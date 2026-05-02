@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Realistic Physics - Layered Tissue Prototype</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="src/styles.css">
+</head>
+<body>
+  <canvas id="sandbox" aria-label="Soft body skin tearing sandbox"></canvas>
+
+  <div id="start-screen" class="overlay">
+    <div class="panel">
+      <h1>Layered Tissue Prototype</h1>
+      <p>Drag the striker through the soft body. Skin, muscle fibers, and attachments fail as separate constraints.</p>
+      <button id="start-button" type="button">Start</button>
+    </div>
+  </div>
+
+  <div class="hud" aria-hidden="true">
+    <button id="reset-button" type="button" title="Reset simulation">Reset</button>
+    <button id="quit-button" type="button" title="Pause and return to start">Quit</button>
+    <button id="impact-button" type="button" title="Cycle striker impact strength">Impact 2x</button>
+    <button id="debug-button" type="button" title="Toggle physics debug overlay">Debug</button>
+    <button id="qa-forearm-button" type="button" title="Run scripted forearm fracture test">QA Arm</button>
+    <button id="qa-shin-button" type="button" title="Run scripted shin fracture test">QA Shin</button>
+    <button id="qa-rest-button" type="button" title="Run rest stability test">QA Rest</button>
+    <span id="stats">0 springs broken</span>
+  </div>
+
+  <pre id="qa-report" class="qa-report" aria-live="polite"></pre>
+
+  <script src="src/materials.js"></script>
+  <script src="src/physics.js"></script>
+  <script src="src/bodyFactory.js"></script>
+  <script src="src/renderer.js"></script>
+  <script src="src/input.js"></script>
+  <script src="src/qa.js"></script>
+  <script src="src/sandbox.js"></script>
+</body>
+</html>
