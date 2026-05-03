@@ -66,6 +66,19 @@ bool writeSvg(const std::filesystem::path& path, const rp::World& world, double 
             << "\" stroke=\"#57a6ff\" stroke-opacity=\"0.16\" stroke-width=\"1\"/>\n";
     }
 
+    for (const rp::BoneJoint& joint : world.boneJoints()) {
+        if (joint.broken || joint.a >= world.bones().size() || joint.b >= world.bones().size()) {
+            continue;
+        }
+        const rp::Vec2 a = bonePoint(world.bones()[joint.a], joint.tA);
+        const rp::Vec2 b = bonePoint(world.bones()[joint.b], joint.tB);
+        out << "<line x1=\"" << a.x << "\" y1=\"" << a.y
+            << "\" x2=\"" << b.x << "\" y2=\"" << b.y
+            << "\" stroke=\"#ffd36a\" stroke-opacity=\"0.42\" stroke-width=\"2\"/>\n";
+        out << "<circle cx=\"" << a.x << "\" cy=\"" << a.y << "\" r=\"3\" fill=\"#ffd36a\" fill-opacity=\"0.82\"/>\n";
+        out << "<circle cx=\"" << b.x << "\" cy=\"" << b.y << "\" r=\"3\" fill=\"#ffd36a\" fill-opacity=\"0.82\"/>\n";
+    }
+
     for (const rp::BoneSegment& bone : world.bones()) {
         out << "<line x1=\"" << bone.a.x << "\" y1=\"" << bone.a.y
             << "\" x2=\"" << bone.b.x << "\" y2=\"" << bone.b.y
@@ -103,6 +116,7 @@ int main(int argc, char** argv) {
               << " springs=" << world.springs().size()
               << " triangles=" << world.triangles().size()
               << " bones=" << world.bones().size()
+              << " bone_joints=" << world.boneJoints().size()
               << " bone_attachments=" << world.boneAttachments().size()
               << '\n';
     std::cout << "skin_points=" << validation.skinPoints

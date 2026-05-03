@@ -31,6 +31,9 @@ int main() {
     if (world.boneAttachments().empty()) {
         return fail("muscle should be attached to bones");
     }
+    if (world.boneJoints().empty()) {
+        return fail("bones should be connected by joints");
+    }
 
     const int initialLiveSkinTriangles = static_cast<int>(std::count_if(world.triangles().begin(), world.triangles().end(), [&](const rp::Triangle& triangle) {
         return triangle.layer == rp::TissueLayer::Skin && world.triangleAlive(triangle);
@@ -65,8 +68,12 @@ int main() {
         world.stats().brokenMuscle != 0 ||
         world.stats().brokenAttachments != 0 ||
         world.stats().brokenBoneAttachments != 0 ||
+        world.stats().brokenBoneJoints != 0 ||
         world.stats().fracturedBones != 0) {
         return fail("rest simulation should not tear tissue");
+    }
+    if (world.debug().active || world.debug().impact != 0.0 || world.debug().boneContacts != 0 || world.debug().tissueContacts != 0) {
+        return fail("inactive input should leave contact debug metrics idle");
     }
 
     rp::World directBoneWorld = rp::createLayeredBody(1280.0, 720.0);
@@ -97,6 +104,111 @@ int main() {
     }
     if (directBoneWorld.stats().fracturedBones <= 0 || directBoneWorld.bones().size() <= directInitialBoneCount) {
         return fail("direct striker contact should fracture a bone");
+    }
+    if (directBoneWorld.stats().brokenMuscle <= 0 || directBoneWorld.stats().brokenBoneAttachments <= 0) {
+        return fail("bone fracture should damage and release nearby tissue");
+    }
+    if (!directBoneWorld.debug().down ||
+        directBoneWorld.debug().impact <= 0.0 ||
+        directBoneWorld.debug().boneContacts <= 0 ||
+        directBoneWorld.debug().maxBoneLoad < directTarget.fractureImpulse ||
+        directBoneWorld.debug().fractures <= 0) {
+        return fail("direct strike should expose contact debug metrics");
+    }
+
+    rp::World jointWorld;
+    const std::size_t jointA = jointWorld.addBoneSegment({100.0, 120.0}, {200.0, 120.0}, 6.0, 999999.0);
+    const std::size_t jointB = jointWorld.addBoneSegment({205.0, 120.0}, {305.0, 120.0}, 6.0, 999999.0);
+    jointWorld.addBoneJoint(jointA, 1.0, jointB, 0.0);
+    const rp::BoneSegment beforeJointB = jointWorld.bones()[jointB];
+    rp::InputState jointStrike;
+    jointStrike.active = true;
+    jointStrike.down = true;
+    jointStrike.x = 195.0;
+    jointStrike.y = 120.0;
+    jointStrike.vx = 1200.0;
+    jointStrike.vy = 0.0;
+    jointStrike.power = 2.0;
+    jointWorld.step(jointWorld.materials().fixedDt, jointStrike, 640.0, 480.0);
+    const rp::BoneSegment afterJointB = jointWorld.bones()[jointB];
+    const double jointTransfer = std::max(rp::distance(beforeJointB.a, afterJointB.a), rp::distance(beforeJointB.b, afterJointB.b));
+    if (jointTransfer < 0.35 || jointWorld.stats().brokenBoneJoints != 0) {
+        return fail("bone joints should transfer motion without breaking under moderate load");
+    }
+
+    rp::Materials angularMaterials;
+    angularMaterials.boneJointAngularBreak = 0.06;
+    angularMaterials.boneJointBreakStretch = 99.0;
+    angularMaterials.boneJointBreakImpulse = 999999.0;
+    angularMaterials.solverIterations = 4;
+    rp::World angularWorld(angularMaterials);
+    const std::size_t angularA = angularWorld.addBoneSegment({100.0, 180.0}, {200.0, 180.0}, 6.0, 999999.0, true);
+    const std::size_t angularB = angularWorld.addBoneSegment({205.0, 180.0}, {305.0, 180.0}, 6.0, 999999.0);
+    angularWorld.addBoneJoint(angularA, 1.0, angularB, 0.0, -0.04, 0.04);
+    for (int i = 0; i < 8 && angularWorld.stats().brokenBoneJoints == 0; ++i) {
+        rp::InputState overextensionStrike;
+        overextensionStrike.active = true;
+        overextensionStrike.down = true;
+        overextensionStrike.x = 305.0;
+        overextensionStrike.y = 180.0;
+        overextensionStrike.vx = 0.0;
+        overextensionStrike.vy = 2200.0;
+        overextensionStrike.power = 4.0;
+        angularWorld.step(angularWorld.materials().fixedDt, overextensionStrike, 640.0, 480.0);
+    }
+    if (angularWorld.stats().brokenBoneJoints <= 0) {
+        return fail("bone joints should break when a connected bone is overextended");
+    }
+
+    rp::World offCenterWorld;
+    const std::size_t offCenterBone = offCenterWorld.addBoneSegment({100.0, 180.0}, {300.0, 180.0}, 7.0, 1000.0);
+    rp::InputState offCenterStrike;
+    offCenterStrike.active = true;
+    offCenterStrike.down = true;
+    offCenterStrike.x = 146.0;
+    offCenterStrike.y = 180.0;
+    offCenterStrike.vx = 1300.0;
+    offCenterStrike.vy = 0.0;
+    offCenterStrike.power = 4.0;
+    offCenterWorld.step(offCenterWorld.materials().fixedDt, offCenterStrike, 640.0, 480.0);
+    if (offCenterWorld.stats().fracturedBones != 1 || offCenterWorld.bones().size() < 3) {
+        return fail("off-center contact should create separated fracture fragments and a splinter");
+    }
+    const rp::BoneSegment& offCenterFirst = offCenterWorld.bones()[offCenterBone];
+    const rp::BoneSegment& offCenterSecond = offCenterWorld.bones()[offCenterBone + 1];
+    if (!offCenterFirst.brokenEnd || !offCenterSecond.brokenStart) {
+        return fail("off-center fracture should mark matching broken ends");
+    }
+    const double shortPiece = rp::distance(offCenterFirst.a, offCenterFirst.b);
+    const double longPiece = rp::distance(offCenterSecond.a, offCenterSecond.b);
+    if (shortPiece >= longPiece * 0.62) {
+        return fail("off-center fracture should split near the contact point, not at the midpoint");
+    }
+    double fractureGap = rp::distance(offCenterFirst.b, offCenterSecond.a);
+    if (fractureGap < 10.0) {
+        return fail("fractured bone ends should open a visible gap");
+    }
+    for (int i = 0; i < 24; ++i) {
+        rp::InputState noInput;
+        offCenterWorld.step(offCenterWorld.materials().fixedDt, noInput, 640.0, 480.0);
+    }
+    fractureGap = rp::distance(offCenterWorld.bones()[offCenterBone].b, offCenterWorld.bones()[offCenterBone + 1].a);
+    if (fractureGap < 7.0) {
+        return fail("fracture gap should not immediately collapse back into alignment");
+    }
+    const std::size_t firstFragmentCount = offCenterWorld.bones().size();
+    const rp::BoneSegment refractureTarget = offCenterWorld.bones()[offCenterBone + 1];
+    rp::InputState refractureStrike;
+    refractureStrike.active = true;
+    refractureStrike.down = true;
+    refractureStrike.x = (refractureTarget.a.x + refractureTarget.b.x) * 0.5;
+    refractureStrike.y = (refractureTarget.a.y + refractureTarget.b.y) * 0.5;
+    refractureStrike.vx = -1600.0;
+    refractureStrike.vy = 320.0;
+    refractureStrike.power = 4.0;
+    offCenterWorld.step(offCenterWorld.materials().fixedDt, refractureStrike, 640.0, 480.0);
+    if (offCenterWorld.stats().fracturedBones < 2 || offCenterWorld.bones().size() <= firstFragmentCount) {
+        return fail("long fractured fragments should be able to fracture again");
     }
 
     rp::InputState strike;
@@ -144,6 +256,8 @@ int main() {
               << " muscle_tears=" << world.stats().brokenMuscle
               << " detachments=" << world.stats().brokenAttachments
               << " bone_detachments=" << world.stats().brokenBoneAttachments
+              << " bone_joints=" << world.boneJoints().size()
+              << " broken_bone_joints=" << world.stats().brokenBoneJoints
               << " bone_fractures=" << world.stats().fracturedBones
               << '\n';
     return 0;

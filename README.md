@@ -11,15 +11,16 @@ See [docs/VISION.md](docs/VISION.md) for the original project description and ag
 - CMake project with a separate `realistic_physics_core` simulation library.
 - Verlet/PBD-style soft body points, springs, area constraints, and attachments.
 - Separate skin and muscle meshes generated from nested body masks so muscle stays inside the skin silhouette.
-- Dynamic segmented bones generated from the same body proportions and attached to nearby muscle points.
-- Mouse-controlled circular striker.
+- Dynamic segmented bones generated from the same body proportions, attached to nearby muscle points, and connected by breakable bone joints.
+- Mouse-controlled blunt striker with a spring-driven heavy head, visible handle/target, and impact direction.
 - Stress-based tearing from overstretched or high-impulse springs.
 - Exposed muscle is a real second mesh coupled to skin through breakable attachments.
-- Bones can fracture into separate segments, and muscle-to-bone attachments can tear under impact stress.
+- Bones fracture at the loaded contact point into separate fragments, can re-fracture while pieces are still large enough, release nearby muscle-to-bone anchors, and damage local tissue so broken pieces separate instead of just slipping out of place.
 - Anatomy view for inspecting muscle and bones without waiting for skin exposure.
-- Small console test target for core simulation checks from WSL or Windows.
+- Contact debug overlay for inspecting striker speed, mass, impact, contact counts, loads, and fracture impulses.
+- Small console test and deterministic strike-scenario targets for core simulation checks from WSL or Windows.
 
-The current bone layer now participates in the simulation through simple rigid segment constraints and muscle attachments. It is not a full articulated skeleton yet: joints, richer rotational inertia, and more convincing post-fracture limb behavior should move into focused follow-up milestones.
+The current striker is a spring-driven blunt mass: the mouse controls a target/handle, while the heavy head lags behind and carries velocity into the body. The current bone layer now participates in the simulation through simple rigid segment constraints, breakable hinge-like bone joints, muscle attachments, contact-local fracture, bounded re-fracture, local tissue damage, and small deterministic splinters. Fractured pieces no longer get pulled back toward their original pose. It is not a full articulated skeleton yet: richer rotational inertia and more convincing post-fracture limb behavior should move into focused follow-up milestones.
 
 ## Run Native On Windows
 
@@ -51,11 +52,12 @@ powershell -ExecutionPolicy Bypass -File .\tools\verify.ps1 -BuildApp
 
 Controls:
 
-- Left-drag to strike the body.
+- Left-drag to swing the blunt striker into the body. Damage comes from heavy-head overlap, swing speed, and selected striker mass.
+- `D` toggles the contact debug overlay.
 - `Tab` toggles anatomy view, where skin is wireframe and muscle/bones are visible.
 - `R` resets the body.
 - `Space` pauses or resumes.
-- `1`, `2`, and `4` change striker impact strength.
+- `1`, `2`, and `4` change striker mass.
 
 ## Run Core Tests
 
@@ -66,7 +68,7 @@ cd E:\PersonalProjects\realistic_physics
 .\tools\verify.ps1
 ```
 
-The core test verifies that the generated body has nested skin/muscle layers, muscle-to-bone attachments, and bones; remains stable at rest; direct cursor contact moves and fractures a bone; tears open skin triangles; and splits bone segments under a high-energy strike.
+The core test verifies that the generated body has nested skin/muscle layers, muscle-to-bone attachments, bone joints, and bones; remains stable at rest; inactive input leaves contact telemetry idle; joints transfer motion under moderate load; direct striker contact moves and fractures a bone while exposing contact debug metrics and damaging nearby tissue; off-center bone contact cracks near the contact point with a persistent gap; long fractured fragments can re-fracture; tears open skin triangles; and splits bone segments under a high-energy strike.
 
 To run tests, diagnostics, and rebuild the double-click app in one pass:
 
@@ -74,13 +76,29 @@ To run tests, diagnostics, and rebuild the double-click app in one pass:
 .\tools\verify.ps1 -BuildApp
 ```
 
+## Strike Scenarios
+
+`.\tools\verify.ps1` also builds and runs deterministic strike playback. The scenario target writes frame-by-frame contact telemetry to:
+
+```text
+E:\PersonalProjects\realistic_physics\output\strike_scenarios.csv
+```
+
+It also writes a compact per-scenario tuning summary to:
+
+```text
+E:\PersonalProjects\realistic_physics\output\strike_summary.csv
+```
+
+The CSV outputs include striker speed, impact, contact counts, contact depth, tissue/bone loads, joint breakage, fracture events, final fragment counts, and accumulated damage stats for repeatable torso, shoulder, and hip strikes.
+
 ## Development Notes
 
 The native implementation is split so simulation can remain independent from rendering:
 
 - `CMakeLists.txt` defines the native app and test target.
 - `src/cpp/simulation.hpp` declares the physics data model and public simulation API.
-- `src/cpp/simulation.cpp` contains body generation, integration, constraints, tearing, and exposure logic.
+- `src/cpp/simulation.cpp` contains body generation, integration, constraints, breakable bone joints, tearing, and exposure logic.
 - `src/cpp/win32_main.cpp` owns the Win32 window, input, timing, and GDI drawing.
 - `tests/simulation_tests.cpp` contains smoke tests for the core simulation.
 - `tools/anatomy_diagnostics.cpp` writes a deterministic SVG anatomy snapshot and reports geometry validation metrics.
@@ -94,15 +112,15 @@ cd E:\PersonalProjects\realistic_physics
 .\tools\verify.ps1
 ```
 
-Open `output\anatomy_debug.svg` to inspect the generated body without launching the app. Skin is translucent, muscle is red, bones are pale, muscle-to-bone attachments are blue, and bone sample markers turn red if they fall outside the skin mesh. The diagnostic exits nonzero if sampled bone centerlines are outside skin.
+Open `output\anatomy_debug.svg` to inspect the generated body without launching the app. Skin is translucent, muscle is red, bones are pale, muscle-to-bone attachments are blue, bone joints are yellow, and bone sample markers turn red if they fall outside the skin mesh. The diagnostic exits nonzero if sampled bone centerlines are outside skin.
 
 The next native simulation milestones are:
 
-1. Add explicit bone joints so limbs bend and separate through articulated constraints instead of only individual segment motion.
-2. Add a native debug/QA overlay for rest stability and deterministic strike scenarios.
-3. Tune material constants, fracture thresholds, and body topology for more convincing impacts.
-4. Add fluid particles emitted from torn constraints.
-5. Add simple tool modes, such as blunt fist versus sharp striker.
+1. Add fluid particles emitted from torn constraints.
+2. Add simple tool modes, such as blunt fist versus sharp striker.
+3. Add richer post-fracture fragment collision and internal tissue damage from sharp bone ends.
+4. Add rotational inertia to free bone fragments so the hinge solver and fracture recoil read less like endpoint-only motion.
+5. Expand deterministic strike scenarios into a small tuning matrix for material constants and body topology changes.
 
 ## Toolchain
 

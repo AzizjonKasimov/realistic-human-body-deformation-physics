@@ -15,6 +15,12 @@ Invoke-ExeViaCmd `
     -ExePath (Join-Path $repoRoot "build\vs\Debug\realistic_physics_tests.exe") `
     -Label "Run simulation tests"
 
+Invoke-WindowsTarget -Target "realistic_physics_strike_scenarios" -Config "Debug"
+Invoke-ExeViaCmd `
+    -ExePath (Join-Path $repoRoot "build\vs\Debug\realistic_physics_strike_scenarios.exe") `
+    -Arguments @("output\strike_scenarios.csv") `
+    -Label "Run strike scenarios"
+
 if (-not $SkipDiagnostics) {
     Invoke-WindowsTarget -Target "realistic_physics_diagnostics" -Config "Debug"
     Invoke-ExeViaCmd `

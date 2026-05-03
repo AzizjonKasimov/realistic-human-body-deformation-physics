@@ -35,6 +35,12 @@ add_executable(realistic_physics_diagnostics
 
 target_link_libraries(realistic_physics_diagnostics PRIVATE realistic_physics_core)
 
+add_executable(realistic_physics_strike_scenarios
+    tools/strike_scenarios.cpp
+)
+
+target_link_libraries(realistic_physics_strike_scenarios PRIVATE realistic_physics_core)
+
 if(WIN32)
     add_executable(realistic_physics WIN32
         src/cpp/win32_main.cpp

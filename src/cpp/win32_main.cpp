@@ -25,6 +25,7 @@ struct AppState {
     int height = 720;
     bool running = true;
     bool pointerDown = false;
+    bool debugOverlay = false;
     double accumulator = 0.0;
     double pointerX = 220.0;
     double pointerY = 240.0;
@@ -32,6 +33,10 @@ struct AppState {
     double previousPointerY = 240.0;
     double pointerVx = 0.0;
     double pointerVy = 0.0;
+    double strikerX = 220.0;
+    double strikerY = 240.0;
+    double strikerVx = 0.0;
+    double strikerVy = 0.0;
     double impactPower = 2.0;
     ViewMode viewMode = ViewMode::Anatomy;
     std::chrono::steady_clock::time_point lastTick = std::chrono::steady_clock::now();
@@ -52,18 +57,48 @@ std::wstring makeTitle(const AppState& app) {
     wchar_t buffer[256];
     std::swprintf(buffer,
                  sizeof(buffer) / sizeof(buffer[0]),
-                 L"Realistic Physics C++ | view %s | skin %d | muscle %d | detach %d | bone %d | impact %.0fx",
+                 L"Realistic Physics C++ | view %s | skin %d | muscle %d | detach %d/%d | bone %d | striker mass %.0fx",
                  app.viewMode == ViewMode::Anatomy ? L"anatomy" : L"normal",
                  app.world.stats().brokenSkin,
                  app.world.stats().brokenMuscle,
                  app.world.stats().brokenAttachments,
+                 app.world.stats().brokenBoneAttachments,
                  app.world.stats().fracturedBones,
                  app.impactPower);
     return buffer;
 }
 
+void resetStriker(AppState& app) {
+    app.strikerX = app.pointerX;
+    app.strikerY = app.pointerY;
+    app.strikerVx = 0.0;
+    app.strikerVy = 0.0;
+}
+
 void rebuildWorld(AppState& app) {
     app.world = rp::createLayeredBody(static_cast<double>(app.width), static_cast<double>(app.height));
+    resetStriker(app);
+}
+
+void advanceStriker(AppState& app, double dt) {
+    const double dx = app.pointerX - app.strikerX;
+    const double dy = app.pointerY - app.strikerY;
+    const double drive = app.pointerDown ? 118.0 : 62.0;
+    const double damping = app.pointerDown ? 15.0 : 20.0;
+
+    app.strikerVx += (dx * drive - app.strikerVx * damping) * dt;
+    app.strikerVy += (dy * drive - app.strikerVy * damping) * dt;
+
+    const double speed = std::sqrt(app.strikerVx * app.strikerVx + app.strikerVy * app.strikerVy);
+    constexpr double maxSpeed = 4200.0;
+    if (speed > maxSpeed) {
+        const double scale = maxSpeed / speed;
+        app.strikerVx *= scale;
+        app.strikerVy *= scale;
+    }
+
+    app.strikerX += app.strikerVx * dt;
+    app.strikerY += app.strikerVy * dt;
 }
 
 void stepSimulation(AppState& app, HWND hwnd) {
@@ -80,13 +115,14 @@ void stepSimulation(AppState& app, HWND hwnd) {
         app.accumulator += frameDt;
         const double fixedDt = app.world.materials().fixedDt;
         while (app.accumulator >= fixedDt) {
+            advanceStriker(app, fixedDt);
             rp::InputState input;
             input.active = true;
             input.down = app.pointerDown;
-            input.x = app.pointerX;
-            input.y = app.pointerY;
-            input.vx = app.pointerVx;
-            input.vy = app.pointerVy;
+            input.x = app.strikerX;
+            input.y = app.strikerY;
+            input.vx = app.strikerVx;
+            input.vy = app.strikerVy;
             input.power = app.impactPower;
             app.world.step(fixedDt, input, static_cast<double>(app.width), static_cast<double>(app.height));
             app.accumulator -= fixedDt;
@@ -125,36 +161,76 @@ void drawLine(HDC dc, int x1, int y1, int x2, int y2, COLORREF stroke, int width
     DeleteObject(pen);
 }
 
+void fillEllipse(HDC dc, int cx, int cy, int radius, COLORREF fill, COLORREF stroke, int strokeWidth) {
+    HBRUSH brush = CreateSolidBrush(fill);
+    HPEN pen = CreatePen(PS_SOLID, strokeWidth, stroke);
+    HGDIOBJ oldBrush = SelectObject(dc, brush);
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    Ellipse(dc, cx - radius, cy - radius, cx + radius, cy + radius);
+    SelectObject(dc, oldPen);
+    SelectObject(dc, oldBrush);
+    DeleteObject(pen);
+    DeleteObject(brush);
+}
+
 void drawFractureCap(HDC dc, const rp::BoneSegment& bone, bool atStart) {
     const rp::Vec2 p = atStart ? bone.a : bone.b;
     const double dx = bone.b.x - bone.a.x;
     const double dy = bone.b.y - bone.a.y;
     const double len = std::max(1.0, std::sqrt(dx * dx + dy * dy));
-    const double nx = -dy / len;
-    const double ny = dx / len;
+    const rp::Vec2 storedNormal = atStart ? bone.brokenStartNormal : bone.brokenEndNormal;
+    const double storedLen = std::sqrt(storedNormal.x * storedNormal.x + storedNormal.y * storedNormal.y);
+    const double nx = storedLen > 0.001 ? storedNormal.x / storedLen : -dy / len;
+    const double ny = storedLen > 0.001 ? storedNormal.y / storedLen : dx / len;
     const double dir = atStart ? -1.0 : 1.0;
     const double cap = bone.radius * 1.15;
+    const double tx = dx / len * dir;
+    const double ty = dy / len * dir;
+    const COLORREF dark = color(92, 18, 17);
+    const COLORREF fresh = color(214, 42, 34);
+    const COLORREF pale = color(246, 238, 212);
 
     drawLine(dc,
              static_cast<int>(p.x - nx * cap),
              static_cast<int>(p.y - ny * cap),
+             static_cast<int>(p.x - nx * cap * 0.28 + tx * bone.radius * 0.45),
+             static_cast<int>(p.y - ny * cap * 0.28 + ty * bone.radius * 0.45),
+             pale,
+             3);
+    drawLine(dc,
+             static_cast<int>(p.x - nx * cap * 0.28 + tx * bone.radius * 0.45),
+             static_cast<int>(p.y - ny * cap * 0.28 + ty * bone.radius * 0.45),
+             static_cast<int>(p.x + nx * cap * 0.24 - tx * bone.radius * 0.20),
+             static_cast<int>(p.y + ny * cap * 0.24 - ty * bone.radius * 0.20),
+             pale,
+             3);
+    drawLine(dc,
+             static_cast<int>(p.x + nx * cap * 0.24 - tx * bone.radius * 0.20),
+             static_cast<int>(p.y + ny * cap * 0.24 - ty * bone.radius * 0.20),
              static_cast<int>(p.x + nx * cap),
              static_cast<int>(p.y + ny * cap),
-             color(132, 24, 22),
+             pale,
              3);
     drawLine(dc,
              static_cast<int>(p.x - nx * cap * 0.65),
              static_cast<int>(p.y - ny * cap * 0.65),
-             static_cast<int>(p.x + dx / len * dir * 7.0),
-             static_cast<int>(p.y + dy / len * dir * 7.0),
-             color(245, 74, 58),
+             static_cast<int>(p.x + tx * 7.0),
+             static_cast<int>(p.y + ty * 7.0),
+             dark,
+             2);
+    drawLine(dc,
+             static_cast<int>(p.x - nx * cap * 0.10),
+             static_cast<int>(p.y - ny * cap * 0.10),
+             static_cast<int>(p.x + tx * 9.0 + nx * cap * 0.38),
+             static_cast<int>(p.y + ty * 9.0 + ny * cap * 0.38),
+             fresh,
              2);
     drawLine(dc,
              static_cast<int>(p.x + nx * cap * 0.65),
              static_cast<int>(p.y + ny * cap * 0.65),
-             static_cast<int>(p.x + dx / len * dir * 5.0),
-             static_cast<int>(p.y + dy / len * dir * 5.0),
-             color(245, 74, 58),
+             static_cast<int>(p.x + tx * 5.0),
+             static_cast<int>(p.y + ty * 5.0),
+             dark,
              2);
 }
 
@@ -162,15 +238,26 @@ void drawWoundEdge(HDC dc, const rp::Point& a, const rp::Point& b) {
     const double dx = b.position.x - a.position.x;
     const double dy = b.position.y - a.position.y;
     const double len = std::sqrt(dx * dx + dy * dy);
-    if (len > 46.0 || len < 2.0) {
+    if (len < 2.0) {
         return;
     }
+    const double nx = -dy / len;
+    const double ny = dx / len;
+    const double mark = std::clamp(len * 0.18, 4.0, 8.0);
+    const double inset = std::clamp(len * 0.14, 2.0, 7.0);
 
     drawLine(dc,
-             static_cast<int>(a.position.x),
-             static_cast<int>(a.position.y),
-             static_cast<int>(b.position.x),
-             static_cast<int>(b.position.y),
+             static_cast<int>(a.position.x + dx / len * inset - nx * mark),
+             static_cast<int>(a.position.y + dy / len * inset - ny * mark),
+             static_cast<int>(a.position.x + dx / len * inset + nx * mark),
+             static_cast<int>(a.position.y + dy / len * inset + ny * mark),
+             color(118, 19, 24),
+             3);
+    drawLine(dc,
+             static_cast<int>(b.position.x - dx / len * inset - nx * mark),
+             static_cast<int>(b.position.y - dy / len * inset - ny * mark),
+             static_cast<int>(b.position.x - dx / len * inset + nx * mark),
+             static_cast<int>(b.position.y - dy / len * inset + ny * mark),
              color(118, 19, 24),
              3);
 }
@@ -218,6 +305,174 @@ void drawBone(HDC dc, const rp::BoneSegment& bone) {
     }
     if (bone.brokenEnd) {
         drawFractureCap(dc, bone, false);
+    }
+}
+
+void drawStriker(HDC dc, const AppState& app) {
+    const double speed = std::sqrt(app.strikerVx * app.strikerVx + app.strikerVy * app.strikerVy);
+    double dirX = 1.0;
+    double dirY = 0.0;
+    if (speed > 1.0) {
+        dirX = app.strikerVx / speed;
+        dirY = app.strikerVy / speed;
+    } else {
+        const double targetDx = app.strikerX - app.pointerX;
+        const double targetDy = app.strikerY - app.pointerY;
+        const double targetDistance = std::sqrt(targetDx * targetDx + targetDy * targetDy);
+        if (targetDistance > 1.0) {
+            dirX = targetDx / targetDistance;
+            dirY = targetDy / targetDistance;
+        }
+    }
+
+    const int radius = static_cast<int>(app.world.materials().strikerRadius);
+    const int cx = static_cast<int>(std::lround(app.strikerX));
+    const int cy = static_cast<int>(std::lround(app.strikerY));
+    const double targetDx = app.pointerX - app.strikerX;
+    const double targetDy = app.pointerY - app.strikerY;
+    const double targetDistance = std::sqrt(targetDx * targetDx + targetDy * targetDy);
+    int handleStartX = static_cast<int>(std::lround(app.strikerX - dirX * (radius + 58.0)));
+    int handleStartY = static_cast<int>(std::lround(app.strikerY - dirY * (radius + 58.0)));
+    int handleEndX = static_cast<int>(std::lround(app.strikerX - dirX * (radius * 0.55)));
+    int handleEndY = static_cast<int>(std::lround(app.strikerY - dirY * (radius * 0.55)));
+    if (targetDistance > radius * 0.65) {
+        handleStartX = static_cast<int>(std::lround(app.pointerX));
+        handleStartY = static_cast<int>(std::lround(app.pointerY));
+        handleEndX = static_cast<int>(std::lround(app.strikerX + targetDx / targetDistance * radius * 0.72));
+        handleEndY = static_cast<int>(std::lround(app.strikerY + targetDy / targetDistance * radius * 0.72));
+    }
+
+    drawLine(dc, handleStartX, handleStartY, handleEndX, handleEndY, color(72, 66, 57), 10);
+    drawLine(dc, handleStartX, handleStartY, handleEndX, handleEndY, color(154, 136, 102), 4);
+    fillEllipse(dc,
+                static_cast<int>(std::lround(app.pointerX)),
+                static_cast<int>(std::lround(app.pointerY)),
+                app.pointerDown ? 5 : 4,
+                app.pointerDown ? color(255, 205, 83) : color(130, 119, 96),
+                color(40, 35, 28),
+                1);
+
+    if (app.pointerDown && speed > 80.0) {
+        const double arrowLength = std::clamp(speed * 0.030, 18.0, 82.0);
+        const int ax = static_cast<int>(std::lround(app.strikerX + dirX * (radius + arrowLength)));
+        const int ay = static_cast<int>(std::lround(app.strikerY + dirY * (radius + arrowLength)));
+        const int sx = static_cast<int>(std::lround(app.strikerX + dirX * radius * 0.35));
+        const int sy = static_cast<int>(std::lround(app.strikerY + dirY * radius * 0.35));
+        drawLine(dc, sx, sy, ax, ay, color(255, 205, 83), 3);
+        const double nx = -dirY;
+        const double ny = dirX;
+        POINT head[3] = {
+            POINT{ax, ay},
+            POINT{static_cast<LONG>(std::lround(ax - dirX * 12.0 + nx * 6.0)), static_cast<LONG>(std::lround(ay - dirY * 12.0 + ny * 6.0))},
+            POINT{static_cast<LONG>(std::lround(ax - dirX * 12.0 - nx * 6.0)), static_cast<LONG>(std::lround(ay - dirY * 12.0 - ny * 6.0))},
+        };
+        HBRUSH arrowBrush = CreateSolidBrush(color(255, 205, 83));
+        HPEN arrowPen = CreatePen(PS_SOLID, 1, color(100, 72, 24));
+        HGDIOBJ oldBrush = SelectObject(dc, arrowBrush);
+        HGDIOBJ oldPen = SelectObject(dc, arrowPen);
+        Polygon(dc, head, 3);
+        SelectObject(dc, oldPen);
+        SelectObject(dc, oldBrush);
+        DeleteObject(arrowPen);
+        DeleteObject(arrowBrush);
+    }
+
+    fillEllipse(dc, cx, cy, radius + 4, color(35, 32, 29), color(18, 16, 15), 2);
+    fillEllipse(dc,
+                cx,
+                cy,
+                radius,
+                app.pointerDown ? color(190, 63, 48) : color(194, 174, 121),
+                color(42, 30, 22),
+                3);
+    fillEllipse(dc,
+                static_cast<int>(std::lround(app.strikerX - dirX * radius * 0.18 - dirY * radius * 0.20)),
+                static_cast<int>(std::lround(app.strikerY - dirY * radius * 0.18 + dirX * radius * 0.20)),
+                std::max(5, radius / 4),
+                color(235, 218, 163),
+                color(96, 76, 42),
+                1);
+}
+
+void drawDebugText(HDC dc, int x, int y, const wchar_t* text) {
+    TextOutW(dc, x, y, text, lstrlenW(text));
+}
+
+void drawDebugOverlay(HDC dc, const AppState& app) {
+    RECT panel{12, 42, 430, 180};
+    HBRUSH brush = CreateSolidBrush(color(22, 24, 27));
+    HPEN pen = CreatePen(PS_SOLID, 1, color(98, 105, 112));
+    HGDIOBJ oldBrush = SelectObject(dc, brush);
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    Rectangle(dc, panel.left, panel.top, panel.right, panel.bottom);
+    SelectObject(dc, oldPen);
+    SelectObject(dc, oldBrush);
+    DeleteObject(pen);
+    DeleteObject(brush);
+
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, color(226, 224, 215));
+
+    const rp::ContactDebug& debug = app.world.debug();
+    wchar_t line[256];
+    int y = panel.top + 10;
+    drawDebugText(dc, panel.left + 12, y, L"Contact debug (D): striker is a spring-driven blunt mass");
+    y += 20;
+    std::swprintf(line,
+                  sizeof(line) / sizeof(line[0]),
+                  L"head=(%.0f, %.0f) target=(%.0f, %.0f) radius=%.0f",
+                  debug.strikerPosition.x,
+                  debug.strikerPosition.y,
+                  app.pointerX,
+                  app.pointerY,
+                  debug.strikerRadius);
+    drawDebugText(dc, panel.left + 12, y, line);
+    y += 20;
+    std::swprintf(line,
+                  sizeof(line) / sizeof(line[0]),
+                  L"speed=%.0f px/s  mass=%.1f  impact=%.0f  down=%s",
+                  debug.strikerSpeed,
+                  debug.strikerMass,
+                  debug.impact,
+                  debug.down ? L"yes" : L"no");
+    drawDebugText(dc, panel.left + 12, y, line);
+    y += 20;
+    std::swprintf(line,
+                  sizeof(line) / sizeof(line[0]),
+                  L"contacts: tissue=%d bone=%d  max depth=%.1f",
+                  debug.tissueContacts,
+                  debug.boneContacts,
+                  debug.maxDepth);
+    drawDebugText(dc, panel.left + 12, y, line);
+    y += 20;
+    std::swprintf(line,
+                  sizeof(line) / sizeof(line[0]),
+                  L"loads: tissue=%.0f bone=%.0f  fracture impulse=%.0f",
+                  debug.maxPointLoad,
+                  debug.maxBoneLoad,
+                  debug.lastFractureImpulse);
+    drawDebugText(dc, panel.left + 12, y, line);
+    y += 20;
+    std::swprintf(line,
+                  sizeof(line) / sizeof(line[0]),
+                  L"totals: skin=%d muscle=%d attach=%d/%d joints=%d fractures=%d step=%d",
+                  app.world.stats().brokenSkin,
+                  app.world.stats().brokenMuscle,
+                  app.world.stats().brokenAttachments,
+                  app.world.stats().brokenBoneAttachments,
+                  app.world.stats().brokenBoneJoints,
+                  app.world.stats().fracturedBones,
+                  debug.fractures);
+    drawDebugText(dc, panel.left + 12, y, line);
+
+    if (debug.maxDepth > 0.0) {
+        fillEllipse(dc,
+                    static_cast<int>(std::lround(debug.strongestContact.x)),
+                    static_cast<int>(std::lround(debug.strongestContact.y)),
+                    5,
+                    color(255, 215, 90),
+                    color(98, 65, 20),
+                    1);
     }
 }
 
@@ -287,24 +542,14 @@ void drawScene(HDC dc, const AppState& app) {
         }
     }
 
-    HBRUSH strikerBrush = CreateSolidBrush(app.pointerDown ? color(230, 83, 58) : color(225, 183, 75));
-    HPEN strikerPen = CreatePen(PS_SOLID, 2, color(42, 30, 22));
-    HGDIOBJ oldBrush = SelectObject(dc, strikerBrush);
-    HGDIOBJ oldPen = SelectObject(dc, strikerPen);
-    const int radius = static_cast<int>(app.world.materials().strikerRadius);
-    Ellipse(dc,
-            static_cast<int>(app.pointerX) - radius,
-            static_cast<int>(app.pointerY) - radius,
-            static_cast<int>(app.pointerX) + radius,
-            static_cast<int>(app.pointerY) + radius);
-    SelectObject(dc, oldPen);
-    SelectObject(dc, oldBrush);
-    DeleteObject(strikerPen);
-    DeleteObject(strikerBrush);
+    drawStriker(dc, app);
+    if (app.debugOverlay) {
+        drawDebugOverlay(dc, app);
+    }
 
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, color(220, 216, 205));
-    constexpr const wchar_t* instructions = L"Left drag: strike | Tab: anatomy | R: reset | Space: pause | 1/2/4: impact";
+    constexpr const wchar_t* instructions = L"Left drag: swing blunt striker | D: debug | Tab: anatomy | R: reset | Space: pause | 1/2/4: mass";
     TextOutW(dc, 16, 16, instructions, lstrlenW(instructions));
 }
 
@@ -397,6 +642,8 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             app->running = !app->running;
         } else if (wParam == VK_TAB) {
             app->viewMode = app->viewMode == ViewMode::Anatomy ? ViewMode::Normal : ViewMode::Anatomy;
+        } else if (wParam == 'D') {
+            app->debugOverlay = !app->debugOverlay;
         } else if (wParam == '1') {
             app->impactPower = 1.0;
         } else if (wParam == '2') {

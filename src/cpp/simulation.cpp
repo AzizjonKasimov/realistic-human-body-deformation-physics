@@ -10,6 +10,7 @@ namespace rp {
 namespace {
 
 constexpr double kEpsilon = 0.0001;
+constexpr double kPi = 3.14159265358979323846;
 
 struct GridKey {
     int x = 0;
@@ -69,6 +70,52 @@ double segmentT(Vec2 point, Vec2 a, Vec2 b) {
         return 0.0;
     }
     return std::clamp(((point.x - a.x) * abx + (point.y - a.y) * aby) / abLenSq, 0.0, 1.0);
+}
+
+Vec2 lerp(Vec2 a, Vec2 b, double t) {
+    return {
+        a.x + (b.x - a.x) * t,
+        a.y + (b.y - a.y) * t,
+    };
+}
+
+double wrapAngle(double angle) {
+    while (angle > kPi) {
+        angle -= kPi * 2.0;
+    }
+    while (angle < -kPi) {
+        angle += kPi * 2.0;
+    }
+    return angle;
+}
+
+double boneAngle(const BoneSegment& bone) {
+    return std::atan2(bone.b.y - bone.a.y, bone.b.x - bone.a.x);
+}
+
+Vec2 rotateAround(Vec2 point, Vec2 pivot, double angle) {
+    const double s = std::sin(angle);
+    const double c = std::cos(angle);
+    const double dx = point.x - pivot.x;
+    const double dy = point.y - pivot.y;
+    return {
+        pivot.x + dx * c - dy * s,
+        pivot.y + dx * s + dy * c,
+    };
+}
+
+Vec2 normalized(Vec2 value, Vec2 fallback) {
+    const double len = std::sqrt(value.x * value.x + value.y * value.y);
+    if (len <= kEpsilon) {
+        return fallback;
+    }
+    return {value.x / len, value.y / len};
+}
+
+double distanceToSegment(Vec2 point, Vec2 a, Vec2 b) {
+    const double t = segmentT(point, a, b);
+    const Vec2 closest = lerp(a, b, t);
+    return distance(point, closest);
 }
 
 bool isInsideHumanoidLayer(double nx, double ny, double inset) {
@@ -293,8 +340,34 @@ void World::addBoneAttachment(std::size_t point, std::size_t bone, double t) {
     boneAttachments_.push_back(attachment);
 }
 
+void World::addBoneJoint(std::size_t a, double tA, std::size_t b, double tB, double minAngle, double maxAngle) {
+    if (a >= bones_.size() || b >= bones_.size() || a == b) {
+        return;
+    }
+
+    BoneJoint joint;
+    joint.a = a;
+    joint.b = b;
+    joint.tA = std::clamp(tA, 0.0, 1.0);
+    joint.tB = std::clamp(tB, 0.0, 1.0);
+    joint.rest = std::max(1.0, distance(bonePoint(bones_[a], joint.tA), bonePoint(bones_[b], joint.tB)));
+    joint.restAngle = wrapAngle(boneAngle(bones_[b]) - boneAngle(bones_[a]));
+    joint.minAngle = std::min(minAngle, maxAngle);
+    joint.maxAngle = std::max(minAngle, maxAngle);
+    boneJoints_.push_back(joint);
+}
+
 void World::step(double dt, const InputState& input, double width, double height) {
     const double floorY = height - 38.0;
+    debug_ = {};
+    debug_.active = input.active;
+    debug_.down = input.down;
+    debug_.strikerPosition = {input.x, input.y};
+    debug_.strikerVelocity = {input.vx, input.vy};
+    debug_.strikerSpeed = std::sqrt(input.vx * input.vx + input.vy * input.vy);
+    debug_.strikerMass = materials_.strikerMass * input.power;
+    debug_.strikerRadius = materials_.strikerRadius;
+    debug_.impact = debug_.strikerSpeed * debug_.strikerMass;
     updateExposure();
     integrate(dt, width, floorY);
     collideStriker(dt, input);
@@ -303,6 +376,7 @@ void World::step(double dt, const InputState& input, double width, double height
         solveSprings();
         solveAttachments();
         solveBoneAttachments();
+        solveBoneJoints();
         solveBones();
         solveAreas();
         constrainToWorld(width, floorY);
@@ -351,8 +425,108 @@ Vec2 World::bonePoint(const BoneSegment& bone, double t) const {
     };
 }
 
-void World::fractureBone(std::size_t boneIndex) {
-    if (boneIndex >= bones_.size() || bones_[boneIndex].fractured) {
+bool World::canFractureBone(const BoneSegment& bone) const {
+    if (bone.pinned || bone.splinter || bone.fractureGeneration >= materials_.maxBoneFractureDepth) {
+        return false;
+    }
+    return bone.restLength >= materials_.minBoneFragmentLength * 2.0;
+}
+
+void World::applyBoneAnchorDelta(BoneSegment& bone, double t, double dx, double dy) {
+    if (bone.pinned) {
+        return;
+    }
+
+    const double aWeight = 1.0 - std::clamp(t, 0.0, 1.0);
+    const double bWeight = std::clamp(t, 0.0, 1.0);
+    bone.a.x += dx * aWeight;
+    bone.a.y += dy * aWeight;
+    bone.b.x += dx * bWeight;
+    bone.b.y += dy * bWeight;
+}
+
+void World::rotateBoneAroundAnchor(BoneSegment& bone, double t, double angle) {
+    if (bone.pinned || std::abs(angle) <= kEpsilon) {
+        return;
+    }
+
+    const Vec2 anchor = bonePoint(bone, std::clamp(t, 0.0, 1.0));
+    bone.a = rotateAround(bone.a, anchor, angle);
+    bone.b = rotateAround(bone.b, anchor, angle);
+}
+
+void World::damageTissueAroundFracture(Vec2 center, double radius, double impulse) {
+    const double radiusSq = radius * radius;
+    const double skinRadius = radius * 0.62;
+
+    for (Spring& spring : springs_) {
+        if (spring.broken) {
+            continue;
+        }
+
+        Point& a = points_[spring.a];
+        Point& b = points_[spring.b];
+        const double d = distanceToSegment(center, a.position, b.position);
+        if (spring.layer == TissueLayer::Muscle && d <= radius) {
+            spring.broken = true;
+            spring.stress = 1.0;
+            a.exposure = std::max(a.exposure, 1.0);
+            b.exposure = std::max(b.exposure, 1.0);
+            a.load = std::max(a.load, impulse * 0.30);
+            b.load = std::max(b.load, impulse * 0.30);
+            ++stats_.brokenMuscle;
+        } else if (spring.layer == TissueLayer::Skin && d <= skinRadius && impulse > materials_.skinTearImpulse * 1.18) {
+            spring.broken = true;
+            spring.stress = 1.0;
+            a.exposure = std::max(a.exposure, 1.0);
+            b.exposure = std::max(b.exposure, 1.0);
+            a.load = std::max(a.load, impulse * 0.18);
+            b.load = std::max(b.load, impulse * 0.18);
+            ++stats_.brokenSkin;
+        }
+    }
+
+    for (Attachment& attachment : attachments_) {
+        if (attachment.broken) {
+            continue;
+        }
+        Point& skin = points_[attachment.skinPoint];
+        Point& muscle = points_[attachment.musclePoint];
+        const double skinDistanceSq = (skin.position.x - center.x) * (skin.position.x - center.x) +
+                                      (skin.position.y - center.y) * (skin.position.y - center.y);
+        const double muscleDistanceSq = (muscle.position.x - center.x) * (muscle.position.x - center.x) +
+                                        (muscle.position.y - center.y) * (muscle.position.y - center.y);
+        if (std::min(skinDistanceSq, muscleDistanceSq) <= radiusSq) {
+            attachment.broken = true;
+            skin.exposure = std::max(skin.exposure, 1.0);
+            muscle.exposure = std::max(muscle.exposure, 1.0);
+            ++stats_.brokenAttachments;
+        }
+    }
+
+    for (Triangle& triangle : triangles_) {
+        if (triangle.failed || triangle.layer != TissueLayer::Muscle) {
+            continue;
+        }
+        Point& a = points_[triangle.a];
+        Point& b = points_[triangle.b];
+        Point& c = points_[triangle.c];
+        const Vec2 centroid{(a.position.x + b.position.x + c.position.x) / 3.0,
+                            (a.position.y + b.position.y + c.position.y) / 3.0};
+        const double dx = centroid.x - center.x;
+        const double dy = centroid.y - center.y;
+        if (dx * dx + dy * dy <= radiusSq) {
+            triangle.damage = std::max(triangle.damage, 1.08);
+            triangle.failed = true;
+            a.exposure = std::max(a.exposure, 1.0);
+            b.exposure = std::max(b.exposure, 1.0);
+            c.exposure = std::max(c.exposure, 1.0);
+        }
+    }
+}
+
+void World::fractureBone(std::size_t boneIndex, double fractureT, Vec2 impulseNormal, double impulse) {
+    if (boneIndex >= bones_.size() || !canFractureBone(bones_[boneIndex])) {
         return;
     }
 
@@ -363,40 +537,72 @@ void World::fractureBone(std::size_t boneIndex) {
     const Vec2 oldPreviousB = bone.previousB;
     const Vec2 oldHomeA = bone.homeA;
     const Vec2 oldHomeB = bone.homeB;
+    const double oldRadius = bone.radius;
+    const double oldLoad = bone.load;
+    const double oldFractureImpulse = bone.fractureImpulse;
+    const bool oldPinned = bone.pinned;
     const double dx = oldB.x - oldA.x;
     const double dy = oldB.y - oldA.y;
     const double len = std::max(kEpsilon, std::sqrt(dx * dx + dy * dy));
+    const double minimumPieceLength = std::max(materials_.minBoneFragmentLength, oldRadius * 3.2);
+    const double minBreakT = std::clamp(minimumPieceLength / len, 0.18, 0.46);
+    if (minBreakT >= 0.5) {
+        return;
+    }
     const Vec2 dir{dx / len, dy / len};
-    const Vec2 mid{(oldA.x + oldB.x) * 0.5, (oldA.y + oldB.y) * 0.5};
-    const Vec2 normal{-dir.y, dir.x};
-    const double gap = std::min(18.0, len * 0.16);
-    const double snap = std::min(9.0, len * 0.08);
+    const Vec2 baseNormal{-dir.y, dir.x};
+    const Vec2 contactNormal = normalized(impulseNormal, baseNormal);
+    const Vec2 normal = normalized({baseNormal.x * 0.35 + contactNormal.x * 0.65,
+                                    baseNormal.y * 0.35 + contactNormal.y * 0.65},
+                                   baseNormal);
 
-    bone.a = {oldA.x - normal.x * snap * 0.35, oldA.y - normal.y * snap * 0.35};
-    bone.b = {mid.x - dir.x * gap - normal.x * snap, mid.y - dir.y * gap - normal.y * snap};
-    bone.previousA = {oldPreviousA.x + normal.x * snap * 1.8, oldPreviousA.y + normal.y * snap * 1.8};
-    bone.previousB = {(oldPreviousA.x + oldPreviousB.x) * 0.5 - dir.x * gap + normal.x * snap * 1.8,
-                      (oldPreviousA.y + oldPreviousB.y) * 0.5 - dir.y * gap + normal.y * snap * 1.8};
-    bone.homeB = {(oldHomeA.x + oldHomeB.x) * 0.5 - dir.x * gap, (oldHomeA.y + oldHomeB.y) * 0.5 - dir.y * gap};
+    const double breakT = std::clamp(fractureT, minBreakT, 1.0 - minBreakT);
+    const Vec2 crack = lerp(oldA, oldB, breakT);
+    const Vec2 previousCrack = lerp(oldPreviousA, oldPreviousB, breakT);
+    const Vec2 homeCrack = lerp(oldHomeA, oldHomeB, breakT);
+    const double overload = std::clamp((std::max(impulse, oldLoad) - oldFractureImpulse) / std::max(1.0, oldFractureImpulse), 0.0, 1.4);
+    const double gap = std::min(std::max(5.0, oldRadius * (0.75 + overload * 0.25)), len * 0.10);
+    const double snap = std::min(std::max(5.5, oldRadius * (1.05 + overload * 0.42)), len * 0.09);
+    const double shear = std::min(std::max(2.5, oldRadius * 0.42), len * 0.035);
+    const double recoil = snap * (2.1 + overload * 0.8);
+    const Vec2 leftCap{crack.x - dir.x * gap * 0.5 - normal.x * snap - dir.x * shear,
+                       crack.y - dir.y * gap * 0.5 - normal.y * snap - dir.y * shear};
+    const Vec2 rightCap{crack.x + dir.x * gap * 0.5 + normal.x * snap + dir.x * shear,
+                        crack.y + dir.y * gap * 0.5 + normal.y * snap + dir.y * shear};
+
+    bone.a = {oldA.x - normal.x * snap * 0.18, oldA.y - normal.y * snap * 0.18};
+    bone.b = leftCap;
+    bone.previousA = {oldPreviousA.x + normal.x * recoil * 0.20, oldPreviousA.y + normal.y * recoil * 0.20};
+    bone.previousB = {previousCrack.x + normal.x * recoil + dir.x * shear * 0.7,
+                      previousCrack.y + normal.y * recoil + dir.y * shear * 0.7};
+    bone.homeB = {homeCrack.x - dir.x * gap * 0.5 - normal.x * snap * 0.35,
+                  homeCrack.y - dir.y * gap * 0.5 - normal.y * snap * 0.35};
     bone.restLength = std::max(kEpsilon, distance(bone.a, bone.b));
     bone.fractured = true;
     bone.brokenEnd = true;
+    bone.brokenEndNormal = normal;
+    ++bone.fractureGeneration;
+    bone.fractureImpulse = oldFractureImpulse * 0.82;
+    bone.load = oldLoad * 0.28;
 
     BoneSegment second;
-    second.a = {mid.x + dir.x * gap + normal.x * snap, mid.y + dir.y * gap + normal.y * snap};
-    second.b = {oldB.x + normal.x * snap * 0.35, oldB.y + normal.y * snap * 0.35};
-    second.previousA = {(oldPreviousA.x + oldPreviousB.x) * 0.5 + dir.x * gap - normal.x * snap * 1.8,
-                        (oldPreviousA.y + oldPreviousB.y) * 0.5 + dir.y * gap - normal.y * snap * 1.8};
-    second.previousB = {oldPreviousB.x - normal.x * snap * 1.8, oldPreviousB.y - normal.y * snap * 1.8};
-    second.homeA = {(oldHomeA.x + oldHomeB.x) * 0.5 + dir.x * gap, (oldHomeA.y + oldHomeB.y) * 0.5 + dir.y * gap};
+    second.a = rightCap;
+    second.b = {oldB.x + normal.x * snap * 0.18, oldB.y + normal.y * snap * 0.18};
+    second.previousA = {previousCrack.x - normal.x * recoil - dir.x * shear * 0.7,
+                        previousCrack.y - normal.y * recoil - dir.y * shear * 0.7};
+    second.previousB = {oldPreviousB.x - normal.x * recoil * 0.20, oldPreviousB.y - normal.y * recoil * 0.20};
+    second.homeA = {homeCrack.x + dir.x * gap * 0.5 + normal.x * snap * 0.35,
+                    homeCrack.y + dir.y * gap * 0.5 + normal.y * snap * 0.35};
     second.homeB = oldHomeB;
-    second.radius = bone.radius;
+    second.radius = oldRadius;
     second.restLength = std::max(kEpsilon, distance(second.a, second.b));
-    second.fractureImpulse = bone.fractureImpulse;
-    second.load = bone.load;
+    second.fractureImpulse = oldFractureImpulse * 0.82;
+    second.load = oldLoad * 0.28;
     second.fractured = true;
     second.brokenStart = true;
-    second.pinned = bone.pinned;
+    second.brokenStartNormal = normal;
+    second.fractureGeneration = bone.fractureGeneration;
+    second.pinned = oldPinned;
     const std::size_t secondIndex = bones_.size();
     bones_.push_back(second);
 
@@ -404,21 +610,94 @@ void World::fractureBone(std::size_t boneIndex) {
         if (attachment.bone != boneIndex || attachment.broken) {
             continue;
         }
-        if (attachment.t <= 0.5) {
-            attachment.t = std::clamp(attachment.t * 2.0, 0.0, 1.0);
+        const double originalT = attachment.t;
+        const double detachZone = std::clamp(0.11 + overload * 0.05 + oldRadius / std::max(len, 1.0) * 1.5, 0.10, 0.22);
+        if (std::abs(originalT - breakT) <= detachZone) {
+            attachment.broken = true;
+            attachment.stress = 1.0 + overload;
+            points_[attachment.point].exposure = std::max(points_[attachment.point].exposure, 0.95);
+            points_[attachment.point].load = std::max(points_[attachment.point].load, oldLoad * 0.35);
+            ++stats_.brokenBoneAttachments;
+            continue;
+        }
+        if (originalT < breakT) {
+            attachment.t = std::clamp(originalT / std::max(0.05, breakT), 0.0, 1.0);
             const Vec2 anchor = bonePoint(bones_[boneIndex], attachment.t);
             attachment.offset = {points_[attachment.point].position.x - anchor.x, points_[attachment.point].position.y - anchor.y};
             attachment.rest = std::max(1.0, distance(points_[attachment.point].position, anchor));
         } else {
             attachment.bone = secondIndex;
-            attachment.t = std::clamp((attachment.t - 0.5) * 2.0, 0.0, 1.0);
+            attachment.t = std::clamp((originalT - breakT) / std::max(0.05, 1.0 - breakT), 0.0, 1.0);
             const Vec2 anchor = bonePoint(bones_[secondIndex], attachment.t);
             attachment.offset = {points_[attachment.point].position.x - anchor.x, points_[attachment.point].position.y - anchor.y};
             attachment.rest = std::max(1.0, distance(points_[attachment.point].position, anchor));
         }
     }
 
+    for (BoneJoint& joint : boneJoints_) {
+        if (joint.broken) {
+            continue;
+        }
+
+        auto remapJointEnd = [&](std::size_t& jointBone, double& jointT) {
+            if (jointBone != boneIndex) {
+                return;
+            }
+            const double originalT = jointT;
+            const double detachZone = std::clamp(0.05 + overload * 0.03 + oldRadius / std::max(len, 1.0), 0.05, 0.14);
+            if (std::abs(originalT - breakT) <= detachZone) {
+                joint.broken = true;
+                joint.stress = 1.0 + overload;
+                ++stats_.brokenBoneJoints;
+                return;
+            }
+            if (originalT < breakT) {
+                jointT = std::clamp(originalT / std::max(0.05, breakT), 0.0, 1.0);
+            } else {
+                jointBone = secondIndex;
+                jointT = std::clamp((originalT - breakT) / std::max(0.05, 1.0 - breakT), 0.0, 1.0);
+            }
+        };
+
+        remapJointEnd(joint.a, joint.tA);
+        remapJointEnd(joint.b, joint.tB);
+        if (!joint.broken && joint.a < bones_.size() && joint.b < bones_.size()) {
+            joint.rest = std::max(1.0, distance(bonePoint(bones_[joint.a], joint.tA), bonePoint(bones_[joint.b], joint.tB)));
+            joint.restAngle = wrapAngle(boneAngle(bones_[joint.b]) - boneAngle(bones_[joint.a]));
+            joint.torqueStress = 0.0;
+        }
+    }
+
+    BoneSegment splinter;
+    const double chipLength = std::min(std::max(oldRadius * 1.8, 8.0), len * 0.13);
+    splinter.a = {crack.x - dir.x * chipLength * 0.45 + normal.x * snap * 0.35,
+                  crack.y - dir.y * chipLength * 0.45 + normal.y * snap * 0.35};
+    splinter.b = {crack.x + dir.x * chipLength * 0.55 + normal.x * snap * 1.35,
+                  crack.y + dir.y * chipLength * 0.55 + normal.y * snap * 1.35};
+    splinter.previousA = {splinter.a.x - normal.x * recoil * 0.55, splinter.a.y - normal.y * recoil * 0.55};
+    splinter.previousB = {splinter.b.x - normal.x * recoil * 0.55, splinter.b.y - normal.y * recoil * 0.55};
+    splinter.homeA = {homeCrack.x - dir.x * chipLength * 0.45 + normal.x * snap * 0.2,
+                      homeCrack.y - dir.y * chipLength * 0.45 + normal.y * snap * 0.2};
+    splinter.homeB = {homeCrack.x + dir.x * chipLength * 0.55 + normal.x * snap * 0.2,
+                      homeCrack.y + dir.y * chipLength * 0.55 + normal.y * snap * 0.2};
+    splinter.radius = std::max(2.5, oldRadius * 0.42);
+    splinter.restLength = std::max(kEpsilon, distance(splinter.a, splinter.b));
+    splinter.fractureImpulse = oldFractureImpulse;
+    splinter.load = oldLoad * 0.5;
+    splinter.fractured = true;
+    splinter.brokenStart = true;
+    splinter.brokenEnd = true;
+    splinter.brokenStartNormal = normal;
+    splinter.brokenEndNormal = normal;
+    splinter.fractureGeneration = materials_.maxBoneFractureDepth;
+    splinter.splinter = true;
+    bones_.push_back(splinter);
+
+    damageTissueAroundFracture(crack, std::max(oldRadius * 3.8, 24.0 + overload * 10.0), std::max(impulse, oldLoad));
+
     ++stats_.fracturedBones;
+    ++debug_.fractures;
+    debug_.lastFractureImpulse = std::max(debug_.lastFractureImpulse, std::max(impulse, oldLoad));
 }
 
 void World::integrate(double dt, double width, double floorY) {
@@ -463,12 +742,13 @@ void World::integrate(double dt, double width, double floorY) {
         const double avy = (bone.a.y - bone.previousA.y) * materials_.boneDamping;
         const double bvx = (bone.b.x - bone.previousB.x) * materials_.boneDamping;
         const double bvy = (bone.b.y - bone.previousB.y) * materials_.boneDamping;
+        const double shapeStiffness = bone.fractured ? 0.0 : materials_.boneShapeStiffness;
         bone.previousA = bone.a;
         bone.previousB = bone.b;
-        bone.a.x += avx + (bone.homeA.x - bone.a.x) * materials_.boneShapeStiffness;
-        bone.a.y += avy + materials_.gravity * dt * dt + (bone.homeA.y - bone.a.y) * materials_.boneShapeStiffness;
-        bone.b.x += bvx + (bone.homeB.x - bone.b.x) * materials_.boneShapeStiffness;
-        bone.b.y += bvy + materials_.gravity * dt * dt + (bone.homeB.y - bone.b.y) * materials_.boneShapeStiffness;
+        bone.a.x += avx + (bone.homeA.x - bone.a.x) * shapeStiffness;
+        bone.a.y += avy + materials_.gravity * dt * dt + (bone.homeA.y - bone.a.y) * shapeStiffness;
+        bone.b.x += bvx + (bone.homeB.x - bone.b.x) * shapeStiffness;
+        bone.b.y += bvy + materials_.gravity * dt * dt + (bone.homeB.y - bone.b.y) * shapeStiffness;
     }
 }
 
@@ -481,7 +761,8 @@ void World::collideStriker(double dt, const InputState& input) {
     const double impact = speed * materials_.strikerMass * input.power;
     const double influence = materials_.strikerRadius + 12.0;
 
-    for (std::size_t i = 0; i < bones_.size(); ++i) {
+    const std::size_t initialBoneCount = bones_.size();
+    for (std::size_t i = 0; i < initialBoneCount; ++i) {
         BoneSegment& bone = bones_[i];
         bone.load *= 0.88;
         const double t = segmentT({input.x, input.y}, bone.a, bone.b);
@@ -510,6 +791,12 @@ void World::collideStriker(double dt, const InputState& input) {
         const double contact = 1.0 - std::clamp((dist - bone.radius) / influence, 0.0, 1.0);
         const double directLoad = (impact + materials_.boneDirectPressure * input.power) * contact;
         bone.load = std::max(bone.load, directLoad);
+        ++debug_.boneContacts;
+        if (depth > debug_.maxDepth) {
+            debug_.maxDepth = depth;
+            debug_.strongestContact = closest;
+        }
+        debug_.maxBoneLoad = std::max(debug_.maxBoneLoad, bone.load);
 
         if (!bone.pinned) {
             const double contactStrength = materials_.boneDirectContact * (0.70 + input.power * 0.12);
@@ -523,8 +810,8 @@ void World::collideStriker(double dt, const InputState& input) {
             bone.b.y += pushY * bWeight;
         }
 
-        if (!bone.fractured && bone.load > bone.fractureImpulse) {
-            fractureBone(i);
+        if (canFractureBone(bone) && bone.load > bone.fractureImpulse) {
+            fractureBone(i, t, {nx, ny}, directLoad);
         }
     }
 
@@ -551,6 +838,12 @@ void World::collideStriker(double dt, const InputState& input) {
         point.position.x += nx * depth * contactStrength + input.vx * dt * 0.45 * contactStrength;
         point.position.y += ny * depth * contactStrength + input.vy * dt * 0.45 * contactStrength;
         point.load = std::max(point.load, impact * (depth / influence) * contactStrength);
+        ++debug_.tissueContacts;
+        if (depth > debug_.maxDepth) {
+            debug_.maxDepth = depth;
+            debug_.strongestContact = point.position;
+        }
+        debug_.maxPointLoad = std::max(debug_.maxPointLoad, point.load);
     }
 }
 
@@ -667,6 +960,63 @@ void World::solveBoneAttachments() {
     }
 }
 
+void World::solveBoneJoints() {
+    for (BoneJoint& joint : boneJoints_) {
+        if (joint.broken || joint.a >= bones_.size() || joint.b >= bones_.size()) {
+            continue;
+        }
+
+        BoneSegment& a = bones_[joint.a];
+        BoneSegment& b = bones_[joint.b];
+        const double loadA = a.load;
+        const double loadB = b.load;
+        const Vec2 anchorA = bonePoint(a, joint.tA);
+        const Vec2 anchorB = bonePoint(b, joint.tB);
+        const double dx = anchorB.x - anchorA.x;
+        const double dy = anchorB.y - anchorA.y;
+        const double len = std::sqrt(dx * dx + dy * dy);
+        if (len < kEpsilon) {
+            continue;
+        }
+
+        const double stretchRatio = len / std::max(1.0, joint.rest);
+        const double impulse = std::max(loadA, loadB);
+        joint.stress = std::max(joint.stress * 0.9, std::max(0.0, stretchRatio - 1.0));
+
+        if (stretchRatio > materials_.boneJointBreakStretch || (impulse > materials_.boneJointBreakImpulse && stretchRatio > 1.35)) {
+            joint.broken = true;
+            ++stats_.brokenBoneJoints;
+            continue;
+        }
+
+        const double relativeAngle = wrapAngle(boneAngle(b) - boneAngle(a) - joint.restAngle);
+        const double clampedAngle = std::clamp(relativeAngle, joint.minAngle, joint.maxAngle);
+        const double angleViolation = relativeAngle - clampedAngle;
+        const double overextension = std::abs(angleViolation);
+        joint.torqueStress = std::max(joint.torqueStress * 0.9, overextension);
+
+        if (overextension > materials_.boneJointAngularBreak ||
+            (impulse > materials_.boneJointBreakImpulse && overextension > materials_.boneJointAngularBreak * 0.45)) {
+            joint.broken = true;
+            ++stats_.brokenBoneJoints;
+            continue;
+        }
+
+        a.load = std::max(loadA, loadB * 0.30);
+        b.load = std::max(loadB, loadA * 0.30);
+
+        const double diff = (len - joint.rest) / len;
+        const double correctionX = dx * diff * materials_.boneJointStiffness * 0.5;
+        const double correctionY = dy * diff * materials_.boneJointStiffness * 0.5;
+        applyBoneAnchorDelta(a, joint.tA, correctionX, correctionY);
+        applyBoneAnchorDelta(b, joint.tB, -correctionX, -correctionY);
+
+        const double angleCorrection = angleViolation * materials_.boneJointAngularStiffness * 0.5;
+        rotateBoneAroundAnchor(a, joint.tA, angleCorrection);
+        rotateBoneAroundAnchor(b, joint.tB, -angleCorrection);
+    }
+}
+
 void World::solveBones() {
     const std::size_t initialBoneCount = bones_.size();
     for (std::size_t i = 0; i < initialBoneCount; ++i) {
@@ -694,7 +1044,7 @@ void World::solveBones() {
         bone.b.x -= correctionX;
         bone.b.y -= correctionY;
 
-        if (!bone.fractured && bone.load > bone.fractureImpulse) {
+        if (canFractureBone(bone) && bone.load > bone.fractureImpulse) {
             fractureBone(i);
         }
     }
@@ -909,14 +1259,22 @@ World createLayeredBody(double width, double height, Materials materials) {
         return Vec2{originX + (nx / 0.7) * bodyWidth, originY + ny * bodyHeight};
     };
 
-    world.addBoneSegment(bodyPoint(0.0, 0.06), bodyPoint(0.0, 0.17), 10.0, materials.boneFractureImpulse * 0.75, true);
-    world.addBoneSegment(bodyPoint(0.0, 0.20), bodyPoint(0.0, 0.63), 8.0, materials.boneFractureImpulse);
-    world.addBoneSegment(bodyPoint(-0.14, 0.30), bodyPoint(0.14, 0.30), 7.0, materials.boneFractureImpulse * 0.95);
-    world.addBoneSegment(bodyPoint(-0.10, 0.48), bodyPoint(0.10, 0.48), 6.0, materials.boneFractureImpulse * 0.9);
-    world.addBoneSegment(bodyPoint(-0.195, 0.295), bodyPoint(-0.245, 0.60), 7.0, materials.boneFractureImpulse * 0.82);
-    world.addBoneSegment(bodyPoint(0.195, 0.295), bodyPoint(0.245, 0.60), 7.0, materials.boneFractureImpulse * 0.82);
-    world.addBoneSegment(bodyPoint(-0.065, 0.68), bodyPoint(-0.082, 0.95), 8.0, materials.boneFractureImpulse * 0.9);
-    world.addBoneSegment(bodyPoint(0.065, 0.68), bodyPoint(0.082, 0.95), 8.0, materials.boneFractureImpulse * 0.9);
+    const std::size_t headBone = world.addBoneSegment(bodyPoint(0.0, 0.06), bodyPoint(0.0, 0.17), 10.0, materials.boneFractureImpulse * 0.75, true);
+    const std::size_t spineBone = world.addBoneSegment(bodyPoint(0.0, 0.20), bodyPoint(0.0, 0.63), 8.0, materials.boneFractureImpulse);
+    const std::size_t shoulderBone = world.addBoneSegment(bodyPoint(-0.14, 0.30), bodyPoint(0.14, 0.30), 7.0, materials.boneFractureImpulse * 0.95);
+    const std::size_t pelvisBone = world.addBoneSegment(bodyPoint(-0.10, 0.48), bodyPoint(0.10, 0.48), 6.0, materials.boneFractureImpulse * 0.9);
+    const std::size_t leftArmBone = world.addBoneSegment(bodyPoint(-0.195, 0.295), bodyPoint(-0.245, 0.60), 7.0, materials.boneFractureImpulse * 0.82);
+    const std::size_t rightArmBone = world.addBoneSegment(bodyPoint(0.195, 0.295), bodyPoint(0.245, 0.60), 7.0, materials.boneFractureImpulse * 0.82);
+    const std::size_t leftLegBone = world.addBoneSegment(bodyPoint(-0.065, 0.68), bodyPoint(-0.082, 0.95), 8.0, materials.boneFractureImpulse * 0.9);
+    const std::size_t rightLegBone = world.addBoneSegment(bodyPoint(0.065, 0.68), bodyPoint(0.082, 0.95), 8.0, materials.boneFractureImpulse * 0.9);
+
+    world.addBoneJoint(headBone, 1.0, spineBone, 0.0, -0.45, 0.45);
+    world.addBoneJoint(spineBone, 0.25, shoulderBone, 0.5, -0.55, 0.55);
+    world.addBoneJoint(spineBone, 0.66, pelvisBone, 0.5, -0.45, 0.45);
+    world.addBoneJoint(shoulderBone, 0.0, leftArmBone, 0.0, -1.15, 1.15);
+    world.addBoneJoint(shoulderBone, 1.0, rightArmBone, 0.0, -1.15, 1.15);
+    world.addBoneJoint(pelvisBone, 0.18, leftLegBone, 0.0, -0.75, 0.75);
+    world.addBoneJoint(pelvisBone, 0.82, rightLegBone, 0.0, -0.75, 0.75);
 
     for (std::size_t musclePoint : musclePoints) {
         std::size_t nearestBone = std::numeric_limits<std::size_t>::max();

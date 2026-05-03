@@ -80,7 +80,10 @@ function Initialize-WindowsBuild {
     $repoRoot = Get-RepoRoot
     $cmake = Get-CMakePath
     $cache = Join-Path $repoRoot "build\vs\CMakeCache.txt"
-    if ($Force -or -not (Test-Path $cache)) {
+    $projectFile = Join-Path $repoRoot "CMakeLists.txt"
+    $projectChanged = (Test-Path $cache) -and (Test-Path $projectFile) -and
+        ((Get-Item $projectFile).LastWriteTime -gt (Get-Item $cache).LastWriteTime)
+    if ($Force -or -not (Test-Path $cache) -or $projectChanged) {
         Invoke-CmdChecked `
             -Label "Configure Visual Studio build" `
             -CommandLine "cd /d `"$repoRoot`" && `"$cmake`" -S . -B build\vs -G `"$Generator`" -A $Architecture"
