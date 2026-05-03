@@ -60,12 +60,15 @@ struct Materials {
     double attachmentBreakStretch = 2.25;
     double attachmentBreakImpulse = 760.0;
 
-    double boneFractureImpulse = 2600.0;
+    double boneFractureImpulse = 1850.0;
     double boneDamping = 0.988;
     double boneShapeStiffness = 0.004;
     double boneAttachmentStiffness = 0.38;
     double boneAttachmentBreakImpulse = 2100.0;
     double boneAttachmentBreakStretch = 2.8;
+    double boneImpactTransfer = 0.62;
+    double boneDirectContact = 0.86;
+    double boneDirectPressure = 780.0;
 };
 
 struct Point {
@@ -136,6 +139,8 @@ struct BoneSegment {
     double fractureImpulse = 2600.0;
     double load = 0.0;
     bool fractured = false;
+    bool brokenStart = false;
+    bool brokenEnd = false;
     bool pinned = false;
 };
 

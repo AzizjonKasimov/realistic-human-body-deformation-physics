@@ -61,20 +61,6 @@ bool pointInTriangle(Vec2 p, Vec2 a, Vec2 b, Vec2 c) {
     return !(hasNegative && hasPositive);
 }
 
-double distanceToSegment(Vec2 point, Vec2 a, Vec2 b) {
-    const double abx = b.x - a.x;
-    const double aby = b.y - a.y;
-    const double apx = point.x - a.x;
-    const double apy = point.y - a.y;
-    const double abLenSq = abx * abx + aby * aby;
-    if (abLenSq <= kEpsilon) {
-        return distance(point, a);
-    }
-    const double t = std::clamp((apx * abx + apy * aby) / abLenSq, 0.0, 1.0);
-    const Vec2 closest{a.x + abx * t, a.y + aby * t};
-    return distance(point, closest);
-}
-
 double segmentT(Vec2 point, Vec2 a, Vec2 b) {
     const double abx = b.x - a.x;
     const double aby = b.y - a.y;
@@ -382,19 +368,26 @@ void World::fractureBone(std::size_t boneIndex) {
     const double len = std::max(kEpsilon, std::sqrt(dx * dx + dy * dy));
     const Vec2 dir{dx / len, dy / len};
     const Vec2 mid{(oldA.x + oldB.x) * 0.5, (oldA.y + oldB.y) * 0.5};
-    const double gap = std::min(8.0, len * 0.08);
+    const Vec2 normal{-dir.y, dir.x};
+    const double gap = std::min(18.0, len * 0.16);
+    const double snap = std::min(9.0, len * 0.08);
 
-    bone.b = {mid.x - dir.x * gap, mid.y - dir.y * gap};
-    bone.previousB = {(oldPreviousA.x + oldPreviousB.x) * 0.5 - dir.x * gap, (oldPreviousA.y + oldPreviousB.y) * 0.5 - dir.y * gap};
+    bone.a = {oldA.x - normal.x * snap * 0.35, oldA.y - normal.y * snap * 0.35};
+    bone.b = {mid.x - dir.x * gap - normal.x * snap, mid.y - dir.y * gap - normal.y * snap};
+    bone.previousA = {oldPreviousA.x + normal.x * snap * 1.8, oldPreviousA.y + normal.y * snap * 1.8};
+    bone.previousB = {(oldPreviousA.x + oldPreviousB.x) * 0.5 - dir.x * gap + normal.x * snap * 1.8,
+                      (oldPreviousA.y + oldPreviousB.y) * 0.5 - dir.y * gap + normal.y * snap * 1.8};
     bone.homeB = {(oldHomeA.x + oldHomeB.x) * 0.5 - dir.x * gap, (oldHomeA.y + oldHomeB.y) * 0.5 - dir.y * gap};
     bone.restLength = std::max(kEpsilon, distance(bone.a, bone.b));
     bone.fractured = true;
+    bone.brokenEnd = true;
 
     BoneSegment second;
-    second.a = {mid.x + dir.x * gap, mid.y + dir.y * gap};
-    second.b = oldB;
-    second.previousA = {(oldPreviousA.x + oldPreviousB.x) * 0.5 + dir.x * gap, (oldPreviousA.y + oldPreviousB.y) * 0.5 + dir.y * gap};
-    second.previousB = oldPreviousB;
+    second.a = {mid.x + dir.x * gap + normal.x * snap, mid.y + dir.y * gap + normal.y * snap};
+    second.b = {oldB.x + normal.x * snap * 0.35, oldB.y + normal.y * snap * 0.35};
+    second.previousA = {(oldPreviousA.x + oldPreviousB.x) * 0.5 + dir.x * gap - normal.x * snap * 1.8,
+                        (oldPreviousA.y + oldPreviousB.y) * 0.5 + dir.y * gap - normal.y * snap * 1.8};
+    second.previousB = {oldPreviousB.x - normal.x * snap * 1.8, oldPreviousB.y - normal.y * snap * 1.8};
     second.homeA = {(oldHomeA.x + oldHomeB.x) * 0.5 + dir.x * gap, (oldHomeA.y + oldHomeB.y) * 0.5 + dir.y * gap};
     second.homeB = oldHomeB;
     second.radius = bone.radius;
@@ -402,6 +395,7 @@ void World::fractureBone(std::size_t boneIndex) {
     second.fractureImpulse = bone.fractureImpulse;
     second.load = bone.load;
     second.fractured = true;
+    second.brokenStart = true;
     second.pinned = bone.pinned;
     const std::size_t secondIndex = bones_.size();
     bones_.push_back(second);
@@ -490,12 +484,45 @@ void World::collideStriker(double dt, const InputState& input) {
     for (std::size_t i = 0; i < bones_.size(); ++i) {
         BoneSegment& bone = bones_[i];
         bone.load *= 0.88;
-        const double dist = distanceToSegment({input.x, input.y}, bone.a, bone.b);
+        const double t = segmentT({input.x, input.y}, bone.a, bone.b);
+        const Vec2 closest = bonePoint(bone, t);
+        double dx = closest.x - input.x;
+        double dy = closest.y - input.y;
+        double dist = std::sqrt(dx * dx + dy * dy);
         if (!input.down || dist > influence + bone.radius) {
             continue;
         }
+
+        if (dist < kEpsilon) {
+            if (speed > kEpsilon) {
+                dx = input.vx / speed;
+                dy = input.vy / speed;
+            } else {
+                dx = 1.0;
+                dy = 0.0;
+            }
+            dist = 1.0;
+        }
+
+        const double nx = dx / dist;
+        const double ny = dy / dist;
+        const double depth = std::max(0.0, influence + bone.radius - dist);
         const double contact = 1.0 - std::clamp((dist - bone.radius) / influence, 0.0, 1.0);
-        bone.load = std::max(bone.load, impact * contact);
+        const double directLoad = (impact + materials_.boneDirectPressure * input.power) * contact;
+        bone.load = std::max(bone.load, directLoad);
+
+        if (!bone.pinned) {
+            const double contactStrength = materials_.boneDirectContact * (0.70 + input.power * 0.12);
+            const double pushX = nx * depth * contactStrength + input.vx * dt * contactStrength * 0.58;
+            const double pushY = ny * depth * contactStrength + input.vy * dt * contactStrength * 0.58;
+            const double aWeight = 1.0 - t;
+            const double bWeight = t;
+            bone.a.x += pushX * aWeight;
+            bone.a.y += pushY * aWeight;
+            bone.b.x += pushX * bWeight;
+            bone.b.y += pushY * bWeight;
+        }
+
         if (!bone.fractured && bone.load > bone.fractureImpulse) {
             fractureBone(i);
         }
@@ -606,6 +633,7 @@ void World::solveBoneAttachments() {
 
         Point& point = points_[attachment.point];
         BoneSegment& bone = bones_[attachment.bone];
+        bone.load = std::max(bone.load, point.load * materials_.boneImpactTransfer);
         const Vec2 rawAnchor = bonePoint(bone, attachment.t);
         const double currentBoneDistance = distance(point.position, rawAnchor);
         const double stretchRatio = currentBoneDistance / std::max(1.0, attachment.rest);
@@ -640,7 +668,9 @@ void World::solveBoneAttachments() {
 }
 
 void World::solveBones() {
-    for (BoneSegment& bone : bones_) {
+    const std::size_t initialBoneCount = bones_.size();
+    for (std::size_t i = 0; i < initialBoneCount; ++i) {
+        BoneSegment& bone = bones_[i];
         if (bone.pinned) {
             bone.a = bone.homeA;
             bone.b = bone.homeB;
@@ -663,6 +693,10 @@ void World::solveBones() {
         bone.a.y += correctionY;
         bone.b.x -= correctionX;
         bone.b.y -= correctionY;
+
+        if (!bone.fractured && bone.load > bone.fractureImpulse) {
+            fractureBone(i);
+        }
     }
 }
 

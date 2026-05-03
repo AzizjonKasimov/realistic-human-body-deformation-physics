@@ -125,6 +125,56 @@ void drawLine(HDC dc, int x1, int y1, int x2, int y2, COLORREF stroke, int width
     DeleteObject(pen);
 }
 
+void drawFractureCap(HDC dc, const rp::BoneSegment& bone, bool atStart) {
+    const rp::Vec2 p = atStart ? bone.a : bone.b;
+    const double dx = bone.b.x - bone.a.x;
+    const double dy = bone.b.y - bone.a.y;
+    const double len = std::max(1.0, std::sqrt(dx * dx + dy * dy));
+    const double nx = -dy / len;
+    const double ny = dx / len;
+    const double dir = atStart ? -1.0 : 1.0;
+    const double cap = bone.radius * 1.15;
+
+    drawLine(dc,
+             static_cast<int>(p.x - nx * cap),
+             static_cast<int>(p.y - ny * cap),
+             static_cast<int>(p.x + nx * cap),
+             static_cast<int>(p.y + ny * cap),
+             color(132, 24, 22),
+             3);
+    drawLine(dc,
+             static_cast<int>(p.x - nx * cap * 0.65),
+             static_cast<int>(p.y - ny * cap * 0.65),
+             static_cast<int>(p.x + dx / len * dir * 7.0),
+             static_cast<int>(p.y + dy / len * dir * 7.0),
+             color(245, 74, 58),
+             2);
+    drawLine(dc,
+             static_cast<int>(p.x + nx * cap * 0.65),
+             static_cast<int>(p.y + ny * cap * 0.65),
+             static_cast<int>(p.x + dx / len * dir * 5.0),
+             static_cast<int>(p.y + dy / len * dir * 5.0),
+             color(245, 74, 58),
+             2);
+}
+
+void drawWoundEdge(HDC dc, const rp::Point& a, const rp::Point& b) {
+    const double dx = b.position.x - a.position.x;
+    const double dy = b.position.y - a.position.y;
+    const double len = std::sqrt(dx * dx + dy * dy);
+    if (len > 46.0 || len < 2.0) {
+        return;
+    }
+
+    drawLine(dc,
+             static_cast<int>(a.position.x),
+             static_cast<int>(a.position.y),
+             static_cast<int>(b.position.x),
+             static_cast<int>(b.position.y),
+             color(118, 19, 24),
+             3);
+}
+
 void outlineTriangle(HDC dc, const rp::World& world, const rp::Triangle& triangle, COLORREF stroke) {
     const auto& points = world.points();
     const rp::Point& a = points[triangle.a];
@@ -163,6 +213,12 @@ void drawBone(HDC dc, const rp::BoneSegment& bone) {
              static_cast<int>(bone.b.y),
              stroke,
              width);
+    if (bone.brokenStart) {
+        drawFractureCap(dc, bone, true);
+    }
+    if (bone.brokenEnd) {
+        drawFractureCap(dc, bone, false);
+    }
 }
 
 void drawScene(HDC dc, const AppState& app) {
@@ -220,19 +276,15 @@ void drawScene(HDC dc, const AppState& app) {
         }
     }
 
-    for (const rp::Spring& spring : world.springs()) {
-        if (!spring.broken || spring.layer != rp::TissueLayer::Skin) {
-            continue;
+    if (app.viewMode == ViewMode::Normal) {
+        for (const rp::Spring& spring : world.springs()) {
+            if (!spring.broken || spring.layer != rp::TissueLayer::Skin) {
+                continue;
+            }
+            const rp::Point& a = world.points()[spring.a];
+            const rp::Point& b = world.points()[spring.b];
+            drawWoundEdge(dc, a, b);
         }
-        const rp::Point& a = world.points()[spring.a];
-        const rp::Point& b = world.points()[spring.b];
-        drawLine(dc,
-                 static_cast<int>(a.position.x),
-                 static_cast<int>(a.position.y),
-                 static_cast<int>(b.position.x),
-                 static_cast<int>(b.position.y),
-                 color(225, 60, 52),
-                 2);
     }
 
     HBRUSH strikerBrush = CreateSolidBrush(app.pointerDown ? color(230, 83, 58) : color(225, 183, 75));

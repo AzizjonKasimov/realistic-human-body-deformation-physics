@@ -33,9 +33,20 @@ When rebuilding after code changes, run:
 
 ```powershell
 cd E:\PersonalProjects\realistic_physics
-& "C:\Program Files\CMake\bin\cmake.exe" -S . -B build\vs -G "Visual Studio 17 2022" -A x64
-& "C:\Program Files\CMake\bin\cmake.exe" --build build\vs --config Release --target realistic_physics
+.\tools\build_app.ps1
 .\realistic_physics.exe
+```
+
+If the app is already open and the build cannot replace `realistic_physics.exe`, close the app or run:
+
+```powershell
+.\tools\build_app.ps1 -StopRunningApp
+```
+
+If Windows blocks script execution, run the same scripts through PowerShell with a one-time bypass:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tools\verify.ps1 -BuildApp
 ```
 
 Controls:
@@ -48,15 +59,20 @@ Controls:
 
 ## Run Core Tests
 
-From PowerShell after configuring with CMake:
+From PowerShell:
 
 ```powershell
 cd E:\PersonalProjects\realistic_physics
-cmake --build build\vs --config Debug --target realistic_physics_tests
-.\build\vs\Debug\realistic_physics_tests.exe
+.\tools\verify.ps1
 ```
 
-The core test verifies that the generated body has nested skin/muscle layers, muscle-to-bone attachments, and bones; remains stable at rest; tears open skin triangles; and splits bone segments under a high-energy strike.
+The core test verifies that the generated body has nested skin/muscle layers, muscle-to-bone attachments, and bones; remains stable at rest; direct cursor contact moves and fractures a bone; tears open skin triangles; and splits bone segments under a high-energy strike.
+
+To run tests, diagnostics, and rebuild the double-click app in one pass:
+
+```powershell
+.\tools\verify.ps1 -BuildApp
+```
 
 ## Development Notes
 
@@ -75,8 +91,7 @@ Use this whenever changing body generation, anatomy layers, bones, constraints, 
 
 ```powershell
 cd E:\PersonalProjects\realistic_physics
-& "C:\Program Files\CMake\bin\cmake.exe" --build build\vs --config Debug --target realistic_physics_diagnostics
-.\build\vs\Debug\realistic_physics_diagnostics.exe output\anatomy_debug.svg
+.\tools\verify.ps1
 ```
 
 Open `output\anatomy_debug.svg` to inspect the generated body without launching the app. Skin is translucent, muscle is red, bones are pale, muscle-to-bone attachments are blue, and bone sample markers turn red if they fall outside the skin mesh. The diagnostic exits nonzero if sampled bone centerlines are outside skin.

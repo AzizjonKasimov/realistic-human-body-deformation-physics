@@ -32,9 +32,30 @@ The project should prioritize real simulation behavior over scripted visual tric
 - Favor simple, inspectable code while the simulation model is still being discovered.
 - If extra tooling, debug views, tests, instrumentation, build scripts, profilers, visualizers, or project setup would make future debugging and fixes meaningfully better, feel free to propose it. Ask the user for approval before adding or installing that tooling.
 
+## Workflow Efficiency
+
+- Optimize agent working speed as the project grows. If a task requires the same manual build, verification, diagnostic, screenshot, profiling, or packaging steps more than once, add or improve a small repo-local tool/script so future iterations are faster and less error-prone.
+- Prefer repeatable one-command workflows over remembering long command chains. Keep those workflows documented in `README.md` and this file.
+- Preserve user time too: when changing gameplay/simulation behavior, rebuild the root `realistic_physics.exe` when practical so the user can double-click it immediately.
+- Do not hide uncertainty behind manual checking. If a visual or physics issue cannot be validated by existing tests, add a diagnostic or deterministic scenario before declaring it fixed.
+
 ## Windows Verification From WSL2
 
 Use Windows tooling for native verification instead of relying only on WSL builds. This repository has a known-good Windows CMake install at `C:\Program Files\CMake\bin\cmake.exe`, and plain PowerShell may not have `cmake` on `PATH`.
+
+Prefer the repo scripts for normal work:
+
+```bash
+/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -ExecutionPolicy Bypass -File "E:\PersonalProjects\realistic_physics\tools\verify.ps1" -BuildApp
+```
+
+To rebuild only the double-click app:
+
+```bash
+/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -ExecutionPolicy Bypass -File "E:\PersonalProjects\realistic_physics\tools\build_app.ps1"
+```
+
+If the root executable is running and blocks linking, rerun the relevant script with `-StopRunningApp`.
 
 From WSL2, configure the Visual Studio build with explicit Windows CMake:
 
@@ -56,7 +77,7 @@ For anatomy/body-generation work, also run the diagnostic target. It validates b
 /mnt/c/Windows/System32/cmd.exe /d /c "cd /d E:\PersonalProjects\realistic_physics && C:\Progra~1\CMake\bin\cmake.exe --build build\vs --config Debug --target realistic_physics_diagnostics && build\vs\Debug\realistic_physics_diagnostics.exe output\anatomy_debug.svg"
 ```
 
-Do not consider future anatomy alignment fixes complete unless `realistic_physics_tests` passes and `realistic_physics_diagnostics` reports `bone_samples_outside_skin=0`.
+Do not consider future anatomy alignment or bone interaction fixes complete unless `realistic_physics_tests` passes and `realistic_physics_diagnostics` reports `bone_samples_outside_skin=0`. The core test includes a direct cursor-to-bone strike that must move and fracture a bone, so preserve or strengthen that scenario when changing striker/bone behavior.
 Run Windows CMake/MSBuild targets sequentially, not in parallel, because concurrent targets can fight over the shared MSVC program database file under `build\vs\Debug`.
 
 ## Technical Direction

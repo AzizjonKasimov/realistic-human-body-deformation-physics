@@ -69,6 +69,36 @@ int main() {
         return fail("rest simulation should not tear tissue");
     }
 
+    rp::World directBoneWorld = rp::createLayeredBody(1280.0, 720.0);
+    if (directBoneWorld.bones().size() < 2) {
+        return fail("direct bone strike scenario needs a torso bone");
+    }
+    const rp::BoneSegment directTarget = directBoneWorld.bones()[1];
+    const rp::Vec2 directCenter{
+        (directTarget.a.x + directTarget.b.x) * 0.5,
+        (directTarget.a.y + directTarget.b.y) * 0.5,
+    };
+    const std::size_t directInitialBoneCount = directBoneWorld.bones().size();
+
+    rp::InputState directStrike;
+    directStrike.active = true;
+    directStrike.down = true;
+    directStrike.x = directCenter.x;
+    directStrike.y = directCenter.y;
+    directStrike.vx = 2200.0;
+    directStrike.vy = 120.0;
+    directStrike.power = 4.0;
+    directBoneWorld.step(directBoneWorld.materials().fixedDt, directStrike, 1280.0, 720.0);
+
+    const rp::BoneSegment movedTarget = directBoneWorld.bones()[1];
+    const double directMovement = std::max(rp::distance(directTarget.a, movedTarget.a), rp::distance(directTarget.b, movedTarget.b));
+    if (directMovement < 2.0) {
+        return fail("direct striker contact should move bone endpoints");
+    }
+    if (directBoneWorld.stats().fracturedBones <= 0 || directBoneWorld.bones().size() <= directInitialBoneCount) {
+        return fail("direct striker contact should fracture a bone");
+    }
+
     rp::InputState strike;
     strike.active = true;
     strike.down = true;
@@ -91,6 +121,12 @@ int main() {
     }
     if (world.bones().size() <= initialBoneCount) {
         return fail("fractured bone should split into independent segments");
+    }
+    const bool hasVisibleBrokenEnd = std::any_of(world.bones().begin(), world.bones().end(), [](const rp::BoneSegment& bone) {
+        return bone.brokenStart || bone.brokenEnd;
+    });
+    if (!hasVisibleBrokenEnd) {
+        return fail("fractured bones should expose broken ends");
     }
 
     const int liveSkinTriangles = static_cast<int>(std::count_if(world.triangles().begin(), world.triangles().end(), [&](const rp::Triangle& triangle) {
