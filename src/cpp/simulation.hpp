@@ -71,6 +71,9 @@ struct Materials {
     int maxBoneFractureDepth = 3;
     double minBoneFragmentLength = 30.0;
     double boneDamping = 0.988;
+    double boneAngularDamping = 0.965;
+    double boneTorqueScale = 0.35;
+    double fractureSpinScale = 1.10;
     double boneShapeStiffness = 0.004;
     double boneAttachmentStiffness = 0.38;
     double boneAttachmentBreakImpulse = 2100.0;
@@ -163,6 +166,7 @@ struct BoneSegment {
     double restLength = 1.0;
     double fractureImpulse = 2600.0;
     double load = 0.0;
+    double angularVelocity = 0.0;
     bool fractured = false;
     bool brokenStart = false;
     bool brokenEnd = false;
@@ -233,6 +237,7 @@ struct ContactDebug {
     double maxDepth = 0.0;
     double maxBoneLoad = 0.0;
     double maxPointLoad = 0.0;
+    double maxBoneAngularSpeed = 0.0;
     double maxFragmentDepth = 0.0;
     double maxFragmentImpulse = 0.0;
     double lastFractureImpulse = 0.0;
@@ -294,6 +299,8 @@ private:
     void damageTissueAroundFracture(Vec2 center, double radius, double impulse);
     void applyBoneAnchorDelta(BoneSegment& bone, double t, double dx, double dy);
     void rotateBoneAroundAnchor(BoneSegment& bone, double t, double angle);
+    void rotateBoneAroundCenter(BoneSegment& bone, double angle);
+    void applyBoneTorque(BoneSegment& bone, Vec2 contact, Vec2 impulse);
     double nextFluidRandom();
     void emitFluid(Vec2 center, Vec2 direction, int count, double speed, double radius, double intensity);
 

@@ -155,8 +155,20 @@ Vec2 add(Vec2 a, Vec2 b) {
     return {a.x + b.x, a.y + b.y};
 }
 
+Vec2 subtract(Vec2 a, Vec2 b) {
+    return {a.x - b.x, a.y - b.y};
+}
+
 Vec2 scale(Vec2 value, double amount) {
     return {value.x * amount, value.y * amount};
+}
+
+double cross(Vec2 a, Vec2 b) {
+    return a.x * b.y - a.y * b.x;
+}
+
+Vec2 midpoint(Vec2 a, Vec2 b) {
+    return {(a.x + b.x) * 0.5, (a.y + b.y) * 0.5};
 }
 
 Vec2 normalized(Vec2 value, Vec2 fallback) {
@@ -516,6 +528,33 @@ void World::rotateBoneAroundAnchor(BoneSegment& bone, double t, double angle) {
     bone.b = rotateAround(bone.b, anchor, angle);
 }
 
+void World::rotateBoneAroundCenter(BoneSegment& bone, double angle) {
+    if (bone.pinned || std::abs(angle) <= kEpsilon) {
+        return;
+    }
+
+    const Vec2 center = midpoint(bone.a, bone.b);
+    bone.a = rotateAround(bone.a, center, angle);
+    bone.b = rotateAround(bone.b, center, angle);
+}
+
+void World::applyBoneTorque(BoneSegment& bone, Vec2 contact, Vec2 impulse) {
+    if (bone.pinned) {
+        return;
+    }
+
+    const Vec2 center = midpoint(bone.a, bone.b);
+    const Vec2 lever = subtract(contact, center);
+    const double inertia = std::max(12.0, bone.restLength * bone.restLength * std::max(1.0, bone.radius));
+    const double torque = cross(lever, impulse);
+    bone.angularVelocity = std::clamp(bone.angularVelocity + torque / inertia * materials_.boneTorqueScale,
+                                      -36.0,
+                                      36.0);
+    if (bone.fractured || bone.splinter) {
+        debug_.maxBoneAngularSpeed = std::max(debug_.maxBoneAngularSpeed, std::abs(bone.angularVelocity));
+    }
+}
+
 double World::nextFluidRandom() {
     fluidSeed_ = fluidSeed_ * 1664525U + 1013904223U;
     return static_cast<double>((fluidSeed_ >> 8U) & 0x00ffffffU) / static_cast<double>(0x01000000U);
@@ -718,6 +757,16 @@ void World::fractureBone(std::size_t boneIndex, double fractureT, Vec2 impulseNo
     ++bone.fractureGeneration;
     bone.fractureImpulse = oldFractureImpulse * 0.82;
     bone.load = oldLoad * 0.28;
+    const double spinSign = cross(dir, normal) >= 0.0 ? 1.0 : -1.0;
+    const double fractureSpin = std::clamp((std::max(impulse, oldLoad) / std::max(1.0, oldFractureImpulse)) *
+                                               materials_.fractureSpinScale *
+                                               (0.55 + std::abs(breakT - 0.5) * 1.9),
+                                           0.0,
+                                           16.0);
+    bone.angularVelocity = std::clamp(bone.angularVelocity + spinSign * fractureSpin * (1.0 - breakT),
+                                      -36.0,
+                                      36.0);
+    const double firstAngularVelocity = bone.angularVelocity;
 
     BoneSegment second;
     second.a = rightCap;
@@ -737,6 +786,10 @@ void World::fractureBone(std::size_t boneIndex, double fractureT, Vec2 impulseNo
     second.brokenStartNormal = normal;
     second.fractureGeneration = bone.fractureGeneration;
     second.pinned = oldPinned;
+    second.angularVelocity = std::clamp(bone.angularVelocity - spinSign * fractureSpin * (0.65 + breakT),
+                                        -36.0,
+                                        36.0);
+    const double secondAngularVelocity = second.angularVelocity;
     const std::size_t secondIndex = bones_.size();
     bones_.push_back(second);
 
@@ -825,7 +878,12 @@ void World::fractureBone(std::size_t boneIndex, double fractureT, Vec2 impulseNo
     splinter.brokenEndNormal = normal;
     splinter.fractureGeneration = materials_.maxBoneFractureDepth;
     splinter.splinter = true;
+    splinter.angularVelocity = std::clamp(spinSign * fractureSpin * 1.65, -42.0, 42.0);
+    const double splinterAngularVelocity = splinter.angularVelocity;
     bones_.push_back(splinter);
+    debug_.maxBoneAngularSpeed = std::max(debug_.maxBoneAngularSpeed,
+                                          std::max(std::abs(firstAngularVelocity),
+                                                   std::max(std::abs(secondAngularVelocity), std::abs(splinterAngularVelocity))));
 
     emitFluid(crack,
               {normal.x + dir.x * 0.28, normal.y + dir.y * 0.28 - 0.30},
@@ -882,12 +940,23 @@ void World::integrate(double dt, double width, double floorY) {
         const double bvx = (bone.b.x - bone.previousB.x) * materials_.boneDamping;
         const double bvy = (bone.b.y - bone.previousB.y) * materials_.boneDamping;
         const double shapeStiffness = bone.fractured ? 0.0 : materials_.boneShapeStiffness;
+        bone.angularVelocity *= materials_.boneAngularDamping;
+        const bool freeFragment = bone.fractured || bone.splinter;
+        if (!freeFragment && std::abs(bone.angularVelocity) < 0.01) {
+            bone.angularVelocity = 0.0;
+        }
+        if (freeFragment) {
+            debug_.maxBoneAngularSpeed = std::max(debug_.maxBoneAngularSpeed, std::abs(bone.angularVelocity));
+        }
         bone.previousA = bone.a;
         bone.previousB = bone.b;
         bone.a.x += avx + (bone.homeA.x - bone.a.x) * shapeStiffness;
         bone.a.y += avy + materials_.gravity * dt * dt + (bone.homeA.y - bone.a.y) * shapeStiffness;
         bone.b.x += bvx + (bone.homeB.x - bone.b.x) * shapeStiffness;
         bone.b.y += bvy + materials_.gravity * dt * dt + (bone.homeB.y - bone.b.y) * shapeStiffness;
+        if (freeFragment) {
+            rotateBoneAroundCenter(bone, bone.angularVelocity * dt);
+        }
     }
 
     for (FluidParticle& fluid : fluids_) {
@@ -988,6 +1057,10 @@ void World::collideStriker(double dt, const InputState& input) {
             bone.a.y += pushY * aWeight;
             bone.b.x += pushX * bWeight;
             bone.b.y += pushY * bWeight;
+            applyBoneTorque(bone,
+                            closest,
+                            {nx * directLoad * 0.16 + input.vx * contact * profile.boneLoadScale * 0.22,
+                             ny * directLoad * 0.16 + input.vy * contact * profile.boneLoadScale * 0.22});
         }
 
         if (canFractureBone(bone) && bone.load > bone.fractureImpulse * profile.fractureScale) {
@@ -1304,7 +1377,7 @@ void World::solveBones() {
 }
 
 void World::collideBoneFragments() {
-    auto processTip = [&](const BoneSegment& bone, Vec2 tip, Vec2 previousTip, Vec2 normal, bool strongTip) {
+    auto processTip = [&](BoneSegment& bone, Vec2 tip, Vec2 previousTip, Vec2 normal, bool strongTip) {
         const double travel = distance(tip, previousTip);
         const double speed = travel / std::max(materials_.fixedDt, kEpsilon);
         const double radius = std::max(materials_.fragmentContactRadius, bone.radius * (strongTip ? 1.75 : 1.25));
@@ -1342,6 +1415,10 @@ void World::collideBoneFragments() {
             ++stats_.fragmentTissueHits;
             ++debug_.fragmentContacts;
             debug_.maxPointLoad = std::max(debug_.maxPointLoad, point.load);
+            applyBoneTorque(bone,
+                            tip,
+                            {-away.x * impulse * contact * 0.06 - tipNormal.x * impulse * contact * 0.02,
+                             -away.y * impulse * contact * 0.06 - tipNormal.y * impulse * contact * 0.02});
             if (contact > 0.62 || impulse > materials_.fragmentDamageImpulse) {
                 emitFluid(point.position,
                           {away.x + tipNormal.x * 0.45, away.y + tipNormal.y * 0.45 - 0.15},
@@ -1449,7 +1526,7 @@ void World::collideBoneFragments() {
 
     const std::size_t initialBoneCount = bones_.size();
     for (std::size_t i = 0; i < initialBoneCount; ++i) {
-        const BoneSegment& bone = bones_[i];
+        BoneSegment& bone = bones_[i];
         if (bone.pinned || (!bone.fractured && !bone.splinter)) {
             continue;
         }

@@ -557,11 +557,12 @@ void drawDebugOverlay(HDC dc, const AppState& app) {
     y += 20;
     std::swprintf(line,
                   sizeof(line) / sizeof(line[0]),
-                  L"fragments: contacts=%d tears=%d depth=%.1f impulse=%.0f",
+                  L"fragments: contacts=%d tears=%d depth=%.1f impulse=%.0f spin=%.2f",
                   debug.fragmentContacts,
                   debug.fragmentTears,
                   debug.maxFragmentDepth,
-                  debug.maxFragmentImpulse);
+                  debug.maxFragmentImpulse,
+                  debug.maxBoneAngularSpeed);
     drawDebugText(dc, panel.left + 12, y, line);
     y += 20;
     const int activeFluids = static_cast<int>(std::count_if(app.world.fluids().begin(), app.world.fluids().end(), [](const rp::FluidParticle& fluid) {
