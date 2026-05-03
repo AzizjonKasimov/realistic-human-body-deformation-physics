@@ -29,12 +29,25 @@ add_executable(realistic_physics_tests
 
 target_link_libraries(realistic_physics_tests PRIVATE realistic_physics_core)
 
+add_executable(realistic_physics_diagnostics
+    tools/anatomy_diagnostics.cpp
+)
+
+target_link_libraries(realistic_physics_diagnostics PRIVATE realistic_physics_core)
+
 if(WIN32)
     add_executable(realistic_physics WIN32
         src/cpp/win32_main.cpp
     )
 
     target_link_libraries(realistic_physics PRIVATE realistic_physics_core)
+
+    set_target_properties(realistic_physics PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_CURRENT_SOURCE_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_SOURCE_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_CURRENT_SOURCE_DIR}"
+        RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_CURRENT_SOURCE_DIR}"
+    )
 
     if(MSVC)
         target_compile_options(realistic_physics PRIVATE /W4 /permissive-)

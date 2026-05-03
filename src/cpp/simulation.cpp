@@ -52,16 +52,50 @@ bool capsule(double x, double y, double ax, double ay, double bx, double by, dou
     return dx * dx + dy * dy <= radius * radius;
 }
 
-bool isInsideHumanoid(double nx, double ny) {
-    const bool head = ellipse(nx, ny, 0.0, 0.105, 0.078, 0.085);
-    const bool neck = box(nx, ny, -0.034, 0.034, 0.17, 0.25);
-    const bool shoulders = ellipse(nx, ny, 0.0, 0.275, 0.205, 0.075);
-    const bool chest = ellipse(nx, ny, 0.0, 0.43, 0.155, 0.225);
-    const bool hips = ellipse(nx, ny, 0.0, 0.64, 0.132, 0.11);
-    const bool leftArm = capsule(nx, ny, -0.195, 0.285, -0.245, 0.62, 0.052);
-    const bool rightArm = capsule(nx, ny, 0.195, 0.285, 0.245, 0.62, 0.052);
-    const bool leftLeg = capsule(nx, ny, -0.065, 0.675, -0.082, 0.97, 0.056);
-    const bool rightLeg = capsule(nx, ny, 0.065, 0.675, 0.082, 0.97, 0.056);
+bool pointInTriangle(Vec2 p, Vec2 a, Vec2 b, Vec2 c) {
+    const double d1 = (p.x - b.x) * (a.y - b.y) - (a.x - b.x) * (p.y - b.y);
+    const double d2 = (p.x - c.x) * (b.y - c.y) - (b.x - c.x) * (p.y - c.y);
+    const double d3 = (p.x - a.x) * (c.y - a.y) - (c.x - a.x) * (p.y - a.y);
+    const bool hasNegative = d1 < -kEpsilon || d2 < -kEpsilon || d3 < -kEpsilon;
+    const bool hasPositive = d1 > kEpsilon || d2 > kEpsilon || d3 > kEpsilon;
+    return !(hasNegative && hasPositive);
+}
+
+double distanceToSegment(Vec2 point, Vec2 a, Vec2 b) {
+    const double abx = b.x - a.x;
+    const double aby = b.y - a.y;
+    const double apx = point.x - a.x;
+    const double apy = point.y - a.y;
+    const double abLenSq = abx * abx + aby * aby;
+    if (abLenSq <= kEpsilon) {
+        return distance(point, a);
+    }
+    const double t = std::clamp((apx * abx + apy * aby) / abLenSq, 0.0, 1.0);
+    const Vec2 closest{a.x + abx * t, a.y + aby * t};
+    return distance(point, closest);
+}
+
+double segmentT(Vec2 point, Vec2 a, Vec2 b) {
+    const double abx = b.x - a.x;
+    const double aby = b.y - a.y;
+    const double abLenSq = abx * abx + aby * aby;
+    if (abLenSq <= kEpsilon) {
+        return 0.0;
+    }
+    return std::clamp(((point.x - a.x) * abx + (point.y - a.y) * aby) / abLenSq, 0.0, 1.0);
+}
+
+bool isInsideHumanoidLayer(double nx, double ny, double inset) {
+    const double s = std::clamp(1.0 - inset, 0.2, 1.0);
+    const bool head = ellipse(nx, ny, 0.0, 0.105, 0.078 * s, 0.085 * s);
+    const bool neck = box(nx, ny, -0.034 * s, 0.034 * s, 0.17, 0.25);
+    const bool shoulders = ellipse(nx, ny, 0.0, 0.275, 0.205 * s, 0.075 * s);
+    const bool chest = ellipse(nx, ny, 0.0, 0.43, 0.155 * s, 0.225 * s);
+    const bool hips = ellipse(nx, ny, 0.0, 0.64, 0.132 * s, 0.11 * s);
+    const bool leftArm = capsule(nx, ny, -0.195, 0.285, -0.245, 0.62, 0.052 * s);
+    const bool rightArm = capsule(nx, ny, 0.195, 0.285, 0.245, 0.62, 0.052 * s);
+    const bool leftLeg = capsule(nx, ny, -0.065, 0.675, -0.082, 0.97, 0.056 * s);
+    const bool rightLeg = capsule(nx, ny, 0.065, 0.675, 0.082, 0.97, 0.056 * s);
     return head || neck || shoulders || chest || hips || leftArm || rightArm || leftLeg || rightLeg;
 }
 
@@ -116,6 +150,56 @@ double signedArea(Vec2 a, Vec2 b, Vec2 c) {
     return ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)) * 0.5;
 }
 
+bool pointInsideLayer(const World& world, Vec2 point, TissueLayer layer) {
+    const std::vector<Point>& points = world.points();
+    for (const Triangle& triangle : world.triangles()) {
+        if (triangle.layer != layer || !world.triangleAlive(triangle)) {
+            continue;
+        }
+        if (pointInTriangle(point, points[triangle.a].position, points[triangle.b].position, points[triangle.c].position)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+AnatomyValidation validateAnatomy(const World& world, int samplesPerBone) {
+    AnatomyValidation validation;
+    validation.skinPoints = static_cast<int>(std::count_if(world.points().begin(), world.points().end(), [](const Point& point) {
+        return point.layer == TissueLayer::Skin;
+    }));
+    validation.musclePoints = static_cast<int>(std::count_if(world.points().begin(), world.points().end(), [](const Point& point) {
+        return point.layer == TissueLayer::Muscle;
+    }));
+
+    const int sampleCount = std::max(2, samplesPerBone);
+    for (const BoneSegment& bone : world.bones()) {
+        bool segmentOutsideSkin = false;
+        bool segmentOutsideMuscle = false;
+        for (int i = 0; i < sampleCount; ++i) {
+            const double t = sampleCount == 1 ? 0.0 : static_cast<double>(i) / static_cast<double>(sampleCount - 1);
+            const Vec2 sample{bone.a.x + (bone.b.x - bone.a.x) * t, bone.a.y + (bone.b.y - bone.a.y) * t};
+            ++validation.boneSamples;
+            if (!pointInsideLayer(world, sample, TissueLayer::Skin)) {
+                ++validation.boneSamplesOutsideSkin;
+                segmentOutsideSkin = true;
+            }
+            if (!pointInsideLayer(world, sample, TissueLayer::Muscle)) {
+                ++validation.boneSamplesOutsideMuscle;
+                segmentOutsideMuscle = true;
+            }
+        }
+        if (segmentOutsideSkin) {
+            ++validation.boneSegmentsOutsideSkin;
+        }
+        if (segmentOutsideMuscle) {
+            ++validation.boneSegmentsOutsideMuscle;
+        }
+    }
+
+    return validation;
+}
+
 World::World(Materials materials)
     : materials_(materials) {}
 
@@ -162,6 +246,9 @@ void World::addArea(std::size_t a, std::size_t b, std::size_t c, TissueLayer lay
     area.a = a;
     area.b = b;
     area.c = c;
+    area.edgeAB = findSpringIndex(a, b, layer);
+    area.edgeBC = findSpringIndex(b, c, layer);
+    area.edgeCA = findSpringIndex(c, a, layer);
     area.layer = layer;
     area.restArea = signedArea(points_[a].position, points_[b].position, points_[c].position);
     area.stiffness = stiffness;
@@ -172,7 +259,7 @@ void World::addAttachment(std::size_t skinPoint, std::size_t musclePoint) {
     Attachment attachment;
     attachment.skinPoint = skinPoint;
     attachment.musclePoint = musclePoint;
-    attachment.rest = distance(points_[skinPoint].position, points_[musclePoint].position);
+    attachment.rest = std::max(materials_.pointSpacing * 0.45, distance(points_[skinPoint].position, points_[musclePoint].position));
     attachments_.push_back(attachment);
 }
 
@@ -181,8 +268,43 @@ void World::addTriangle(std::size_t a, std::size_t b, std::size_t c, TissueLayer
     triangle.a = a;
     triangle.b = b;
     triangle.c = c;
+    triangle.edgeAB = findSpringIndex(a, b, layer);
+    triangle.edgeBC = findSpringIndex(b, c, layer);
+    triangle.edgeCA = findSpringIndex(c, a, layer);
     triangle.layer = layer;
     triangles_.push_back(triangle);
+}
+
+std::size_t World::addBoneSegment(Vec2 a, Vec2 b, double radius, double fractureImpulse, bool pinned) {
+    BoneSegment bone;
+    bone.a = a;
+    bone.b = b;
+    bone.previousA = a;
+    bone.previousB = b;
+    bone.homeA = a;
+    bone.homeB = b;
+    bone.radius = radius;
+    bone.restLength = std::max(kEpsilon, distance(a, b));
+    bone.fractureImpulse = fractureImpulse;
+    bone.pinned = pinned;
+    const std::size_t index = bones_.size();
+    bones_.push_back(bone);
+    return index;
+}
+
+void World::addBoneAttachment(std::size_t point, std::size_t bone, double t) {
+    if (point >= points_.size() || bone >= bones_.size()) {
+        return;
+    }
+
+    BoneAttachment attachment;
+    attachment.point = point;
+    attachment.bone = bone;
+    attachment.t = std::clamp(t, 0.0, 1.0);
+    const Vec2 anchor = bonePoint(bones_[bone], attachment.t);
+    attachment.offset = {points_[point].position.x - anchor.x, points_[point].position.y - anchor.y};
+    attachment.rest = std::max(1.0, distance(points_[point].position, anchor));
+    boneAttachments_.push_back(attachment);
 }
 
 void World::step(double dt, const InputState& input, double width, double height) {
@@ -194,6 +316,8 @@ void World::step(double dt, const InputState& input, double width, double height
     for (int i = 0; i < materials_.solverIterations; ++i) {
         solveSprings();
         solveAttachments();
+        solveBoneAttachments();
+        solveBones();
         solveAreas();
         constrainToWorld(width, floorY);
     }
@@ -206,23 +330,101 @@ bool World::triangleAlive(const Triangle& triangle) const {
         return false;
     }
 
-    const int liveEdges =
-        (hasLiveSpring(triangle.a, triangle.b, triangle.layer) ? 1 : 0) +
-        (hasLiveSpring(triangle.b, triangle.c, triangle.layer) ? 1 : 0) +
-        (hasLiveSpring(triangle.c, triangle.a, triangle.layer) ? 1 : 0);
-    return liveEdges >= 2;
+    return liveEdgeCount(triangle.edgeAB, triangle.edgeBC, triangle.edgeCA) >= 2;
 }
 
 bool World::hasLiveSpring(std::size_t a, std::size_t b, TissueLayer layer) const {
-    for (const Spring& spring : springs_) {
-        if (spring.layer != layer || spring.broken) {
+    return springAlive(findSpringIndex(a, b, layer));
+}
+
+std::size_t World::findSpringIndex(std::size_t a, std::size_t b, TissueLayer layer) const {
+    for (std::size_t i = 0; i < springs_.size(); ++i) {
+        const Spring& spring = springs_[i];
+        if (spring.layer != layer) {
             continue;
         }
         if ((spring.a == a && spring.b == b) || (spring.a == b && spring.b == a)) {
-            return true;
+            return i;
         }
     }
-    return false;
+    return kMissingSpring;
+}
+
+bool World::springAlive(std::size_t springIndex) const {
+    return springIndex != kMissingSpring && springIndex < springs_.size() && !springs_[springIndex].broken;
+}
+
+int World::liveEdgeCount(std::size_t edgeAB, std::size_t edgeBC, std::size_t edgeCA) const {
+    return (springAlive(edgeAB) ? 1 : 0) + (springAlive(edgeBC) ? 1 : 0) + (springAlive(edgeCA) ? 1 : 0);
+}
+
+Vec2 World::bonePoint(const BoneSegment& bone, double t) const {
+    return {
+        bone.a.x + (bone.b.x - bone.a.x) * t,
+        bone.a.y + (bone.b.y - bone.a.y) * t,
+    };
+}
+
+void World::fractureBone(std::size_t boneIndex) {
+    if (boneIndex >= bones_.size() || bones_[boneIndex].fractured) {
+        return;
+    }
+
+    BoneSegment& bone = bones_[boneIndex];
+    const Vec2 oldA = bone.a;
+    const Vec2 oldB = bone.b;
+    const Vec2 oldPreviousA = bone.previousA;
+    const Vec2 oldPreviousB = bone.previousB;
+    const Vec2 oldHomeA = bone.homeA;
+    const Vec2 oldHomeB = bone.homeB;
+    const double dx = oldB.x - oldA.x;
+    const double dy = oldB.y - oldA.y;
+    const double len = std::max(kEpsilon, std::sqrt(dx * dx + dy * dy));
+    const Vec2 dir{dx / len, dy / len};
+    const Vec2 mid{(oldA.x + oldB.x) * 0.5, (oldA.y + oldB.y) * 0.5};
+    const double gap = std::min(8.0, len * 0.08);
+
+    bone.b = {mid.x - dir.x * gap, mid.y - dir.y * gap};
+    bone.previousB = {(oldPreviousA.x + oldPreviousB.x) * 0.5 - dir.x * gap, (oldPreviousA.y + oldPreviousB.y) * 0.5 - dir.y * gap};
+    bone.homeB = {(oldHomeA.x + oldHomeB.x) * 0.5 - dir.x * gap, (oldHomeA.y + oldHomeB.y) * 0.5 - dir.y * gap};
+    bone.restLength = std::max(kEpsilon, distance(bone.a, bone.b));
+    bone.fractured = true;
+
+    BoneSegment second;
+    second.a = {mid.x + dir.x * gap, mid.y + dir.y * gap};
+    second.b = oldB;
+    second.previousA = {(oldPreviousA.x + oldPreviousB.x) * 0.5 + dir.x * gap, (oldPreviousA.y + oldPreviousB.y) * 0.5 + dir.y * gap};
+    second.previousB = oldPreviousB;
+    second.homeA = {(oldHomeA.x + oldHomeB.x) * 0.5 + dir.x * gap, (oldHomeA.y + oldHomeB.y) * 0.5 + dir.y * gap};
+    second.homeB = oldHomeB;
+    second.radius = bone.radius;
+    second.restLength = std::max(kEpsilon, distance(second.a, second.b));
+    second.fractureImpulse = bone.fractureImpulse;
+    second.load = bone.load;
+    second.fractured = true;
+    second.pinned = bone.pinned;
+    const std::size_t secondIndex = bones_.size();
+    bones_.push_back(second);
+
+    for (BoneAttachment& attachment : boneAttachments_) {
+        if (attachment.bone != boneIndex || attachment.broken) {
+            continue;
+        }
+        if (attachment.t <= 0.5) {
+            attachment.t = std::clamp(attachment.t * 2.0, 0.0, 1.0);
+            const Vec2 anchor = bonePoint(bones_[boneIndex], attachment.t);
+            attachment.offset = {points_[attachment.point].position.x - anchor.x, points_[attachment.point].position.y - anchor.y};
+            attachment.rest = std::max(1.0, distance(points_[attachment.point].position, anchor));
+        } else {
+            attachment.bone = secondIndex;
+            attachment.t = std::clamp((attachment.t - 0.5) * 2.0, 0.0, 1.0);
+            const Vec2 anchor = bonePoint(bones_[secondIndex], attachment.t);
+            attachment.offset = {points_[attachment.point].position.x - anchor.x, points_[attachment.point].position.y - anchor.y};
+            attachment.rest = std::max(1.0, distance(points_[attachment.point].position, anchor));
+        }
+    }
+
+    ++stats_.fracturedBones;
 }
 
 void World::integrate(double dt, double width, double floorY) {
@@ -252,6 +454,28 @@ void World::integrate(double dt, double width, double floorY) {
             point.previous.x = point.position.x + (point.previous.x - point.position.x) * materials_.floorFriction;
         }
     }
+
+    for (BoneSegment& bone : bones_) {
+        bone.load *= 0.88;
+        if (bone.pinned) {
+            bone.a = bone.homeA;
+            bone.b = bone.homeB;
+            bone.previousA = bone.a;
+            bone.previousB = bone.b;
+            continue;
+        }
+
+        const double avx = (bone.a.x - bone.previousA.x) * materials_.boneDamping;
+        const double avy = (bone.a.y - bone.previousA.y) * materials_.boneDamping;
+        const double bvx = (bone.b.x - bone.previousB.x) * materials_.boneDamping;
+        const double bvy = (bone.b.y - bone.previousB.y) * materials_.boneDamping;
+        bone.previousA = bone.a;
+        bone.previousB = bone.b;
+        bone.a.x += avx + (bone.homeA.x - bone.a.x) * materials_.boneShapeStiffness;
+        bone.a.y += avy + materials_.gravity * dt * dt + (bone.homeA.y - bone.a.y) * materials_.boneShapeStiffness;
+        bone.b.x += bvx + (bone.homeB.x - bone.b.x) * materials_.boneShapeStiffness;
+        bone.b.y += bvy + materials_.gravity * dt * dt + (bone.homeB.y - bone.b.y) * materials_.boneShapeStiffness;
+    }
 }
 
 void World::collideStriker(double dt, const InputState& input) {
@@ -262,6 +486,20 @@ void World::collideStriker(double dt, const InputState& input) {
     const double speed = std::sqrt(input.vx * input.vx + input.vy * input.vy);
     const double impact = speed * materials_.strikerMass * input.power;
     const double influence = materials_.strikerRadius + 12.0;
+
+    for (std::size_t i = 0; i < bones_.size(); ++i) {
+        BoneSegment& bone = bones_[i];
+        bone.load *= 0.88;
+        const double dist = distanceToSegment({input.x, input.y}, bone.a, bone.b);
+        if (!input.down || dist > influence + bone.radius) {
+            continue;
+        }
+        const double contact = 1.0 - std::clamp((dist - bone.radius) / influence, 0.0, 1.0);
+        bone.load = std::max(bone.load, impact * contact);
+        if (!bone.fractured && bone.load > bone.fractureImpulse) {
+            fractureBone(i);
+        }
+    }
 
     for (Point& point : points_) {
         if (point.pinned) {
@@ -360,14 +598,77 @@ void World::solveAttachments() {
     }
 }
 
+void World::solveBoneAttachments() {
+    for (BoneAttachment& attachment : boneAttachments_) {
+        if (attachment.broken || attachment.point >= points_.size() || attachment.bone >= bones_.size()) {
+            continue;
+        }
+
+        Point& point = points_[attachment.point];
+        BoneSegment& bone = bones_[attachment.bone];
+        const Vec2 rawAnchor = bonePoint(bone, attachment.t);
+        const double currentBoneDistance = distance(point.position, rawAnchor);
+        const double stretchRatio = currentBoneDistance / std::max(1.0, attachment.rest);
+        const double impulse = std::max(point.load, bone.load);
+        attachment.stress = std::max(attachment.stress * 0.9, std::max(0.0, stretchRatio - 1.0));
+
+        if (stretchRatio > materials_.boneAttachmentBreakStretch || (impulse > materials_.boneAttachmentBreakImpulse && stretchRatio > 1.45)) {
+            attachment.broken = true;
+            ++stats_.brokenBoneAttachments;
+            point.exposure = std::max(point.exposure, 0.85);
+            continue;
+        }
+
+        const Vec2 target{rawAnchor.x + attachment.offset.x, rawAnchor.y + attachment.offset.y};
+        const double correctionX = (target.x - point.position.x) * materials_.boneAttachmentStiffness;
+        const double correctionY = (target.y - point.position.y) * materials_.boneAttachmentStiffness;
+        if (!point.pinned) {
+            point.position.x += correctionX;
+            point.position.y += correctionY;
+        }
+
+        if (!bone.pinned) {
+            const double boneShare = 0.10;
+            const double aWeight = 1.0 - attachment.t;
+            const double bWeight = attachment.t;
+            bone.a.x -= correctionX * boneShare * aWeight;
+            bone.a.y -= correctionY * boneShare * aWeight;
+            bone.b.x -= correctionX * boneShare * bWeight;
+            bone.b.y -= correctionY * boneShare * bWeight;
+        }
+    }
+}
+
+void World::solveBones() {
+    for (BoneSegment& bone : bones_) {
+        if (bone.pinned) {
+            bone.a = bone.homeA;
+            bone.b = bone.homeB;
+            bone.previousA = bone.a;
+            bone.previousB = bone.b;
+            continue;
+        }
+
+        const double dx = bone.b.x - bone.a.x;
+        const double dy = bone.b.y - bone.a.y;
+        const double len = std::sqrt(dx * dx + dy * dy);
+        if (len < kEpsilon) {
+            continue;
+        }
+
+        const double diff = (len - bone.restLength) / len;
+        const double correctionX = dx * diff * 0.5;
+        const double correctionY = dy * diff * 0.5;
+        bone.a.x += correctionX;
+        bone.a.y += correctionY;
+        bone.b.x -= correctionX;
+        bone.b.y -= correctionY;
+    }
+}
+
 void World::solveAreas() {
     for (const AreaConstraint& area : areas_) {
-        Triangle probe;
-        probe.a = area.a;
-        probe.b = area.b;
-        probe.c = area.c;
-        probe.layer = area.layer;
-        if (!triangleAlive(probe)) {
+        if (liveEdgeCount(area.edgeAB, area.edgeBC, area.edgeCA) < 2) {
             continue;
         }
 
@@ -419,6 +720,15 @@ void World::constrainToWorld(double width, double floorY) {
         point.position.x = std::clamp(point.position.x, margin, width - margin);
         point.position.y = std::min(point.position.y, floorY);
     }
+    for (BoneSegment& bone : bones_) {
+        if (bone.pinned) {
+            continue;
+        }
+        bone.a.x = std::clamp(bone.a.x, margin, width - margin);
+        bone.b.x = std::clamp(bone.b.x, margin, width - margin);
+        bone.a.y = std::min(bone.a.y, floorY);
+        bone.b.y = std::min(bone.b.y, floorY);
+    }
 }
 
 void World::updateExposure() {
@@ -469,27 +779,29 @@ World createLayeredBody(double width, double height, Materials materials) {
 
     std::unordered_map<GridKey, std::size_t, GridKeyHash> skinGrid;
     std::unordered_map<GridKey, std::size_t, GridKeyHash> muscleGrid;
+    std::vector<std::size_t> skinPoints;
+    std::vector<std::size_t> musclePoints;
 
     for (int y = 0; y <= rows; ++y) {
         for (int x = 0; x <= cols; ++x) {
             const double nx = (static_cast<double>(x) / cols - 0.5) * 0.7;
             const double ny = static_cast<double>(y) / rows;
-            if (!isInsideHumanoid(nx, ny)) {
-                continue;
-            }
-
-            const double skinX = originX + (static_cast<double>(x) / cols - 0.5) * bodyWidth;
-            const double skinY = originY + ny * bodyHeight;
-            const double muscleX = originX + (static_cast<double>(x) / cols - 0.5) * bodyWidth * 0.78;
-            const double muscleY = originY + ny * bodyHeight;
+            const double worldX = originX + (static_cast<double>(x) / cols - 0.5) * bodyWidth;
+            const double worldY = originY + ny * bodyHeight;
             const bool pinned = ny < 0.035;
             const GridKey key{x, y};
 
-            const std::size_t skinPoint = world.addPoint({skinX, skinY}, TissueLayer::Skin, pinned);
-            const std::size_t musclePoint = world.addPoint({muscleX, muscleY}, TissueLayer::Muscle, pinned);
-            skinGrid[key] = skinPoint;
-            muscleGrid[key] = musclePoint;
-            world.addAttachment(skinPoint, musclePoint);
+            if (isInsideHumanoidLayer(nx, ny, 0.0)) {
+                const std::size_t skinPoint = world.addPoint({worldX, worldY}, TissueLayer::Skin, pinned);
+                skinGrid[key] = skinPoint;
+                skinPoints.push_back(skinPoint);
+            }
+
+            if (isInsideHumanoidLayer(nx, ny, 0.24)) {
+                const std::size_t musclePoint = world.addPoint({worldX, worldY}, TissueLayer::Muscle, pinned);
+                muscleGrid[key] = musclePoint;
+                musclePoints.push_back(musclePoint);
+            }
         }
     }
 
@@ -516,7 +828,7 @@ World createLayeredBody(double width, double height, Materials materials) {
         for (int x = 0; x <= cols; ++x) {
             const std::size_t skinPoint = get(skinGrid, x, y);
             const std::size_t musclePoint = get(muscleGrid, x, y);
-            if (skinPoint == std::numeric_limits<std::size_t>::max() || musclePoint == std::numeric_limits<std::size_t>::max()) {
+            if (skinPoint == std::numeric_limits<std::size_t>::max()) {
                 continue;
             }
 
@@ -524,6 +836,10 @@ World createLayeredBody(double width, double height, Materials materials) {
             addSkinSpring(skinPoint, get(skinGrid, x, y + 1), materials.skinStructuralStiffness, materials.skinTearStretch);
             addSkinSpring(skinPoint, get(skinGrid, x + 1, y + 1), materials.skinShearStiffness, materials.skinTearStretch * 1.08);
             addSkinSpring(skinPoint, get(skinGrid, x - 1, y + 1), materials.skinShearStiffness, materials.skinTearStretch * 1.08);
+
+            if (musclePoint == std::numeric_limits<std::size_t>::max()) {
+                continue;
+            }
 
             addMuscleSpring(musclePoint, get(muscleGrid, x, y + 1), materials.muscleFiberStiffness, true, materials.muscleTearStretch);
             addMuscleSpring(musclePoint, get(muscleGrid, x, y + 2), materials.muscleFiberStiffness * 0.42, true, materials.muscleTearStretch * 1.05);
@@ -537,6 +853,54 @@ World createLayeredBody(double width, double height, Materials materials) {
         for (int x = 0; x < cols; ++x) {
             addCellTriangles(world, skinGrid, x, y, TissueLayer::Skin, materials.skinAreaStiffness);
             addCellTriangles(world, muscleGrid, x, y, TissueLayer::Muscle, materials.muscleAreaStiffness);
+        }
+    }
+
+    for (std::size_t skinPoint : skinPoints) {
+        std::size_t nearest = std::numeric_limits<std::size_t>::max();
+        double nearestDistance = materials.pointSpacing * 2.35;
+        for (std::size_t musclePoint : musclePoints) {
+            const double d = distance(world.points()[skinPoint].position, world.points()[musclePoint].position);
+            if (d < nearestDistance) {
+                nearestDistance = d;
+                nearest = musclePoint;
+            }
+        }
+        if (nearest != std::numeric_limits<std::size_t>::max()) {
+            world.addAttachment(skinPoint, nearest);
+        }
+    }
+
+    const auto bodyPoint = [&](double nx, double ny) {
+        return Vec2{originX + (nx / 0.7) * bodyWidth, originY + ny * bodyHeight};
+    };
+
+    world.addBoneSegment(bodyPoint(0.0, 0.06), bodyPoint(0.0, 0.17), 10.0, materials.boneFractureImpulse * 0.75, true);
+    world.addBoneSegment(bodyPoint(0.0, 0.20), bodyPoint(0.0, 0.63), 8.0, materials.boneFractureImpulse);
+    world.addBoneSegment(bodyPoint(-0.14, 0.30), bodyPoint(0.14, 0.30), 7.0, materials.boneFractureImpulse * 0.95);
+    world.addBoneSegment(bodyPoint(-0.10, 0.48), bodyPoint(0.10, 0.48), 6.0, materials.boneFractureImpulse * 0.9);
+    world.addBoneSegment(bodyPoint(-0.195, 0.295), bodyPoint(-0.245, 0.60), 7.0, materials.boneFractureImpulse * 0.82);
+    world.addBoneSegment(bodyPoint(0.195, 0.295), bodyPoint(0.245, 0.60), 7.0, materials.boneFractureImpulse * 0.82);
+    world.addBoneSegment(bodyPoint(-0.065, 0.68), bodyPoint(-0.082, 0.95), 8.0, materials.boneFractureImpulse * 0.9);
+    world.addBoneSegment(bodyPoint(0.065, 0.68), bodyPoint(0.082, 0.95), 8.0, materials.boneFractureImpulse * 0.9);
+
+    for (std::size_t musclePoint : musclePoints) {
+        std::size_t nearestBone = std::numeric_limits<std::size_t>::max();
+        double nearestDistance = materials.pointSpacing * 2.7;
+        double nearestT = 0.0;
+        for (std::size_t i = 0; i < world.bones().size(); ++i) {
+            const rp::BoneSegment& bone = world.bones()[i];
+            const double t = segmentT(world.points()[musclePoint].position, bone.a, bone.b);
+            const Vec2 anchor = {bone.a.x + (bone.b.x - bone.a.x) * t, bone.a.y + (bone.b.y - bone.a.y) * t};
+            const double d = distance(world.points()[musclePoint].position, anchor);
+            if (d < nearestDistance) {
+                nearestDistance = d;
+                nearestBone = i;
+                nearestT = t;
+            }
+        }
+        if (nearestBone != std::numeric_limits<std::size_t>::max()) {
+            world.addBoneAttachment(musclePoint, nearestBone, nearestT);
         }
     }
 

@@ -15,6 +15,11 @@ namespace {
 constexpr int kTimerId = 1;
 constexpr int kTargetFrameMs = 16;
 
+enum class ViewMode {
+    Normal,
+    Anatomy
+};
+
 struct AppState {
     int width = 1280;
     int height = 720;
@@ -28,12 +33,15 @@ struct AppState {
     double pointerVx = 0.0;
     double pointerVy = 0.0;
     double impactPower = 2.0;
+    ViewMode viewMode = ViewMode::Anatomy;
     std::chrono::steady_clock::time_point lastTick = std::chrono::steady_clock::now();
     rp::World world = rp::createLayeredBody(1280.0, 720.0);
 };
 
-COLORREF color(unsigned char r, unsigned char g, unsigned char b) {
-    return RGB(r, g, b);
+COLORREF color(int r, int g, int b) {
+    return RGB(static_cast<unsigned char>(std::clamp(r, 0, 255)),
+               static_cast<unsigned char>(std::clamp(g, 0, 255)),
+               static_cast<unsigned char>(std::clamp(b, 0, 255)));
 }
 
 POINT toPoint(const rp::Point& point) {
@@ -44,10 +52,12 @@ std::wstring makeTitle(const AppState& app) {
     wchar_t buffer[256];
     std::swprintf(buffer,
                  sizeof(buffer) / sizeof(buffer[0]),
-                 L"Realistic Physics C++ | skin %d | muscle %d | detach %d | impact %.0fx",
+                 L"Realistic Physics C++ | view %s | skin %d | muscle %d | detach %d | bone %d | impact %.0fx",
+                 app.viewMode == ViewMode::Anatomy ? L"anatomy" : L"normal",
                  app.world.stats().brokenSkin,
                  app.world.stats().brokenMuscle,
                  app.world.stats().brokenAttachments,
+                 app.world.stats().fracturedBones,
                  app.impactPower);
     return buffer;
 }
@@ -115,6 +125,46 @@ void drawLine(HDC dc, int x1, int y1, int x2, int y2, COLORREF stroke, int width
     DeleteObject(pen);
 }
 
+void outlineTriangle(HDC dc, const rp::World& world, const rp::Triangle& triangle, COLORREF stroke) {
+    const auto& points = world.points();
+    const rp::Point& a = points[triangle.a];
+    const rp::Point& b = points[triangle.b];
+    const rp::Point& c = points[triangle.c];
+    drawLine(dc,
+             static_cast<int>(a.position.x),
+             static_cast<int>(a.position.y),
+             static_cast<int>(b.position.x),
+             static_cast<int>(b.position.y),
+             stroke,
+             1);
+    drawLine(dc,
+             static_cast<int>(b.position.x),
+             static_cast<int>(b.position.y),
+             static_cast<int>(c.position.x),
+             static_cast<int>(c.position.y),
+             stroke,
+             1);
+    drawLine(dc,
+             static_cast<int>(c.position.x),
+             static_cast<int>(c.position.y),
+             static_cast<int>(a.position.x),
+             static_cast<int>(a.position.y),
+             stroke,
+             1);
+}
+
+void drawBone(HDC dc, const rp::BoneSegment& bone) {
+    const COLORREF stroke = bone.fractured ? color(235, 235, 222) : color(214, 202, 172);
+    const int width = std::max(3, static_cast<int>(std::lround(bone.radius * 1.7)));
+    drawLine(dc,
+             static_cast<int>(bone.a.x),
+             static_cast<int>(bone.a.y),
+             static_cast<int>(bone.b.x),
+             static_cast<int>(bone.b.y),
+             stroke,
+             width);
+}
+
 void drawScene(HDC dc, const AppState& app) {
     RECT background{0, 0, app.width, app.height};
     HBRUSH bgBrush = CreateSolidBrush(color(24, 24, 24));
@@ -128,6 +178,13 @@ void drawScene(HDC dc, const AppState& app) {
     drawLine(dc, 0, app.height - 38, app.width, app.height - 38, color(75, 69, 61), 1);
 
     const rp::World& world = app.world;
+
+    if (app.viewMode == ViewMode::Normal) {
+        for (const rp::BoneSegment& bone : world.bones()) {
+            drawBone(dc, bone);
+        }
+    }
+
     for (const rp::Triangle& triangle : world.triangles()) {
         if (!world.triangleAlive(triangle)) {
             continue;
@@ -135,11 +192,11 @@ void drawScene(HDC dc, const AppState& app) {
         if (triangle.layer == rp::TissueLayer::Muscle) {
             const auto& points = world.points();
             const double exposure = (points[triangle.a].exposure + points[triangle.b].exposure + points[triangle.c].exposure) / 3.0;
-            if (exposure < 0.04) {
+            if (app.viewMode == ViewMode::Normal && exposure < 0.04) {
                 continue;
             }
-            const int red = static_cast<int>(std::clamp(95.0 + exposure * 60.0 + triangle.damage * 35.0, 0.0, 255.0));
-            fillPolygon(dc, world, triangle, color(static_cast<unsigned char>(red), 30, 38), color(95, 35, 40));
+            const int red = static_cast<int>(std::clamp(105.0 + exposure * 58.0 + triangle.damage * 35.0, 0.0, 255.0));
+            fillPolygon(dc, world, triangle, color(red, 30, 38), color(95, 35, 40));
         }
     }
 
@@ -150,7 +207,17 @@ void drawScene(HDC dc, const AppState& app) {
         const auto& points = world.points();
         const double load = (points[triangle.a].load + points[triangle.b].load + points[triangle.c].load) / 3.0;
         const int heat = static_cast<int>(std::clamp(load / 18.0, 0.0, 70.0));
-        fillPolygon(dc, world, triangle, color(155 + heat, 112 - heat / 3, 94 - heat / 4), color(76, 48, 43));
+        if (app.viewMode == ViewMode::Anatomy) {
+            outlineTriangle(dc, world, triangle, color(104 + heat, 70, 62));
+        } else {
+            fillPolygon(dc, world, triangle, color(155 + heat, 112 - heat / 3, 94 - heat / 4), color(76, 48, 43));
+        }
+    }
+
+    if (app.viewMode == ViewMode::Anatomy) {
+        for (const rp::BoneSegment& bone : world.bones()) {
+            drawBone(dc, bone);
+        }
     }
 
     for (const rp::Spring& spring : world.springs()) {
@@ -185,7 +252,7 @@ void drawScene(HDC dc, const AppState& app) {
 
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, color(220, 216, 205));
-    constexpr const wchar_t* instructions = L"Left drag: strike | R: reset | Space: pause | 1/2/4: impact";
+    constexpr const wchar_t* instructions = L"Left drag: strike | Tab: anatomy | R: reset | Space: pause | 1/2/4: impact";
     TextOutW(dc, 16, 16, instructions, lstrlenW(instructions));
 }
 
@@ -234,8 +301,8 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         if (!app) {
             return 0;
         }
-        app->width = std::max(1, LOWORD(lParam));
-        app->height = std::max(1, HIWORD(lParam));
+        app->width = std::max(1, static_cast<int>(LOWORD(lParam)));
+        app->height = std::max(1, static_cast<int>(HIWORD(lParam)));
         rebuildWorld(*app);
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
@@ -276,6 +343,8 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             rebuildWorld(*app);
         } else if (wParam == VK_SPACE) {
             app->running = !app->running;
+        } else if (wParam == VK_TAB) {
+            app->viewMode = app->viewMode == ViewMode::Anatomy ? ViewMode::Normal : ViewMode::Anatomy;
         } else if (wParam == '1') {
             app->impactPower = 1.0;
         } else if (wParam == '2') {

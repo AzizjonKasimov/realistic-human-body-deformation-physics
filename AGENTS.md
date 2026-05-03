@@ -22,6 +22,8 @@ The project should prioritize real simulation behavior over scripted visual tric
 
 - If the user asks a question, answer the question first. Do not edit code unless the user asks for implementation or the answer clearly requires inspection plus a fix.
 - The user runs Codex in WSL2 but runs the project on Windows. Prefer PowerShell commands in user-facing instructions whenever possible.
+- For Windows-specific verification from WSL2, agents can and should invoke Windows PowerShell directly, for example `/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -Command "..."`.
+- If plain PowerShell cannot find Windows build tools such as `cmake`, do not stop there. Check common explicit locations such as `C:\Program Files\CMake\bin\cmake.exe`, and try locating/invoking the Visual Studio Developer PowerShell or `VsDevCmd.bat` from the installed Visual Studio/Build Tools path so MSVC and CMake are available.
 - Maintain main `README.md` files well as the project evolves.
 - Keep `docs/VISION.md` aligned with major product direction changes.
 - This repository may grow beyond quick patches. Do not default only to the smallest possible fix. When a problem has a larger, cleaner, more proper solution, propose it clearly, including tradeoffs, even if you also provide a small immediate fix.
@@ -29,6 +31,33 @@ The project should prioritize real simulation behavior over scripted visual tric
 - Avoid pre-made game engines for the core simulation unless the user explicitly changes that direction.
 - Favor simple, inspectable code while the simulation model is still being discovered.
 - If extra tooling, debug views, tests, instrumentation, build scripts, profilers, visualizers, or project setup would make future debugging and fixes meaningfully better, feel free to propose it. Ask the user for approval before adding or installing that tooling.
+
+## Windows Verification From WSL2
+
+Use Windows tooling for native verification instead of relying only on WSL builds. This repository has a known-good Windows CMake install at `C:\Program Files\CMake\bin\cmake.exe`, and plain PowerShell may not have `cmake` on `PATH`.
+
+From WSL2, configure the Visual Studio build with explicit Windows CMake:
+
+```bash
+/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe -NoProfile -Command "Set-Location 'E:\PersonalProjects\realistic_physics'; & 'C:\Program Files\CMake\bin\cmake.exe' -S . -B build\vs -G 'Visual Studio 17 2022' -A x64"
+```
+
+Build and run the Windows test executable with `cmd.exe` when stdout matters; this avoids repeated PowerShell quoting/output issues:
+
+```bash
+/mnt/c/Windows/System32/cmd.exe /d /c "cd /d E:\PersonalProjects\realistic_physics && C:\Progra~1\CMake\bin\cmake.exe --build build\vs --config Debug --target realistic_physics_tests && build\vs\Debug\realistic_physics_tests.exe"
+```
+
+To verify the app target, use the same pattern with `--target realistic_physics`. If `C:\Progra~1\CMake\bin\cmake.exe` does not exist, search Windows paths from WSL2 with PowerShell before falling back to WSL-only verification.
+
+For anatomy/body-generation work, also run the diagnostic target. It validates bone samples against the generated skin mesh and writes `output\anatomy_debug.svg` for visual inspection:
+
+```bash
+/mnt/c/Windows/System32/cmd.exe /d /c "cd /d E:\PersonalProjects\realistic_physics && C:\Progra~1\CMake\bin\cmake.exe --build build\vs --config Debug --target realistic_physics_diagnostics && build\vs\Debug\realistic_physics_diagnostics.exe output\anatomy_debug.svg"
+```
+
+Do not consider future anatomy alignment fixes complete unless `realistic_physics_tests` passes and `realistic_physics_diagnostics` reports `bone_samples_outside_skin=0`.
+Run Windows CMake/MSBuild targets sequentially, not in parallel, because concurrent targets can fight over the shared MSVC program database file under `build\vs\Debug`.
 
 ## Technical Direction
 
