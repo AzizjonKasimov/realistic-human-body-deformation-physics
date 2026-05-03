@@ -10,19 +10,19 @@ param(
 $repoRoot = Get-RepoRoot
 Initialize-WindowsBuild -Force:$Configure
 
-Invoke-WindowsTarget -Target "realistic_physics_tests" -Config "Debug"
+Invoke-WindowsTarget -Target "realistic_physics_tests" -Config "Debug" -CleanFirst
 Invoke-ExeViaCmd `
     -ExePath (Join-Path $repoRoot "build\vs\Debug\realistic_physics_tests.exe") `
     -Label "Run simulation tests"
 
-Invoke-WindowsTarget -Target "realistic_physics_strike_scenarios" -Config "Debug"
+Invoke-WindowsTarget -Target "realistic_physics_strike_scenarios" -Config "Debug" -CleanFirst
 Invoke-ExeViaCmd `
     -ExePath (Join-Path $repoRoot "build\vs\Debug\realistic_physics_strike_scenarios.exe") `
     -Arguments @("output\strike_scenarios.csv") `
     -Label "Run strike scenarios"
 
 if (-not $SkipDiagnostics) {
-    Invoke-WindowsTarget -Target "realistic_physics_diagnostics" -Config "Debug"
+    Invoke-WindowsTarget -Target "realistic_physics_diagnostics" -Config "Debug" -CleanFirst
     Invoke-ExeViaCmd `
         -ExePath (Join-Path $repoRoot "build\vs\Debug\realistic_physics_diagnostics.exe") `
         -Arguments @("output\anatomy_debug.svg") `
@@ -31,7 +31,7 @@ if (-not $SkipDiagnostics) {
 
 if ($BuildApp) {
     Stop-RunningAppIfRequested -StopRunningApp:$StopRunningApp
-    Invoke-WindowsTarget -Target "realistic_physics" -Config "Release"
+    Invoke-WindowsTarget -Target "realistic_physics" -Config "Release" -CleanFirst
 }
 
 Write-Host ""

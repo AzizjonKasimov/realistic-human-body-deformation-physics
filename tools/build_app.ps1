@@ -8,7 +8,7 @@ param(
 $repoRoot = Get-RepoRoot
 Initialize-WindowsBuild -Force:$Configure
 Stop-RunningAppIfRequested -StopRunningApp:$StopRunningApp
-Invoke-WindowsTarget -Target "realistic_physics" -Config "Release"
+Invoke-WindowsTarget -Target "realistic_physics" -Config "Release" -CleanFirst
 
 Write-Host ""
 Write-Host "Built $repoRoot\realistic_physics.exe"

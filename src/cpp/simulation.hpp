@@ -17,6 +17,12 @@ enum class TissueLayer {
     Muscle
 };
 
+enum class ToolMode {
+    Blunt,
+    Sharp,
+    Heavy
+};
+
 inline constexpr std::size_t kMissingSpring = std::numeric_limits<std::size_t>::max();
 
 struct InputState {
@@ -27,6 +33,7 @@ struct InputState {
     double vx = 0.0;
     double vy = 0.0;
     double power = 2.0;
+    ToolMode tool = ToolMode::Blunt;
 };
 
 struct Materials {
@@ -76,6 +83,17 @@ struct Materials {
     double boneImpactTransfer = 0.62;
     double boneDirectContact = 0.86;
     double boneDirectPressure = 780.0;
+
+    int maxFluidParticles = 900;
+    double fluidDamping = 0.982;
+    double fluidGravityScale = 0.42;
+    double fluidLifetime = 4.8;
+    double fluidFloorFriction = 0.48;
+    double fluidImpactScale = 0.08;
+    double sharpToolTearPressure = 0.66;
+    double fragmentContactRadius = 15.0;
+    double fragmentDamageImpulse = 520.0;
+    double fragmentPush = 0.34;
 };
 
 struct Point {
@@ -179,6 +197,16 @@ struct BoneJoint {
     bool broken = false;
 };
 
+struct FluidParticle {
+    Vec2 position;
+    Vec2 previous;
+    double radius = 2.0;
+    double life = 0.0;
+    double maxLife = 1.0;
+    double intensity = 1.0;
+    bool settled = false;
+};
+
 struct Stats {
     int brokenSkin = 0;
     int brokenMuscle = 0;
@@ -186,6 +214,9 @@ struct Stats {
     int brokenBoneAttachments = 0;
     int brokenBoneJoints = 0;
     int fracturedBones = 0;
+    int emittedFluidParticles = 0;
+    int fragmentTissueHits = 0;
+    int fragmentTissueTears = 0;
 };
 
 struct ContactDebug {
@@ -197,14 +228,20 @@ struct ContactDebug {
     double strikerSpeed = 0.0;
     double strikerMass = 0.0;
     double strikerRadius = 0.0;
+    ToolMode tool = ToolMode::Blunt;
     double impact = 0.0;
     double maxDepth = 0.0;
     double maxBoneLoad = 0.0;
     double maxPointLoad = 0.0;
+    double maxFragmentDepth = 0.0;
+    double maxFragmentImpulse = 0.0;
     double lastFractureImpulse = 0.0;
     int boneContacts = 0;
     int tissueContacts = 0;
     int fractures = 0;
+    int fluidEmitted = 0;
+    int fragmentContacts = 0;
+    int fragmentTears = 0;
 };
 
 struct AnatomyValidation {
@@ -243,6 +280,7 @@ public:
     const std::vector<BoneSegment>& bones() const { return bones_; }
     const std::vector<BoneAttachment>& boneAttachments() const { return boneAttachments_; }
     const std::vector<BoneJoint>& boneJoints() const { return boneJoints_; }
+    const std::vector<FluidParticle>& fluids() const { return fluids_; }
     const Stats& stats() const { return stats_; }
     const ContactDebug& debug() const { return debug_; }
 
@@ -256,6 +294,8 @@ private:
     void damageTissueAroundFracture(Vec2 center, double radius, double impulse);
     void applyBoneAnchorDelta(BoneSegment& bone, double t, double dx, double dy);
     void rotateBoneAroundAnchor(BoneSegment& bone, double t, double angle);
+    double nextFluidRandom();
+    void emitFluid(Vec2 center, Vec2 direction, int count, double speed, double radius, double intensity);
 
     void integrate(double dt, double width, double floorY);
     void collideStriker(double dt, const InputState& input);
@@ -264,6 +304,7 @@ private:
     void solveBoneAttachments();
     void solveBoneJoints();
     void solveBones();
+    void collideBoneFragments();
     void solveAreas();
     void constrainToWorld(double width, double floorY);
     void updateExposure();
@@ -278,8 +319,11 @@ private:
     std::vector<BoneSegment> bones_;
     std::vector<BoneAttachment> boneAttachments_;
     std::vector<BoneJoint> boneJoints_;
+    std::vector<FluidParticle> fluids_;
     Stats stats_;
     ContactDebug debug_;
+    std::size_t fluidWriteCursor_ = 0;
+    std::uint32_t fluidSeed_ = 0x9e3779b9U;
 };
 
 World createLayeredBody(double width, double height, Materials materials = {});

@@ -94,14 +94,16 @@ function Invoke-WindowsTarget {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Target,
-        [string]$Config = "Debug"
+        [string]$Config = "Debug",
+        [switch]$CleanFirst
     )
 
     $repoRoot = Get-RepoRoot
     $cmake = Get-CMakePath
+    $cleanText = if ($CleanFirst) { " --clean-first" } else { "" }
     Invoke-CmdChecked `
         -Label "Build $Target ($Config)" `
-        -CommandLine "cd /d `"$repoRoot`" && `"$cmake`" --build build\vs --config $Config --target $Target"
+        -CommandLine "cd /d `"$repoRoot`" && `"$cmake`" --build build\vs --config $Config --target $Target$cleanText"
 }
 
 function Invoke-ExeViaCmd {

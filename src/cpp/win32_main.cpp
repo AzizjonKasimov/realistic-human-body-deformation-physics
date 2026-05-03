@@ -38,6 +38,7 @@ struct AppState {
     double strikerVx = 0.0;
     double strikerVy = 0.0;
     double impactPower = 2.0;
+    rp::ToolMode tool = rp::ToolMode::Blunt;
     ViewMode viewMode = ViewMode::Anatomy;
     std::chrono::steady_clock::time_point lastTick = std::chrono::steady_clock::now();
     rp::World world = rp::createLayeredBody(1280.0, 720.0);
@@ -53,17 +54,43 @@ POINT toPoint(const rp::Point& point) {
     return POINT{static_cast<LONG>(std::lround(point.position.x)), static_cast<LONG>(std::lround(point.position.y))};
 }
 
+const wchar_t* toolName(rp::ToolMode tool) {
+    switch (tool) {
+    case rp::ToolMode::Sharp:
+        return L"sharp";
+    case rp::ToolMode::Heavy:
+        return L"heavy";
+    case rp::ToolMode::Blunt:
+    default:
+        return L"blunt";
+    }
+}
+
+double toolRadiusScale(rp::ToolMode tool) {
+    switch (tool) {
+    case rp::ToolMode::Sharp:
+        return 0.48;
+    case rp::ToolMode::Heavy:
+        return 1.18;
+    case rp::ToolMode::Blunt:
+    default:
+        return 1.0;
+    }
+}
+
 std::wstring makeTitle(const AppState& app) {
     wchar_t buffer[256];
     std::swprintf(buffer,
                  sizeof(buffer) / sizeof(buffer[0]),
-                 L"Realistic Physics C++ | view %s | skin %d | muscle %d | detach %d/%d | bone %d | striker mass %.0fx",
+                 L"Realistic Physics C++ | tool %s | view %s | skin %d | muscle %d | detach %d/%d | bone %d | fluid %d | mass %.0fx",
+                 toolName(app.tool),
                  app.viewMode == ViewMode::Anatomy ? L"anatomy" : L"normal",
                  app.world.stats().brokenSkin,
                  app.world.stats().brokenMuscle,
                  app.world.stats().brokenAttachments,
                  app.world.stats().brokenBoneAttachments,
                  app.world.stats().fracturedBones,
+                 app.world.stats().emittedFluidParticles,
                  app.impactPower);
     return buffer;
 }
@@ -124,6 +151,7 @@ void stepSimulation(AppState& app, HWND hwnd) {
             input.vx = app.strikerVx;
             input.vy = app.strikerVy;
             input.power = app.impactPower;
+            input.tool = app.tool;
             app.world.step(fixedDt, input, static_cast<double>(app.width), static_cast<double>(app.height));
             app.accumulator -= fixedDt;
         }
@@ -308,6 +336,28 @@ void drawBone(HDC dc, const rp::BoneSegment& bone) {
     }
 }
 
+void drawFluidParticles(HDC dc, const rp::World& world) {
+    for (const rp::FluidParticle& fluid : world.fluids()) {
+        if (fluid.life <= 0.0) {
+            continue;
+        }
+
+        const double fade = std::clamp(fluid.life / std::max(0.01, fluid.maxLife), 0.0, 1.0);
+        const double settledDarkening = fluid.settled ? 0.68 : 1.0;
+        const int red = static_cast<int>((86.0 + 70.0 * fluid.intensity * fade) * settledDarkening);
+        const int green = static_cast<int>((8.0 + 8.0 * fade) * settledDarkening);
+        const int blue = static_cast<int>((13.0 + 10.0 * fade) * settledDarkening);
+        const int radius = std::max(1, static_cast<int>(std::lround(fluid.radius * (0.82 + 0.32 * fade))));
+        fillEllipse(dc,
+                    static_cast<int>(std::lround(fluid.position.x)),
+                    static_cast<int>(std::lround(fluid.position.y)),
+                    radius,
+                    color(red, green, blue),
+                    color(46, 5, 8),
+                    1);
+    }
+}
+
 void drawStriker(HDC dc, const AppState& app) {
     const double speed = std::sqrt(app.strikerVx * app.strikerVx + app.strikerVy * app.strikerVy);
     double dirX = 1.0;
@@ -325,7 +375,7 @@ void drawStriker(HDC dc, const AppState& app) {
         }
     }
 
-    const int radius = static_cast<int>(app.world.materials().strikerRadius);
+    const int radius = std::max(8, static_cast<int>(std::lround(app.world.materials().strikerRadius * toolRadiusScale(app.tool))));
     const int cx = static_cast<int>(std::lround(app.strikerX));
     const int cy = static_cast<int>(std::lround(app.strikerY));
     const double targetDx = app.pointerX - app.strikerX;
@@ -377,21 +427,57 @@ void drawStriker(HDC dc, const AppState& app) {
         DeleteObject(arrowBrush);
     }
 
-    fillEllipse(dc, cx, cy, radius + 4, color(35, 32, 29), color(18, 16, 15), 2);
-    fillEllipse(dc,
-                cx,
-                cy,
-                radius,
-                app.pointerDown ? color(190, 63, 48) : color(194, 174, 121),
-                color(42, 30, 22),
-                3);
-    fillEllipse(dc,
-                static_cast<int>(std::lround(app.strikerX - dirX * radius * 0.18 - dirY * radius * 0.20)),
-                static_cast<int>(std::lround(app.strikerY - dirY * radius * 0.18 + dirX * radius * 0.20)),
-                std::max(5, radius / 4),
-                color(235, 218, 163),
-                color(96, 76, 42),
-                1);
+    if (app.tool == rp::ToolMode::Sharp) {
+        const double nx = -dirY;
+        const double ny = dirX;
+        POINT blade[4] = {
+            POINT{static_cast<LONG>(std::lround(app.strikerX + dirX * radius * 1.55)),
+                  static_cast<LONG>(std::lround(app.strikerY + dirY * radius * 1.55))},
+            POINT{static_cast<LONG>(std::lround(app.strikerX - dirX * radius * 0.65 + nx * radius * 0.55)),
+                  static_cast<LONG>(std::lround(app.strikerY - dirY * radius * 0.65 + ny * radius * 0.55))},
+            POINT{static_cast<LONG>(std::lround(app.strikerX - dirX * radius * 0.18)),
+                  static_cast<LONG>(std::lround(app.strikerY - dirY * radius * 0.18))},
+            POINT{static_cast<LONG>(std::lround(app.strikerX - dirX * radius * 0.65 - nx * radius * 0.55)),
+                  static_cast<LONG>(std::lround(app.strikerY - dirY * radius * 0.65 - ny * radius * 0.55))},
+        };
+        HBRUSH bladeBrush = CreateSolidBrush(app.pointerDown ? color(214, 224, 224) : color(171, 184, 185));
+        HPEN bladePen = CreatePen(PS_SOLID, 2, color(60, 69, 72));
+        HGDIOBJ oldBrush = SelectObject(dc, bladeBrush);
+        HGDIOBJ oldPen = SelectObject(dc, bladePen);
+        Polygon(dc, blade, 4);
+        SelectObject(dc, oldPen);
+        SelectObject(dc, oldBrush);
+        DeleteObject(bladePen);
+        DeleteObject(bladeBrush);
+        drawLine(dc,
+                 static_cast<int>(std::lround(app.strikerX - dirX * radius * 0.72 + nx * radius * 0.60)),
+                 static_cast<int>(std::lround(app.strikerY - dirY * radius * 0.72 + ny * radius * 0.60)),
+                 static_cast<int>(std::lround(app.strikerX - dirX * radius * 0.72 - nx * radius * 0.60)),
+                 static_cast<int>(std::lround(app.strikerY - dirY * radius * 0.72 - ny * radius * 0.60)),
+                 color(84, 61, 39),
+                 5);
+    } else {
+        const COLORREF shell = app.tool == rp::ToolMode::Heavy ? color(28, 31, 34) : color(35, 32, 29);
+        const COLORREF fill = app.tool == rp::ToolMode::Heavy
+            ? (app.pointerDown ? color(77, 83, 88) : color(94, 96, 94))
+            : (app.pointerDown ? color(190, 63, 48) : color(194, 174, 121));
+        const COLORREF highlight = app.tool == rp::ToolMode::Heavy ? color(153, 157, 154) : color(235, 218, 163);
+        fillEllipse(dc, cx, cy, radius + 4, shell, color(18, 16, 15), 2);
+        fillEllipse(dc,
+                    cx,
+                    cy,
+                    radius,
+                    fill,
+                    color(42, 30, 22),
+                    3);
+        fillEllipse(dc,
+                    static_cast<int>(std::lround(app.strikerX - dirX * radius * 0.18 - dirY * radius * 0.20)),
+                    static_cast<int>(std::lround(app.strikerY - dirY * radius * 0.18 + dirX * radius * 0.20)),
+                    std::max(5, radius / 4),
+                    highlight,
+                    color(96, 76, 42),
+                    1);
+    }
 }
 
 void drawDebugText(HDC dc, int x, int y, const wchar_t* text) {
@@ -399,7 +485,7 @@ void drawDebugText(HDC dc, int x, int y, const wchar_t* text) {
 }
 
 void drawDebugOverlay(HDC dc, const AppState& app) {
-    RECT panel{12, 42, 430, 180};
+    RECT panel{12, 42, 430, 220};
     HBRUSH brush = CreateSolidBrush(color(22, 24, 27));
     HPEN pen = CreatePen(PS_SOLID, 1, color(98, 105, 112));
     HGDIOBJ oldBrush = SelectObject(dc, brush);
@@ -416,7 +502,11 @@ void drawDebugOverlay(HDC dc, const AppState& app) {
     const rp::ContactDebug& debug = app.world.debug();
     wchar_t line[256];
     int y = panel.top + 10;
-    drawDebugText(dc, panel.left + 12, y, L"Contact debug (D): striker is a spring-driven blunt mass");
+    std::swprintf(line,
+                  sizeof(line) / sizeof(line[0]),
+                  L"Contact debug (D): tool=%s",
+                  toolName(debug.tool));
+    drawDebugText(dc, panel.left + 12, y, line);
     y += 20;
     std::swprintf(line,
                   sizeof(line) / sizeof(line[0]),
@@ -463,6 +553,26 @@ void drawDebugOverlay(HDC dc, const AppState& app) {
                   app.world.stats().brokenBoneJoints,
                   app.world.stats().fracturedBones,
                   debug.fractures);
+    drawDebugText(dc, panel.left + 12, y, line);
+    y += 20;
+    std::swprintf(line,
+                  sizeof(line) / sizeof(line[0]),
+                  L"fragments: contacts=%d tears=%d depth=%.1f impulse=%.0f",
+                  debug.fragmentContacts,
+                  debug.fragmentTears,
+                  debug.maxFragmentDepth,
+                  debug.maxFragmentImpulse);
+    drawDebugText(dc, panel.left + 12, y, line);
+    y += 20;
+    const int activeFluids = static_cast<int>(std::count_if(app.world.fluids().begin(), app.world.fluids().end(), [](const rp::FluidParticle& fluid) {
+        return fluid.life > 0.0;
+    }));
+    std::swprintf(line,
+                  sizeof(line) / sizeof(line[0]),
+                  L"fluid: active=%d emitted=%d step=%d",
+                  activeFluids,
+                  app.world.stats().emittedFluidParticles,
+                  debug.fluidEmitted);
     drawDebugText(dc, panel.left + 12, y, line);
 
     if (debug.maxDepth > 0.0) {
@@ -542,6 +652,7 @@ void drawScene(HDC dc, const AppState& app) {
         }
     }
 
+    drawFluidParticles(dc, world);
     drawStriker(dc, app);
     if (app.debugOverlay) {
         drawDebugOverlay(dc, app);
@@ -549,7 +660,7 @@ void drawScene(HDC dc, const AppState& app) {
 
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, color(220, 216, 205));
-    constexpr const wchar_t* instructions = L"Left drag: swing blunt striker | D: debug | Tab: anatomy | R: reset | Space: pause | 1/2/4: mass";
+    constexpr const wchar_t* instructions = L"Left drag: use tool | B/S/H: blunt/sharp/heavy | D: debug | Tab: anatomy | R: reset | Space: pause | 1/2/4: mass";
     TextOutW(dc, 16, 16, instructions, lstrlenW(instructions));
 }
 
@@ -644,6 +755,12 @@ LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
             app->viewMode = app->viewMode == ViewMode::Anatomy ? ViewMode::Normal : ViewMode::Anatomy;
         } else if (wParam == 'D') {
             app->debugOverlay = !app->debugOverlay;
+        } else if (wParam == 'B') {
+            app->tool = rp::ToolMode::Blunt;
+        } else if (wParam == 'S') {
+            app->tool = rp::ToolMode::Sharp;
+        } else if (wParam == 'H') {
+            app->tool = rp::ToolMode::Heavy;
         } else if (wParam == '1') {
             app->impactPower = 1.0;
         } else if (wParam == '2') {

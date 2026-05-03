@@ -12,6 +12,19 @@ namespace {
 constexpr double kEpsilon = 0.0001;
 constexpr double kPi = 3.14159265358979323846;
 
+struct ToolProfile {
+    double radiusScale = 1.0;
+    double reachPadding = 12.0;
+    double massScale = 1.0;
+    double tissuePushScale = 1.0;
+    double tissueLoadScale = 1.0;
+    double bonePushScale = 1.0;
+    double boneLoadScale = 1.0;
+    double fractureScale = 1.0;
+    double tearPressureScale = 0.0;
+    double fluidScale = 1.0;
+};
+
 struct GridKey {
     int x = 0;
     int y = 0;
@@ -28,6 +41,40 @@ struct GridKeyHash {
         return static_cast<std::size_t>((ux << 32U) ^ uy);
     }
 };
+
+ToolProfile toolProfile(ToolMode tool) {
+    switch (tool) {
+    case ToolMode::Sharp:
+        return {
+            0.48,
+            5.0,
+            0.72,
+            0.38,
+            2.05,
+            0.30,
+            0.58,
+            0.76,
+            1.0,
+            1.35,
+        };
+    case ToolMode::Heavy:
+        return {
+            1.18,
+            16.0,
+            1.85,
+            1.24,
+            1.18,
+            1.46,
+            1.72,
+            1.34,
+            0.10,
+            0.92,
+        };
+    case ToolMode::Blunt:
+    default:
+        return {};
+    }
+}
 
 bool ellipse(double x, double y, double cx, double cy, double rx, double ry) {
     const double dx = (x - cx) / rx;
@@ -102,6 +149,14 @@ Vec2 rotateAround(Vec2 point, Vec2 pivot, double angle) {
         pivot.x + dx * c - dy * s,
         pivot.y + dx * s + dy * c,
     };
+}
+
+Vec2 add(Vec2 a, Vec2 b) {
+    return {a.x + b.x, a.y + b.y};
+}
+
+Vec2 scale(Vec2 value, double amount) {
+    return {value.x * amount, value.y * amount};
 }
 
 Vec2 normalized(Vec2 value, Vec2 fallback) {
@@ -359,15 +414,20 @@ void World::addBoneJoint(std::size_t a, double tA, std::size_t b, double tB, dou
 
 void World::step(double dt, const InputState& input, double width, double height) {
     const double floorY = height - 38.0;
+    const ToolProfile profile = toolProfile(input.tool);
+    const double strikerRadius = materials_.strikerRadius * profile.radiusScale;
+    const double strikerMass = materials_.strikerMass * input.power * profile.massScale;
+    const double strikerSpeed = std::sqrt(input.vx * input.vx + input.vy * input.vy);
     debug_ = {};
     debug_.active = input.active;
     debug_.down = input.down;
     debug_.strikerPosition = {input.x, input.y};
     debug_.strikerVelocity = {input.vx, input.vy};
-    debug_.strikerSpeed = std::sqrt(input.vx * input.vx + input.vy * input.vy);
-    debug_.strikerMass = materials_.strikerMass * input.power;
-    debug_.strikerRadius = materials_.strikerRadius;
-    debug_.impact = debug_.strikerSpeed * debug_.strikerMass;
+    debug_.strikerSpeed = strikerSpeed;
+    debug_.strikerMass = strikerMass;
+    debug_.strikerRadius = strikerRadius;
+    debug_.tool = input.tool;
+    debug_.impact = strikerSpeed * strikerMass;
     updateExposure();
     integrate(dt, width, floorY);
     collideStriker(dt, input);
@@ -382,6 +442,7 @@ void World::step(double dt, const InputState& input, double width, double height
         constrainToWorld(width, floorY);
     }
 
+    collideBoneFragments();
     updateTriangleDamage();
 }
 
@@ -455,6 +516,52 @@ void World::rotateBoneAroundAnchor(BoneSegment& bone, double t, double angle) {
     bone.b = rotateAround(bone.b, anchor, angle);
 }
 
+double World::nextFluidRandom() {
+    fluidSeed_ = fluidSeed_ * 1664525U + 1013904223U;
+    return static_cast<double>((fluidSeed_ >> 8U) & 0x00ffffffU) / static_cast<double>(0x01000000U);
+}
+
+void World::emitFluid(Vec2 center, Vec2 direction, int count, double speed, double radius, double intensity) {
+    if (materials_.maxFluidParticles <= 0 || count <= 0) {
+        return;
+    }
+
+    const int particleLimit = std::max(0, materials_.maxFluidParticles);
+    const double dt = materials_.fixedDt;
+    const Vec2 dir = normalized(direction, {0.0, -1.0});
+    const Vec2 tangent{-dir.y, dir.x};
+    const double clampedSpeed = std::clamp(speed, 55.0, 980.0);
+    const double clampedRadius = std::clamp(radius, 1.35, 4.8);
+    const double clampedIntensity = std::clamp(intensity, 0.35, 1.35);
+
+    for (int i = 0; i < count; ++i) {
+        const double spread = (nextFluidRandom() - 0.5) * 1.35;
+        const double launch = clampedSpeed * (0.44 + nextFluidRandom() * 0.74);
+        const double jitter = radius * (nextFluidRandom() - 0.5) * 2.4;
+        const Vec2 velocity = add(scale(dir, launch), scale(tangent, spread * launch));
+        FluidParticle particle;
+        particle.position = add(center, scale(tangent, jitter));
+        particle.previous = {
+            particle.position.x - velocity.x * dt,
+            particle.position.y - velocity.y * dt,
+        };
+        particle.radius = clampedRadius * (0.72 + nextFluidRandom() * 0.58);
+        particle.maxLife = materials_.fluidLifetime * (0.62 + nextFluidRandom() * 0.76);
+        particle.life = particle.maxLife;
+        particle.intensity = clampedIntensity;
+        particle.settled = false;
+
+        if (static_cast<int>(fluids_.size()) < particleLimit) {
+            fluids_.push_back(particle);
+        } else {
+            fluids_[fluidWriteCursor_ % fluids_.size()] = particle;
+            fluidWriteCursor_ = (fluidWriteCursor_ + 1U) % fluids_.size();
+        }
+        ++stats_.emittedFluidParticles;
+        ++debug_.fluidEmitted;
+    }
+}
+
 void World::damageTissueAroundFracture(Vec2 center, double radius, double impulse) {
     const double radiusSq = radius * radius;
     const double skinRadius = radius * 0.62;
@@ -468,6 +575,7 @@ void World::damageTissueAroundFracture(Vec2 center, double radius, double impuls
         Point& b = points_[spring.b];
         const double d = distanceToSegment(center, a.position, b.position);
         if (spring.layer == TissueLayer::Muscle && d <= radius) {
+            const Vec2 midpoint{(a.position.x + b.position.x) * 0.5, (a.position.y + b.position.y) * 0.5};
             spring.broken = true;
             spring.stress = 1.0;
             a.exposure = std::max(a.exposure, 1.0);
@@ -475,7 +583,14 @@ void World::damageTissueAroundFracture(Vec2 center, double radius, double impuls
             a.load = std::max(a.load, impulse * 0.30);
             b.load = std::max(b.load, impulse * 0.30);
             ++stats_.brokenMuscle;
+            emitFluid(midpoint,
+                      {midpoint.x - center.x, midpoint.y - center.y - radius * 0.15},
+                      3 + static_cast<int>(std::clamp(impulse / 900.0, 0.0, 7.0)),
+                      90.0 + impulse * materials_.fluidImpactScale,
+                      2.2,
+                      1.05);
         } else if (spring.layer == TissueLayer::Skin && d <= skinRadius && impulse > materials_.skinTearImpulse * 1.18) {
+            const Vec2 midpoint{(a.position.x + b.position.x) * 0.5, (a.position.y + b.position.y) * 0.5};
             spring.broken = true;
             spring.stress = 1.0;
             a.exposure = std::max(a.exposure, 1.0);
@@ -483,6 +598,12 @@ void World::damageTissueAroundFracture(Vec2 center, double radius, double impuls
             a.load = std::max(a.load, impulse * 0.18);
             b.load = std::max(b.load, impulse * 0.18);
             ++stats_.brokenSkin;
+            emitFluid(midpoint,
+                      {midpoint.x - center.x, midpoint.y - center.y - skinRadius * 0.25},
+                      5 + static_cast<int>(std::clamp(impulse / 780.0, 0.0, 9.0)),
+                      120.0 + impulse * materials_.fluidImpactScale,
+                      2.4,
+                      1.18);
         }
     }
 
@@ -497,10 +618,17 @@ void World::damageTissueAroundFracture(Vec2 center, double radius, double impuls
         const double muscleDistanceSq = (muscle.position.x - center.x) * (muscle.position.x - center.x) +
                                         (muscle.position.y - center.y) * (muscle.position.y - center.y);
         if (std::min(skinDistanceSq, muscleDistanceSq) <= radiusSq) {
+            const Vec2 midpoint{(skin.position.x + muscle.position.x) * 0.5, (skin.position.y + muscle.position.y) * 0.5};
             attachment.broken = true;
             skin.exposure = std::max(skin.exposure, 1.0);
             muscle.exposure = std::max(muscle.exposure, 1.0);
             ++stats_.brokenAttachments;
+            emitFluid(midpoint,
+                      {midpoint.x - center.x, midpoint.y - center.y - radius * 0.10},
+                      2 + static_cast<int>(std::clamp(impulse / 1200.0, 0.0, 5.0)),
+                      75.0 + impulse * materials_.fluidImpactScale * 0.55,
+                      1.8,
+                      0.78);
         }
     }
 
@@ -521,6 +649,12 @@ void World::damageTissueAroundFracture(Vec2 center, double radius, double impuls
             a.exposure = std::max(a.exposure, 1.0);
             b.exposure = std::max(b.exposure, 1.0);
             c.exposure = std::max(c.exposure, 1.0);
+            emitFluid(centroid,
+                      {centroid.x - center.x, centroid.y - center.y - radius * 0.08},
+                      2 + static_cast<int>(std::clamp(impulse / 1600.0, 0.0, 4.0)),
+                      70.0 + impulse * materials_.fluidImpactScale * 0.45,
+                      1.7,
+                      0.72);
         }
     }
 }
@@ -693,6 +827,12 @@ void World::fractureBone(std::size_t boneIndex, double fractureT, Vec2 impulseNo
     splinter.splinter = true;
     bones_.push_back(splinter);
 
+    emitFluid(crack,
+              {normal.x + dir.x * 0.28, normal.y + dir.y * 0.28 - 0.30},
+              10 + static_cast<int>(std::clamp(std::max(impulse, oldLoad) / 720.0, 0.0, 16.0)),
+              180.0 + std::max(impulse, oldLoad) * materials_.fluidImpactScale,
+              2.7,
+              1.28);
     damageTissueAroundFracture(crack, std::max(oldRadius * 3.8, 24.0 + overload * 10.0), std::max(impulse, oldLoad));
 
     ++stats_.fracturedBones;
@@ -701,7 +841,6 @@ void World::fractureBone(std::size_t boneIndex, double fractureT, Vec2 impulseNo
 }
 
 void World::integrate(double dt, double width, double floorY) {
-    (void)width;
     for (Point& point : points_) {
         point.load *= 0.84;
         point.exposure *= 0.92;
@@ -750,6 +889,45 @@ void World::integrate(double dt, double width, double floorY) {
         bone.b.x += bvx + (bone.homeB.x - bone.b.x) * shapeStiffness;
         bone.b.y += bvy + materials_.gravity * dt * dt + (bone.homeB.y - bone.b.y) * shapeStiffness;
     }
+
+    for (FluidParticle& fluid : fluids_) {
+        if (fluid.life <= 0.0) {
+            continue;
+        }
+
+        fluid.life = std::max(0.0, fluid.life - dt);
+        if (fluid.life <= 0.0) {
+            continue;
+        }
+
+        if (fluid.settled) {
+            fluid.life = std::max(0.0, fluid.life - dt * 0.45);
+            continue;
+        }
+
+        const double vx = (fluid.position.x - fluid.previous.x) * materials_.fluidDamping;
+        const double vy = (fluid.position.y - fluid.previous.y) * materials_.fluidDamping;
+        fluid.previous = fluid.position;
+        fluid.position.x += vx;
+        fluid.position.y += vy + materials_.gravity * materials_.fluidGravityScale * dt * dt;
+
+        const double margin = fluid.radius + 1.0;
+        if (fluid.position.x < margin) {
+            fluid.position.x = margin;
+            fluid.previous.x = fluid.position.x + vx * materials_.fluidFloorFriction;
+        } else if (fluid.position.x > width - margin) {
+            fluid.position.x = width - margin;
+            fluid.previous.x = fluid.position.x + vx * materials_.fluidFloorFriction;
+        }
+        if (fluid.position.y > floorY - fluid.radius) {
+            fluid.position.y = floorY - fluid.radius;
+            fluid.previous.x = fluid.position.x + vx * materials_.fluidFloorFriction;
+            fluid.previous.y = fluid.position.y + vy * materials_.fluidFloorFriction;
+            if (std::abs(vx) + std::abs(vy) < 1.2) {
+                fluid.settled = true;
+            }
+        }
+    }
 }
 
 void World::collideStriker(double dt, const InputState& input) {
@@ -757,9 +935,11 @@ void World::collideStriker(double dt, const InputState& input) {
         return;
     }
 
+    const ToolProfile profile = toolProfile(input.tool);
     const double speed = std::sqrt(input.vx * input.vx + input.vy * input.vy);
-    const double impact = speed * materials_.strikerMass * input.power;
-    const double influence = materials_.strikerRadius + 12.0;
+    const double radius = materials_.strikerRadius * profile.radiusScale;
+    const double impact = speed * materials_.strikerMass * input.power * profile.massScale;
+    const double influence = radius + profile.reachPadding;
 
     const std::size_t initialBoneCount = bones_.size();
     for (std::size_t i = 0; i < initialBoneCount; ++i) {
@@ -789,7 +969,7 @@ void World::collideStriker(double dt, const InputState& input) {
         const double ny = dy / dist;
         const double depth = std::max(0.0, influence + bone.radius - dist);
         const double contact = 1.0 - std::clamp((dist - bone.radius) / influence, 0.0, 1.0);
-        const double directLoad = (impact + materials_.boneDirectPressure * input.power) * contact;
+        const double directLoad = (impact + materials_.boneDirectPressure * input.power) * contact * profile.boneLoadScale;
         bone.load = std::max(bone.load, directLoad);
         ++debug_.boneContacts;
         if (depth > debug_.maxDepth) {
@@ -799,7 +979,7 @@ void World::collideStriker(double dt, const InputState& input) {
         debug_.maxBoneLoad = std::max(debug_.maxBoneLoad, bone.load);
 
         if (!bone.pinned) {
-            const double contactStrength = materials_.boneDirectContact * (0.70 + input.power * 0.12);
+            const double contactStrength = materials_.boneDirectContact * profile.bonePushScale * (0.70 + input.power * 0.12);
             const double pushX = nx * depth * contactStrength + input.vx * dt * contactStrength * 0.58;
             const double pushY = ny * depth * contactStrength + input.vy * dt * contactStrength * 0.58;
             const double aWeight = 1.0 - t;
@@ -810,7 +990,7 @@ void World::collideStriker(double dt, const InputState& input) {
             bone.b.y += pushY * bWeight;
         }
 
-        if (canFractureBone(bone) && bone.load > bone.fractureImpulse) {
+        if (canFractureBone(bone) && bone.load > bone.fractureImpulse * profile.fractureScale) {
             fractureBone(i, t, {nx, ny}, directLoad);
         }
     }
@@ -827,7 +1007,7 @@ void World::collideStriker(double dt, const InputState& input) {
             continue;
         }
 
-        double contactStrength = (input.down ? 0.74 : 0.20) * (0.85 + input.power * 0.15);
+        double contactStrength = (input.down ? 0.74 : 0.20) * profile.tissuePushScale * (0.85 + input.power * 0.15);
         if (point.layer == TissueLayer::Muscle) {
             contactStrength *= materials_.directMuscleContact + point.exposure * 0.82;
         }
@@ -837,13 +1017,57 @@ void World::collideStriker(double dt, const InputState& input) {
         const double depth = influence - dist;
         point.position.x += nx * depth * contactStrength + input.vx * dt * 0.45 * contactStrength;
         point.position.y += ny * depth * contactStrength + input.vy * dt * 0.45 * contactStrength;
-        point.load = std::max(point.load, impact * (depth / influence) * contactStrength);
+        point.load = std::max(point.load, impact * (depth / influence) * contactStrength * profile.tissueLoadScale);
         ++debug_.tissueContacts;
         if (depth > debug_.maxDepth) {
             debug_.maxDepth = depth;
             debug_.strongestContact = point.position;
         }
         debug_.maxPointLoad = std::max(debug_.maxPointLoad, point.load);
+    }
+
+    if (input.down && profile.tearPressureScale > 0.0) {
+        for (Spring& spring : springs_) {
+            if (spring.broken) {
+                continue;
+            }
+
+            Point& a = points_[spring.a];
+            Point& b = points_[spring.b];
+            const Vec2 midpoint{(a.position.x + b.position.x) * 0.5, (a.position.y + b.position.y) * 0.5};
+            const double d = distance(midpoint, {input.x, input.y});
+            if (d > influence * 0.82) {
+                continue;
+            }
+
+            const double contact = 1.0 - std::clamp(d / std::max(1.0, influence * 0.82), 0.0, 1.0);
+            const double layerScale = spring.layer == TissueLayer::Skin ? 1.0 : 0.78 + std::max(a.exposure, b.exposure) * 0.42;
+            const double pressure = impact * profile.tearPressureScale * contact * layerScale;
+            const double threshold = spring.tearImpulse * materials_.sharpToolTearPressure;
+            spring.stress = std::max(spring.stress, pressure / std::max(1.0, threshold));
+            if (pressure <= threshold) {
+                continue;
+            }
+
+            const Vec2 tangent = normalized({b.position.x - a.position.x, b.position.y - a.position.y}, {1.0, 0.0});
+            const Vec2 normal{-tangent.y, tangent.x - 0.25};
+            spring.broken = true;
+            a.exposure = std::max(a.exposure, spring.layer == TissueLayer::Skin ? 0.92 : 1.0);
+            b.exposure = std::max(b.exposure, spring.layer == TissueLayer::Skin ? 0.92 : 1.0);
+            a.load = std::max(a.load, pressure * 0.18);
+            b.load = std::max(b.load, pressure * 0.18);
+            if (spring.layer == TissueLayer::Skin) {
+                ++stats_.brokenSkin;
+            } else {
+                ++stats_.brokenMuscle;
+            }
+            emitFluid(midpoint,
+                      normal,
+                      spring.layer == TissueLayer::Skin ? 6 : 4,
+                      120.0 + pressure * materials_.fluidImpactScale * 0.42,
+                      spring.layer == TissueLayer::Skin ? 2.1 : 1.8,
+                      profile.fluidScale);
+        }
     }
 }
 
@@ -870,11 +1094,26 @@ void World::solveSprings() {
         spring.stress = std::max(spring.stress * 0.9, std::max(0.0, stretchRatio - 1.0));
 
         if (stretchRatio > spring.tearStretch || (endpointLoad > tearImpulse && stretchRatio > 1.12)) {
+            const Vec2 midpoint{(a.position.x + b.position.x) * 0.5, (a.position.y + b.position.y) * 0.5};
+            const Vec2 tangent = normalized({b.position.x - a.position.x, b.position.y - a.position.y}, {1.0, 0.0});
+            const Vec2 normal{-tangent.y, tangent.x - 0.35};
             spring.broken = true;
             if (spring.layer == TissueLayer::Skin) {
                 ++stats_.brokenSkin;
+                emitFluid(midpoint,
+                          normal,
+                          5 + static_cast<int>(std::clamp(endpointLoad / 900.0, 0.0, 8.0)),
+                          110.0 + endpointLoad * materials_.fluidImpactScale,
+                          2.3,
+                          1.12);
             } else {
                 ++stats_.brokenMuscle;
+                emitFluid(midpoint,
+                          normal,
+                          3 + static_cast<int>(std::clamp(endpointLoad / 1050.0, 0.0, 6.0)),
+                          85.0 + endpointLoad * materials_.fluidImpactScale * 0.75,
+                          1.9,
+                          0.86);
             }
             a.load = std::max(a.load, endpointLoad * 0.35);
             b.load = std::max(b.load, endpointLoad * 0.35);
@@ -906,10 +1145,17 @@ void World::solveAttachments() {
         attachment.stress = std::max(attachment.stress * 0.88, std::max(0.0, stretchRatio - 1.0));
 
         if (stretchRatio > materials_.attachmentBreakStretch || (impulse > materials_.attachmentBreakImpulse && stretchRatio > 1.25)) {
+            const Vec2 midpoint{(skin.position.x + muscle.position.x) * 0.5, (skin.position.y + muscle.position.y) * 0.5};
             attachment.broken = true;
             ++stats_.brokenAttachments;
             skin.exposure = std::max(skin.exposure, 1.0);
             muscle.exposure = std::max(muscle.exposure, 1.0);
+            emitFluid(midpoint,
+                      {skin.position.x - muscle.position.x, skin.position.y - muscle.position.y - 0.4},
+                      3 + static_cast<int>(std::clamp(impulse / 1200.0, 0.0, 5.0)),
+                      80.0 + impulse * materials_.fluidImpactScale * 0.60,
+                      1.8,
+                      0.78);
             continue;
         }
 
@@ -934,9 +1180,16 @@ void World::solveBoneAttachments() {
         attachment.stress = std::max(attachment.stress * 0.9, std::max(0.0, stretchRatio - 1.0));
 
         if (stretchRatio > materials_.boneAttachmentBreakStretch || (impulse > materials_.boneAttachmentBreakImpulse && stretchRatio > 1.45)) {
+            const Vec2 midpoint{(point.position.x + rawAnchor.x) * 0.5, (point.position.y + rawAnchor.y) * 0.5};
             attachment.broken = true;
             ++stats_.brokenBoneAttachments;
             point.exposure = std::max(point.exposure, 0.85);
+            emitFluid(midpoint,
+                      {point.position.x - rawAnchor.x, point.position.y - rawAnchor.y - 0.35},
+                      4 + static_cast<int>(std::clamp(impulse / 1050.0, 0.0, 7.0)),
+                      95.0 + impulse * materials_.fluidImpactScale * 0.72,
+                      2.0,
+                      0.94);
             continue;
         }
 
@@ -1046,6 +1299,165 @@ void World::solveBones() {
 
         if (canFractureBone(bone) && bone.load > bone.fractureImpulse) {
             fractureBone(i);
+        }
+    }
+}
+
+void World::collideBoneFragments() {
+    auto processTip = [&](const BoneSegment& bone, Vec2 tip, Vec2 previousTip, Vec2 normal, bool strongTip) {
+        const double travel = distance(tip, previousTip);
+        const double speed = travel / std::max(materials_.fixedDt, kEpsilon);
+        const double radius = std::max(materials_.fragmentContactRadius, bone.radius * (strongTip ? 1.75 : 1.25));
+        const double impulse = bone.load * 0.22 + speed * bone.radius * (bone.splinter ? 0.75 : 1.0);
+        if (impulse < materials_.fragmentDamageImpulse * 0.34) {
+            return;
+        }
+        debug_.maxFragmentImpulse = std::max(debug_.maxFragmentImpulse, impulse);
+
+        const Vec2 tipNormal = normalized(normal, {0.0, -1.0});
+        for (Point& point : points_) {
+            if (point.pinned) {
+                continue;
+            }
+            const double dx = point.position.x - tip.x;
+            const double dy = point.position.y - tip.y;
+            const double d = std::sqrt(dx * dx + dy * dy);
+            if (d > radius || d <= kEpsilon) {
+                continue;
+            }
+
+            const bool deepTissue = point.layer == TissueLayer::Muscle || point.exposure > 0.20 || impulse > materials_.fragmentDamageImpulse * 1.35;
+            if (!deepTissue) {
+                continue;
+            }
+
+            const double contact = 1.0 - d / radius;
+            debug_.maxFragmentDepth = std::max(debug_.maxFragmentDepth, radius - d);
+            const Vec2 away = normalized({dx, dy}, tipNormal);
+            const double push = contact * materials_.fragmentPush * (bone.splinter ? 1.25 : 1.0);
+            point.position.x += (away.x * radius * 0.42 + tipNormal.x * radius * 0.18) * push;
+            point.position.y += (away.y * radius * 0.42 + tipNormal.y * radius * 0.18) * push;
+            point.load = std::max(point.load, impulse * contact * 0.46);
+            point.exposure = std::max(point.exposure, point.layer == TissueLayer::Muscle ? 1.0 : 0.86);
+            ++stats_.fragmentTissueHits;
+            ++debug_.fragmentContacts;
+            debug_.maxPointLoad = std::max(debug_.maxPointLoad, point.load);
+            if (contact > 0.62 || impulse > materials_.fragmentDamageImpulse) {
+                emitFluid(point.position,
+                          {away.x + tipNormal.x * 0.45, away.y + tipNormal.y * 0.45 - 0.15},
+                          1 + static_cast<int>(std::clamp(impulse / 1200.0, 0.0, 4.0)),
+                          80.0 + impulse * materials_.fluidImpactScale * 0.28,
+                          point.layer == TissueLayer::Muscle ? 1.7 : 1.9,
+                          point.layer == TissueLayer::Muscle ? 0.72 : 0.92);
+            }
+        }
+
+        for (Spring& spring : springs_) {
+            if (spring.broken) {
+                continue;
+            }
+            Point& a = points_[spring.a];
+            Point& b = points_[spring.b];
+            const Vec2 midpoint{(a.position.x + b.position.x) * 0.5, (a.position.y + b.position.y) * 0.5};
+            const double d = distance(midpoint, tip);
+            if (d > radius * 1.18) {
+                continue;
+            }
+            const bool reachable = spring.layer == TissueLayer::Muscle ||
+                                   std::max(a.exposure, b.exposure) > 0.35 ||
+                                   impulse > materials_.fragmentDamageImpulse * 1.75;
+            if (!reachable) {
+                continue;
+            }
+
+            const double contact = 1.0 - d / (radius * 1.18);
+            const double threshold = spring.tearImpulse * (spring.layer == TissueLayer::Muscle ? 0.46 : 0.72);
+            spring.stress = std::max(spring.stress, impulse * contact / std::max(1.0, threshold));
+            if (impulse * contact <= threshold) {
+                continue;
+            }
+
+            spring.broken = true;
+            a.exposure = std::max(a.exposure, 1.0);
+            b.exposure = std::max(b.exposure, 1.0);
+            a.load = std::max(a.load, impulse * contact * 0.35);
+            b.load = std::max(b.load, impulse * contact * 0.35);
+            if (spring.layer == TissueLayer::Skin) {
+                ++stats_.brokenSkin;
+            } else {
+                ++stats_.brokenMuscle;
+            }
+            ++stats_.fragmentTissueTears;
+            ++debug_.fragmentTears;
+            emitFluid(midpoint,
+                      {midpoint.x - tip.x + tipNormal.x * 0.5, midpoint.y - tip.y + tipNormal.y * 0.5 - 0.18},
+                      spring.layer == TissueLayer::Skin ? 4 : 3,
+                      115.0 + impulse * materials_.fluidImpactScale * 0.36,
+                      spring.layer == TissueLayer::Skin ? 2.1 : 1.8,
+                      spring.layer == TissueLayer::Skin ? 1.02 : 0.82);
+        }
+
+        for (BoneAttachment& attachment : boneAttachments_) {
+            if (attachment.broken || attachment.point >= points_.size()) {
+                continue;
+            }
+            Point& point = points_[attachment.point];
+            const double d = distance(point.position, tip);
+            if (d > radius * 1.12 || impulse < materials_.boneAttachmentBreakImpulse * 0.38) {
+                continue;
+            }
+            attachment.broken = true;
+            attachment.stress = std::max(attachment.stress, impulse / std::max(1.0, materials_.boneAttachmentBreakImpulse));
+            point.exposure = std::max(point.exposure, 0.95);
+            point.load = std::max(point.load, impulse * 0.32);
+            ++stats_.brokenBoneAttachments;
+            ++stats_.fragmentTissueTears;
+            ++debug_.fragmentTears;
+            emitFluid(point.position,
+                      {point.position.x - tip.x + tipNormal.x * 0.4, point.position.y - tip.y + tipNormal.y * 0.4 - 0.20},
+                      3,
+                      100.0 + impulse * materials_.fluidImpactScale * 0.30,
+                      1.9,
+                      0.90);
+        }
+
+        for (Triangle& triangle : triangles_) {
+            if (triangle.failed || triangle.layer != TissueLayer::Muscle) {
+                continue;
+            }
+            Point& a = points_[triangle.a];
+            Point& b = points_[triangle.b];
+            Point& c = points_[triangle.c];
+            const Vec2 centroid{(a.position.x + b.position.x + c.position.x) / 3.0,
+                                (a.position.y + b.position.y + c.position.y) / 3.0};
+            const double d = distance(centroid, tip);
+            if (d > radius * 1.28) {
+                continue;
+            }
+            const double contact = 1.0 - d / (radius * 1.28);
+            triangle.damage = std::min(1.35, triangle.damage + contact * impulse / 1800.0);
+            if (triangle.damage > 1.0) {
+                triangle.failed = true;
+                a.exposure = std::max(a.exposure, 1.0);
+                b.exposure = std::max(b.exposure, 1.0);
+                c.exposure = std::max(c.exposure, 1.0);
+                ++stats_.fragmentTissueTears;
+                ++debug_.fragmentTears;
+            }
+        }
+    };
+
+    const std::size_t initialBoneCount = bones_.size();
+    for (std::size_t i = 0; i < initialBoneCount; ++i) {
+        const BoneSegment& bone = bones_[i];
+        if (bone.pinned || (!bone.fractured && !bone.splinter)) {
+            continue;
+        }
+        if (bone.brokenStart || bone.splinter) {
+            processTip(bone, bone.a, bone.previousA, bone.brokenStartNormal, bone.brokenStart);
+        }
+        if (bone.brokenEnd || bone.splinter) {
+            processTip(bone, bone.b, bone.previousB, bone.brokenEndNormal, bone.brokenEnd);
         }
     }
 }

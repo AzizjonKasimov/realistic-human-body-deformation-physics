@@ -12,6 +12,7 @@ namespace {
 
 struct Scenario {
     const char* name = "";
+    rp::ToolMode tool = rp::ToolMode::Blunt;
     rp::Vec2 start;
     rp::Vec2 end;
     int windupFrames = 12;
@@ -19,6 +20,18 @@ struct Scenario {
     int settleFrames = 42;
     double power = 4.0;
 };
+
+const char* toolName(rp::ToolMode tool) {
+    switch (tool) {
+    case rp::ToolMode::Sharp:
+        return "sharp";
+    case rp::ToolMode::Heavy:
+        return "heavy";
+    case rp::ToolMode::Blunt:
+    default:
+        return "blunt";
+    }
+}
 
 struct ScenarioResult {
     int tissueContacts = 0;
@@ -31,11 +44,23 @@ struct ScenarioResult {
     int boneJointBreaks = 0;
     int boneFractures = 0;
     int finalBones = 0;
+    int fluidEmitted = 0;
+    int maxActiveFluids = 0;
+    int fragmentHits = 0;
+    int fragmentTears = 0;
     double maxImpact = 0.0;
     double maxBoneLoad = 0.0;
     double maxPointLoad = 0.0;
     double maxDepth = 0.0;
+    double maxFragmentDepth = 0.0;
+    double maxFragmentImpulse = 0.0;
 };
+
+int activeFluidCount(const rp::World& world) {
+    return static_cast<int>(std::count_if(world.fluids().begin(), world.fluids().end(), [](const rp::FluidParticle& fluid) {
+        return fluid.life > 0.0;
+    }));
+}
 
 rp::InputState makeStrikeInput(const Scenario& scenario, int frame, double dt) {
     const double t0 = static_cast<double>(std::max(0, frame - scenario.windupFrames)) /
@@ -58,12 +83,14 @@ rp::InputState makeStrikeInput(const Scenario& scenario, int frame, double dt) {
     input.vx = input.down ? velocity.x : 0.0;
     input.vy = input.down ? velocity.y : 0.0;
     input.power = scenario.power;
+    input.tool = scenario.tool;
     return input;
 }
 
 void writeFrame(std::ostream& out, const Scenario& scenario, int frame, const rp::World& world) {
     const rp::ContactDebug& debug = world.debug();
     out << scenario.name << ','
+        << toolName(debug.tool) << ','
         << frame << ','
         << debug.strikerPosition.x << ','
         << debug.strikerPosition.y << ','
@@ -80,7 +107,16 @@ void writeFrame(std::ostream& out, const Scenario& scenario, int frame, const rp
         << world.stats().brokenAttachments << ','
         << world.stats().brokenBoneAttachments << ','
         << world.stats().brokenBoneJoints << ','
-        << world.stats().fracturedBones << '\n';
+        << world.stats().fracturedBones << ','
+        << debug.fluidEmitted << ','
+        << activeFluidCount(world) << ','
+        << world.stats().emittedFluidParticles << ','
+        << debug.fragmentContacts << ','
+        << debug.fragmentTears << ','
+        << debug.maxFragmentDepth << ','
+        << debug.maxFragmentImpulse << ','
+        << world.stats().fragmentTissueHits << ','
+        << world.stats().fragmentTissueTears << '\n';
 }
 
 ScenarioResult runScenario(const Scenario& scenario, std::ostream& csv) {
@@ -105,6 +141,9 @@ ScenarioResult runScenario(const Scenario& scenario, std::ostream& csv) {
         result.maxBoneLoad = std::max(result.maxBoneLoad, debug.maxBoneLoad);
         result.maxPointLoad = std::max(result.maxPointLoad, debug.maxPointLoad);
         result.maxDepth = std::max(result.maxDepth, debug.maxDepth);
+        result.maxFragmentDepth = std::max(result.maxFragmentDepth, debug.maxFragmentDepth);
+        result.maxFragmentImpulse = std::max(result.maxFragmentImpulse, debug.maxFragmentImpulse);
+        result.maxActiveFluids = std::max(result.maxActiveFluids, activeFluidCount(world));
         writeFrame(csv, scenario, frame, world);
     }
 
@@ -115,11 +154,15 @@ ScenarioResult runScenario(const Scenario& scenario, std::ostream& csv) {
     result.boneJointBreaks = world.stats().brokenBoneJoints;
     result.boneFractures = world.stats().fracturedBones;
     result.finalBones = static_cast<int>(world.bones().size());
+    result.fluidEmitted = world.stats().emittedFluidParticles;
+    result.fragmentHits = world.stats().fragmentTissueHits;
+    result.fragmentTears = world.stats().fragmentTissueTears;
     return result;
 }
 
 void writeSummary(std::ostream& out, const Scenario& scenario, const ScenarioResult& result) {
     out << scenario.name << ','
+        << toolName(scenario.tool) << ','
         << result.tissueContacts << ','
         << result.boneContacts << ','
         << result.fractures << ','
@@ -133,7 +176,13 @@ void writeSummary(std::ostream& out, const Scenario& scenario, const ScenarioRes
         << result.boneDetachments << ','
         << result.boneJointBreaks << ','
         << result.boneFractures << ','
-        << result.finalBones << '\n';
+        << result.finalBones << ','
+        << result.fluidEmitted << ','
+        << result.maxActiveFluids << ','
+        << result.fragmentHits << ','
+        << result.fragmentTears << ','
+        << result.maxFragmentDepth << ','
+        << result.maxFragmentImpulse << '\n';
 }
 
 } // namespace
@@ -161,13 +210,16 @@ int main(int argc, char** argv) {
 
     csv << std::fixed << std::setprecision(3);
     summaryCsv << std::fixed << std::setprecision(3);
-    csv << "scenario,frame,x,y,speed,impact,tissue_contacts,bone_contacts,max_depth,max_point_load,max_bone_load,step_fractures,skin_tears,muscle_tears,detachments,bone_detachments,bone_joint_breaks,bone_fractures\n";
-    summaryCsv << "scenario,total_tissue_contacts,total_bone_contacts,total_step_fractures,max_impact,max_point_load,max_bone_load,max_depth,skin_tears,muscle_tears,detachments,bone_detachments,bone_joint_breaks,bone_fractures,final_bones\n";
+    csv << "scenario,tool,frame,x,y,speed,impact,tissue_contacts,bone_contacts,max_depth,max_point_load,max_bone_load,step_fractures,skin_tears,muscle_tears,detachments,bone_detachments,bone_joint_breaks,bone_fractures,step_fluid_emitted,active_fluids,total_fluid_emitted,step_fragment_contacts,step_fragment_tears,max_fragment_depth,max_fragment_impulse,total_fragment_hits,total_fragment_tears\n";
+    summaryCsv << "scenario,tool,total_tissue_contacts,total_bone_contacts,total_step_fractures,max_impact,max_point_load,max_bone_load,max_depth,skin_tears,muscle_tears,detachments,bone_detachments,bone_joint_breaks,bone_fractures,final_bones,total_fluid_emitted,max_active_fluids,total_fragment_hits,total_fragment_tears,max_fragment_depth,max_fragment_impulse\n";
 
     const std::vector<Scenario> scenarios{
-        {"torso_blunt", {545.0, 336.0}, {704.0, 336.0}, 12, 34, 48, 4.0},
-        {"left_shoulder_blunt", {460.0, 238.0}, {592.0, 258.0}, 12, 30, 44, 3.0},
-        {"hip_drive", {548.0, 420.0}, {692.0, 430.0}, 12, 32, 44, 4.0},
+        {"torso_blunt", rp::ToolMode::Blunt, {545.0, 336.0}, {704.0, 336.0}, 12, 34, 48, 4.0},
+        {"torso_sharp", rp::ToolMode::Sharp, {545.0, 336.0}, {704.0, 336.0}, 12, 34, 48, 4.0},
+        {"torso_heavy", rp::ToolMode::Heavy, {545.0, 336.0}, {704.0, 336.0}, 12, 34, 48, 4.0},
+        {"left_shoulder_blunt", rp::ToolMode::Blunt, {460.0, 238.0}, {592.0, 258.0}, 12, 30, 44, 3.0},
+        {"left_shoulder_sharp", rp::ToolMode::Sharp, {460.0, 238.0}, {592.0, 258.0}, 12, 30, 44, 3.0},
+        {"hip_drive_heavy", rp::ToolMode::Heavy, {548.0, 420.0}, {692.0, 430.0}, 12, 32, 44, 4.0},
     };
 
     bool allContacted = true;
@@ -176,6 +228,7 @@ int main(int argc, char** argv) {
         writeSummary(summaryCsv, scenario, result);
         allContacted = allContacted && (result.tissueContacts > 0 || result.boneContacts > 0);
         std::cout << scenario.name
+                  << " tool=" << toolName(scenario.tool)
                   << " tissue_contacts=" << result.tissueContacts
                   << " bone_contacts=" << result.boneContacts
                   << " fractures=" << result.fractures
@@ -183,6 +236,8 @@ int main(int argc, char** argv) {
                   << " max_point_load=" << result.maxPointLoad
                   << " max_bone_load=" << result.maxBoneLoad
                   << " max_depth=" << result.maxDepth
+                  << " fluid=" << result.fluidEmitted
+                  << " fragment_hits=" << result.fragmentHits
                   << '\n';
     }
 
