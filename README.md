@@ -12,16 +12,19 @@ See [docs/VISION.md](docs/VISION.md) for the original project description and ag
 - Verlet/PBD-style soft body points, springs, area constraints, and attachments.
 - Separate skin and muscle meshes generated from nested body masks so muscle stays inside the skin silhouette.
 - Dynamic segmented bones generated from the same body proportions, attached to nearby muscle points, and connected by breakable bone joints.
-- Mouse-controlled tool head with blunt, sharp, and heavy modes, a spring-driven handle/target, and impact direction.
+- Post-fracture joint limits let broken or remapped limb joints sag and twist with slack instead of snapping rigidly or separating without bounds.
+- Mouse-controlled tool head with blunt, sharp, and heavy modes, a spring-driven handle/target, impact direction, mode-specific handling, and distinct tool silhouettes.
 - Stress-based tearing from overstretched or high-impulse springs.
 - Exposed muscle is a real second mesh coupled to skin through breakable attachments.
 - Bones fracture at the loaded contact point into separate fragments, can re-fracture while pieces are still large enough, release nearby muscle-to-bone anchors, keep rotational inertia after separation, and continue damaging nearby tissue from sharp broken ends and splinters.
+- Fractured bone pieces and splinters use capsule-style fragment repulsion so loose pieces separate instead of piling through each other.
 - Fluid particles emit from real tissue tears, attachment releases, and fracture-adjacent damage, then fall, settle, and fade through the same simulation step.
+- Persistent wound sources leak or briefly spray based on layer, depth, and pressure, then clot down over time.
 - Anatomy view for inspecting muscle and bones without waiting for skin exposure.
-- Contact debug overlay for inspecting tool mode, striker speed, mass, impact, contact counts, loads, fracture impulses, fragment contacts, fragment spin, and fluid emission.
-- Small console test and deterministic strike-scenario targets for core simulation checks from WSL or Windows.
+- Contact debug overlay for inspecting tool mode, striker speed, mass, impact, contact counts, loads, fracture impulses, fragment tissue contacts, fragment-pair contacts, post-fracture joint limits, wound leaks, fragment spin, and fluid emission.
+- Small console test, anatomy diagnostics, and a calibrated 22-case deterministic strike tuning matrix for core simulation checks from WSL or Windows.
 
-The current striker is a spring-driven tool head: the mouse controls a target/handle, while the active head lags behind and carries velocity into the body. Blunt mode balances crushing and tearing, sharp mode concentrates pressure into smaller cuts, and heavy mode drives stronger bone loads. The current bone layer now participates in the simulation through simple rigid segment constraints, breakable hinge-like bone joints, muscle attachments, contact-local fracture, bounded re-fracture, local tissue damage, small deterministic splinters, rotational inertia for free fragments, continued broken-end tissue contact, and fluid bursts from damaged tissue. Fractured pieces no longer get pulled back toward their original pose. It is not a full articulated skeleton yet: richer fragment collision and more convincing post-fracture limb behavior should move into focused follow-up milestones.
+The current striker is a spring-driven tool head: the mouse controls a target/handle, while the active head lags behind and carries velocity into the body. Blunt mode balances crushing and tearing, sharp mode uses the rendered blade segment for narrower edge/tip contact and blade-motion wound normals, and heavy mode drives stronger bone loads with slower hammer-like handling. The current bone layer now participates in the simulation through simple rigid segment constraints, breakable hinge-like bone joints, post-fracture slack/twist limits, muscle attachments, contact-local fracture, bounded re-fracture, local tissue damage, small deterministic splinters, rotational inertia for free fragments, fragment-to-fragment repulsion, continued broken-end tissue contact, pressure-based wound leaks, and fluid bursts from damaged tissue. Fractured pieces no longer get pulled back toward their original pose. It is not a full articulated skeleton yet: richer tuning and collision responses should move into focused follow-up milestones.
 
 ## Run Native On Windows
 
@@ -70,7 +73,7 @@ cd E:\PersonalProjects\realistic_physics
 .\tools\verify.ps1
 ```
 
-The core test verifies that the generated body has nested skin/muscle layers, muscle-to-bone attachments, bone joints, and bones; remains stable at rest without fluid or fragment damage; inactive input leaves contact telemetry idle; tool selection is reflected in debug telemetry; sharp mode can cut skin; heavy mode applies larger bone loads than blunt; joints transfer motion under moderate load; direct striker contact moves and fractures a bone while exposing contact debug metrics, damaging nearby tissue, emitting fluid particles, and reporting broken-end tissue contact; off-center bone contact cracks near the contact point with a persistent gap, seeds fragment angular velocity, and keeps free fragments rotating while settling; long fractured fragments can re-fracture; tears open skin triangles; and splits bone segments under a high-energy strike.
+The core test verifies that the generated body has nested skin/muscle layers, muscle-to-bone attachments, bone joints, and bones; remains stable at rest without fluid, wounds, or fragment damage; inactive input leaves contact telemetry idle; tool selection is reflected in debug telemetry; sharp mode can cut skin and open a clotting wound source; heavy mode applies larger bone loads than blunt; joints transfer motion under moderate load; broken and fracture-remapped joints limit impossible post-fracture stretch and twist while still allowing sag; direct striker contact moves and fractures a bone while exposing contact debug metrics, damaging nearby tissue, emitting fluid particles, opening persistent wound leaks, and reporting broken-end tissue contact; off-center bone contact cracks near the contact point with a persistent gap, seeds fragment angular velocity, keeps free fragments rotating while settling, and avoids deep fragment overlap; overlapping fractured bones report fragment-pair contacts and separate while settling; long fractured fragments can re-fracture; tears open skin triangles; and splits bone segments under a high-energy strike.
 
 To run tests, diagnostics, and rebuild the double-click app in one pass:
 
@@ -80,7 +83,7 @@ To run tests, diagnostics, and rebuild the double-click app in one pass:
 
 ## Strike Scenarios
 
-`.\tools\verify.ps1` also builds and runs deterministic strike playback. The scenario target writes frame-by-frame contact telemetry to:
+`.\tools\verify.ps1` also builds and runs deterministic strike playback across torso, shoulder, arm, hip, and leg strikes with blunt, sharp, and heavy tools at low/medium/high energies. The scenario target writes frame-by-frame contact telemetry to:
 
 ```text
 E:\PersonalProjects\realistic_physics\output\strike_scenarios.csv
@@ -92,7 +95,13 @@ It also writes a compact per-scenario tuning summary to:
 E:\PersonalProjects\realistic_physics\output\strike_summary.csv
 ```
 
-The CSV outputs include tool mode, striker speed, impact, contact counts, contact depth, tissue/bone loads, joint breakage, fracture events, broken-end tissue contacts, fragment angular speed, free/spinning fragment counts, fluid emission, final fragment counts, and accumulated damage stats for repeatable torso, shoulder, and hip strikes.
+It also writes a warning-only tuning report that compares each scenario against calibrated expected damage bands:
+
+```text
+E:\PersonalProjects\realistic_physics\output\strike_tuning_report.txt
+```
+
+The CSV outputs include region, intent, tool mode, striker speed, impact, contact counts, contact depth, tissue/bone loads, joint breakage, fracture events, post-fracture joint limit corrections, wound counts, wound pressure/clotting, broken-end tissue contacts, fragment-pair contacts and overlap depth, fragment angular speed, free/spinning fragment counts, fluid emission, final fragment counts, and accumulated damage stats.
 
 ## Development Notes
 
@@ -118,11 +127,11 @@ Open `output\anatomy_debug.svg` to inspect the generated body without launching 
 
 The next native simulation milestones are:
 
-1. Add fragment-to-fragment repulsion so loose splinters and large fragments cannot overlap each other.
-2. Expand deterministic strike scenarios into a larger tuning matrix for material constants and body topology changes.
-3. Add wound-pressure controls so deep damage can leak, spray, or clot differently by tissue layer.
-4. Add per-tool visual polish, such as sharper blade contact normals and heavier hammer rebound.
-5. Add simple post-fracture joint limits for partially attached limb sections so broken anatomy can sag and twist without snapping into impossible poses.
+1. Add richer fragment collision responses, such as fragment-to-intact-bone contacts and less jitter when many splinters pile together.
+2. Add historical baseline comparison for strike summaries so regressions are easier to spot.
+3. Tighten selected tuning bands once material behavior has settled enough for intentional regression gates.
+4. Anchor wound sources to moving tissue/bone features instead of keeping them at fixed world positions.
+5. Add contact-normal telemetry and visual compression/spark feedback for clearer tool impacts.
 
 ## Toolchain
 

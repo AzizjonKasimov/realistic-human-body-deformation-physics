@@ -15,6 +15,17 @@ double testBoneAngle(const rp::BoneSegment& bone) {
     return std::atan2(bone.b.y - bone.a.y, bone.b.x - bone.a.x);
 }
 
+rp::Vec2 testBonePoint(const rp::BoneSegment& bone, double t) {
+    return {
+        bone.a.x + (bone.b.x - bone.a.x) * t,
+        bone.a.y + (bone.b.y - bone.a.y) * t,
+    };
+}
+
+double jointAnchorDistance(const rp::World& world, const rp::BoneJoint& joint) {
+    return rp::distance(testBonePoint(world.bones()[joint.a], joint.tA), testBonePoint(world.bones()[joint.b], joint.tB));
+}
+
 double angleDelta(double a, double b) {
     constexpr double pi = 3.14159265358979323846;
     double delta = std::fmod(std::abs(a - b), pi * 2.0);
@@ -22,6 +33,101 @@ double angleDelta(double a, double b) {
         delta = pi * 2.0 - delta;
     }
     return delta;
+}
+
+double jointAngleViolation(const rp::World& world, const rp::BoneJoint& joint) {
+    constexpr double pi = 3.14159265358979323846;
+    const double restAngle = joint.postFractureRest > 0.0 ? joint.postFractureRestAngle : joint.restAngle;
+    double relativeAngle = testBoneAngle(world.bones()[joint.b]) - testBoneAngle(world.bones()[joint.a]) - restAngle;
+    while (relativeAngle > pi) {
+        relativeAngle -= pi * 2.0;
+    }
+    while (relativeAngle < -pi) {
+        relativeAngle += pi * 2.0;
+    }
+    const double minAngle = joint.minAngle - world.materials().postFractureJointAngleSlack;
+    const double maxAngle = joint.maxAngle + world.materials().postFractureJointAngleSlack;
+    return std::max(0.0, std::max(minAngle - relativeAngle, relativeAngle - maxAngle));
+}
+
+rp::Vec2 testLerp(rp::Vec2 a, rp::Vec2 b, double t) {
+    return {a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t};
+}
+
+double testDot(rp::Vec2 a, rp::Vec2 b) {
+    return a.x * b.x + a.y * b.y;
+}
+
+rp::Vec2 testSubtract(rp::Vec2 a, rp::Vec2 b) {
+    return {a.x - b.x, a.y - b.y};
+}
+
+double testSegmentDistance(rp::Vec2 a0, rp::Vec2 a1, rp::Vec2 b0, rp::Vec2 b1) {
+    constexpr double epsilon = 0.0001;
+    const rp::Vec2 dA = testSubtract(a1, a0);
+    const rp::Vec2 dB = testSubtract(b1, b0);
+    const rp::Vec2 r = testSubtract(a0, b0);
+    const double lenA = testDot(dA, dA);
+    const double lenB = testDot(dB, dB);
+    const double dBF = testDot(dB, r);
+    double tA = 0.0;
+    double tB = 0.0;
+
+    if (lenA <= epsilon && lenB <= epsilon) {
+        tA = 0.0;
+        tB = 0.0;
+    } else if (lenA <= epsilon) {
+        tA = 0.0;
+        tB = std::clamp(dBF / lenB, 0.0, 1.0);
+    } else {
+        const double dAC = testDot(dA, r);
+        if (lenB <= epsilon) {
+            tB = 0.0;
+            tA = std::clamp(-dAC / lenA, 0.0, 1.0);
+        } else {
+            const double dAB = testDot(dA, dB);
+            const double denom = lenA * lenB - dAB * dAB;
+            tA = denom > epsilon ? std::clamp((dAB * dBF - dAC * lenB) / denom, 0.0, 1.0) : 0.0;
+
+            const double tBNumer = dAB * tA + dBF;
+            if (tBNumer < 0.0) {
+                tB = 0.0;
+                tA = std::clamp(-dAC / lenA, 0.0, 1.0);
+            } else if (tBNumer > lenB) {
+                tB = 1.0;
+                tA = std::clamp((dAB - dAC) / lenA, 0.0, 1.0);
+            } else {
+                tB = tBNumer / lenB;
+            }
+        }
+    }
+
+    return rp::distance(testLerp(a0, a1, tA), testLerp(b0, b1, tB));
+}
+
+double maxFreeFragmentOverlap(const rp::World& world) {
+    double maxOverlap = 0.0;
+    for (std::size_t i = 0; i < world.bones().size(); ++i) {
+        const rp::BoneSegment& a = world.bones()[i];
+        if (a.pinned || (!a.fractured && !a.splinter)) {
+            continue;
+        }
+        for (std::size_t j = i + 1; j < world.bones().size(); ++j) {
+            const rp::BoneSegment& b = world.bones()[j];
+            if (b.pinned || (!b.fractured && !b.splinter)) {
+                continue;
+            }
+            const double surfaceOverlap = a.radius + b.radius - testSegmentDistance(a.a, a.b, b.a, b.b);
+            maxOverlap = std::max(maxOverlap, surfaceOverlap);
+        }
+    }
+    return maxOverlap;
+}
+
+int activeWoundCount(const rp::World& world) {
+    return static_cast<int>(std::count_if(world.wounds().begin(), world.wounds().end(), [](const rp::WoundSource& wound) {
+        return wound.active;
+    }));
 }
 
 } // namespace
@@ -83,12 +189,14 @@ int main() {
         world.stats().brokenBoneAttachments != 0 ||
         world.stats().brokenBoneJoints != 0 ||
         world.stats().emittedFluidParticles != 0 ||
+        world.stats().openedWounds != 0 ||
+        world.stats().woundFluidParticles != 0 ||
         world.stats().fragmentTissueHits != 0 ||
         world.stats().fragmentTissueTears != 0 ||
         world.stats().fracturedBones != 0) {
         return fail("rest simulation should not tear tissue");
     }
-    if (!world.fluids().empty()) {
+    if (!world.fluids().empty() || !world.wounds().empty()) {
         return fail("rest simulation should not emit fluid particles");
     }
     if (world.debug().active || world.debug().impact != 0.0 || world.debug().boneContacts != 0 || world.debug().tissueContacts != 0) {
@@ -149,6 +257,19 @@ int main() {
         directBoneWorld.debug().fluidEmitted <= 0) {
         return fail("direct strike should expose contact debug metrics");
     }
+    if (directBoneWorld.stats().openedWounds <= 0 || activeWoundCount(directBoneWorld) <= 0) {
+        return fail("bone fracture should open persistent wound sources");
+    }
+    const int directBurstFluid = directBoneWorld.stats().emittedFluidParticles;
+    for (int i = 0; i < 30; ++i) {
+        rp::InputState noInput;
+        directBoneWorld.step(directBoneWorld.materials().fixedDt, noInput, 1280.0, 720.0);
+    }
+    if (directBoneWorld.stats().woundFluidParticles <= 0 ||
+        directBoneWorld.stats().emittedFluidParticles <= directBurstFluid ||
+        directBoneWorld.debug().maxWoundPressure <= 0.0) {
+        return fail("open fracture wounds should keep leaking after impact");
+    }
 
     rp::World sharpWorld;
     sharpWorld.addPoint({130.0, 120.0}, rp::TissueLayer::Skin, false);
@@ -168,6 +289,40 @@ int main() {
         sharpWorld.debug().strikerRadius >= directBoneWorld.materials().strikerRadius ||
         sharpWorld.stats().brokenSkin <= 0) {
         return fail("sharp tool should concentrate pressure into skin tearing");
+    }
+    if (sharpWorld.stats().openedWounds <= 0 || activeWoundCount(sharpWorld) <= 0) {
+        return fail("sharp skin tears should open a persistent wound source");
+    }
+
+    rp::World sharpNormalWorld;
+    sharpNormalWorld.addPoint({130.0, 120.0}, rp::TissueLayer::Skin, false);
+    sharpNormalWorld.addPoint({170.0, 120.0}, rp::TissueLayer::Skin, false);
+    sharpNormalWorld.addSpring(0, 1, rp::TissueLayer::Skin, 0.82, 10.0, 1000.0);
+    rp::InputState verticalCut = sharpStrike;
+    verticalCut.vx = 0.0;
+    verticalCut.vy = 900.0;
+    sharpNormalWorld.step(sharpNormalWorld.materials().fixedDt, verticalCut, 640.0, 480.0);
+    if (sharpNormalWorld.wounds().empty() ||
+        std::abs(sharpNormalWorld.wounds().front().direction.x) <=
+            std::abs(sharpNormalWorld.wounds().front().direction.y) * 2.5) {
+        return fail("sharp wound direction should follow blade motion instead of only spring orientation");
+    }
+
+    rp::World sharpTipWorld;
+    sharpTipWorld.addPoint({165.0, 120.0}, rp::TissueLayer::Skin, false);
+    sharpTipWorld.addPoint({185.0, 120.0}, rp::TissueLayer::Skin, false);
+    sharpTipWorld.addSpring(0, 1, rp::TissueLayer::Skin, 0.82, 10.0, 1000.0);
+    sharpTipWorld.step(sharpTipWorld.materials().fixedDt, sharpStrike, 640.0, 480.0);
+    if (sharpTipWorld.stats().brokenSkin <= 0 || sharpTipWorld.debug().tissueContacts <= 0) {
+        return fail("sharp tool should contact and cut along the rendered blade segment, not just at the handle center");
+    }
+
+    for (int i = 0; i < 24; ++i) {
+        rp::InputState noInput;
+        sharpWorld.step(sharpWorld.materials().fixedDt, noInput, 640.0, 480.0);
+    }
+    if (sharpWorld.stats().woundFluidParticles <= 0 || sharpWorld.debug().maxWoundClot <= 0.0) {
+        return fail("skin wound pressure should leak and begin clotting over time");
     }
 
     rp::World bluntLoadWorld;
@@ -238,6 +393,60 @@ int main() {
     if (angularWorld.stats().brokenBoneJoints <= 0) {
         return fail("bone joints should break when a connected bone is overextended");
     }
+    for (int i = 0; i < 48; ++i) {
+        rp::InputState noInput;
+        angularWorld.step(angularWorld.materials().fixedDt, noInput, 640.0, 480.0);
+    }
+    const rp::BoneJoint& brokenJoint = angularWorld.boneJoints()[0];
+    const double brokenJointLimit = std::max(brokenJoint.rest + angularWorld.materials().postFractureJointSlack,
+                                             brokenJoint.rest * angularWorld.materials().postFractureJointMaxStretch);
+    if (jointAnchorDistance(angularWorld, brokenJoint) > brokenJointLimit + 12.0 ||
+        jointAngleViolation(angularWorld, brokenJoint) > 0.35) {
+        return fail("broken bone joints should still limit impossible post-fracture stretch and twist");
+    }
+
+    rp::Materials partialJointMaterials;
+    partialJointMaterials.maxBoneFractureDepth = 1;
+    partialJointMaterials.boneJointBreakStretch = 99.0;
+    partialJointMaterials.boneJointBreakImpulse = 999999.0;
+    partialJointMaterials.boneJointAngularBreak = 99.0;
+    partialJointMaterials.postFractureJointStiffness = 0.20;
+    partialJointMaterials.postFractureJointAngularStiffness = 0.08;
+    rp::World partialJointWorld(partialJointMaterials);
+    const std::size_t partialAnchor = partialJointWorld.addBoneSegment({100.0, 180.0}, {180.0, 180.0}, 7.0, 999999.0, true);
+    const std::size_t partialLimb = partialJointWorld.addBoneSegment({185.0, 180.0}, {385.0, 180.0}, 7.0, 850.0);
+    partialJointWorld.addBoneJoint(partialAnchor, 1.0, partialLimb, 0.0, -0.35, 0.35);
+    rp::InputState partialStrike;
+    partialStrike.active = true;
+    partialStrike.down = true;
+    partialStrike.x = 255.0;
+    partialStrike.y = 180.0;
+    partialStrike.vx = 1500.0;
+    partialStrike.vy = 120.0;
+    partialStrike.power = 4.0;
+    partialJointWorld.step(partialJointWorld.materials().fixedDt, partialStrike, 640.0, 480.0);
+    if (partialJointWorld.stats().fracturedBones <= 0 || partialJointWorld.boneJoints().empty()) {
+        return fail("jointed limb strike should fracture a connected bone");
+    }
+    if (!partialJointWorld.boneJoints()[0].postFractureLimited || partialJointWorld.boneJoints()[0].broken) {
+        return fail("surviving remapped bone joints should become post-fracture limited");
+    }
+    const double partialTipY = partialJointWorld.bones()[partialLimb].b.y;
+    for (int i = 0; i < 60; ++i) {
+        rp::InputState noInput;
+        partialJointWorld.step(partialJointWorld.materials().fixedDt, noInput, 640.0, 480.0);
+    }
+    const rp::BoneJoint& partialJoint = partialJointWorld.boneJoints()[0];
+    const double partialLimit = std::max(partialJoint.postFractureRest + partialJointWorld.materials().postFractureJointSlack,
+                                         partialJoint.postFractureRest * partialJointWorld.materials().postFractureJointMaxStretch);
+    if (partialJointWorld.debug().maxPostFractureJointStretch <= 0.0 ||
+        partialJointWorld.bones()[partialLimb].b.y <= partialTipY + 3.0) {
+        return fail("post-fracture limited joints should allow a partially attached limb to sag");
+    }
+    if (jointAnchorDistance(partialJointWorld, partialJoint) > partialLimit + 10.0 ||
+        jointAngleViolation(partialJointWorld, partialJoint) > 0.30) {
+        return fail("post-fracture limited joints should bound partially attached limb stretch and twist");
+    }
 
     rp::Materials offCenterMaterials;
     offCenterMaterials.maxBoneFractureDepth = 1;
@@ -285,6 +494,36 @@ int main() {
     const double fragmentAngleAfterSettle = testBoneAngle(offCenterWorld.bones()[offCenterBone + 1]);
     if (angleDelta(fragmentAngleBeforeSettle, fragmentAngleAfterSettle) < 0.02) {
         return fail("free fractured fragments should keep rotating while they settle");
+    }
+    if (maxFreeFragmentOverlap(offCenterWorld) > 2.0) {
+        return fail("off-center fractured fragments should not settle while deeply overlapping");
+    }
+
+    rp::Materials fragmentSeparationMaterials;
+    fragmentSeparationMaterials.maxBoneFractureDepth = 1;
+    fragmentSeparationMaterials.solverIterations = 12;
+    rp::World fragmentSeparationWorld(fragmentSeparationMaterials);
+    fragmentSeparationWorld.addBoneSegment({100.0, 180.0}, {320.0, 180.0}, 8.0, 800.0);
+    fragmentSeparationWorld.addBoneSegment({105.0, 180.0}, {325.0, 180.0}, 8.0, 800.0);
+    rp::InputState fragmentSeparationStrike;
+    fragmentSeparationStrike.active = true;
+    fragmentSeparationStrike.down = true;
+    fragmentSeparationStrike.x = 210.0;
+    fragmentSeparationStrike.y = 180.0;
+    fragmentSeparationStrike.vx = 1600.0;
+    fragmentSeparationStrike.vy = 0.0;
+    fragmentSeparationStrike.power = 4.0;
+    fragmentSeparationWorld.step(fragmentSeparationWorld.materials().fixedDt, fragmentSeparationStrike, 640.0, 480.0);
+    if (fragmentSeparationWorld.debug().fragmentPairContacts <= 0 ||
+        fragmentSeparationWorld.debug().maxFragmentOverlap <= 0.0) {
+        return fail("overlapping fractured bones should report fragment-to-fragment contacts");
+    }
+    for (int i = 0; i < 12; ++i) {
+        rp::InputState noInput;
+        fragmentSeparationWorld.step(fragmentSeparationWorld.materials().fixedDt, noInput, 640.0, 480.0);
+    }
+    if (maxFreeFragmentOverlap(fragmentSeparationWorld) > 2.5) {
+        return fail("fragment repulsion should push overlapping broken bones apart");
     }
 
     rp::World refractureWorld;
@@ -362,6 +601,8 @@ int main() {
               << " broken_bone_joints=" << world.stats().brokenBoneJoints
               << " bone_fractures=" << world.stats().fracturedBones
               << " fluid_particles=" << world.stats().emittedFluidParticles
+              << " wounds=" << world.stats().openedWounds
+              << " wound_fluid=" << world.stats().woundFluidParticles
               << " fragment_hits=" << world.stats().fragmentTissueHits
               << " fragment_tears=" << world.stats().fragmentTissueTears
               << '\n';

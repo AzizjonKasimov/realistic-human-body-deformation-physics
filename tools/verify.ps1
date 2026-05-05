@@ -36,6 +36,7 @@ if ($BuildApp) {
 
 Write-Host ""
 Write-Host "Verification complete."
+Write-Host "Strike tuning report: $repoRoot\output\strike_tuning_report.txt"
 if (-not $SkipDiagnostics) {
     Write-Host "Anatomy snapshot: $repoRoot\output\anatomy_debug.svg"
 }

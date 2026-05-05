@@ -83,6 +83,11 @@ struct Materials {
     double boneJointBreakStretch = 2.15;
     double boneJointBreakImpulse = 2600.0;
     double boneJointAngularBreak = 1.20;
+    double postFractureJointStiffness = 0.13;
+    double postFractureJointAngularStiffness = 0.052;
+    double postFractureJointMaxStretch = 2.6;
+    double postFractureJointSlack = 34.0;
+    double postFractureJointAngleSlack = 0.78;
     double boneImpactTransfer = 0.62;
     double boneDirectContact = 0.86;
     double boneDirectPressure = 780.0;
@@ -93,10 +98,18 @@ struct Materials {
     double fluidLifetime = 4.8;
     double fluidFloorFriction = 0.48;
     double fluidImpactScale = 0.08;
+    int maxWoundSources = 160;
+    double woundLeakRate = 4.6;
+    double woundPressureDecay = 0.20;
+    double woundClotRate = 0.13;
+    double woundSprayPressure = 1.25;
+    double woundMergeRadius = 16.0;
     double sharpToolTearPressure = 0.66;
     double fragmentContactRadius = 15.0;
     double fragmentDamageImpulse = 520.0;
     double fragmentPush = 0.34;
+    double fragmentRepulsionStiffness = 0.56;
+    double fragmentRepulsionSlop = 0.85;
 };
 
 struct Point {
@@ -199,6 +212,9 @@ struct BoneJoint {
     double stress = 0.0;
     double torqueStress = 0.0;
     bool broken = false;
+    bool postFractureLimited = false;
+    double postFractureRest = 0.0;
+    double postFractureRestAngle = 0.0;
 };
 
 struct FluidParticle {
@@ -211,6 +227,19 @@ struct FluidParticle {
     bool settled = false;
 };
 
+struct WoundSource {
+    Vec2 position;
+    Vec2 direction;
+    TissueLayer layer = TissueLayer::Skin;
+    double pressure = 0.0;
+    double clot = 0.0;
+    double age = 0.0;
+    double radius = 2.0;
+    double depth = 0.0;
+    double accumulator = 0.0;
+    bool active = false;
+};
+
 struct Stats {
     int brokenSkin = 0;
     int brokenMuscle = 0;
@@ -219,6 +248,8 @@ struct Stats {
     int brokenBoneJoints = 0;
     int fracturedBones = 0;
     int emittedFluidParticles = 0;
+    int woundFluidParticles = 0;
+    int openedWounds = 0;
     int fragmentTissueHits = 0;
     int fragmentTissueTears = 0;
 };
@@ -240,6 +271,11 @@ struct ContactDebug {
     double maxBoneAngularSpeed = 0.0;
     double maxFragmentDepth = 0.0;
     double maxFragmentImpulse = 0.0;
+    double maxFragmentOverlap = 0.0;
+    double maxPostFractureJointStretch = 0.0;
+    double maxPostFractureJointAngle = 0.0;
+    double maxWoundPressure = 0.0;
+    double maxWoundClot = 0.0;
     double lastFractureImpulse = 0.0;
     int boneContacts = 0;
     int tissueContacts = 0;
@@ -247,6 +283,10 @@ struct ContactDebug {
     int fluidEmitted = 0;
     int fragmentContacts = 0;
     int fragmentTears = 0;
+    int fragmentPairContacts = 0;
+    int postFractureJointCorrections = 0;
+    int activeWounds = 0;
+    int woundLeaks = 0;
 };
 
 struct AnatomyValidation {
@@ -286,6 +326,7 @@ public:
     const std::vector<BoneAttachment>& boneAttachments() const { return boneAttachments_; }
     const std::vector<BoneJoint>& boneJoints() const { return boneJoints_; }
     const std::vector<FluidParticle>& fluids() const { return fluids_; }
+    const std::vector<WoundSource>& wounds() const { return wounds_; }
     const Stats& stats() const { return stats_; }
     const ContactDebug& debug() const { return debug_; }
 
@@ -303,14 +344,18 @@ private:
     void applyBoneTorque(BoneSegment& bone, Vec2 contact, Vec2 impulse);
     double nextFluidRandom();
     void emitFluid(Vec2 center, Vec2 direction, int count, double speed, double radius, double intensity);
+    void openWound(Vec2 center, Vec2 direction, TissueLayer layer, double pressure, double radius, double depth);
 
     void integrate(double dt, double width, double floorY);
+    void updateWounds(double dt);
     void collideStriker(double dt, const InputState& input);
     void solveSprings();
     void solveAttachments();
     void solveBoneAttachments();
     void solveBoneJoints();
     void solveBones();
+    void solvePostFractureJoints();
+    void solveBoneFragmentRepulsion();
     void collideBoneFragments();
     void solveAreas();
     void constrainToWorld(double width, double floorY);
@@ -327,6 +372,7 @@ private:
     std::vector<BoneAttachment> boneAttachments_;
     std::vector<BoneJoint> boneJoints_;
     std::vector<FluidParticle> fluids_;
+    std::vector<WoundSource> wounds_;
     Stats stats_;
     ContactDebug debug_;
     std::size_t fluidWriteCursor_ = 0;

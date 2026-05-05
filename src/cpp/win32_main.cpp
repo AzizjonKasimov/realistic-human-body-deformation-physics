@@ -78,6 +78,26 @@ double toolRadiusScale(rp::ToolMode tool) {
     }
 }
 
+struct StrikerDriveProfile {
+    double downDrive = 118.0;
+    double idleDrive = 62.0;
+    double downDamping = 15.0;
+    double idleDamping = 20.0;
+    double maxSpeed = 4200.0;
+};
+
+StrikerDriveProfile strikerDriveProfile(rp::ToolMode tool) {
+    switch (tool) {
+    case rp::ToolMode::Sharp:
+        return {132.0, 70.0, 13.0, 18.0, 4600.0};
+    case rp::ToolMode::Heavy:
+        return {74.0, 42.0, 22.0, 28.0, 3200.0};
+    case rp::ToolMode::Blunt:
+    default:
+        return {};
+    }
+}
+
 std::wstring makeTitle(const AppState& app) {
     wchar_t buffer[256];
     std::swprintf(buffer,
@@ -110,14 +130,15 @@ void rebuildWorld(AppState& app) {
 void advanceStriker(AppState& app, double dt) {
     const double dx = app.pointerX - app.strikerX;
     const double dy = app.pointerY - app.strikerY;
-    const double drive = app.pointerDown ? 118.0 : 62.0;
-    const double damping = app.pointerDown ? 15.0 : 20.0;
+    const StrikerDriveProfile profile = strikerDriveProfile(app.tool);
+    const double drive = app.pointerDown ? profile.downDrive : profile.idleDrive;
+    const double damping = app.pointerDown ? profile.downDamping : profile.idleDamping;
 
     app.strikerVx += (dx * drive - app.strikerVx * damping) * dt;
     app.strikerVy += (dy * drive - app.strikerVy * damping) * dt;
 
     const double speed = std::sqrt(app.strikerVx * app.strikerVx + app.strikerVy * app.strikerVy);
-    constexpr double maxSpeed = 4200.0;
+    const double maxSpeed = profile.maxSpeed;
     if (speed > maxSpeed) {
         const double scale = maxSpeed / speed;
         app.strikerVx *= scale;
@@ -456,12 +477,41 @@ void drawStriker(HDC dc, const AppState& app) {
                  static_cast<int>(std::lround(app.strikerY - dirY * radius * 0.72 - ny * radius * 0.60)),
                  color(84, 61, 39),
                  5);
+    } else if (app.tool == rp::ToolMode::Heavy) {
+        const double nx = -dirY;
+        const double ny = dirX;
+        const double halfWidth = radius * 0.96;
+        const double halfHeight = radius * 0.58;
+        POINT head[4] = {
+            POINT{static_cast<LONG>(std::lround(app.strikerX + nx * halfWidth + dirX * halfHeight)),
+                  static_cast<LONG>(std::lround(app.strikerY + ny * halfWidth + dirY * halfHeight))},
+            POINT{static_cast<LONG>(std::lround(app.strikerX - nx * halfWidth + dirX * halfHeight)),
+                  static_cast<LONG>(std::lround(app.strikerY - ny * halfWidth + dirY * halfHeight))},
+            POINT{static_cast<LONG>(std::lround(app.strikerX - nx * halfWidth - dirX * halfHeight)),
+                  static_cast<LONG>(std::lround(app.strikerY - ny * halfWidth - dirY * halfHeight))},
+            POINT{static_cast<LONG>(std::lround(app.strikerX + nx * halfWidth - dirX * halfHeight)),
+                  static_cast<LONG>(std::lround(app.strikerY + ny * halfWidth - dirY * halfHeight))},
+        };
+        HBRUSH headBrush = CreateSolidBrush(app.pointerDown ? color(77, 83, 88) : color(94, 96, 94));
+        HPEN headPen = CreatePen(PS_SOLID, 3, color(22, 24, 26));
+        HGDIOBJ oldBrush = SelectObject(dc, headBrush);
+        HGDIOBJ oldPen = SelectObject(dc, headPen);
+        Polygon(dc, head, 4);
+        SelectObject(dc, oldPen);
+        SelectObject(dc, oldBrush);
+        DeleteObject(headPen);
+        DeleteObject(headBrush);
+        drawLine(dc,
+                 static_cast<int>(std::lround(app.strikerX - nx * halfWidth * 0.52)),
+                 static_cast<int>(std::lround(app.strikerY - ny * halfWidth * 0.52)),
+                 static_cast<int>(std::lround(app.strikerX + nx * halfWidth * 0.52)),
+                 static_cast<int>(std::lround(app.strikerY + ny * halfWidth * 0.52)),
+                 color(153, 157, 154),
+                 3);
     } else {
-        const COLORREF shell = app.tool == rp::ToolMode::Heavy ? color(28, 31, 34) : color(35, 32, 29);
-        const COLORREF fill = app.tool == rp::ToolMode::Heavy
-            ? (app.pointerDown ? color(77, 83, 88) : color(94, 96, 94))
-            : (app.pointerDown ? color(190, 63, 48) : color(194, 174, 121));
-        const COLORREF highlight = app.tool == rp::ToolMode::Heavy ? color(153, 157, 154) : color(235, 218, 163);
+        const COLORREF shell = color(35, 32, 29);
+        const COLORREF fill = app.pointerDown ? color(190, 63, 48) : color(194, 174, 121);
+        const COLORREF highlight = color(235, 218, 163);
         fillEllipse(dc, cx, cy, radius + 4, shell, color(18, 16, 15), 2);
         fillEllipse(dc,
                     cx,
@@ -485,7 +535,7 @@ void drawDebugText(HDC dc, int x, int y, const wchar_t* text) {
 }
 
 void drawDebugOverlay(HDC dc, const AppState& app) {
-    RECT panel{12, 42, 430, 220};
+    RECT panel{12, 42, 430, 262};
     HBRUSH brush = CreateSolidBrush(color(22, 24, 27));
     HPEN pen = CreatePen(PS_SOLID, 1, color(98, 105, 112));
     HGDIOBJ oldBrush = SelectObject(dc, brush);
@@ -557,12 +607,27 @@ void drawDebugOverlay(HDC dc, const AppState& app) {
     y += 20;
     std::swprintf(line,
                   sizeof(line) / sizeof(line[0]),
-                  L"fragments: contacts=%d tears=%d depth=%.1f impulse=%.0f spin=%.2f",
+                  L"fragments: tissue=%d pair=%d tears=%d depth=%.1f overlap=%.1f",
                   debug.fragmentContacts,
+                  debug.fragmentPairContacts,
                   debug.fragmentTears,
                   debug.maxFragmentDepth,
+                  debug.maxFragmentOverlap);
+    drawDebugText(dc, panel.left + 12, y, line);
+    y += 20;
+    std::swprintf(line,
+                  sizeof(line) / sizeof(line[0]),
+                  L"fragment motion: impulse=%.0f spin=%.2f",
                   debug.maxFragmentImpulse,
                   debug.maxBoneAngularSpeed);
+    drawDebugText(dc, panel.left + 12, y, line);
+    y += 20;
+    std::swprintf(line,
+                  sizeof(line) / sizeof(line[0]),
+                  L"joint limits: corrections=%d stretch=%.1f angle=%.2f",
+                  debug.postFractureJointCorrections,
+                  debug.maxPostFractureJointStretch,
+                  debug.maxPostFractureJointAngle);
     drawDebugText(dc, panel.left + 12, y, line);
     y += 20;
     const int activeFluids = static_cast<int>(std::count_if(app.world.fluids().begin(), app.world.fluids().end(), [](const rp::FluidParticle& fluid) {
@@ -570,10 +635,12 @@ void drawDebugOverlay(HDC dc, const AppState& app) {
     }));
     std::swprintf(line,
                   sizeof(line) / sizeof(line[0]),
-                  L"fluid: active=%d emitted=%d step=%d",
+                  L"fluid: active=%d emitted=%d step=%d wounds=%d leaks=%d",
                   activeFluids,
                   app.world.stats().emittedFluidParticles,
-                  debug.fluidEmitted);
+                  debug.fluidEmitted,
+                  debug.activeWounds,
+                  debug.woundLeaks);
     drawDebugText(dc, panel.left + 12, y, line);
 
     if (debug.maxDepth > 0.0) {
