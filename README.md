@@ -31,13 +31,12 @@ The current striker is a spring-driven tool head: the mouse controls a target/ha
 After the app has been built once, double-click this file from File Explorer:
 
 ```text
-E:\PersonalProjects\realistic_physics\realistic_physics.exe
+realistic_physics.exe
 ```
 
-When rebuilding after code changes, run:
+When rebuilding after code changes, run this from the repository root:
 
 ```powershell
-cd E:\PersonalProjects\realistic_physics
 .\tools\build_app.ps1
 .\realistic_physics.exe
 ```
@@ -66,10 +65,9 @@ Controls:
 
 ## Run Core Tests
 
-From PowerShell:
+From the repository root in PowerShell:
 
 ```powershell
-cd E:\PersonalProjects\realistic_physics
 .\tools\verify.ps1
 ```
 
@@ -86,19 +84,19 @@ To run tests, diagnostics, and rebuild the double-click app in one pass:
 `.\tools\verify.ps1` also builds and runs deterministic strike playback across torso, shoulder, arm, hip, and leg strikes with blunt, sharp, and heavy tools at low/medium/high energies. The scenario target writes frame-by-frame contact telemetry to:
 
 ```text
-E:\PersonalProjects\realistic_physics\output\strike_scenarios.csv
+output\strike_scenarios.csv
 ```
 
 It also writes a compact per-scenario tuning summary to:
 
 ```text
-E:\PersonalProjects\realistic_physics\output\strike_summary.csv
+output\strike_summary.csv
 ```
 
 It also writes a warning-only tuning report that compares each scenario against calibrated expected damage bands:
 
 ```text
-E:\PersonalProjects\realistic_physics\output\strike_tuning_report.txt
+output\strike_tuning_report.txt
 ```
 
 The CSV outputs include region, intent, tool mode, striker speed, impact, contact counts, contact depth, tissue/bone loads, joint breakage, fracture events, post-fracture joint limit corrections, wound counts, wound pressure/clotting, broken-end tissue contacts, fragment-pair contacts and overlap depth, fragment angular speed, free/spinning fragment counts, fluid emission, final fragment counts, and accumulated damage stats.
@@ -116,10 +114,9 @@ The native implementation is split so simulation can remain independent from ren
 
 ## Anatomy Diagnostics
 
-Use this whenever changing body generation, anatomy layers, bones, constraints, or rendering assumptions:
+Use this from the repository root whenever changing body generation, anatomy layers, bones, constraints, or rendering assumptions:
 
 ```powershell
-cd E:\PersonalProjects\realistic_physics
 .\tools\verify.ps1
 ```
 
@@ -136,3 +133,7 @@ The next native simulation milestones are:
 ## Toolchain
 
 The primary build uses CMake and a Windows C++ compiler, preferably Visual Studio 2022 Build Tools or the full Visual Studio IDE. The current renderer uses plain Win32/GDI so the project can stay dependency-free while the simulation is still being discovered.
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE).
