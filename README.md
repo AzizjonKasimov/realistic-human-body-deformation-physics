@@ -24,6 +24,7 @@ See [docs/VISION.md](docs/VISION.md) for the original project description and ag
 - Persistent wound sources leak or briefly spray based on layer, depth, and pressure, then clot down over time.
 - Anatomy view for inspecting muscle and bones without waiting for skin exposure.
 - Rust diagnostics, strike scenario playback, and simulation tests.
+- Checked-in human silhouette reference under `docs/reference/` for tuning the generated front-view body proportions.
 
 ## Realism Target
 
@@ -138,6 +139,7 @@ Open `output\anatomy_debug.svg` to inspect the generated body without launching 
 - `src/bin/anatomy_diagnostics.rs` writes a deterministic SVG anatomy snapshot and reports geometry validation metrics.
 - `src/bin/strike_scenarios.rs` writes deterministic strike telemetry and tuning summaries.
 - `tests/simulation_tests.rs` contains focused Rust simulation checks.
+- `docs/reference/human_body_silhouette.svg` is the public-domain front-view silhouette reference used when tuning body proportions.
 
 The next Rust simulation milestones are:
 

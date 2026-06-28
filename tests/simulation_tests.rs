@@ -58,6 +58,74 @@ fn skin_band_width_with_filter(
     }
 }
 
+fn skin_band_region_counts(
+    world: &rp::World,
+    min_t: f64,
+    max_t: f64,
+    center_gap: f64,
+) -> (usize, usize, usize) {
+    let skin_points: Vec<_> = world
+        .points()
+        .iter()
+        .filter(|point| point.layer == rp::TissueLayer::Skin)
+        .collect();
+    let min_y = skin_points
+        .iter()
+        .map(|point| point.position.y)
+        .fold(f64::INFINITY, f64::min);
+    let max_y = skin_points
+        .iter()
+        .map(|point| point.position.y)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let min_body_x = skin_points
+        .iter()
+        .map(|point| point.position.x)
+        .fold(f64::INFINITY, f64::min);
+    let max_body_x = skin_points
+        .iter()
+        .map(|point| point.position.x)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let height = (max_y - min_y).max(1.0);
+    let center_x = (min_body_x + max_body_x) * 0.5;
+    let gap = height * center_gap;
+    let mut left = 0;
+    let mut center = 0;
+    let mut right = 0;
+    for point in skin_points {
+        let t = (point.position.y - min_y) / height;
+        if !(min_t..=max_t).contains(&t) {
+            continue;
+        }
+        let dx = point.position.x - center_x;
+        if dx < -gap {
+            left += 1;
+        } else if dx > gap {
+            right += 1;
+        } else {
+            center += 1;
+        }
+    }
+    (left, center, right)
+}
+
+#[test]
+fn checked_in_human_silhouette_reference_is_available() {
+    let reference = include_str!("../docs/reference/human_body_silhouette.svg");
+    if !reference.contains("width=\"970\"") || !reference.contains("height=\"2200\"") {
+        fail("human silhouette reference should keep the original Commons SVG dimensions");
+    }
+    if !reference.contains("path2180") {
+        fail("human silhouette reference should contain the original silhouette path");
+    }
+
+    let attribution = include_str!("../docs/reference/README.md");
+    if !attribution.contains("File:Human_body_silhouette.svg")
+        || !attribution.contains("public domain")
+    {
+        fail("human silhouette reference should keep source and license notes");
+    }
+}
+
 #[test]
 fn generated_body_has_expected_layers_and_anatomy() {
     let world = rp::create_layered_body(1280.0, 720.0, rp::Materials::default());
@@ -106,16 +174,43 @@ fn generated_body_has_expected_layers_and_anatomy() {
         fail("every generated skin point should have at least one muscle attachment");
     }
     let head_width = skin_band_width(&world, 0.02, 0.16);
+    let neck_width = central_skin_band_width(&world, 0.135, 0.188);
     let shoulder_width = skin_band_width(&world, 0.22, 0.36);
+    let chest_width = central_skin_band_width(&world, 0.32, 0.43);
     let waist_width = central_skin_band_width(&world, 0.45, 0.58);
-    if head_width <= 0.0 || shoulder_width <= 0.0 || waist_width <= 0.0 {
-        fail("generated human body should have visible head, shoulders, and torso");
+    let hip_width = central_skin_band_width(&world, 0.61, 0.72);
+    let (left_leg_points, lower_leg_gap_points, right_leg_points) =
+        skin_band_region_counts(&world, 0.82, 0.94, 0.018);
+    if head_width <= 0.0
+        || neck_width <= 0.0
+        || shoulder_width <= 0.0
+        || chest_width <= 0.0
+        || waist_width <= 0.0
+        || hip_width <= 0.0
+        || left_leg_points == 0
+        || right_leg_points == 0
+    {
+        fail(
+            "generated human body should have visible head, neck, shoulders, torso, hips, and legs",
+        );
+    }
+    if neck_width > head_width * 0.85 {
+        fail("neck should read narrower than the head");
     }
     if shoulder_width < head_width * 2.05 {
         fail("shoulders should read wider than the head");
     }
+    if chest_width < waist_width * 1.15 {
+        fail("ribcage should read wider than the waist");
+    }
     if waist_width > shoulder_width * 0.78 {
         fail("torso should taper from shoulders toward the waist");
+    }
+    if hip_width < waist_width * 1.05 {
+        fail("pelvis should widen again below the waist");
+    }
+    if lower_leg_gap_points >= left_leg_points.min(right_leg_points) {
+        fail("separated legs should keep a readable center gap below the pelvis");
     }
 
     let anatomy = rp::validate_anatomy(&world, 16);
@@ -156,7 +251,20 @@ fn rest_simulation_stays_stable_and_idle() {
         || stats.fragment_tissue_tears != 0
         || stats.fractured_bones != 0
     {
-        fail("rest simulation should not tear tissue");
+        panic!(
+            "FAIL: rest simulation should not tear tissue: skin={} muscle={} attachments={} bone_attachments={} bone_joints={} emitted_fluid={} wounds={} wound_fluid={} fragment_hits={} fragment_tears={} fractures={}",
+            stats.broken_skin,
+            stats.broken_muscle,
+            stats.broken_attachments,
+            stats.broken_bone_attachments,
+            stats.broken_bone_joints,
+            stats.emitted_fluid_particles,
+            stats.opened_wounds,
+            stats.wound_fluid_particles,
+            stats.fragment_tissue_hits,
+            stats.fragment_tissue_tears,
+            stats.fractured_bones
+        );
     }
     if !world.fluids().is_empty() || !world.wounds().is_empty() {
         fail("rest simulation should not emit fluid particles");
