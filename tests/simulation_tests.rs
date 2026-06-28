@@ -4,6 +4,60 @@ fn fail(message: &str) {
     panic!("FAIL: {message}");
 }
 
+fn skin_band_width(world: &rp::World, min_t: f64, max_t: f64) -> f64 {
+    skin_band_width_with_filter(world, min_t, max_t, f64::INFINITY)
+}
+
+fn central_skin_band_width(world: &rp::World, min_t: f64, max_t: f64) -> f64 {
+    skin_band_width_with_filter(world, min_t, max_t, 0.13)
+}
+
+fn skin_band_width_with_filter(
+    world: &rp::World,
+    min_t: f64,
+    max_t: f64,
+    max_center_distance: f64,
+) -> f64 {
+    let skin_points: Vec<_> = world
+        .points()
+        .iter()
+        .filter(|point| point.layer == rp::TissueLayer::Skin)
+        .collect();
+    let min_y = skin_points
+        .iter()
+        .map(|point| point.position.y)
+        .fold(f64::INFINITY, f64::min);
+    let max_y = skin_points
+        .iter()
+        .map(|point| point.position.y)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let min_body_x = skin_points
+        .iter()
+        .map(|point| point.position.x)
+        .fold(f64::INFINITY, f64::min);
+    let max_body_x = skin_points
+        .iter()
+        .map(|point| point.position.x)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let height = (max_y - min_y).max(1.0);
+    let center_x = (min_body_x + max_body_x) * 0.5;
+    let center_limit = height * max_center_distance;
+    let mut min_x = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    for point in skin_points {
+        let t = (point.position.y - min_y) / height;
+        if t >= min_t && t <= max_t && (point.position.x - center_x).abs() <= center_limit {
+            min_x = min_x.min(point.position.x);
+            max_x = max_x.max(point.position.x);
+        }
+    }
+    if min_x.is_finite() && max_x.is_finite() {
+        max_x - min_x
+    } else {
+        0.0
+    }
+}
+
 #[test]
 fn generated_body_has_expected_layers_and_anatomy() {
     let world = rp::create_layered_body(1280.0, 720.0, rp::Materials::default());
@@ -50,6 +104,18 @@ fn generated_body_has_expected_layers_and_anatomy() {
         point.layer == rp::TissueLayer::Skin && skin_attachment_counts[index] == 0
     }) {
         fail("every generated skin point should have at least one muscle attachment");
+    }
+    let head_width = skin_band_width(&world, 0.02, 0.16);
+    let shoulder_width = skin_band_width(&world, 0.22, 0.36);
+    let waist_width = central_skin_band_width(&world, 0.45, 0.58);
+    if head_width <= 0.0 || shoulder_width <= 0.0 || waist_width <= 0.0 {
+        fail("generated human body should have visible head, shoulders, and torso");
+    }
+    if shoulder_width < head_width * 2.05 {
+        fail("shoulders should read wider than the head");
+    }
+    if waist_width > shoulder_width * 0.78 {
+        fail("torso should taper from shoulders toward the waist");
     }
 
     let anatomy = rp::validate_anatomy(&world, 16);
