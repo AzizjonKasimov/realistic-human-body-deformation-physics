@@ -9,7 +9,7 @@ fn skin_band_width(world: &rp::World, min_t: f64, max_t: f64) -> f64 {
 }
 
 fn central_skin_band_width(world: &rp::World, min_t: f64, max_t: f64) -> f64 {
-    skin_band_width_with_filter(world, min_t, max_t, 0.13)
+    skin_band_width_with_filter(world, min_t, max_t, 0.14)
 }
 
 fn skin_band_width_with_filter(
@@ -109,23 +109,55 @@ fn skin_band_region_counts(
 }
 
 #[test]
-fn checked_in_human_silhouette_reference_is_available() {
-    let reference = include_str!("../docs/reference/human_body_silhouette.svg");
-    if !reference.contains("width=\"970\"") || !reference.contains("height=\"2200\"") {
-        fail("human silhouette reference should keep the original Commons SVG dimensions");
+fn checked_in_front_facing_pixel_silhouette_reference_is_available() {
+    let mask =
+        include_str!("../docs/reference/pixel_human_silhouettes/front_adult_silhouette_41x96.mask");
+    if !mask.contains("front-facing adult silhouette") {
+        fail("pixel silhouette reference should explicitly identify the adult front-facing source");
     }
-    if !reference.contains("path2180") {
-        fail("human silhouette reference should contain the original silhouette path");
+    if mask.contains("side-facing") || mask.contains("back-facing") {
+        fail("body-generation silhouette reference must stay front-facing only");
+    }
+
+    let mut width = 0usize;
+    let mut height = 0usize;
+    let mut rows = Vec::new();
+    for line in mask.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("# ") {
+            continue;
+        }
+        if let Some(size) = line.strip_prefix("size ") {
+            let mut parts = size.split_whitespace();
+            width = parts
+                .next()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            height = parts
+                .next()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            continue;
+        }
+        if line.chars().any(|value| value != '#' && value != '.') {
+            fail("pixel silhouette mask should contain only occupied and transparent pixels");
+        }
+        rows.push(line);
+    }
+    if width != 41 || height != 96 || rows.len() != height {
+        fail("front-facing adult pixel silhouette mask should stay at the expected 41x96 size");
+    }
+    if rows.iter().any(|row| row.len() != width) {
+        fail("front-facing pixel silhouette mask rows should match the declared width");
     }
 
     let attribution = include_str!("../docs/reference/README.md");
-    if !attribution.contains("File:Human_body_silhouette.svg")
-        || !attribution.contains("public domain")
+    if !attribution.contains("front-facing adult silhouette")
+        || !attribution.contains("front_adult_silhouette_41x96.mask")
     {
-        fail("human silhouette reference should keep source and license notes");
+        fail("pixel silhouette reference should keep front-facing source and usage notes");
     }
 }
-
 #[test]
 fn generated_body_has_expected_layers_and_anatomy() {
     let world = rp::create_layered_body(1280.0, 720.0, rp::Materials::default());
@@ -173,12 +205,12 @@ fn generated_body_has_expected_layers_and_anatomy() {
     }) {
         fail("every generated skin point should have at least one muscle attachment");
     }
-    let head_width = skin_band_width(&world, 0.02, 0.16);
-    let neck_width = central_skin_band_width(&world, 0.135, 0.188);
-    let shoulder_width = skin_band_width(&world, 0.22, 0.36);
-    let chest_width = central_skin_band_width(&world, 0.32, 0.43);
-    let waist_width = central_skin_band_width(&world, 0.45, 0.58);
-    let hip_width = central_skin_band_width(&world, 0.61, 0.72);
+    let head_width = skin_band_width(&world, 0.04, 0.20);
+    let neck_width = central_skin_band_width(&world, 0.20, 0.27);
+    let shoulder_width = skin_band_width(&world, 0.35, 0.48);
+    let chest_width = central_skin_band_width(&world, 0.45, 0.57);
+    let waist_width = central_skin_band_width(&world, 0.57, 0.69);
+    let hip_width = central_skin_band_width(&world, 0.70, 0.78);
     let (left_leg_points, lower_leg_gap_points, right_leg_points) =
         skin_band_region_counts(&world, 0.82, 0.94, 0.018);
     if head_width <= 0.0
@@ -195,19 +227,25 @@ fn generated_body_has_expected_layers_and_anatomy() {
         );
     }
     if neck_width > head_width * 0.85 {
-        fail("neck should read narrower than the head");
+        panic!(
+            "FAIL: neck should read narrower than the head: neck={neck_width:.2} head={head_width:.2}"
+        );
     }
-    if shoulder_width < head_width * 2.05 {
-        fail("shoulders should read wider than the head");
+    if shoulder_width < head_width * 1.30 || shoulder_width < neck_width * 1.75 {
+        fail("front-facing adult shoulders should read clearly broader than the head and neck");
     }
-    if chest_width < waist_width * 1.15 {
-        fail("ribcage should read wider than the waist");
+    if chest_width < waist_width * 1.10 {
+        panic!(
+            "FAIL: front-facing adult ribcage should read wider than the waist: chest={chest_width:.2} waist={waist_width:.2}"
+        );
     }
     if waist_width > shoulder_width * 0.78 {
         fail("torso should taper from shoulders toward the waist");
     }
     if hip_width < waist_width * 1.05 {
-        fail("pelvis should widen again below the waist");
+        panic!(
+            "FAIL: pelvis should widen again below the waist: hip={hip_width:.2} waist={waist_width:.2}"
+        );
     }
     if lower_leg_gap_points >= left_leg_points.min(right_leg_points) {
         fail("separated legs should keep a readable center gap below the pelvis");

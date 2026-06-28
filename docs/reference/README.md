@@ -2,6 +2,16 @@
 
 This folder stores visual references used to tune the procedural body silhouette.
 
+## `pixel_human_silhouettes/front_adult_silhouette_41x96.mask`
+
+- Primary body-shape reference used by `src/simulation.rs`.
+- Custom original pixel mask based on the user-requested direction: slim adult silhouette, facing front, arms hanging down, long separated legs.
+- Format: `#` means occupied body pixel, `.` means transparent pixel.
+- Direction constraint: front-facing adult silhouette only. Do not use side, back, diagonal, or multi-direction sprite frames for the generated body silhouette.
+- The watermarked sample image from the thread is visual direction only and is not copied into this repository.
+
+The Rust body generator samples this mask for the outer skin layer and samples a horizontally inset version for the muscle layer. This keeps the sandbox body tied to a concrete 2D pixel-art front silhouette rather than a smooth vector outline.
+
 ## `human_body_silhouette.svg`
 
 - Source: https://commons.wikimedia.org/wiki/File:Human_body_silhouette.svg
@@ -10,4 +20,4 @@ This folder stores visual references used to tune the procedural body silhouette
 - Author/derivative attribution on Commons: based on `Upper body front.png` by Mikael Haggstrom, transparent background by Frederic MICHEL, derivative work by RexxS.
 - License: public domain / PD-self as stated on the Wikimedia Commons file page.
 
-The Rust body generator in `src/simulation.rs` uses this as the proportion reference for head width, shoulder span, torso taper, pelvis width, hanging arm placement, leg separation, and overall front-view silhouette readability.
+This SVG is retained as an auxiliary front-view anatomy/proportion reference. It is not the primary pixel silhouette source for body generation.

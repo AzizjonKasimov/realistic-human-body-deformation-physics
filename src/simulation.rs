@@ -9,6 +9,9 @@ const FRAGMENT_TISSUE_TANGENTIAL_FRICTION: f64 = 0.34;
 const FRAGMENT_TISSUE_ANGULAR_FRICTION: f64 = 0.18;
 const SKIN_ATTACHMENT_CANDIDATES: usize = 4;
 pub const MISSING_SPRING: usize = usize::MAX;
+const FRONT_PIXEL_SILHOUETTE_REFERENCE: &str =
+    include_str!("../docs/reference/pixel_human_silhouettes/front_adult_silhouette_41x96.mask");
+const FRONT_PIXEL_SILHOUETTE_WORLD_WIDTH: f64 = 0.60;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vec2 {
@@ -3521,92 +3524,92 @@ pub fn create_layered_body(width: f64, height: f64, materials: Materials) -> Wor
     };
 
     let head_bone = world.add_bone_segment(
-        body_point(0.0, 0.047),
-        body_point(0.0, 0.142),
-        8.8,
+        body_point(0.0, 0.070),
+        body_point(0.0, 0.205),
+        8.2,
         materials.bone_fracture_impulse * 0.75,
         true,
     );
     let spine_bone = world.add_bone_segment(
-        body_point(0.0, 0.170),
-        body_point(0.0, 0.650),
+        body_point(0.0, 0.250),
+        body_point(0.0, 0.720),
         7.2,
         materials.bone_fracture_impulse,
         false,
     );
     let shoulder_bone = world.add_bone_segment(
-        body_point(-0.120, 0.260),
-        body_point(0.120, 0.260),
+        body_point(-0.116, 0.375),
+        body_point(0.116, 0.375),
         6.2,
         materials.bone_fracture_impulse * 0.95,
         false,
     );
     let pelvis_bone = world.add_bone_segment(
-        body_point(-0.094, 0.655),
-        body_point(0.094, 0.655),
+        body_point(-0.055, 0.720),
+        body_point(0.055, 0.720),
         6.4,
         materials.bone_fracture_impulse * 0.9,
         false,
     );
     let left_upper_arm_bone = world.add_bone_segment(
-        body_point(-0.136, 0.294),
-        body_point(-0.164, 0.470),
+        body_point(-0.130, 0.405),
+        body_point(-0.165, 0.585),
         5.7,
         materials.bone_fracture_impulse * 0.82,
         false,
     );
     let left_forearm_bone = world.add_bone_segment(
-        body_point(-0.164, 0.470),
-        body_point(-0.171, 0.688),
+        body_point(-0.165, 0.585),
+        body_point(-0.158, 0.700),
         4.8,
         materials.bone_fracture_impulse * 0.72,
         false,
     );
     let right_upper_arm_bone = world.add_bone_segment(
-        body_point(0.136, 0.294),
-        body_point(0.164, 0.470),
+        body_point(0.130, 0.405),
+        body_point(0.165, 0.585),
         5.7,
         materials.bone_fracture_impulse * 0.82,
         false,
     );
     let right_forearm_bone = world.add_bone_segment(
-        body_point(0.164, 0.470),
-        body_point(0.171, 0.688),
+        body_point(0.165, 0.585),
+        body_point(0.158, 0.700),
         4.8,
         materials.bone_fracture_impulse * 0.72,
         false,
     );
     let left_thigh_bone = world.add_bone_segment(
-        body_point(-0.054, 0.690),
-        body_point(-0.070, 0.835),
+        body_point(-0.045, 0.755),
+        body_point(-0.065, 0.875),
         6.4,
         materials.bone_fracture_impulse * 0.9,
         false,
     );
     let left_shin_bone = world.add_bone_segment(
-        body_point(-0.070, 0.835),
-        body_point(-0.079, 0.965),
+        body_point(-0.065, 0.875),
+        body_point(-0.083, 0.968),
         5.3,
         materials.bone_fracture_impulse * 0.78,
         false,
     );
     let right_thigh_bone = world.add_bone_segment(
-        body_point(0.054, 0.690),
-        body_point(0.070, 0.835),
+        body_point(0.045, 0.755),
+        body_point(0.065, 0.875),
         6.4,
         materials.bone_fracture_impulse * 0.9,
         false,
     );
     let right_shin_bone = world.add_bone_segment(
-        body_point(0.070, 0.835),
-        body_point(0.079, 0.965),
+        body_point(0.065, 0.875),
+        body_point(0.083, 0.968),
         5.3,
         materials.bone_fracture_impulse * 0.78,
         false,
     );
 
     world.add_bone_joint(head_bone, 1.0, spine_bone, 0.0, -0.45, 0.45);
-    world.add_bone_joint(spine_bone, 0.19, shoulder_bone, 0.5, -0.55, 0.55);
+    world.add_bone_joint(spine_bone, 0.27, shoulder_bone, 0.5, -0.55, 0.55);
     world.add_bone_joint(spine_bone, 1.0, pelvis_bone, 0.5, -0.45, 0.45);
     world.add_bone_joint(shoulder_bone, 0.0, left_upper_arm_bone, 0.0, -1.25, 1.05);
     world.add_bone_joint(
@@ -4083,79 +4086,55 @@ fn closest_segment_points(a0: Vec2, a1: Vec2, b0: Vec2, b1: Vec2) -> SegmentClos
 }
 
 fn is_inside_humanoid_layer(nx: f64, ny: f64, inset: f64) -> bool {
-    let s = (1.0 - inset).clamp(0.28, 1.0);
-    let arm_radius = 0.035 * s;
-    let forearm_radius = 0.030 * s;
-    let thigh_radius = 0.046 * s;
-    let calf_radius = 0.036 * s;
-
-    // Calibrated against docs/reference/human_body_silhouette.svg so the
-    // generated lattice reads as a front-view human instead of a block puppet.
-    ellipse(nx, ny, 0.0, 0.067, 0.073 * s, 0.080 * s)
-        || ellipse(nx, ny, 0.0, 0.132, 0.055 * s, 0.039 * s)
-        || capsule(nx, ny, 0.0, 0.136, 0.0, 0.205, 0.027 * s)
-        || capsule(nx, ny, -0.124 * s, 0.248, 0.124 * s, 0.248, 0.044 * s)
-        || reference_torso(nx, ny, s)
-        || ellipse(nx, ny, 0.0, 0.655, 0.130 * s, 0.070 * s)
-        || ellipse(nx, ny, -0.132 * s, 0.298, 0.041 * s, 0.052 * s)
-        || capsule(nx, ny, -0.136 * s, 0.294, -0.164 * s, 0.470, arm_radius)
-        || capsule(nx, ny, -0.164 * s, 0.470, -0.171 * s, 0.692, forearm_radius)
-        || ellipse(nx, ny, -0.172 * s, 0.728, 0.034 * s, 0.041 * s)
-        || ellipse(nx, ny, 0.132 * s, 0.298, 0.041 * s, 0.052 * s)
-        || capsule(nx, ny, 0.136 * s, 0.294, 0.164 * s, 0.470, arm_radius)
-        || capsule(nx, ny, 0.164 * s, 0.470, 0.171 * s, 0.692, forearm_radius)
-        || ellipse(nx, ny, 0.172 * s, 0.728, 0.034 * s, 0.041 * s)
-        || capsule(nx, ny, -0.054 * s, 0.690, -0.070 * s, 0.835, thigh_radius)
-        || capsule(nx, ny, -0.070 * s, 0.835, -0.079 * s, 0.970, calf_radius)
-        || ellipse(nx, ny, -0.094 * s, 0.986, 0.045 * s, 0.020 * s)
-        || capsule(nx, ny, 0.054 * s, 0.690, 0.070 * s, 0.835, thigh_radius)
-        || capsule(nx, ny, 0.070 * s, 0.835, 0.079 * s, 0.970, calf_radius)
-        || ellipse(nx, ny, 0.094 * s, 0.986, 0.045 * s, 0.020 * s)
+    let horizontal_scale = (1.0 - inset * 0.72).clamp(0.34, 1.0);
+    let vertical_scale = (1.0 - inset * 0.12).clamp(0.84, 1.0);
+    let sample_y = (ny - 0.52) / vertical_scale + 0.52;
+    let sample_x = nx / horizontal_scale;
+    front_pixel_mask_contains(sample_x, sample_y)
 }
 
-fn ellipse(x: f64, y: f64, cx: f64, cy: f64, rx: f64, ry: f64) -> bool {
-    let dx = (x - cx) / rx;
-    let dy = (y - cy) / ry;
-    dx * dx + dy * dy <= 1.0
-}
-
-fn reference_torso(x: f64, y: f64, scale_factor: f64) -> bool {
-    let top = 0.178;
-    let bottom = 0.690;
-    if !(top..=bottom).contains(&y) {
+fn front_pixel_mask_contains(nx: f64, ny: f64) -> bool {
+    if !(0.0..=1.0).contains(&ny) {
+        return false;
+    }
+    let x_ratio =
+        (nx + FRONT_PIXEL_SILHOUETTE_WORLD_WIDTH * 0.5) / FRONT_PIXEL_SILHOUETTE_WORLD_WIDTH;
+    if !(0.0..=1.0).contains(&x_ratio) {
         return false;
     }
 
-    let t = (y - top) / (bottom - top);
-    let half_width = if t < 0.16 {
-        lerp_scalar(0.052, 0.126, smoothstep(t / 0.16))
-    } else if t < 0.42 {
-        lerp_scalar(0.126, 0.121, smoothstep((t - 0.16) / 0.26))
-    } else if t < 0.76 {
-        lerp_scalar(0.121, 0.088, smoothstep((t - 0.42) / 0.34))
-    } else {
-        lerp_scalar(0.088, 0.118, smoothstep((t - 0.76) / 0.24))
-    } * scale_factor;
+    let mut width = 0usize;
+    let mut height = 0usize;
+    let mut rows = Vec::new();
+    for line in FRONT_PIXEL_SILHOUETTE_REFERENCE.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with("# ") {
+            continue;
+        }
+        if let Some(size) = line.strip_prefix("size ") {
+            let mut parts = size.split_whitespace();
+            width = parts
+                .next()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            height = parts
+                .next()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            continue;
+        }
+        rows.push(line);
+    }
+    if width == 0 || height == 0 || rows.len() != height {
+        return false;
+    }
 
-    let top_softening = lerp_scalar(0.50, 1.0, smoothstep(t / 0.09));
-    let bottom_softening = lerp_scalar(0.68, 1.0, smoothstep((1.0 - t) / 0.10));
-    x.abs() <= half_width * top_softening * bottom_softening
+    let col = (x_ratio * width as f64)
+        .floor()
+        .clamp(0.0, (width - 1) as f64) as usize;
+    let row = (ny * height as f64).floor().clamp(0.0, (height - 1) as f64) as usize;
+    rows[row].as_bytes().get(col).copied() == Some(b'#')
 }
-
-fn capsule(x: f64, y: f64, ax: f64, ay: f64, bx: f64, by: f64, radius: f64) -> bool {
-    let abx = bx - ax;
-    let aby = by - ay;
-    let apx = x - ax;
-    let apy = y - ay;
-    let ab_len_sq = abx * abx + aby * aby;
-    let t = ((apx * abx + apy * aby) / ab_len_sq).clamp(0.0, 1.0);
-    let cx = ax + abx * t;
-    let cy = ay + aby * t;
-    let dx = x - cx;
-    let dy = y - cy;
-    dx * dx + dy * dy <= radius * radius
-}
-
 fn bone_point(bone: BoneSegment, t: f64) -> Vec2 {
     Vec2 {
         x: bone.a.x + (bone.b.x - bone.a.x) * t,
@@ -4186,15 +4165,6 @@ fn lerp(a: Vec2, b: Vec2, t: f64) -> Vec2 {
         x: a.x + (b.x - a.x) * t,
         y: a.y + (b.y - a.y) * t,
     }
-}
-
-fn lerp_scalar(a: f64, b: f64, t: f64) -> f64 {
-    a + (b - a) * t.clamp(0.0, 1.0)
-}
-
-fn smoothstep(t: f64) -> f64 {
-    let t = t.clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
 }
 
 fn wrap_angle(mut angle: f64) -> f64 {
