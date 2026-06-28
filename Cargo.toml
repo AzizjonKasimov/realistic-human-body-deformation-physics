@@ -1,0 +1,24 @@
+[package]
+name = "realistic_physics"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[lib]
+name = "realistic_physics"
+path = "src/lib.rs"
+
+[[bin]]
+name = "realistic_physics"
+path = "src/bin/realistic_physics.rs"
+
+[[bin]]
+name = "anatomy_diagnostics"
+path = "src/bin/anatomy_diagnostics.rs"
+
+[[bin]]
+name = "strike_scenarios"
+path = "src/bin/strike_scenarios.rs"
+
+[dependencies]
+macroquad = "0.4"

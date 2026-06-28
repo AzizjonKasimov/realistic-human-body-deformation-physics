@@ -1,5 +1,4 @@
 param(
-    [switch]$Configure,
     [switch]$SkipDiagnostics,
     [switch]$BuildApp,
     [switch]$StopRunningApp
@@ -8,30 +7,19 @@ param(
 . "$PSScriptRoot\common.ps1"
 
 $repoRoot = Get-RepoRoot
-Initialize-WindowsBuild -Force:$Configure
 
-Invoke-WindowsTarget -Target "realistic_physics_tests" -Config "Debug" -CleanFirst
-Invoke-ExeViaCmd `
-    -ExePath (Join-Path $repoRoot "build\vs\Debug\realistic_physics_tests.exe") `
-    -Label "Run simulation tests"
-
-Invoke-WindowsTarget -Target "realistic_physics_strike_scenarios" -Config "Debug" -CleanFirst
-Invoke-ExeViaCmd `
-    -ExePath (Join-Path $repoRoot "build\vs\Debug\realistic_physics_strike_scenarios.exe") `
-    -Arguments @("output\strike_scenarios.csv") `
-    -Label "Run strike scenarios"
+Invoke-Cargo -Arguments @("fmt", "--check") -Label "Check Rust formatting"
+Invoke-Cargo -Arguments @("test") -Label "Run Rust simulation tests"
+Invoke-Cargo -Arguments @("run", "--bin", "strike_scenarios", "--", "output\strike_scenarios.csv") -Label "Run Rust strike scenarios"
 
 if (-not $SkipDiagnostics) {
-    Invoke-WindowsTarget -Target "realistic_physics_diagnostics" -Config "Debug" -CleanFirst
-    Invoke-ExeViaCmd `
-        -ExePath (Join-Path $repoRoot "build\vs\Debug\realistic_physics_diagnostics.exe") `
-        -Arguments @("output\anatomy_debug.svg") `
-        -Label "Run anatomy diagnostics"
+    Invoke-Cargo -Arguments @("run", "--bin", "anatomy_diagnostics", "--", "output\anatomy_debug.svg") -Label "Run Rust anatomy diagnostics"
 }
 
 if ($BuildApp) {
     Stop-RunningAppIfRequested -StopRunningApp:$StopRunningApp
-    Invoke-WindowsTarget -Target "realistic_physics" -Config "Release" -CleanFirst
+    Invoke-Cargo -Arguments @("build", "--release", "--bin", "realistic_physics") -Label "Build Rust app (Release)"
+    Copy-RustAppToRepoRoot
 }
 
 Write-Host ""

@@ -15,8 +15,10 @@ The end product is a free standalone download that someone can install, play wit
 ## Agreed Direction
 
 - Do not use a pre-made game engine for the core prototype.
-- Use native C++ as the main implementation path for the Windows-first sandbox.
-- Keep the experience simulation-focused instead of graphic for its own sake.
-- Target Windows first.
+- Use the Rust implementation as the main path, with `macroquad` for the cross-platform desktop renderer.
+- Target Windows first while keeping the renderer and simulation portable enough for macOS.
 - Start one system at a time, beginning with soft-body skin tearing.
 - Prioritize real simulation behavior over scripted decals or canned animations.
+- Aim as close as practical to real-life body destruction physics.
+- Treat graphic injury detail as part of the simulation target: gore, exposed tissue, blood, tearing, fracture, and body deformation should be shown when the physics state supports them.
+- Do not ask whether the app should be less gory by default; assume a darker, more realistic destruction model unless a later product decision explicitly says otherwise.

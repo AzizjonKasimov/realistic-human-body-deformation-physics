@@ -4,16 +4,15 @@ function Get-RepoRoot {
     return (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 }
 
-function Get-CMakePath {
-    $fromPath = Get-Command cmake -ErrorAction SilentlyContinue
+function Get-CargoPath {
+    $fromPath = Get-Command cargo -ErrorAction SilentlyContinue
     if ($fromPath) {
         return $fromPath.Source
     }
 
     $candidates = @(
-        "C:\Program Files\CMake\bin\cmake.exe",
-        "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe",
-        "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
+        (Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"),
+        (Join-Path $env:USERPROFILE ".rustup\toolchains\stable-x86_64-pc-windows-msvc\bin\cargo.exe")
     )
 
     foreach ($candidate in $candidates) {
@@ -22,7 +21,7 @@ function Get-CMakePath {
         }
     }
 
-    throw "Could not find cmake.exe. Install CMake or update tools/common.ps1 with the local CMake path."
+    throw "Could not find cargo.exe. Install Rust with: winget install Rustlang.Rustup; then restart PowerShell."
 }
 
 function Invoke-Checked {
@@ -46,80 +45,35 @@ function Invoke-Checked {
     }
 }
 
-function Invoke-CmdChecked {
+function Invoke-Cargo {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$CommandLine,
-        [Parameter(Mandatory = $true)]
-        [string]$Label
-    )
-
-    Write-Host ""
-    Write-Host "==> $Label"
-    $outputFile = [System.IO.Path]::GetTempFileName()
-    try {
-        & "$env:SystemRoot\System32\cmd.exe" /d /c "$CommandLine > `"$outputFile`" 2>&1"
-        $exitCode = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
-        Get-Content $outputFile | ForEach-Object { Write-Host $_ }
-        if ($exitCode -ne 0) {
-            throw "$Label failed with exit code $exitCode"
-        }
-        Write-Host "OK: $Label"
-    } finally {
-        Remove-Item $outputFile -ErrorAction SilentlyContinue
-    }
-}
-
-function Initialize-WindowsBuild {
-    param(
-        [string]$Generator = "Visual Studio 17 2022",
-        [string]$Architecture = "x64",
-        [switch]$Force
-    )
-
-    $repoRoot = Get-RepoRoot
-    $cmake = Get-CMakePath
-    $cache = Join-Path $repoRoot "build\vs\CMakeCache.txt"
-    $projectFile = Join-Path $repoRoot "CMakeLists.txt"
-    $projectChanged = (Test-Path $cache) -and (Test-Path $projectFile) -and
-        ((Get-Item $projectFile).LastWriteTime -gt (Get-Item $cache).LastWriteTime)
-    if ($Force -or -not (Test-Path $cache) -or $projectChanged) {
-        Invoke-CmdChecked `
-            -Label "Configure Visual Studio build" `
-            -CommandLine "cd /d `"$repoRoot`" && `"$cmake`" -S . -B build\vs -G `"$Generator`" -A $Architecture"
-    }
-}
-
-function Invoke-WindowsTarget {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Target,
-        [string]$Config = "Debug",
-        [switch]$CleanFirst
-    )
-
-    $repoRoot = Get-RepoRoot
-    $cmake = Get-CMakePath
-    $cleanText = if ($CleanFirst) { " --clean-first" } else { "" }
-    Invoke-CmdChecked `
-        -Label "Build $Target ($Config)" `
-        -CommandLine "cd /d `"$repoRoot`" && `"$cmake`" --build build\vs --config $Config --target $Target$cleanText"
-}
-
-function Invoke-ExeViaCmd {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$ExePath,
-        [string[]]$Arguments = @(),
+        [string[]]$Arguments,
         [Parameter(Mandatory = $true)]
         [string]$Label
     )
 
     $repoRoot = Get-RepoRoot
-    $argumentText = if ($Arguments.Count -gt 0) { " " + ($Arguments -join " ") } else { "" }
-    Invoke-CmdChecked `
+    $cargo = Get-CargoPath
+    Invoke-Checked `
         -Label $Label `
-        -CommandLine "cd /d `"$repoRoot`" && `"$ExePath`"$argumentText"
+        -Command {
+            Push-Location $repoRoot
+            try {
+                & $cargo @Arguments
+            } finally {
+                Pop-Location
+            }
+        }
+}
+
+function Copy-RustAppToRepoRoot {
+    $repoRoot = Get-RepoRoot
+    $builtExe = Join-Path $repoRoot "target\release\realistic_physics.exe"
+    if (-not (Test-Path $builtExe)) {
+        throw "Expected Rust app executable was not produced: $builtExe"
+    }
+    Copy-Item -LiteralPath $builtExe -Destination (Join-Path $repoRoot "realistic_physics.exe") -Force
 }
 
 function Stop-RunningAppIfRequested {
