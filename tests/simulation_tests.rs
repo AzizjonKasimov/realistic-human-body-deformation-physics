@@ -307,6 +307,29 @@ fn rest_simulation_stays_stable_and_idle() {
     if !world.fluids().is_empty() || !world.wounds().is_empty() {
         fail("rest simulation should not emit fluid particles");
     }
+    let mut skin_displacement_sum = 0.0;
+    let mut skin_displacement_count = 0usize;
+    let mut max_skin_displacement = 0.0;
+    for point in world
+        .points()
+        .iter()
+        .filter(|point| point.layer == rp::TissueLayer::Skin)
+    {
+        let displacement = ((point.position.x - point.home.x).powi(2)
+            + (point.position.y - point.home.y).powi(2))
+        .sqrt();
+        skin_displacement_sum += displacement;
+        skin_displacement_count += 1;
+        if displacement > max_skin_displacement {
+            max_skin_displacement = displacement;
+        }
+    }
+    let average_skin_displacement = skin_displacement_sum / skin_displacement_count.max(1) as f64;
+    if average_skin_displacement > 18.0 || max_skin_displacement > 76.0 {
+        panic!(
+            "FAIL: idle body should retain passive tissue shape: avg={average_skin_displacement:.2} max={max_skin_displacement:.2}"
+        );
+    }
     let debug = world.debug();
     if debug.active || debug.impact != 0.0 || debug.bone_contacts != 0 || debug.tissue_contacts != 0
     {

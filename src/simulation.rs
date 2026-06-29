@@ -147,44 +147,44 @@ impl Default for Materials {
     fn default() -> Self {
         Self {
             fixed_dt: 1.0 / 60.0,
-            solver_iterations: 9,
+            solver_iterations: 12,
             gravity: 920.0,
-            damping: 0.992,
+            damping: 0.988,
             point_spacing: 11.5,
             floor_friction: 0.78,
             striker_radius: 34.0,
             striker_mass: 2.9,
             direct_muscle_contact: 0.18,
-            skin_shape_stiffness: 0.006,
-            muscle_shape_stiffness: 0.018,
-            skin_structural_stiffness: 0.82,
-            skin_shear_stiffness: 0.48,
-            skin_area_stiffness: 0.03,
+            skin_shape_stiffness: 0.012,
+            muscle_shape_stiffness: 0.030,
+            skin_structural_stiffness: 0.92,
+            skin_shear_stiffness: 0.58,
+            skin_area_stiffness: 0.070,
             skin_tear_stretch: 1.68,
             skin_tear_impulse: 820.0,
-            muscle_fiber_stiffness: 0.74,
-            muscle_cross_stiffness: 0.34,
-            muscle_shear_stiffness: 0.28,
-            muscle_area_stiffness: 0.24,
+            muscle_fiber_stiffness: 0.86,
+            muscle_cross_stiffness: 0.44,
+            muscle_shear_stiffness: 0.38,
+            muscle_area_stiffness: 0.36,
             muscle_tear_stretch: 1.92,
             muscle_tear_impulse: 1180.0,
             muscle_exposed_tear_impulse: 620.0,
-            attachment_stiffness: 0.34,
-            attachment_break_stretch: 2.55,
+            attachment_stiffness: 0.46,
+            attachment_break_stretch: 2.40,
             attachment_break_impulse: 980.0,
             bone_fracture_impulse: 1850.0,
             max_bone_fracture_depth: 3,
             min_bone_fragment_length: 30.0,
-            bone_damping: 0.988,
-            bone_angular_damping: 0.965,
+            bone_damping: 0.984,
+            bone_angular_damping: 0.955,
             bone_torque_scale: 0.35,
             fracture_spin_scale: 1.10,
-            bone_shape_stiffness: 0.004,
-            bone_attachment_stiffness: 0.38,
+            bone_shape_stiffness: 0.008,
+            bone_attachment_stiffness: 0.52,
             bone_attachment_break_impulse: 2100.0,
             bone_attachment_break_stretch: 2.8,
-            bone_joint_stiffness: 0.54,
-            bone_joint_angular_stiffness: 0.16,
+            bone_joint_stiffness: 0.66,
+            bone_joint_angular_stiffness: 0.22,
             bone_joint_break_stretch: 2.15,
             bone_joint_break_impulse: 2600.0,
             bone_joint_angular_break: 1.20,
@@ -1438,7 +1438,7 @@ impl World {
             if !bone.pinned {
                 let contact_strength = self.materials.bone_direct_contact
                     * profile.bone_push_scale
-                    * (0.70 + input.power * 0.12);
+                    * (0.78 + input.power * 0.12);
                 let push_x = normal.x * depth * contact_strength * profile.rebound_scale
                     + input.vx * dt * contact_strength * 0.58 * profile.drag_scale;
                 let push_y = normal.y * depth * contact_strength * profile.rebound_scale
@@ -1484,7 +1484,7 @@ impl World {
             if point_contact.distance > influence {
                 continue;
             }
-            let mut contact_strength = (if input.down { 0.74 } else { 0.20 })
+            let mut contact_strength = (if input.down { 0.58 } else { 0.16 })
                 * profile.tissue_push_scale
                 * (0.85 + input.power * 0.15);
             if point.layer == TissueLayer::Muscle {
