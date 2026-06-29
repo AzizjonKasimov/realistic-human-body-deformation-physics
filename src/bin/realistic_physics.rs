@@ -73,19 +73,26 @@ struct RenderPalette {
     floor_edge: Color,
     skin_base: Color,
     skin_heat: Color,
+    skin_contusion: Color,
     skin_outline: Color,
     skin_wire: Color,
     muscle_base: Color,
     muscle_hot: Color,
+    muscle_contusion: Color,
     muscle_shadow: Color,
+    muscle_fiber: Color,
     bone: Color,
     bone_fractured: Color,
     bone_shadow: Color,
     blood_dark: Color,
     blood_mid: Color,
     blood_fresh: Color,
+    blood_stain: Color,
+    major_vessel: Color,
+    major_vessel_shadow: Color,
     wound_core: Color,
     wound_edge: Color,
+    wound_shadow: Color,
     attachment: Color,
     hud_back: Color,
     hud_border: Color,
@@ -289,19 +296,26 @@ fn render_palette() -> RenderPalette {
         floor_edge: rgba(92, 64, 55, 255),
         skin_base: rgba(152, 101, 83, 246),
         skin_heat: rgba(223, 77, 55, 246),
+        skin_contusion: rgba(55, 31, 86, 235),
         skin_outline: rgba(69, 40, 36, 220),
         skin_wire: rgba(136, 86, 75, 130),
         muscle_base: rgba(112, 22, 31, 190),
         muscle_hot: rgba(190, 35, 47, 225),
+        muscle_contusion: rgba(49, 13, 61, 215),
         muscle_shadow: rgba(47, 8, 13, 150),
+        muscle_fiber: rgba(235, 82, 79, 218),
         bone: rgba(222, 211, 181, 240),
         bone_fractured: rgba(255, 245, 218, 255),
         bone_shadow: rgba(53, 43, 35, 160),
         blood_dark: rgba(43, 2, 7, 235),
         blood_mid: rgba(103, 7, 15, 230),
         blood_fresh: rgba(190, 22, 26, 235),
+        blood_stain: rgba(38, 0, 7, 225),
+        major_vessel: rgba(168, 12, 24, 230),
+        major_vessel_shadow: rgba(28, 0, 5, 210),
         wound_core: rgba(34, 0, 5, 230),
         wound_edge: rgba(156, 18, 24, 235),
+        wound_shadow: rgba(17, 0, 4, 225),
         attachment: rgba(70, 148, 235, 48),
         hud_back: rgba(13, 13, 15, 198),
         hud_border: rgba(118, 97, 83, 170),
@@ -353,7 +367,11 @@ fn draw_body_layers(ctx: &RenderContext) {
     }
 
     draw_muscle_layer(ctx);
+    if ctx.anatomy {
+        draw_major_vessels(ctx);
+    }
     draw_skin_layer(ctx);
+    draw_exposed_tissue_detail(ctx);
 
     if ctx.anatomy {
         draw_bone_attachments(ctx);
@@ -363,6 +381,9 @@ fn draw_body_layers(ctx: &RenderContext) {
     }
 
     draw_wound_edges(ctx);
+    if !ctx.anatomy {
+        draw_major_vessels(ctx);
+    }
     draw_wound_sources(ctx);
 
     let debug = world.debug();
@@ -391,17 +412,31 @@ fn draw_muscle_layer(ctx: &RenderContext) {
         }
 
         let (load, exposure) = triangle_point_metrics(world, triangle);
-        let visible = ctx.anatomy || exposure > 0.035 || triangle.damage > 0.015 || load > 140.0;
+        let contusion = triangle_point_contusion(world, triangle);
+        let visible = ctx.anatomy
+            || exposure > 0.035
+            || triangle.damage > 0.015
+            || load > 140.0
+            || contusion > 0.08;
         if !visible {
             continue;
         }
 
         let heat = ((load / 900.0) + triangle.damage * 0.85 + exposure * 0.35).clamp(0.0, 1.0);
         let mut fill = mix(ctx.palette.muscle_base, ctx.palette.muscle_hot, heat as f32);
+        fill = mix(
+            fill,
+            ctx.palette.muscle_contusion,
+            (contusion * 0.48).clamp(0.0, 0.62) as f32,
+        );
         fill.a = if ctx.anatomy {
             (0.54 + heat as f32 * 0.28 + exposure as f32 * 0.10).min(0.88)
         } else {
-            (0.20 + exposure as f32 * 0.58 + triangle.damage as f32 * 0.28).clamp(0.18, 0.82)
+            (0.20
+                + exposure as f32 * 0.58
+                + triangle.damage as f32 * 0.28
+                + contusion as f32 * 0.08)
+                .clamp(0.18, 0.86)
         };
         let mut shadow = ctx.palette.muscle_shadow;
         shadow.a = if ctx.anatomy {
@@ -434,12 +469,18 @@ fn draw_skin_layer(ctx: &RenderContext) {
         }
 
         let (load, exposure) = triangle_point_metrics(world, triangle);
+        let contusion = triangle_point_contusion(world, triangle);
         let heat = (load / 1300.0).clamp(0.0, 1.0);
         if ctx.anatomy {
             let mut veil = mix(
                 ctx.palette.skin_base,
                 ctx.palette.skin_heat,
                 heat as f32 * 0.35,
+            );
+            veil = mix(
+                veil,
+                ctx.palette.skin_contusion,
+                (contusion * 0.42).clamp(0.0, 0.55) as f32,
             );
             veil.a = (0.08 + heat as f32 * 0.08).min(0.17);
             fill_triangle(world, triangle, veil);
@@ -452,19 +493,151 @@ fn draw_skin_layer(ctx: &RenderContext) {
             outline_triangle(world, triangle, wire, 1.0);
         } else {
             let mut fill = mix(ctx.palette.skin_base, ctx.palette.skin_heat, heat as f32);
+            fill = mix(
+                fill,
+                ctx.palette.skin_contusion,
+                (contusion * 0.56).clamp(0.0, 0.72) as f32,
+            );
             fill.a = (0.96 - exposure as f32 * 0.22).clamp(0.68, 0.98);
             fill_triangle(world, triangle, fill);
-            if heat > 0.08 || exposure > 0.10 {
+            if heat > 0.08 || exposure > 0.10 || contusion > 0.08 {
                 outline_triangle(
                     world,
                     triangle,
                     with_alpha(
-                        ctx.palette.skin_outline,
-                        (0.35 + heat as f32 * 0.30).min(0.72),
+                        mix(
+                            ctx.palette.skin_outline,
+                            ctx.palette.skin_contusion,
+                            (contusion * 0.35).clamp(0.0, 0.5) as f32,
+                        ),
+                        (0.35 + heat as f32 * 0.30 + contusion as f32 * 0.16).min(0.78),
                     ),
                     1.0,
                 );
             }
+        }
+    }
+}
+
+fn draw_exposed_tissue_detail(ctx: &RenderContext) {
+    let world = &ctx.app.world;
+    for triangle in world.triangles() {
+        if triangle.layer != rp::TissueLayer::Muscle {
+            continue;
+        }
+        let (load, exposure) = triangle_point_metrics(world, triangle);
+        if world.triangle_alive(triangle) {
+            let detail = (triangle.damage * 0.75 + exposure * 0.85 + load / 1800.0).clamp(0.0, 1.0);
+            if detail > 0.18 {
+                draw_muscle_fibers(ctx, triangle, detail as f32);
+            }
+        } else if exposure > 0.22 || load > 260.0 || triangle.damage > 0.72 {
+            draw_failed_muscle_void(ctx, triangle, exposure, load);
+        }
+    }
+}
+
+fn draw_muscle_fibers(ctx: &RenderContext, triangle: &rp::Triangle, detail: f32) {
+    let points = ctx.app.world.points();
+    let a = points[triangle.a].position;
+    let b = points[triangle.b].position;
+    let c = points[triangle.c].position;
+    let centroid = scale(add(add(a, b), c), 1.0 / 3.0);
+    let edges = [(a, b), (b, c), (c, a)];
+    let mut longest = edges[0];
+    let mut longest_len = length(sub(longest.1, longest.0));
+    for edge in edges.iter().skip(1) {
+        let len = length(sub(edge.1, edge.0));
+        if len > longest_len {
+            longest = *edge;
+            longest_len = len;
+        }
+    }
+    if longest_len < 6.0 {
+        return;
+    }
+    let fiber_dir = normalized(sub(longest.1, longest.0), rp::Vec2 { x: 1.0, y: 0.0 });
+    let normal = rp::Vec2 {
+        x: -fiber_dir.y,
+        y: fiber_dir.x,
+    };
+    let span = longest_len * (0.18 + f64::from(detail) * 0.24);
+    let rows = if detail > 0.68 { 3 } else { 2 };
+    for row in 0..rows {
+        let row_t = if rows == 1 {
+            0.0
+        } else {
+            row as f64 / (rows - 1) as f64 - 0.5
+        };
+        let center = add(centroid, scale(normal, row_t * longest_len * 0.18));
+        let trim = 0.72 - f64::from(detail) * 0.16;
+        let start = sub(center, scale(fiber_dir, span * trim));
+        let end = add(center, scale(fiber_dir, span));
+        draw_line_vec(
+            start,
+            end,
+            0.8 + detail * 1.2,
+            with_alpha(ctx.palette.muscle_fiber, 0.16 + detail * 0.38),
+        );
+    }
+}
+
+fn draw_failed_muscle_void(ctx: &RenderContext, triangle: &rp::Triangle, exposure: f64, load: f64) {
+    let intensity = (exposure * 0.55 + triangle.damage * 0.45 + load / 2200.0).clamp(0.0, 1.0);
+    fill_triangle(
+        &ctx.app.world,
+        triangle,
+        with_alpha(
+            ctx.palette.wound_shadow,
+            (0.12 + intensity as f32 * 0.30).min(0.46),
+        ),
+    );
+    outline_triangle(
+        &ctx.app.world,
+        triangle,
+        with_alpha(
+            ctx.palette.wound_edge,
+            (0.18 + intensity as f32 * 0.36).min(0.58),
+        ),
+        1.1,
+    );
+}
+
+fn draw_major_vessels(ctx: &RenderContext) {
+    for vessel in ctx.app.world.vessels() {
+        if !ctx.anatomy && !vessel.lacerated {
+            continue;
+        }
+        let opacity = if vessel.lacerated {
+            0.82
+        } else if ctx.anatomy {
+            0.34
+        } else {
+            0.0
+        };
+        if opacity <= 0.0 {
+            continue;
+        }
+        draw_line_vec(
+            vessel.a,
+            vessel.b,
+            (vessel.radius * 2.5 + 2.0) as f32,
+            with_alpha(ctx.palette.major_vessel_shadow, opacity * 0.64),
+        );
+        draw_line_vec(
+            vessel.a,
+            vessel.b,
+            (vessel.radius * 1.35 + 0.8) as f32,
+            with_alpha(ctx.palette.major_vessel, opacity),
+        );
+        if vessel.lacerated {
+            let center = mid(vessel.a, vessel.b);
+            draw_soft_circle(
+                to_mq(center),
+                (vessel.radius * 3.8 + 7.0) as f32,
+                4,
+                with_alpha(ctx.palette.blood_fresh, 0.18),
+            );
         }
     }
 }
@@ -500,6 +673,8 @@ fn draw_bone(ctx: &RenderContext, bone: &rp::BoneSegment, alpha: f32, details: b
     draw_line_vec(bone.a, bone.b, width + 4.0, shadow);
     let stroke = if bone.fractured || bone.splinter {
         ctx.palette.bone_fractured
+    } else if bone.kind == rp::BoneKind::Rib {
+        rgba(232, 207, 156, 255)
     } else {
         ctx.palette.bone
     };
@@ -644,31 +819,63 @@ fn draw_wound_edge(ctx: &RenderContext, a: rp::Point, b: rp::Point) {
     let inset = (len * 0.14).clamp(2.0, 8.0);
     let a_mid = add(a.position, scale(dir, inset));
     let b_mid = sub(b.position, scale(dir, inset));
+    let exposure = a.exposure.max(b.exposure).clamp(0.0, 1.0);
+    let load = a.load.max(b.load);
+    let severity = (exposure * 0.58 + load / 1700.0).clamp(0.0, 1.0) as f32;
 
     draw_line_vec(
         add(a_mid, scale(normal, -mark)),
         add(a_mid, scale(normal, mark)),
-        4.0,
-        ctx.palette.wound_core,
+        4.0 + severity * 1.8,
+        with_alpha(ctx.palette.wound_shadow, 0.58 + severity * 0.30),
     );
     draw_line_vec(
         add(a_mid, scale(normal, -mark * 0.72)),
         add(a_mid, scale(normal, mark * 0.72)),
-        2.0,
-        ctx.palette.wound_edge,
+        2.0 + severity * 0.8,
+        with_alpha(ctx.palette.wound_edge, 0.68 + severity * 0.24),
     );
     draw_line_vec(
         add(b_mid, scale(normal, -mark)),
         add(b_mid, scale(normal, mark)),
-        4.0,
-        ctx.palette.wound_core,
+        4.0 + severity * 1.8,
+        with_alpha(ctx.palette.wound_shadow, 0.58 + severity * 0.30),
     );
     draw_line_vec(
         add(b_mid, scale(normal, -mark * 0.72)),
         add(b_mid, scale(normal, mark * 0.72)),
-        2.0,
-        ctx.palette.blood_fresh,
+        2.0 + severity * 0.8,
+        with_alpha(
+            mix(ctx.palette.wound_edge, ctx.palette.blood_fresh, severity),
+            0.66 + severity * 0.28,
+        ),
     );
+    let tear_center = mid(a.position, b.position);
+    draw_line_vec(
+        sub(tear_center, scale(dir, len * 0.24)),
+        add(tear_center, scale(dir, len * 0.24)),
+        1.0 + severity * 1.1,
+        with_alpha(ctx.palette.wound_core, 0.44 + severity * 0.34),
+    );
+    if severity > 0.28 {
+        let fiber_count = if severity > 0.68 { 3 } else { 2 };
+        for i in 0..fiber_count {
+            let t = (i + 1) as f64 / (fiber_count + 1) as f64;
+            let base = add(a.position, scale(delta, t));
+            let side = if i % 2 == 0 { 1.0 } else { -1.0 };
+            let start = add(base, scale(normal, side * mark * 0.20));
+            let end = add(
+                base,
+                scale(normal, side * mark * (0.62 + f64::from(severity) * 0.36)),
+            );
+            draw_line_vec(
+                start,
+                end,
+                0.8 + severity * 0.7,
+                with_alpha(ctx.palette.muscle_fiber, 0.30 + severity * 0.34),
+            );
+        }
+    }
 }
 
 fn draw_wound_sources(ctx: &RenderContext) {
@@ -712,7 +919,31 @@ fn draw_wound_sources(ctx: &RenderContext) {
 }
 
 fn draw_effects(ctx: &RenderContext) {
+    draw_blood_stains(ctx);
     draw_fluids(ctx);
+}
+
+fn draw_blood_stains(ctx: &RenderContext) {
+    for stain in ctx.app.world.blood_stains() {
+        if stain.intensity <= 0.025 {
+            continue;
+        }
+        let intensity = stain.intensity.clamp(0.0, 1.75) as f32;
+        let radius = stain.radius.max(1.0) as f32;
+        let pos = to_mq(stain.position);
+        draw_soft_circle(
+            pos,
+            radius * (1.16 + intensity * 0.10),
+            5,
+            with_alpha(ctx.palette.blood_stain, 0.16 + intensity * 0.14),
+        );
+        draw_circle(
+            pos.x,
+            pos.y,
+            radius * (0.58 + intensity * 0.08),
+            with_alpha(ctx.palette.blood_dark, 0.20 + intensity * 0.18),
+        );
+    }
 }
 
 fn draw_fluids(ctx: &RenderContext) {
@@ -1158,6 +1389,7 @@ fn draw_control_hint(ctx: &RenderContext, x: f32, y: f32, hint: ControlHint) -> 
 fn draw_debug_panel(ctx: &RenderContext) {
     let debug = ctx.app.world.debug();
     let stats = ctx.app.world.stats();
+    let materials = ctx.app.world.materials();
     let active_fluids = ctx
         .app
         .world
@@ -1167,8 +1399,8 @@ fn draw_debug_panel(ctx: &RenderContext) {
         .count();
     let panel_x = 14.0;
     let panel_y = 54.0;
-    let panel_w = 446.0;
-    let panel_h = 252.0;
+    let panel_w = 540.0;
+    let panel_h = 340.0;
     draw_panel(ctx, panel_x, panel_y, panel_w, panel_h);
 
     let lines = [
@@ -1193,41 +1425,119 @@ fn draw_debug_panel(ctx: &RenderContext) {
             debug.max_point_load, debug.max_bone_load, debug.last_fracture_impulse
         ),
         format!(
-            "damage  skin={} muscle={} attach={}/{} joints={}",
+            "damage  skin={} muscle={} fiber={} prop={} deep={} crush={} flaps={} vessels={} attach={}/{} joints={}",
             stats.broken_skin,
             stats.broken_muscle,
+            stats.muscle_fiber_tears,
+            stats.tear_propagations,
+            stats.muscle_cut_transfers,
+            stats.muscle_crush_ruptures,
+            stats.skin_flap_detachments,
+            stats.vessel_lacerations,
             stats.broken_attachments,
             stats.broken_bone_attachments,
             stats.broken_bone_joints
         ),
         format!(
-            "fragments  step={} tissue={} pair={} tears={}",
+            "contusion  active={} events={} max={:.2} soften={:.2} fatigue={:.2} plastic={:.2}",
+            debug.active_contusions,
+            stats.contusion_events,
+            debug.max_contusion,
+            debug.max_tissue_softening,
+            debug.max_tissue_fatigue,
+            debug.max_tissue_plasticity
+        ),
+        format!(
+            "fragments  step={} tissue={} pair={} tears={} punctures={}",
             debug.fractures,
             debug.fragment_contacts,
             debug.fragment_pair_contacts,
-            debug.fragment_tears
+            debug.fragment_tears,
+            stats.fragment_skin_punctures
         ),
         format!(
             "fragment motion  impulse={:.0} spin={:.2} overlap={:.1}",
             debug.max_fragment_impulse, debug.max_bone_angular_speed, debug.max_fragment_overlap
         ),
         format!(
-            "joint limits  corrections={} stretch={:.1} angle={:.2}",
+            "joint limits  corrections={} sublux={} lig={} ribfx={} max={:.2} stretch={:.1} angle={:.2}",
             debug.post_fracture_joint_corrections,
+            stats.bone_joint_subluxations,
+            stats.joint_ligament_damage_events,
+            stats.fractured_ribs,
+            debug.max_bone_joint_subluxation,
             debug.max_post_fracture_joint_stretch,
             debug.max_post_fracture_joint_angle
         ),
         format!(
-            "fluid  active={} emitted={} step={} wounds={} leaks={}",
+            "fluid  active={} stains={} emitted={} marrow={} stain_deposits={} blood={:.2} turgor={:.2} loss={:.3}",
             active_fluids,
+            debug.active_blood_stains,
             stats.emitted_fluid_particles,
-            debug.fluid_emitted,
-            debug.active_wounds,
-            debug.wound_leaks
+            stats.fracture_marrow_sources,
+            stats.blood_stain_deposits,
+            ctx.app.world.blood_volume_fraction(),
+            ctx.app.world.blood_turgor_scale(),
+            stats.blood_loss
         ),
         format!(
-            "wounds  pressure={:.2} clot={:.2}",
-            debug.max_wound_pressure, debug.max_wound_clot
+            "wounds  active={} leaks={} reopens={} pressure={:.2} clot={:.2}",
+            debug.active_wounds,
+            debug.wound_leaks,
+            stats.wound_reopens,
+            debug.max_wound_pressure,
+            debug.max_wound_clot
+        ),
+        format!(
+            "cavity  pressure={:.2} collapse={:.2} events={} ruptures={}",
+            debug.max_cavity_pressure,
+            debug.max_cavity_collapse,
+            stats.cavity_pressure_events,
+            stats.cavity_ruptures
+        ),
+        format!(
+            "organs  damage={:.2} events={} penetrations={} ribOrg={} ruptures={} fragVessel={}",
+            debug.max_organ_damage,
+            stats.organ_damage_events,
+            stats.organ_penetrations,
+            stats.rib_organ_punctures,
+            stats.organ_ruptures,
+            stats.fragment_vessel_lacerations
+        ),
+        format!(
+            "budget  fragments={}/{} sleep={} skipped={} blocks={}",
+            debug.active_fragments,
+            materials.max_active_bone_fragments,
+            debug.sleeping_fragments,
+            debug.fragment_budget_skips,
+            debug.fracture_budget_blocks
+        ),
+        format!(
+            "checks  bone={}/{} pair={}/{} tissue={}/{}",
+            debug.fragment_bone_checks,
+            materials.max_fragment_bone_checks,
+            debug.fragment_pair_checks,
+            materials.max_fragment_pair_checks,
+            debug.fragment_tissue_checks,
+            materials.max_fragment_tissue_checks
+        ),
+        format!(
+            "support bone={}/{} pair={}/{} floor={}/{}",
+            debug.fragment_bone_damping_events,
+            debug.fragment_bone_resting_contacts,
+            debug.fragment_pair_damping_events,
+            debug.fragment_pair_resting_contacts,
+            debug.fragment_floor_contacts,
+            debug.fragment_floor_resting_contacts
+        ),
+        format!(
+            "caps  fluid={} stain={} wound={} sleep/wake={}/{} solver={}",
+            debug.fluid_budget_replacements,
+            debug.blood_stain_budget_replacements,
+            debug.wound_budget_replacements,
+            debug.fragment_sleep_events,
+            debug.fragment_wake_events,
+            debug.solver_iterations
         ),
     ];
 
@@ -1294,6 +1604,13 @@ fn triangle_point_metrics(world: &rp::World, triangle: &rp::Triangle) -> (f64, f
         (a.load + b.load + c.load) / 3.0,
         (a.exposure + b.exposure + c.exposure) / 3.0,
     )
+}
+
+fn triangle_point_contusion(world: &rp::World, triangle: &rp::Triangle) -> f64 {
+    let a = world.points()[triangle.a];
+    let b = world.points()[triangle.b];
+    let c = world.points()[triangle.c];
+    (a.contusion + b.contusion + c.contusion) / 3.0
 }
 
 fn draw_quad(points: [rp::Vec2; 4], color: Color) {

@@ -13,14 +13,23 @@ fn main() {
     let world = rp::create_layered_body(width, height, rp::Materials::default());
     let validation = rp::validate_anatomy(&world, 16);
 
+    let rib_count = world
+        .bones()
+        .iter()
+        .filter(|bone| bone.kind == rp::BoneKind::Rib)
+        .count();
     println!(
-        "points={} springs={} triangles={} bones={} bone_joints={} bone_attachments={}",
+        "points={} springs={} triangles={} bones={} ribs={} bone_joints={} bone_attachments={} vessels={} cavities={} organs={}",
         world.points().len(),
         world.springs().len(),
         world.triangles().len(),
         world.bones().len(),
+        rib_count,
         world.bone_joints().len(),
-        world.bone_attachments().len()
+        world.bone_attachments().len(),
+        world.vessels().len(),
+        world.cavities().len(),
+        world.organs().len()
     );
     println!(
         "skin_points={} muscle_points={} bone_samples={} bone_samples_outside_skin={} bone_samples_outside_muscle={}",
@@ -62,6 +71,16 @@ fn build_svg(world: &rp::World, width: f64, height: f64) -> String {
             write_triangle(&mut out, world, triangle, "#b62e3a", 0.50);
         }
     }
+    for vessel in world.vessels() {
+        out.push_str(&format!(
+            "<line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"#b51224\" stroke-opacity=\"0.72\" stroke-width=\"{:.2}\" stroke-linecap=\"round\"/>\n",
+            vessel.a.x,
+            vessel.a.y,
+            vessel.b.x,
+            vessel.b.y,
+            vessel.radius * 1.35 + 1.0
+        ));
+    }
     for attachment in world.bone_attachments() {
         if attachment.broken
             || attachment.bone >= world.bones().len()
@@ -96,13 +115,18 @@ fn build_svg(world: &rp::World, width: f64, height: f64) -> String {
         ));
     }
     for bone in world.bones() {
+        let intact_stroke = if bone.kind == rp::BoneKind::Rib {
+            "#f0dfb6"
+        } else {
+            "#e5d5aa"
+        };
         out.push_str(&format!(
             "<line x1=\"{:.2}\" y1=\"{:.2}\" x2=\"{:.2}\" y2=\"{:.2}\" stroke=\"{}\" stroke-width=\"{:.2}\" stroke-linecap=\"round\"/>\n",
             bone.a.x,
             bone.a.y,
             bone.b.x,
             bone.b.y,
-            if bone.fractured { "#fff3d6" } else { "#e5d5aa" },
+            if bone.fractured { "#fff3d6" } else { intact_stroke },
             bone.radius * 1.8
         ));
     }

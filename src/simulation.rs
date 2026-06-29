@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
 
 const EPSILON: f64 = 0.0001;
@@ -8,6 +8,7 @@ const FRAGMENT_TISSUE_NORMAL_DAMPING: f64 = 0.58;
 const FRAGMENT_TISSUE_TANGENTIAL_FRICTION: f64 = 0.34;
 const FRAGMENT_TISSUE_ANGULAR_FRICTION: f64 = 0.18;
 const SKIN_ATTACHMENT_CANDIDATES: usize = 4;
+pub const MISSING_ANCHOR: usize = usize::MAX;
 pub const MISSING_SPRING: usize = usize::MAX;
 const FRONT_PIXEL_SILHOUETTE_REFERENCE: &str =
     include_str!("../docs/reference/pixel_human_silhouettes/front_adult_silhouette_41x96.mask");
@@ -41,6 +42,32 @@ pub enum ToolMode {
 impl Default for ToolMode {
     fn default() -> Self {
         Self::Blunt
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrganKind {
+    LeftLung,
+    RightLung,
+    Liver,
+    Spleen,
+}
+
+impl Default for OrganKind {
+    fn default() -> Self {
+        Self::Liver
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoneKind {
+    Generic,
+    Rib,
+}
+
+impl Default for BoneKind {
+    fn default() -> Self {
+        Self::Generic
     }
 }
 
@@ -87,21 +114,86 @@ pub struct Materials {
     pub skin_structural_stiffness: f64,
     pub skin_shear_stiffness: f64,
     pub skin_area_stiffness: f64,
+    pub skin_spring_compliance: f64,
+    pub skin_area_compliance: f64,
     pub skin_tear_stretch: f64,
     pub skin_tear_impulse: f64,
     pub muscle_fiber_stiffness: f64,
     pub muscle_cross_stiffness: f64,
     pub muscle_shear_stiffness: f64,
     pub muscle_area_stiffness: f64,
+    pub muscle_fiber_rupture_damage_floor: f64,
+    pub muscle_spring_compliance: f64,
+    pub muscle_area_compliance: f64,
     pub muscle_tear_stretch: f64,
     pub muscle_tear_impulse: f64,
     pub muscle_exposed_tear_impulse: f64,
+    pub contusion_load_threshold: f64,
+    pub contusion_decay: f64,
+    pub contusion_tear_weakening: f64,
+    pub contusion_stiffness_softening: f64,
+    pub tissue_fatigue_stretch_threshold: f64,
+    pub tissue_fatigue_load_threshold: f64,
+    pub tissue_fatigue_rate: f64,
+    pub tissue_fatigue_decay: f64,
+    pub tissue_fatigue_tear_weakening: f64,
+    pub tissue_fatigue_stiffness_softening: f64,
+    pub tissue_plastic_stretch_threshold: f64,
+    pub tissue_plastic_compression_threshold: f64,
+    pub tissue_plastic_rate: f64,
+    pub tissue_plastic_limit: f64,
+    pub tear_propagation_stress_threshold: f64,
+    pub tear_propagation_fatigue_threshold: f64,
+    pub tear_propagation_load_threshold: f64,
+    pub max_tear_propagations_per_step: usize,
+    pub muscle_cut_transfer_exposure_threshold: f64,
+    pub muscle_cut_transfer_load_threshold: f64,
+    pub muscle_cut_transfer_radius: f64,
+    pub max_muscle_cut_transfers_per_step: usize,
+    pub muscle_crush_rupture_load_threshold: f64,
+    pub muscle_crush_rupture_damage_threshold: f64,
+    pub max_muscle_crush_ruptures_per_step: usize,
+    pub cavity_load_threshold: f64,
+    pub cavity_pressure_stiffness: f64,
+    pub cavity_pressure_load_scale: f64,
+    pub cavity_non_heavy_pressure_load_cap: f64,
+    pub cavity_pressure_decay: f64,
+    pub cavity_min_area_fraction: f64,
+    pub cavity_tissue_push: f64,
+    pub cavity_contusion_pressure: f64,
+    pub cavity_rupture_pressure: f64,
+    pub cavity_rupture_load_scale: f64,
+    pub cavity_non_heavy_rupture_load_scale: f64,
+    pub cavity_rupture_min_collapse: f64,
+    pub max_cavity_ruptures_per_step: usize,
+    pub organ_pressure_damage_threshold: f64,
+    pub organ_load_damage_threshold: f64,
+    pub organ_fragment_damage_threshold: f64,
+    pub organ_penetration_impulse: f64,
+    pub organ_penetration_cut_radius: f64,
+    pub organ_penetration_damage: f64,
+    pub organ_damage_rate: f64,
+    pub organ_rupture_damage: f64,
+    pub organ_bleed_pressure: f64,
+    pub rib_organ_puncture_impulse: f64,
+    pub rib_organ_puncture_radius: f64,
+    pub rib_organ_puncture_damage: f64,
+    pub max_rib_organ_punctures_per_step: usize,
+    pub max_organ_penetrations_per_step: usize,
+    pub max_organ_ruptures_per_step: usize,
+    pub max_total_organ_ruptures: usize,
+    pub skin_flap_load_threshold: f64,
+    pub skin_flap_stress_threshold: f64,
+    pub skin_flap_cut_radius: f64,
+    pub max_skin_flap_detachments_per_step: usize,
     pub attachment_stiffness: f64,
     pub attachment_break_stretch: f64,
     pub attachment_break_impulse: f64,
     pub bone_fracture_impulse: f64,
     pub max_bone_fracture_depth: i32,
     pub min_bone_fragment_length: f64,
+    pub min_rib_fragment_length: f64,
+    pub secondary_bone_fracture_impulse_scale: f64,
     pub bone_damping: f64,
     pub bone_angular_damping: f64,
     pub bone_torque_scale: f64,
@@ -112,6 +204,14 @@ pub struct Materials {
     pub bone_attachment_break_stretch: f64,
     pub bone_joint_stiffness: f64,
     pub bone_joint_angular_stiffness: f64,
+    pub bone_joint_subluxation_stretch: f64,
+    pub bone_joint_subluxation_impulse: f64,
+    pub bone_joint_subluxation_angular: f64,
+    pub bone_joint_subluxation_slack: f64,
+    pub bone_joint_subluxation_stiffness_scale: f64,
+    pub joint_ligament_damage_radius: f64,
+    pub joint_ligament_damage_load_scale: f64,
+    pub joint_ligament_damage_contusion_scale: f64,
     pub bone_joint_break_stretch: f64,
     pub bone_joint_break_impulse: f64,
     pub bone_joint_angular_break: f64,
@@ -123,23 +223,71 @@ pub struct Materials {
     pub bone_impact_transfer: f64,
     pub bone_direct_contact: f64,
     pub bone_direct_pressure: f64,
+    pub max_active_bone_fragments: usize,
+    pub max_fragment_bone_checks: usize,
+    pub max_fragment_pair_checks: usize,
+    pub max_fragment_tissue_checks: usize,
+    pub fragment_sleep_speed: f64,
+    pub fragment_sleep_angular_speed: f64,
+    pub fragment_sleep_load: f64,
+    pub fragment_sleep_frames: i32,
+    pub fragment_wake_load: f64,
     pub max_fluid_particles: usize,
     pub fluid_damping: f64,
     pub fluid_gravity_scale: f64,
     pub fluid_lifetime: f64,
     pub fluid_floor_friction: f64,
     pub fluid_impact_scale: f64,
+    pub blood_volume_capacity: f64,
+    pub blood_loss_per_wound_particle: f64,
+    pub blood_pressure_min_scale: f64,
+    pub blood_turgor_min_scale: f64,
+    pub max_blood_stains: usize,
+    pub blood_stain_merge_radius: f64,
+    pub blood_stain_decay: f64,
+    pub blood_stain_spread: f64,
     pub max_wound_sources: usize,
     pub wound_leak_rate: f64,
     pub wound_pressure_decay: f64,
     pub wound_clot_rate: f64,
     pub wound_spray_pressure: f64,
     pub wound_merge_radius: f64,
+    pub wound_reopen_load_threshold: f64,
+    pub wound_reopen_radius: f64,
+    pub wound_reopen_pressure_scale: f64,
+    pub wound_reopen_clot_loss: f64,
+    pub max_wound_reopens_per_step: usize,
+    pub major_vessel_cut_radius: f64,
+    pub major_vessel_laceration_impulse: f64,
+    pub major_vessel_blunt_impulse_scale: f64,
+    pub major_vessel_pressure_scale: f64,
+    pub max_vessel_lacerations_per_step: usize,
+    pub fragment_vessel_laceration_impulse: f64,
+    pub fragment_vessel_laceration_radius: f64,
+    pub max_fragment_vessel_lacerations_per_step: usize,
     pub sharp_tool_tear_pressure: f64,
     pub fragment_contact_radius: f64,
     pub fragment_damage_impulse: f64,
+    pub fragment_skin_puncture_impulse: f64,
+    pub max_fragment_skin_punctures_per_step: usize,
     pub fragment_push: f64,
     pub fragment_repulsion_stiffness: f64,
+    pub fragment_pair_normal_damping: f64,
+    pub fragment_pair_tangential_friction: f64,
+    pub fragment_pair_angular_friction: f64,
+    pub fragment_pair_rest_speed: f64,
+    pub fragment_pair_rest_stiffness: f64,
+    pub fragment_pair_rest_friction: f64,
+    pub fragment_bone_normal_damping: f64,
+    pub fragment_bone_tangential_friction: f64,
+    pub fragment_bone_angular_friction: f64,
+    pub fragment_bone_rest_speed: f64,
+    pub fragment_bone_rest_stiffness: f64,
+    pub fragment_bone_rest_friction: f64,
+    pub fragment_floor_normal_damping: f64,
+    pub fragment_floor_friction: f64,
+    pub fragment_floor_angular_friction: f64,
+    pub fragment_floor_rest_speed: f64,
     pub fragment_repulsion_slop: f64,
 }
 
@@ -160,21 +308,86 @@ impl Default for Materials {
             skin_structural_stiffness: 0.92,
             skin_shear_stiffness: 0.58,
             skin_area_stiffness: 0.070,
+            skin_spring_compliance: 0.0,
+            skin_area_compliance: 0.0,
             skin_tear_stretch: 1.68,
             skin_tear_impulse: 820.0,
             muscle_fiber_stiffness: 0.86,
             muscle_cross_stiffness: 0.44,
             muscle_shear_stiffness: 0.38,
             muscle_area_stiffness: 0.36,
+            muscle_fiber_rupture_damage_floor: 0.0,
+            muscle_spring_compliance: 0.0,
+            muscle_area_compliance: 0.0,
             muscle_tear_stretch: 1.92,
             muscle_tear_impulse: 1180.0,
             muscle_exposed_tear_impulse: 620.0,
+            contusion_load_threshold: 420.0,
+            contusion_decay: 0.014,
+            contusion_tear_weakening: 0.10,
+            contusion_stiffness_softening: 0.0,
+            tissue_fatigue_stretch_threshold: 1.18,
+            tissue_fatigue_load_threshold: 520.0,
+            tissue_fatigue_rate: 0.0008,
+            tissue_fatigue_decay: 0.0012,
+            tissue_fatigue_tear_weakening: 0.10,
+            tissue_fatigue_stiffness_softening: 0.0,
+            tissue_plastic_stretch_threshold: 1.08,
+            tissue_plastic_compression_threshold: 0.72,
+            tissue_plastic_rate: 0.00016,
+            tissue_plastic_limit: 0.12,
+            tear_propagation_stress_threshold: 0.22,
+            tear_propagation_fatigue_threshold: 0.22,
+            tear_propagation_load_threshold: 620.0,
+            max_tear_propagations_per_step: 4,
+            muscle_cut_transfer_exposure_threshold: 0.42,
+            muscle_cut_transfer_load_threshold: 520.0,
+            muscle_cut_transfer_radius: 18.0,
+            max_muscle_cut_transfers_per_step: 3,
+            muscle_crush_rupture_load_threshold: 820.0,
+            muscle_crush_rupture_damage_threshold: 1.0,
+            max_muscle_crush_ruptures_per_step: 5,
+            cavity_load_threshold: 560.0,
+            cavity_pressure_stiffness: 0.72,
+            cavity_pressure_load_scale: 0.34,
+            cavity_non_heavy_pressure_load_cap: 1.85,
+            cavity_pressure_decay: 2.8,
+            cavity_min_area_fraction: 0.70,
+            cavity_tissue_push: 0.34,
+            cavity_contusion_pressure: 0.46,
+            cavity_rupture_pressure: 0.80,
+            cavity_rupture_load_scale: 3.2,
+            cavity_non_heavy_rupture_load_scale: 2.05,
+            cavity_rupture_min_collapse: 0.05,
+            max_cavity_ruptures_per_step: 1,
+            organ_pressure_damage_threshold: 0.58,
+            organ_load_damage_threshold: 1450.0,
+            organ_fragment_damage_threshold: 760.0,
+            organ_penetration_impulse: 980.0,
+            organ_penetration_cut_radius: 4.5,
+            organ_penetration_damage: 0.82,
+            organ_damage_rate: 0.18,
+            organ_rupture_damage: 1.0,
+            organ_bleed_pressure: 1.12,
+            rib_organ_puncture_impulse: 1500.0,
+            rib_organ_puncture_radius: 8.5,
+            rib_organ_puncture_damage: 0.52,
+            max_rib_organ_punctures_per_step: 2,
+            max_organ_penetrations_per_step: 2,
+            max_organ_ruptures_per_step: 2,
+            max_total_organ_ruptures: 2,
+            skin_flap_load_threshold: 760.0,
+            skin_flap_stress_threshold: 0.18,
+            skin_flap_cut_radius: 20.0,
+            max_skin_flap_detachments_per_step: 5,
             attachment_stiffness: 0.46,
             attachment_break_stretch: 2.40,
             attachment_break_impulse: 980.0,
             bone_fracture_impulse: 1850.0,
-            max_bone_fracture_depth: 3,
-            min_bone_fragment_length: 30.0,
+            max_bone_fracture_depth: 4,
+            min_bone_fragment_length: 26.0,
+            min_rib_fragment_length: 12.0,
+            secondary_bone_fracture_impulse_scale: 0.76,
             bone_damping: 0.984,
             bone_angular_damping: 0.955,
             bone_torque_scale: 0.35,
@@ -185,6 +398,14 @@ impl Default for Materials {
             bone_attachment_break_stretch: 2.8,
             bone_joint_stiffness: 0.66,
             bone_joint_angular_stiffness: 0.22,
+            bone_joint_subluxation_stretch: 1.46,
+            bone_joint_subluxation_impulse: 1650.0,
+            bone_joint_subluxation_angular: 0.62,
+            bone_joint_subluxation_slack: 18.0,
+            bone_joint_subluxation_stiffness_scale: 0.56,
+            joint_ligament_damage_radius: 24.0,
+            joint_ligament_damage_load_scale: 0.34,
+            joint_ligament_damage_contusion_scale: 0.65,
             bone_joint_break_stretch: 2.15,
             bone_joint_break_impulse: 2600.0,
             bone_joint_angular_break: 1.20,
@@ -196,23 +417,71 @@ impl Default for Materials {
             bone_impact_transfer: 0.62,
             bone_direct_contact: 0.86,
             bone_direct_pressure: 780.0,
+            max_active_bone_fragments: 48,
+            max_fragment_bone_checks: 16_384,
+            max_fragment_pair_checks: 8192,
+            max_fragment_tissue_checks: 500_000,
+            fragment_sleep_speed: 18.0,
+            fragment_sleep_angular_speed: 0.08,
+            fragment_sleep_load: 90.0,
+            fragment_sleep_frames: 36,
+            fragment_wake_load: 260.0,
             max_fluid_particles: 900,
             fluid_damping: 0.982,
             fluid_gravity_scale: 0.42,
             fluid_lifetime: 4.8,
             fluid_floor_friction: 0.48,
             fluid_impact_scale: 0.08,
+            blood_volume_capacity: 1.0,
+            blood_loss_per_wound_particle: 0.00016,
+            blood_pressure_min_scale: 0.34,
+            blood_turgor_min_scale: 0.55,
+            max_blood_stains: 320,
+            blood_stain_merge_radius: 18.0,
+            blood_stain_decay: 0.008,
+            blood_stain_spread: 2.4,
             max_wound_sources: 160,
             wound_leak_rate: 4.6,
             wound_pressure_decay: 0.20,
             wound_clot_rate: 0.13,
             wound_spray_pressure: 1.25,
             wound_merge_radius: 16.0,
+            wound_reopen_load_threshold: 540.0,
+            wound_reopen_radius: 24.0,
+            wound_reopen_pressure_scale: 0.52,
+            wound_reopen_clot_loss: 0.22,
+            max_wound_reopens_per_step: 6,
+            major_vessel_cut_radius: 10.5,
+            major_vessel_laceration_impulse: 1450.0,
+            major_vessel_blunt_impulse_scale: 2.45,
+            major_vessel_pressure_scale: 1.38,
+            max_vessel_lacerations_per_step: 3,
+            fragment_vessel_laceration_impulse: 2200.0,
+            fragment_vessel_laceration_radius: 7.5,
+            max_fragment_vessel_lacerations_per_step: 2,
             sharp_tool_tear_pressure: 0.66,
             fragment_contact_radius: 15.0,
             fragment_damage_impulse: 520.0,
+            fragment_skin_puncture_impulse: 1080.0,
+            max_fragment_skin_punctures_per_step: 8,
             fragment_push: 0.34,
             fragment_repulsion_stiffness: 0.56,
+            fragment_pair_normal_damping: 0.32,
+            fragment_pair_tangential_friction: 0.16,
+            fragment_pair_angular_friction: 0.10,
+            fragment_pair_rest_speed: 95.0,
+            fragment_pair_rest_stiffness: 0.24,
+            fragment_pair_rest_friction: 0.22,
+            fragment_bone_normal_damping: 0.28,
+            fragment_bone_tangential_friction: 0.14,
+            fragment_bone_angular_friction: 0.08,
+            fragment_bone_rest_speed: 112.0,
+            fragment_bone_rest_stiffness: 0.20,
+            fragment_bone_rest_friction: 0.18,
+            fragment_floor_normal_damping: 0.78,
+            fragment_floor_friction: 0.42,
+            fragment_floor_angular_friction: 0.18,
+            fragment_floor_rest_speed: 70.0,
             fragment_repulsion_slop: 0.85,
         }
     }
@@ -227,6 +496,7 @@ pub struct Point {
     pub pinned: bool,
     pub load: f64,
     pub exposure: f64,
+    pub contusion: f64,
     pub mass: f64,
 }
 
@@ -240,6 +510,7 @@ impl Default for Point {
             pinned: false,
             load: 0.0,
             exposure: 0.0,
+            contusion: 0.0,
             mass: 1.0,
         }
     }
@@ -250,6 +521,7 @@ pub struct Spring {
     pub a: usize,
     pub b: usize,
     pub rest: f64,
+    pub rest_reference: f64,
     pub stiffness: f64,
     pub tear_stretch: f64,
     pub tear_impulse: f64,
@@ -257,6 +529,9 @@ pub struct Spring {
     pub fiber: bool,
     pub broken: bool,
     pub stress: f64,
+    pub fatigue: f64,
+    pub plastic_strain: f64,
+    pub lambda: f64,
 }
 
 impl Default for Spring {
@@ -265,6 +540,7 @@ impl Default for Spring {
             a: 0,
             b: 0,
             rest: 0.0,
+            rest_reference: 0.0,
             stiffness: 0.0,
             tear_stretch: 0.0,
             tear_impulse: 0.0,
@@ -272,6 +548,9 @@ impl Default for Spring {
             fiber: false,
             broken: false,
             stress: 0.0,
+            fatigue: 0.0,
+            plastic_strain: 0.0,
+            lambda: 0.0,
         }
     }
 }
@@ -287,6 +566,7 @@ pub struct AreaConstraint {
     pub rest_area: f64,
     pub stiffness: f64,
     pub layer: TissueLayer,
+    pub lambda: f64,
 }
 
 impl Default for AreaConstraint {
@@ -301,6 +581,7 @@ impl Default for AreaConstraint {
             rest_area: 0.0,
             stiffness: 0.0,
             layer: TissueLayer::Skin,
+            lambda: 0.0,
         }
     }
 }
@@ -343,8 +624,54 @@ impl Default for Triangle {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct CavityRegion {
+    pub area_indices: Vec<usize>,
+    pub rest_area: f64,
+    pub pressure: f64,
+    pub collapse: f64,
+    pub centroid: Vec2,
+    pub ruptured: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct OrganRegion {
+    pub kind: OrganKind,
+    pub center: Vec2,
+    pub radius: Vec2,
+    pub anchor_point: usize,
+    pub anchor_offset: Vec2,
+    pub damage: f64,
+    pub pressure_damage: f64,
+    pub load_damage: f64,
+    pub penetration_damage: f64,
+    pub penetrated: bool,
+    pub rib_punctured: bool,
+    pub ruptured: bool,
+}
+
+impl Default for OrganRegion {
+    fn default() -> Self {
+        Self {
+            kind: OrganKind::default(),
+            center: Vec2::default(),
+            radius: Vec2 { x: 1.0, y: 1.0 },
+            anchor_point: MISSING_ANCHOR,
+            anchor_offset: Vec2::default(),
+            damage: 0.0,
+            pressure_damage: 0.0,
+            load_damage: 0.0,
+            penetration_damage: 0.0,
+            penetrated: false,
+            rib_punctured: false,
+            ruptured: false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct BoneSegment {
+    pub kind: BoneKind,
     pub a: Vec2,
     pub b: Vec2,
     pub previous_a: Vec2,
@@ -364,11 +691,14 @@ pub struct BoneSegment {
     pub fracture_generation: i32,
     pub splinter: bool,
     pub pinned: bool,
+    pub sleeping: bool,
+    pub sleep_frames: i32,
 }
 
 impl Default for BoneSegment {
     fn default() -> Self {
         Self {
+            kind: BoneKind::default(),
             a: Vec2::default(),
             b: Vec2::default(),
             previous_a: Vec2::default(),
@@ -388,6 +718,8 @@ impl Default for BoneSegment {
             fracture_generation: 0,
             splinter: false,
             pinned: false,
+            sleeping: false,
+            sleep_frames: 0,
         }
     }
 }
@@ -415,6 +747,8 @@ pub struct BoneJoint {
     pub max_angle: f64,
     pub stress: f64,
     pub torque_stress: f64,
+    pub subluxated: bool,
+    pub subluxation: f64,
     pub broken: bool,
     pub post_fracture_limited: bool,
     pub post_fracture_rest: f64,
@@ -434,6 +768,8 @@ impl Default for BoneJoint {
             max_angle: 0.95,
             stress: 0.0,
             torque_stress: 0.0,
+            subluxated: false,
+            subluxation: 0.0,
             broken: false,
             post_fracture_limited: false,
             post_fracture_rest: 0.0,
@@ -451,6 +787,7 @@ pub struct FluidParticle {
     pub max_life: f64,
     pub intensity: f64,
     pub settled: bool,
+    pub stained: bool,
 }
 
 impl Default for FluidParticle {
@@ -463,6 +800,57 @@ impl Default for FluidParticle {
             max_life: 1.0,
             intensity: 1.0,
             settled: false,
+            stained: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct BloodStain {
+    pub position: Vec2,
+    pub radius: f64,
+    pub intensity: f64,
+    pub age: f64,
+}
+
+impl Default for BloodStain {
+    fn default() -> Self {
+        Self {
+            position: Vec2::default(),
+            radius: 2.0,
+            intensity: 0.0,
+            age: 0.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct VesselSegment {
+    pub a: Vec2,
+    pub b: Vec2,
+    pub radius: f64,
+    pub pressure: f64,
+    pub laceration_impulse: f64,
+    pub lacerated: bool,
+    pub anchor_a: usize,
+    pub anchor_b: usize,
+    pub offset_a: Vec2,
+    pub offset_b: Vec2,
+}
+
+impl Default for VesselSegment {
+    fn default() -> Self {
+        Self {
+            a: Vec2::default(),
+            b: Vec2::default(),
+            radius: 2.0,
+            pressure: 1.0,
+            laceration_impulse: 1450.0,
+            lacerated: false,
+            anchor_a: MISSING_ANCHOR,
+            anchor_b: MISSING_ANCHOR,
+            offset_a: Vec2::default(),
+            offset_b: Vec2::default(),
         }
     }
 }
@@ -479,6 +867,10 @@ pub struct WoundSource {
     pub depth: f64,
     pub accumulator: f64,
     pub active: bool,
+    pub anchor_point: usize,
+    pub anchor_bone: usize,
+    pub anchor_t: f64,
+    pub anchor_offset: Vec2,
 }
 
 impl Default for WoundSource {
@@ -494,6 +886,10 @@ impl Default for WoundSource {
             depth: 0.0,
             accumulator: 0.0,
             active: false,
+            anchor_point: MISSING_ANCHOR,
+            anchor_bone: MISSING_ANCHOR,
+            anchor_t: 0.0,
+            anchor_offset: Vec2::default(),
         }
     }
 }
@@ -502,15 +898,39 @@ impl Default for WoundSource {
 pub struct Stats {
     pub broken_skin: i32,
     pub broken_muscle: i32,
+    pub muscle_fiber_tears: i32,
     pub broken_attachments: i32,
     pub broken_bone_attachments: i32,
     pub broken_bone_joints: i32,
+    pub bone_joint_subluxations: i32,
+    pub joint_ligament_damage_events: i32,
     pub fractured_bones: i32,
+    pub fractured_ribs: i32,
     pub emitted_fluid_particles: i32,
     pub wound_fluid_particles: i32,
+    pub blood_loss: f64,
+    pub fracture_marrow_sources: i32,
+    pub blood_stain_deposits: i32,
+    pub contusion_events: i32,
+    pub tissue_fatigue_events: i32,
+    pub tissue_plastic_events: i32,
+    pub tear_propagations: i32,
+    pub muscle_cut_transfers: i32,
+    pub muscle_crush_ruptures: i32,
+    pub cavity_pressure_events: i32,
+    pub cavity_ruptures: i32,
+    pub organ_damage_events: i32,
+    pub organ_penetrations: i32,
+    pub rib_organ_punctures: i32,
+    pub organ_ruptures: i32,
+    pub skin_flap_detachments: i32,
+    pub vessel_lacerations: i32,
+    pub fragment_vessel_lacerations: i32,
+    pub wound_reopens: i32,
     pub opened_wounds: i32,
     pub fragment_tissue_hits: i32,
     pub fragment_tissue_tears: i32,
+    pub fragment_skin_punctures: i32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -534,19 +954,79 @@ pub struct ContactDebug {
     pub max_fragment_overlap: f64,
     pub max_post_fracture_joint_stretch: f64,
     pub max_post_fracture_joint_angle: f64,
+    pub max_bone_joint_subluxation: f64,
     pub max_wound_pressure: f64,
     pub max_wound_clot: f64,
+    pub max_cavity_pressure: f64,
+    pub max_cavity_collapse: f64,
+    pub max_organ_damage: f64,
+    pub blood_loss: f64,
+    pub blood_volume_fraction: f64,
+    pub blood_turgor_scale: f64,
+    pub max_contusion: f64,
+    pub max_tissue_softening: f64,
+    pub max_tissue_fatigue: f64,
+    pub max_tissue_plasticity: f64,
     pub last_fracture_impulse: f64,
     pub bone_contacts: i32,
     pub tissue_contacts: i32,
     pub fractures: i32,
+    pub rib_fractures: i32,
     pub fluid_emitted: i32,
     pub fragment_contacts: i32,
     pub fragment_tears: i32,
+    pub fragment_skin_punctures: i32,
+    pub fragment_bone_contacts: i32,
+    pub fragment_bone_damping_events: i32,
+    pub fragment_bone_resting_contacts: i32,
     pub fragment_pair_contacts: i32,
+    pub fragment_pair_damping_events: i32,
+    pub fragment_pair_resting_contacts: i32,
+    pub fragment_floor_contacts: i32,
+    pub fragment_floor_resting_contacts: i32,
     pub post_fracture_joint_corrections: i32,
+    pub bone_joint_subluxations: i32,
+    pub joint_ligament_damage_events: i32,
     pub active_wounds: i32,
+    pub active_fluids: i32,
+    pub active_blood_stains: i32,
+    pub active_contusions: i32,
+    pub active_fragments: i32,
+    pub sleeping_fragments: i32,
+    pub solver_iterations: i32,
+    pub fragment_sleep_events: i32,
+    pub fragment_wake_events: i32,
+    pub fragment_budget_skips: i32,
+    pub fracture_budget_blocks: i32,
+    pub fragment_bone_checks: i32,
+    pub fragment_bone_budget_skips: i32,
+    pub fragment_pair_checks: i32,
+    pub fragment_pair_budget_skips: i32,
+    pub fragment_tissue_checks: i32,
+    pub fragment_tissue_budget_skips: i32,
+    pub fluid_budget_replacements: i32,
+    pub blood_stain_deposits: i32,
+    pub blood_stain_budget_replacements: i32,
+    pub contusion_events: i32,
+    pub tissue_fatigue_events: i32,
+    pub tissue_plastic_events: i32,
+    pub muscle_fiber_tears: i32,
+    pub tear_propagations: i32,
+    pub muscle_cut_transfers: i32,
+    pub muscle_crush_ruptures: i32,
+    pub cavity_pressure_events: i32,
+    pub cavity_ruptures: i32,
+    pub organ_damage_events: i32,
+    pub organ_penetrations: i32,
+    pub rib_organ_punctures: i32,
+    pub organ_ruptures: i32,
+    pub skin_flap_detachments: i32,
+    pub vessel_lacerations: i32,
+    pub fragment_vessel_lacerations: i32,
+    pub wound_reopens: i32,
+    pub wound_budget_replacements: i32,
     pub wound_leaks: i32,
+    pub fracture_marrow_sources: i32,
 }
 
 impl Default for ContactDebug {
@@ -571,19 +1051,79 @@ impl Default for ContactDebug {
             max_fragment_overlap: 0.0,
             max_post_fracture_joint_stretch: 0.0,
             max_post_fracture_joint_angle: 0.0,
+            max_bone_joint_subluxation: 0.0,
             max_wound_pressure: 0.0,
             max_wound_clot: 0.0,
+            max_cavity_pressure: 0.0,
+            max_cavity_collapse: 0.0,
+            max_organ_damage: 0.0,
+            blood_loss: 0.0,
+            blood_volume_fraction: 1.0,
+            blood_turgor_scale: 1.0,
+            max_contusion: 0.0,
+            max_tissue_softening: 0.0,
+            max_tissue_fatigue: 0.0,
+            max_tissue_plasticity: 0.0,
             last_fracture_impulse: 0.0,
             bone_contacts: 0,
             tissue_contacts: 0,
             fractures: 0,
+            rib_fractures: 0,
             fluid_emitted: 0,
             fragment_contacts: 0,
             fragment_tears: 0,
+            fragment_skin_punctures: 0,
+            fragment_bone_contacts: 0,
+            fragment_bone_damping_events: 0,
+            fragment_bone_resting_contacts: 0,
             fragment_pair_contacts: 0,
+            fragment_pair_damping_events: 0,
+            fragment_pair_resting_contacts: 0,
+            fragment_floor_contacts: 0,
+            fragment_floor_resting_contacts: 0,
             post_fracture_joint_corrections: 0,
+            bone_joint_subluxations: 0,
+            joint_ligament_damage_events: 0,
             active_wounds: 0,
+            active_fluids: 0,
+            active_blood_stains: 0,
+            active_contusions: 0,
+            active_fragments: 0,
+            sleeping_fragments: 0,
+            solver_iterations: 0,
+            fragment_sleep_events: 0,
+            fragment_wake_events: 0,
+            fragment_budget_skips: 0,
+            fracture_budget_blocks: 0,
+            fragment_bone_checks: 0,
+            fragment_bone_budget_skips: 0,
+            fragment_pair_checks: 0,
+            fragment_pair_budget_skips: 0,
+            fragment_tissue_checks: 0,
+            fragment_tissue_budget_skips: 0,
+            fluid_budget_replacements: 0,
+            blood_stain_deposits: 0,
+            blood_stain_budget_replacements: 0,
+            contusion_events: 0,
+            tissue_fatigue_events: 0,
+            tissue_plastic_events: 0,
+            muscle_fiber_tears: 0,
+            tear_propagations: 0,
+            muscle_cut_transfers: 0,
+            muscle_crush_ruptures: 0,
+            cavity_pressure_events: 0,
+            cavity_ruptures: 0,
+            organ_damage_events: 0,
+            organ_penetrations: 0,
+            rib_organ_punctures: 0,
+            organ_ruptures: 0,
+            skin_flap_detachments: 0,
+            vessel_lacerations: 0,
+            fragment_vessel_lacerations: 0,
+            wound_reopens: 0,
+            wound_budget_replacements: 0,
             wound_leaks: 0,
+            fracture_marrow_sources: 0,
         }
     }
 }
@@ -606,6 +1146,7 @@ struct ToolProfile {
     mass_scale: f64,
     tissue_push_scale: f64,
     tissue_load_scale: f64,
+    contusion_scale: f64,
     bone_push_scale: f64,
     bone_load_scale: f64,
     fracture_scale: f64,
@@ -627,6 +1168,7 @@ impl Default for ToolProfile {
             mass_scale: 1.0,
             tissue_push_scale: 1.0,
             tissue_load_scale: 1.0,
+            contusion_scale: 1.0,
             bone_push_scale: 1.0,
             bone_load_scale: 1.0,
             fracture_scale: 1.0,
@@ -659,6 +1201,12 @@ struct ToolPointContact {
     distance: f64,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct OrganToolContact {
+    tool_point: Vec2,
+    contact: f64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct GridKey {
     x: i32,
@@ -674,6 +1222,30 @@ struct SegmentClosestPoints {
     distance: f64,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct Aabb {
+    min: Vec2,
+    max: Vec2,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WoundAnchorCandidate {
+    point: usize,
+    bone: usize,
+    t: f64,
+    offset: Vec2,
+    distance_sq: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct CavityMetrics {
+    current_area: f64,
+    average_load: f64,
+    peak_load: f64,
+    centroid: Vec2,
+    samples: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct World {
     materials: Materials,
@@ -685,11 +1257,17 @@ pub struct World {
     bones: Vec<BoneSegment>,
     bone_attachments: Vec<BoneAttachment>,
     bone_joints: Vec<BoneJoint>,
+    vessels: Vec<VesselSegment>,
+    cavities: Vec<CavityRegion>,
+    organs: Vec<OrganRegion>,
     fluids: Vec<FluidParticle>,
+    blood_stains: Vec<BloodStain>,
     wounds: Vec<WoundSource>,
     stats: Stats,
     debug: ContactDebug,
+    blood_volume: f64,
     fluid_write_cursor: usize,
+    blood_stain_write_cursor: usize,
     fluid_seed: u32,
 }
 
@@ -711,11 +1289,17 @@ impl World {
             bones: Vec::new(),
             bone_attachments: Vec::new(),
             bone_joints: Vec::new(),
+            vessels: Vec::new(),
+            cavities: Vec::new(),
+            organs: Vec::new(),
             fluids: Vec::new(),
+            blood_stains: Vec::new(),
             wounds: Vec::new(),
             stats: Stats::default(),
             debug: ContactDebug::default(),
+            blood_volume: materials.blood_volume_capacity.max(0.0),
             fluid_write_cursor: 0,
+            blood_stain_write_cursor: 0,
             fluid_seed: 0x9e3779b9,
         }
     }
@@ -756,8 +1340,24 @@ impl World {
         &self.bone_joints
     }
 
+    pub fn vessels(&self) -> &[VesselSegment] {
+        &self.vessels
+    }
+
+    pub fn cavities(&self) -> &[CavityRegion] {
+        &self.cavities
+    }
+
+    pub fn organs(&self) -> &[OrganRegion] {
+        &self.organs
+    }
+
     pub fn fluids(&self) -> &[FluidParticle] {
         &self.fluids
+    }
+
+    pub fn blood_stains(&self) -> &[BloodStain] {
+        &self.blood_stains
     }
 
     pub fn wounds(&self) -> &[WoundSource] {
@@ -770,6 +1370,14 @@ impl World {
 
     pub fn debug(&self) -> &ContactDebug {
         &self.debug
+    }
+
+    pub fn blood_volume_fraction(&self) -> f64 {
+        self.blood_volume_fraction_internal()
+    }
+
+    pub fn blood_turgor_scale(&self) -> f64 {
+        self.blood_turgor_scale_internal()
     }
 
     pub fn add_point(&mut self, position: Vec2, layer: TissueLayer, pinned: bool) -> usize {
@@ -809,10 +1417,12 @@ impl World {
         }) {
             return;
         }
+        let rest = distance(self.points[a].position, self.points[b].position);
         self.springs.push(Spring {
             a,
             b,
-            rest: distance(self.points[a].position, self.points[b].position),
+            rest,
+            rest_reference: rest,
             stiffness,
             tear_stretch,
             tear_impulse,
@@ -840,7 +1450,72 @@ impl World {
             ),
             stiffness,
             layer,
+            lambda: 0.0,
         });
+    }
+
+    pub fn add_cavity_from_areas(&mut self, area_indices: Vec<usize>) -> usize {
+        let mut filtered = Vec::new();
+        let mut rest_area = 0.0;
+        let mut weighted_centroid = Vec2::default();
+        for index in area_indices {
+            if index >= self.areas.len() {
+                continue;
+            }
+            let area = self.areas[index];
+            if area.layer != TissueLayer::Muscle {
+                continue;
+            }
+            let weight = area.rest_area.abs();
+            if weight <= EPSILON {
+                continue;
+            }
+            let centroid = Vec2 {
+                x: (self.points[area.a].home.x
+                    + self.points[area.b].home.x
+                    + self.points[area.c].home.x)
+                    / 3.0,
+                y: (self.points[area.a].home.y
+                    + self.points[area.b].home.y
+                    + self.points[area.c].home.y)
+                    / 3.0,
+            };
+            weighted_centroid.x += centroid.x * weight;
+            weighted_centroid.y += centroid.y * weight;
+            rest_area += weight;
+            filtered.push(index);
+        }
+        if filtered.is_empty() || rest_area <= EPSILON {
+            return MISSING_ANCHOR;
+        }
+        let centroid = scale(weighted_centroid, 1.0 / rest_area);
+        let index = self.cavities.len();
+        self.cavities.push(CavityRegion {
+            area_indices: filtered,
+            rest_area,
+            pressure: 0.0,
+            collapse: 0.0,
+            centroid,
+            ruptured: false,
+        });
+        index
+    }
+
+    pub fn add_organ_region(&mut self, kind: OrganKind, center: Vec2, radius: Vec2) -> usize {
+        let (anchor_point, anchor_offset) = self.nearest_vessel_point_anchor(center);
+        let index = self.organs.len();
+        self.organs.push(OrganRegion {
+            kind,
+            center,
+            radius: Vec2 {
+                x: radius.x.max(2.0),
+                y: radius.y.max(2.0),
+            },
+            anchor_point,
+            anchor_offset,
+            ..OrganRegion::default()
+        });
+        index
     }
 
     pub fn add_attachment(&mut self, skin_point: usize, muscle_point: usize) {
@@ -889,8 +1564,21 @@ impl World {
         fracture_impulse: f64,
         pinned: bool,
     ) -> usize {
+        self.add_bone_segment_with_kind(a, b, radius, fracture_impulse, pinned, BoneKind::Generic)
+    }
+
+    pub fn add_bone_segment_with_kind(
+        &mut self,
+        a: Vec2,
+        b: Vec2,
+        radius: f64,
+        fracture_impulse: f64,
+        pinned: bool,
+        kind: BoneKind,
+    ) -> usize {
         let index = self.bones.len();
         self.bones.push(BoneSegment {
+            kind,
             a,
             b,
             previous_a: a,
@@ -955,6 +1643,25 @@ impl World {
         });
     }
 
+    pub fn add_vessel_segment(&mut self, a: Vec2, b: Vec2, radius: f64, pressure: f64) -> usize {
+        let (anchor_a, offset_a) = self.nearest_vessel_point_anchor(a);
+        let (anchor_b, offset_b) = self.nearest_vessel_point_anchor(b);
+        let index = self.vessels.len();
+        self.vessels.push(VesselSegment {
+            a,
+            b,
+            radius: radius.max(0.8),
+            pressure: pressure.max(0.1),
+            laceration_impulse: self.materials.major_vessel_laceration_impulse,
+            anchor_a,
+            anchor_b,
+            offset_a,
+            offset_b,
+            ..VesselSegment::default()
+        });
+        index
+    }
+
     pub fn step(&mut self, dt: f64, input: &InputState, width: f64, height: f64) {
         let floor_y = height - 38.0;
         let profile = tool_profile(input.tool);
@@ -978,13 +1685,25 @@ impl World {
             striker_radius,
             tool: input.tool,
             impact: striker_speed * striker_mass,
+            solver_iterations: self.materials.solver_iterations as i32,
+            blood_loss: self.stats.blood_loss,
+            blood_volume_fraction: self.blood_volume_fraction_internal(),
+            blood_turgor_scale: self.blood_turgor_scale_internal(),
             ..ContactDebug::default()
         };
 
         self.update_exposure();
         self.integrate(dt, width, floor_y);
+        self.update_vessel_anchors();
+        self.update_organ_anchors();
+        self.update_wound_anchors();
         self.update_wounds(dt);
         self.collide_striker(dt, input);
+        self.update_organ_anchors();
+        self.update_cavities(dt);
+        self.update_organs(dt);
+        self.disturb_wounds_from_loaded_tissue();
+        self.reset_constraint_lambdas();
 
         for _ in 0..self.materials.solver_iterations {
             self.solve_springs();
@@ -993,14 +1712,40 @@ impl World {
             self.solve_bone_joints();
             self.solve_bones();
             self.solve_post_fracture_joints();
+            self.solve_bone_fragment_bone_contacts();
             self.solve_bone_fragment_tissue_contacts();
             self.solve_bone_fragment_repulsion();
             self.solve_areas();
             self.constrain_to_world(width, floor_y);
         }
 
+        self.update_vessel_anchors();
+        self.update_organ_anchors();
+        self.propagate_skin_tears();
+        self.transfer_sharp_cut_to_exposed_muscle();
+        self.delaminate_skin_flaps_from_cut_edges();
         self.collide_bone_fragments();
         self.update_triangle_damage();
+        self.update_fragment_sleep_states();
+        self.debug.active_fluids = self.active_fluid_count() as i32;
+        self.debug.active_blood_stains = self.active_blood_stain_count() as i32;
+        let (active_contusions, max_contusion) = self.contusion_metrics();
+        self.debug.active_contusions = active_contusions as i32;
+        self.debug.max_contusion = self.debug.max_contusion.max(max_contusion);
+        self.debug.active_fragments = self
+            .debug
+            .active_fragments
+            .max(self.free_fragment_count() as i32);
+        self.debug.sleeping_fragments = self.sleeping_fragment_count() as i32;
+    }
+
+    fn reset_constraint_lambdas(&mut self) {
+        for spring in &mut self.springs {
+            spring.lambda = 0.0;
+        }
+        for area in &mut self.areas {
+            area.lambda = 0.0;
+        }
     }
 
     pub fn triangle_alive(&self, triangle: &Triangle) -> bool {
@@ -1033,10 +1778,292 @@ impl World {
     }
 
     fn can_fracture_bone(&self, bone: BoneSegment) -> bool {
+        self.can_fracture_bone_shape(bone) && self.fracture_budget_allows(bone)
+    }
+
+    fn can_fracture_bone_shape(&self, bone: BoneSegment) -> bool {
+        let min_fragment_length = if bone.kind == BoneKind::Rib {
+            self.materials.min_rib_fragment_length
+        } else {
+            self.materials.min_bone_fragment_length
+        };
         !bone.pinned
             && !bone.splinter
             && bone.fracture_generation < self.materials.max_bone_fracture_depth
-            && bone.rest_length >= self.materials.min_bone_fragment_length * 2.0
+            && bone.rest_length >= min_fragment_length * 2.0
+    }
+
+    fn fracture_budget_allows(&self, bone: BoneSegment) -> bool {
+        let budget = self.materials.max_active_bone_fragments;
+        if budget == 0 {
+            return false;
+        }
+        let added_fragments = if free_bone_fragment(bone) { 2 } else { 3 };
+        self.free_fragment_count() + added_fragments <= budget
+    }
+
+    fn free_fragment_count(&self) -> usize {
+        self.bones
+            .iter()
+            .filter(|bone| awake_free_bone_fragment(**bone))
+            .count()
+    }
+
+    fn sleeping_fragment_count(&self) -> usize {
+        self.bones
+            .iter()
+            .filter(|bone| free_bone_fragment(**bone) && bone.sleeping)
+            .count()
+    }
+
+    fn active_fluid_count(&self) -> usize {
+        self.fluids.iter().filter(|fluid| fluid.life > 0.0).count()
+    }
+
+    fn active_blood_stain_count(&self) -> usize {
+        self.blood_stains
+            .iter()
+            .filter(|stain| stain.intensity > 0.025)
+            .count()
+    }
+
+    fn active_wound_count(&self) -> usize {
+        self.wounds.iter().filter(|wound| wound.active).count()
+    }
+
+    fn contusion_metrics(&self) -> (usize, f64) {
+        let mut active = 0;
+        let mut max_contusion: f64 = 0.0;
+        for point in &self.points {
+            max_contusion = max_contusion.max(point.contusion);
+            if point.contusion > 0.035 {
+                active += 1;
+            }
+        }
+        (active, max_contusion)
+    }
+
+    fn fragment_work_priority(&self, index: usize) -> f64 {
+        let bone = self.bones[index];
+        let endpoint_speed = fragment_endpoint_speed(bone, self.materials.fixed_dt);
+        bone.load
+            + endpoint_speed * bone.radius.max(1.0) * 0.18
+            + bone.angular_velocity.abs() * bone.radius.max(1.0) * 18.0
+            + bone.rest_length * if bone.splinter { 0.10 } else { 0.32 }
+            + if bone.broken_start || bone.broken_end {
+                180.0
+            } else {
+                0.0
+            }
+    }
+
+    fn budgeted_fragment_indices(&mut self) -> Vec<usize> {
+        let mut indices: Vec<usize> = self
+            .bones
+            .iter()
+            .enumerate()
+            .filter_map(|(index, bone)| awake_free_bone_fragment(*bone).then_some(index))
+            .collect();
+        self.debug.active_fragments = self.debug.active_fragments.max(indices.len() as i32);
+
+        let budget = self.materials.max_active_bone_fragments;
+        if indices.len() <= budget {
+            return indices;
+        }
+        if budget == 0 {
+            self.debug.fragment_budget_skips += indices.len() as i32;
+            return Vec::new();
+        }
+
+        indices.sort_by(|a, b| {
+            self.fragment_work_priority(*b)
+                .partial_cmp(&self.fragment_work_priority(*a))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let skipped = indices.len() - budget;
+        self.debug.fragment_budget_skips += skipped as i32;
+        indices.truncate(budget);
+        indices
+    }
+
+    fn consume_fragment_pair_check(&mut self) -> bool {
+        if (self.debug.fragment_pair_checks as usize) >= self.materials.max_fragment_pair_checks {
+            self.debug.fragment_pair_budget_skips += 1;
+            false
+        } else {
+            self.debug.fragment_pair_checks += 1;
+            true
+        }
+    }
+
+    fn consume_fragment_bone_check(&mut self) -> bool {
+        if (self.debug.fragment_bone_checks as usize) >= self.materials.max_fragment_bone_checks {
+            self.debug.fragment_bone_budget_skips += 1;
+            false
+        } else {
+            self.debug.fragment_bone_checks += 1;
+            true
+        }
+    }
+
+    fn consume_fragment_tissue_check(&mut self) -> bool {
+        if (self.debug.fragment_tissue_checks as usize) >= self.materials.max_fragment_tissue_checks
+        {
+            self.debug.fragment_tissue_budget_skips += 1;
+            false
+        } else {
+            self.debug.fragment_tissue_checks += 1;
+            true
+        }
+    }
+
+    fn fragment_tissue_cell_size(&self) -> f64 {
+        (self
+            .materials
+            .fragment_contact_radius
+            .max(self.materials.point_spacing * 1.6))
+        .max(8.0)
+    }
+
+    fn fragment_pair_cell_size(&self) -> f64 {
+        (self.materials.fragment_contact_radius * 2.6)
+            .max(self.materials.point_spacing * 2.0)
+            .max(16.0)
+    }
+
+    fn fragment_bone_cell_size(&self) -> f64 {
+        (self.materials.fragment_contact_radius * 2.8)
+            .max(self.materials.point_spacing * 2.0)
+            .max(18.0)
+    }
+
+    fn build_point_spatial_grid(&self, cell_size: f64) -> HashMap<GridKey, Vec<usize>> {
+        let mut grid = HashMap::new();
+        for (index, point) in self.points.iter().enumerate() {
+            grid.entry(spatial_key(point.position, cell_size))
+                .or_insert_with(Vec::new)
+                .push(index);
+        }
+        grid
+    }
+
+    fn build_fragment_spatial_grid(
+        &self,
+        fragment_indices: &[usize],
+        cell_size: f64,
+    ) -> HashMap<GridKey, Vec<usize>> {
+        let mut grid = HashMap::new();
+        for &index in fragment_indices {
+            let bone = self.bones[index];
+            let margin = bone.radius + self.materials.fragment_repulsion_slop + 1.0;
+            add_index_to_spatial_cells(
+                &mut grid,
+                segment_aabb(bone.a, bone.b, margin),
+                cell_size,
+                index,
+            );
+        }
+        grid
+    }
+
+    fn build_intact_bone_spatial_grid(&self, cell_size: f64) -> HashMap<GridKey, Vec<usize>> {
+        let mut grid = HashMap::new();
+        for (index, bone) in self.bones.iter().enumerate() {
+            if free_bone_fragment(*bone) {
+                continue;
+            }
+            let margin = bone.radius + self.materials.fragment_repulsion_slop + 1.0;
+            add_index_to_spatial_cells(
+                &mut grid,
+                segment_aabb(bone.a, bone.b, margin),
+                cell_size,
+                index,
+            );
+        }
+        grid
+    }
+
+    fn point_candidates_near_aabb(
+        &self,
+        grid: &HashMap<GridKey, Vec<usize>>,
+        aabb: Aabb,
+        cell_size: f64,
+    ) -> Vec<usize> {
+        let mut candidates = Vec::new();
+        for_spatial_cells(aabb, cell_size, |key| {
+            if let Some(indices) = grid.get(&key) {
+                candidates.extend(indices.iter().copied());
+            }
+        });
+        candidates
+    }
+
+    fn fragment_candidates_near_aabb(
+        &self,
+        grid: &HashMap<GridKey, Vec<usize>>,
+        aabb: Aabb,
+        cell_size: f64,
+    ) -> Vec<usize> {
+        let mut seen = HashSet::new();
+        let mut candidates = Vec::new();
+        for_spatial_cells(aabb, cell_size, |key| {
+            if let Some(indices) = grid.get(&key) {
+                for &index in indices {
+                    if seen.insert(index) {
+                        candidates.push(index);
+                    }
+                }
+            }
+        });
+        candidates
+    }
+
+    fn wake_fragment(&mut self, bone: &mut BoneSegment) {
+        if bone.sleeping {
+            bone.sleeping = false;
+            bone.sleep_frames = 0;
+            self.debug.fragment_wake_events += 1;
+        }
+    }
+
+    fn update_fragment_sleep_states(&mut self) {
+        for bone in &mut self.bones {
+            if !free_bone_fragment(*bone) {
+                bone.sleeping = false;
+                bone.sleep_frames = 0;
+                continue;
+            }
+
+            if bone.load > self.materials.fragment_wake_load {
+                if bone.sleeping {
+                    bone.sleeping = false;
+                    self.debug.fragment_wake_events += 1;
+                }
+                bone.sleep_frames = 0;
+                continue;
+            }
+
+            let speed = fragment_endpoint_speed(*bone, self.materials.fixed_dt);
+            let quiet = speed < self.materials.fragment_sleep_speed
+                && bone.angular_velocity.abs() < self.materials.fragment_sleep_angular_speed
+                && bone.load < self.materials.fragment_sleep_load;
+            if quiet {
+                bone.sleep_frames += 1;
+                if !bone.sleeping && bone.sleep_frames >= self.materials.fragment_sleep_frames {
+                    bone.sleeping = true;
+                    bone.angular_velocity = 0.0;
+                    bone.previous_a = bone.a;
+                    bone.previous_b = bone.b;
+                    self.debug.fragment_sleep_events += 1;
+                }
+            } else {
+                if bone.sleeping {
+                    bone.sleeping = false;
+                    self.debug.fragment_wake_events += 1;
+                }
+                bone.sleep_frames = 0;
+            }
+        }
     }
 
     fn next_fluid_random(&mut self) -> f64 {
@@ -1088,6 +2115,7 @@ impl World {
                 life: max_life,
                 intensity: clamped_intensity,
                 settled: false,
+                stained: false,
             };
 
             if self.fluids.len() < self.materials.max_fluid_particles {
@@ -1096,10 +2124,82 @@ impl World {
                 let index = self.fluid_write_cursor % self.fluids.len();
                 self.fluids[index] = particle;
                 self.fluid_write_cursor = (self.fluid_write_cursor + 1) % self.fluids.len();
+                self.debug.fluid_budget_replacements += 1;
             }
             self.stats.emitted_fluid_particles += 1;
             self.debug.fluid_emitted += 1;
         }
+    }
+
+    fn update_blood_stains(&mut self, dt: f64) {
+        for stain in &mut self.blood_stains {
+            if stain.intensity <= 0.0 {
+                continue;
+            }
+            stain.age += dt;
+            stain.intensity = (stain.intensity - dt * self.materials.blood_stain_decay).max(0.0);
+        }
+    }
+
+    fn deposit_blood_stain(&mut self, center: Vec2, radius: f64, intensity: f64) {
+        if self.materials.max_blood_stains == 0 || intensity <= 0.0 {
+            return;
+        }
+
+        let clamped_radius = radius.clamp(2.0, 38.0);
+        let clamped_intensity = intensity.clamp(0.05, 1.55);
+        let merge_radius = self.materials.blood_stain_merge_radius + clamped_radius * 0.35;
+
+        if let Some(stain) = self
+            .blood_stains
+            .iter_mut()
+            .filter(|stain| stain.intensity > 0.025)
+            .find(|stain| distance(stain.position, center) <= merge_radius + stain.radius * 0.40)
+        {
+            let existing_weight = stain.intensity.max(0.05) * stain.radius.max(1.0);
+            let added_weight = clamped_intensity * clamped_radius.max(1.0);
+            let weight = existing_weight + added_weight;
+            stain.position = Vec2 {
+                x: (stain.position.x * existing_weight + center.x * added_weight) / weight,
+                y: (stain.position.y * existing_weight + center.y * added_weight) / weight,
+            };
+            stain.radius = (stain.radius * stain.radius + clamped_radius * clamped_radius * 0.52)
+                .sqrt()
+                .min(52.0);
+            stain.intensity = (stain.intensity + clamped_intensity * 0.42).min(1.75);
+            stain.age = 0.0;
+            self.stats.blood_stain_deposits += 1;
+            self.debug.blood_stain_deposits += 1;
+            self.debug.active_blood_stains = self.active_blood_stain_count() as i32;
+            return;
+        }
+
+        let stain = BloodStain {
+            position: center,
+            radius: clamped_radius,
+            intensity: clamped_intensity,
+            age: 0.0,
+        };
+
+        if let Some(index) = self
+            .blood_stains
+            .iter()
+            .position(|stain| stain.intensity <= 0.025)
+        {
+            self.blood_stains[index] = stain;
+        } else if self.blood_stains.len() < self.materials.max_blood_stains {
+            self.blood_stains.push(stain);
+        } else if !self.blood_stains.is_empty() {
+            let index = self.blood_stain_write_cursor % self.blood_stains.len();
+            self.blood_stains[index] = stain;
+            self.blood_stain_write_cursor =
+                (self.blood_stain_write_cursor + 1) % self.blood_stains.len();
+            self.debug.blood_stain_budget_replacements += 1;
+        }
+
+        self.stats.blood_stain_deposits += 1;
+        self.debug.blood_stain_deposits += 1;
+        self.debug.active_blood_stains = self.active_blood_stain_count() as i32;
     }
 
     fn open_wound(
@@ -1110,26 +2210,44 @@ impl World {
         pressure: f64,
         radius: f64,
         depth: f64,
-    ) {
+    ) -> bool {
+        self.open_wound_with_anchor(
+            center, direction, layer, pressure, radius, depth, None, true,
+        )
+    }
+
+    fn open_wound_with_anchor(
+        &mut self,
+        center: Vec2,
+        direction: Vec2,
+        layer: TissueLayer,
+        pressure: f64,
+        radius: f64,
+        depth: f64,
+        forced_anchor: Option<WoundAnchorCandidate>,
+        merge_active_sources: bool,
+    ) -> bool {
         if self.materials.max_wound_sources == 0 || pressure <= 0.0 {
-            return;
+            return false;
         }
 
         let dir = normalized(direction, Vec2 { x: 0.0, y: -1.0 });
-        let clamped_pressure = pressure.clamp(0.12, 4.8);
+        let clamped_pressure = (pressure * self.blood_pressure_scale()).clamp(0.12, 4.8);
         let clamped_depth = depth.clamp(0.12, 1.35);
         let clamped_radius = radius.clamp(1.3, 5.2);
 
         let mut target_index = self.wounds.iter().position(|wound| !wound.active);
-        let mut best_distance = self.materials.wound_merge_radius;
-        for (index, wound) in self.wounds.iter().enumerate() {
-            if !wound.active {
-                continue;
-            }
-            let d = distance(wound.position, center);
-            if d < best_distance {
-                best_distance = d;
-                target_index = Some(index);
+        if merge_active_sources {
+            let mut best_distance = self.materials.wound_merge_radius;
+            for (index, wound) in self.wounds.iter().enumerate() {
+                if !wound.active {
+                    continue;
+                }
+                let d = distance(wound.position, center);
+                if d < best_distance {
+                    best_distance = d;
+                    target_index = Some(index);
+                }
             }
         }
 
@@ -1139,6 +2257,7 @@ impl World {
             self.wounds.push(WoundSource::default());
             self.wounds.len() - 1
         } else {
+            self.debug.wound_budget_replacements += 1;
             self.wounds
                 .iter()
                 .enumerate()
@@ -1151,13 +2270,26 @@ impl World {
                 .unwrap_or(0)
         };
 
-        let target = &mut self.wounds[index];
-        let was_active = target.active;
-        target.position = if was_active {
-            lerp(target.position, center, 0.35)
+        let was_active = self.wounds[index].active;
+        let previous_position = self.wounds[index].position;
+        let previous_layer = self.wounds[index].layer;
+        let merged_position = if was_active {
+            lerp(previous_position, center, 0.35)
         } else {
             center
         };
+        let merged_layer = if layer == TissueLayer::Muscle
+            || (was_active && previous_layer == TissueLayer::Muscle)
+        {
+            TissueLayer::Muscle
+        } else {
+            TissueLayer::Skin
+        };
+        let anchor = forced_anchor
+            .unwrap_or_else(|| self.choose_wound_anchor(merged_position, merged_layer));
+
+        let target = &mut self.wounds[index];
+        target.position = merged_position;
         target.direction = normalized(
             add(
                 scale(target.direction, if was_active { 0.45 } else { 0.0 }),
@@ -1165,11 +2297,7 @@ impl World {
             ),
             dir,
         );
-        target.layer = if target.layer == TissueLayer::Muscle || layer == TissueLayer::Muscle {
-            TissueLayer::Muscle
-        } else {
-            TissueLayer::Skin
-        };
+        target.layer = merged_layer;
         target.pressure = (target.pressure * 0.72).max(clamped_pressure) + clamped_pressure * 0.34;
         target.pressure = target.pressure.min(6.0);
         target.clot = if was_active {
@@ -1182,18 +2310,320 @@ impl World {
         } else {
             0.0
         };
-        target.radius = target.radius.max(clamped_radius);
-        target.depth = target.depth.max(clamped_depth);
+        target.radius = if was_active {
+            target.radius.max(clamped_radius)
+        } else {
+            clamped_radius
+        };
+        target.depth = if was_active {
+            target.depth.max(clamped_depth)
+        } else {
+            clamped_depth
+        };
+        target.anchor_point = anchor.point;
+        target.anchor_bone = anchor.bone;
+        target.anchor_t = anchor.t;
+        target.anchor_offset = anchor.offset;
         target.active = true;
         if !was_active {
             self.stats.opened_wounds += 1;
         }
+        true
+    }
+
+    fn open_bone_marrow_wound(
+        &mut self,
+        bone_index: usize,
+        t: f64,
+        direction: Vec2,
+        pressure: f64,
+        radius: f64,
+        depth: f64,
+    ) {
+        if bone_index >= self.bones.len() {
+            return;
+        }
+        let t = t.clamp(0.0, 1.0);
+        let position = bone_point(self.bones[bone_index], t);
+        let anchor = WoundAnchorCandidate {
+            point: MISSING_ANCHOR,
+            bone: bone_index,
+            t,
+            offset: Vec2::default(),
+            distance_sq: 0.0,
+        };
+        if self.open_wound_with_anchor(
+            position,
+            direction,
+            TissueLayer::Muscle,
+            pressure,
+            radius,
+            depth,
+            Some(anchor),
+            false,
+        ) {
+            self.stats.fracture_marrow_sources += 1;
+            self.debug.fracture_marrow_sources += 1;
+        }
+    }
+
+    fn choose_wound_anchor(&self, center: Vec2, layer: TissueLayer) -> WoundAnchorCandidate {
+        let mut best_point = self.nearest_wound_point_anchor(center, layer, true);
+        if best_point.is_none() {
+            best_point = self.nearest_wound_point_anchor(center, layer, false);
+        }
+        let best_bone = self.nearest_wound_bone_anchor(center);
+
+        match (best_point, best_bone) {
+            (Some(point), Some(bone)) => {
+                let point_limit = self.materials.point_spacing * 1.9;
+                if bone.distance_sq < point.distance_sq * 0.65
+                    || point.distance_sq > point_limit * point_limit
+                {
+                    bone
+                } else {
+                    point
+                }
+            }
+            (Some(point), None) => point,
+            (None, Some(bone)) => bone,
+            (None, None) => WoundAnchorCandidate {
+                point: MISSING_ANCHOR,
+                bone: MISSING_ANCHOR,
+                t: 0.0,
+                offset: Vec2::default(),
+                distance_sq: f64::INFINITY,
+            },
+        }
+    }
+
+    fn nearest_wound_point_anchor(
+        &self,
+        center: Vec2,
+        layer: TissueLayer,
+        same_layer_only: bool,
+    ) -> Option<WoundAnchorCandidate> {
+        let mut best_index = MISSING_ANCHOR;
+        let mut best_distance_sq = f64::INFINITY;
+        for (index, point) in self.points.iter().enumerate() {
+            if same_layer_only && point.layer != layer {
+                continue;
+            }
+            let d = distance_sq(point.position, center);
+            if d < best_distance_sq {
+                best_distance_sq = d;
+                best_index = index;
+            }
+        }
+        if best_index == MISSING_ANCHOR {
+            None
+        } else {
+            Some(WoundAnchorCandidate {
+                point: best_index,
+                bone: MISSING_ANCHOR,
+                t: 0.0,
+                offset: subtract(center, self.points[best_index].position),
+                distance_sq: best_distance_sq,
+            })
+        }
+    }
+
+    fn nearest_wound_bone_anchor(&self, center: Vec2) -> Option<WoundAnchorCandidate> {
+        let mut best = None;
+        let mut best_distance_sq = f64::INFINITY;
+        for (index, bone) in self.bones.iter().enumerate() {
+            let t = segment_t(center, bone.a, bone.b);
+            let anchor = bone_point(*bone, t);
+            let delta = subtract(center, anchor);
+            let d = dot(delta, delta);
+            if d >= best_distance_sq {
+                continue;
+            }
+            let tangent = normalized(subtract(bone.b, bone.a), Vec2 { x: 1.0, y: 0.0 });
+            let normal = Vec2 {
+                x: -tangent.y,
+                y: tangent.x,
+            };
+            best_distance_sq = d;
+            best = Some(WoundAnchorCandidate {
+                point: MISSING_ANCHOR,
+                bone: index,
+                t,
+                offset: Vec2 {
+                    x: dot(delta, tangent),
+                    y: dot(delta, normal),
+                },
+                distance_sq: d,
+            });
+        }
+        best
+    }
+
+    fn nearest_vessel_point_anchor(&self, position: Vec2) -> (usize, Vec2) {
+        let mut best_index = MISSING_ANCHOR;
+        let mut best_distance_sq = f64::INFINITY;
+        for (index, point) in self.points.iter().enumerate() {
+            if point.layer != TissueLayer::Muscle {
+                continue;
+            }
+            let d = distance_sq(point.position, position);
+            if d < best_distance_sq {
+                best_distance_sq = d;
+                best_index = index;
+            }
+        }
+        if best_index == MISSING_ANCHOR {
+            for (index, point) in self.points.iter().enumerate() {
+                let d = distance_sq(point.position, position);
+                if d < best_distance_sq {
+                    best_distance_sq = d;
+                    best_index = index;
+                }
+            }
+        }
+        if best_index == MISSING_ANCHOR {
+            (MISSING_ANCHOR, Vec2::default())
+        } else {
+            (
+                best_index,
+                subtract(position, self.points[best_index].position),
+            )
+        }
+    }
+
+    fn update_vessel_anchors(&mut self) {
+        for vessel in &mut self.vessels {
+            if vessel.anchor_a != MISSING_ANCHOR && vessel.anchor_a < self.points.len() {
+                vessel.a = add(self.points[vessel.anchor_a].position, vessel.offset_a);
+            }
+            if vessel.anchor_b != MISSING_ANCHOR && vessel.anchor_b < self.points.len() {
+                vessel.b = add(self.points[vessel.anchor_b].position, vessel.offset_b);
+            }
+        }
+    }
+
+    fn update_organ_anchors(&mut self) {
+        for organ in &mut self.organs {
+            if organ.anchor_point != MISSING_ANCHOR && organ.anchor_point < self.points.len() {
+                organ.center = add(
+                    self.points[organ.anchor_point].position,
+                    organ.anchor_offset,
+                );
+            }
+        }
+    }
+
+    fn update_wound_anchors(&mut self) {
+        for index in 0..self.wounds.len() {
+            let point = self.wounds[index].anchor_point;
+            let bone = self.wounds[index].anchor_bone;
+            let t = self.wounds[index].anchor_t;
+            let offset = self.wounds[index].anchor_offset;
+            if point != MISSING_ANCHOR && point < self.points.len() {
+                self.wounds[index].position = add(self.points[point].position, offset);
+            } else if bone != MISSING_ANCHOR && bone < self.bones.len() {
+                let segment = self.bones[bone];
+                let anchor = bone_point(segment, t);
+                let tangent = normalized(subtract(segment.b, segment.a), Vec2 { x: 1.0, y: 0.0 });
+                let normal = Vec2 {
+                    x: -tangent.y,
+                    y: tangent.x,
+                };
+                self.wounds[index].position = add(
+                    anchor,
+                    add(scale(tangent, offset.x), scale(normal, offset.y)),
+                );
+            }
+        }
+    }
+
+    fn disturb_wounds_from_loaded_tissue(&mut self) {
+        let budget = self.materials.max_wound_reopens_per_step;
+        let radius = self.materials.wound_reopen_radius.max(0.0);
+        let threshold = self.materials.wound_reopen_load_threshold.max(EPSILON);
+        if budget == 0 || radius <= EPSILON || self.wounds.is_empty() || self.points.is_empty() {
+            return;
+        }
+
+        let radius_sq = radius * radius;
+        let mut events = Vec::new();
+        for (wound_index, wound) in self.wounds.iter().enumerate() {
+            if events.len() >= budget {
+                break;
+            }
+            let clot_gate = if wound.active { 0.42 } else { 0.18 };
+            if wound.age < 0.24 || wound.clot < clot_gate {
+                continue;
+            }
+
+            let mut best_load = 0.0;
+            let mut best_direction = wound.direction;
+            for point in &self.points {
+                let d2 = distance_sq(point.position, wound.position);
+                if d2 > radius_sq {
+                    continue;
+                }
+                let layer_scale = if point.layer == wound.layer {
+                    1.0
+                } else if wound.layer == TissueLayer::Muscle {
+                    0.74
+                } else {
+                    0.58
+                };
+                let falloff = 1.0 - (d2.sqrt() / radius).clamp(0.0, 1.0) * 0.45;
+                let local_speed =
+                    distance(point.position, point.previous) / self.materials.fixed_dt.max(EPSILON);
+                let motion_load = local_speed * point.mass * 0.11;
+                let contusion_load =
+                    point.contusion * self.materials.contusion_load_threshold * 0.30;
+                let local_load =
+                    (point.load + motion_load + contusion_load) * layer_scale * falloff;
+                if local_load > best_load {
+                    best_load = local_load;
+                    best_direction =
+                        normalized(subtract(wound.position, point.position), wound.direction);
+                }
+            }
+
+            if best_load <= threshold {
+                continue;
+            }
+            let severity = ((best_load - threshold) / threshold).clamp(0.0, 1.6);
+            events.push((wound_index, severity, best_direction));
+        }
+
+        for (wound_index, severity, direction) in events {
+            let wound = &mut self.wounds[wound_index];
+            let reopened_pressure =
+                0.18 + self.materials.wound_reopen_pressure_scale * (1.0 + severity);
+            wound.pressure = wound.pressure.max(reopened_pressure).min(6.0);
+            wound.clot =
+                (wound.clot - self.materials.wound_reopen_clot_loss * (0.8 + severity)).max(0.0);
+            wound.clot = wound.clot.min(0.36);
+            wound.accumulator = wound.accumulator.max(0.16 + severity * 0.22);
+            wound.direction = normalized(
+                add(scale(wound.direction, 0.58), scale(direction, 0.42)),
+                direction,
+            );
+            wound.age = wound.age.min(0.40);
+            wound.active = true;
+            self.stats.wound_reopens += 1;
+            self.debug.wound_reopens += 1;
+            self.debug.max_wound_pressure = self.debug.max_wound_pressure.max(wound.pressure);
+            self.debug.max_wound_clot = self.debug.max_wound_clot.max(wound.clot);
+        }
+
+        if self.debug.wound_reopens > 0 {
+            self.debug.active_wounds = self.active_wound_count() as i32;
+        }
     }
 
     fn integrate(&mut self, dt: f64, width: f64, floor_y: f64) {
+        let blood_turgor = self.blood_turgor_scale_internal();
         for point in &mut self.points {
             point.load *= 0.84;
             point.exposure *= 0.92;
+            point.contusion = (point.contusion - dt * self.materials.contusion_decay).max(0.0);
             if point.pinned {
                 point.position = point.home;
                 point.previous = point.position;
@@ -1204,11 +2634,12 @@ impl World {
             point.previous = point.position;
             point.position.x += vx;
             point.position.y += vy + self.materials.gravity * dt * dt;
-            let shape_stiffness = if point.layer == TissueLayer::Skin {
+            let base_shape_stiffness = if point.layer == TissueLayer::Skin {
                 self.materials.skin_shape_stiffness
             } else {
                 self.materials.muscle_shape_stiffness
             };
+            let shape_stiffness = base_shape_stiffness * blood_turgor;
             point.position.x += (point.home.x - point.position.x) * shape_stiffness;
             point.position.y += (point.home.y - point.position.y) * shape_stiffness;
             if point.position.y > floor_y {
@@ -1224,6 +2655,14 @@ impl World {
             if bone.pinned {
                 bone.a = bone.home_a;
                 bone.b = bone.home_b;
+                bone.previous_a = bone.a;
+                bone.previous_b = bone.b;
+                self.bones[index] = bone;
+                continue;
+            }
+            if bone.sleeping && free_bone_fragment(bone) {
+                bone.load *= 0.50;
+                bone.angular_velocity = 0.0;
                 bone.previous_a = bone.a;
                 bone.previous_b = bone.b;
                 self.bones[index] = bone;
@@ -1266,6 +2705,8 @@ impl World {
             self.bones[index] = bone;
         }
 
+        self.update_blood_stains(dt);
+        let mut stain_deposits = Vec::new();
         for fluid in &mut self.fluids {
             if fluid.life <= 0.0 {
                 continue;
@@ -1296,15 +2737,74 @@ impl World {
                 fluid.position.y = floor_y - fluid.radius;
                 fluid.previous.x = fluid.position.x + vx * self.materials.fluid_floor_friction;
                 fluid.previous.y = fluid.position.y + vy * self.materials.fluid_floor_friction;
+                let floor_hit_speed = vy.abs() + vx.abs() * 0.32;
+                if !fluid.stained && floor_hit_speed > 0.45 {
+                    let stain_radius = fluid.radius
+                        * (self.materials.blood_stain_spread
+                            + fluid.intensity * 0.78
+                            + floor_hit_speed.min(18.0) * 0.035);
+                    let stain_intensity = (fluid.intensity
+                        * (0.72 + floor_hit_speed.min(22.0) * 0.018))
+                        .clamp(0.08, 1.45);
+                    stain_deposits.push((
+                        Vec2 {
+                            x: fluid.position.x,
+                            y: floor_y - fluid.radius * 0.18,
+                        },
+                        stain_radius,
+                        stain_intensity,
+                    ));
+                    fluid.stained = true;
+                }
                 if vx.abs() + vy.abs() < 1.2 {
                     fluid.settled = true;
                 }
             }
         }
+        for (position, radius, intensity) in stain_deposits {
+            self.deposit_blood_stain(position, radius, intensity);
+        }
+    }
+
+    fn blood_volume_fraction_internal(&self) -> f64 {
+        let capacity = self.materials.blood_volume_capacity.max(EPSILON);
+        (self.blood_volume / capacity).clamp(0.0, 1.0)
+    }
+
+    fn blood_pressure_scale(&self) -> f64 {
+        let min_scale = self.materials.blood_pressure_min_scale.clamp(0.05, 1.0);
+        min_scale + (1.0 - min_scale) * self.blood_volume_fraction_internal()
+    }
+
+    fn blood_turgor_scale_internal(&self) -> f64 {
+        let min_scale = self.materials.blood_turgor_min_scale.clamp(0.10, 1.0);
+        min_scale + (1.0 - min_scale) * self.blood_volume_fraction_internal()
+    }
+
+    fn drain_blood_volume(&mut self, count: i32, intensity: f64) {
+        if count <= 0 || self.materials.blood_volume_capacity <= 0.0 {
+            return;
+        }
+        let loss = f64::from(count)
+            * self.materials.blood_loss_per_wound_particle.max(0.0)
+            * intensity.clamp(0.25, 2.2);
+        if loss <= 0.0 {
+            return;
+        }
+        let drained = loss.min(self.blood_volume.max(0.0));
+        self.blood_volume = (self.blood_volume - drained).max(0.0);
+        self.stats.blood_loss += drained;
+        self.debug.blood_loss = self.stats.blood_loss;
+        self.debug.blood_volume_fraction = self.blood_volume_fraction_internal();
+        self.debug.blood_turgor_scale = self.blood_turgor_scale_internal();
     }
 
     fn update_wounds(&mut self, dt: f64) {
         let mut emissions = Vec::new();
+        let systemic_pressure = self.blood_pressure_scale();
+        self.debug.blood_loss = self.stats.blood_loss;
+        self.debug.blood_volume_fraction = self.blood_volume_fraction_internal();
+        self.debug.blood_turgor_scale = self.blood_turgor_scale_internal();
         for wound in &mut self.wounds {
             if !wound.active {
                 continue;
@@ -1321,17 +2821,19 @@ impl World {
             wound.accumulator += dt
                 * self.materials.wound_leak_rate
                 * wound.pressure
+                * systemic_pressure
                 * open_factor
                 * layer_scale
                 * (0.45 + wound.depth * 0.82);
-            if wound.age < 0.42 && wound.pressure > self.materials.wound_spray_pressure {
+            let effective_pressure = wound.pressure * systemic_pressure;
+            if wound.age < 0.42 && effective_pressure > self.materials.wound_spray_pressure {
                 wound.accumulator +=
-                    dt * (wound.pressure - self.materials.wound_spray_pressure) * 2.1;
+                    dt * (effective_pressure - self.materials.wound_spray_pressure) * 2.1;
             }
             let count = (wound.accumulator.floor() as i32).min(4);
             if count > 0 {
                 wound.accumulator -= f64::from(count);
-                let spray = ((wound.pressure - self.materials.wound_spray_pressure) / 2.4)
+                let spray = ((effective_pressure - self.materials.wound_spray_pressure) / 2.4)
                     .clamp(0.0, 1.0)
                     * (1.0 - wound.age / 0.9).clamp(0.0, 1.0);
                 let leak_direction = normalized(
@@ -1345,7 +2847,7 @@ impl World {
                     wound.position,
                     leak_direction,
                     count,
-                    45.0 + wound.pressure * (38.0 + spray * 92.0),
+                    45.0 + effective_pressure * (38.0 + spray * 92.0),
                     wound.radius * (0.64 + wound.depth * 0.18),
                     0.58 + wound.depth * 0.42 + spray * 0.18,
                 ));
@@ -1372,12 +2874,579 @@ impl World {
         }
 
         for (position, direction, count, speed, radius, intensity) in emissions {
+            self.drain_blood_volume(count, intensity);
             let before = self.stats.emitted_fluid_particles;
             self.emit_fluid(position, direction, count, speed, radius, intensity);
             let emitted = self.stats.emitted_fluid_particles - before;
             self.stats.wound_fluid_particles += emitted;
             self.debug.wound_leaks += emitted;
         }
+    }
+
+    fn update_cavities(&mut self, dt: f64) {
+        if self.cavities.is_empty() {
+            return;
+        }
+
+        let mut rupture_events = Vec::new();
+        for index in 0..self.cavities.len() {
+            let area_indices = self.cavities[index].area_indices.clone();
+            let metrics = self.cavity_metrics(&area_indices);
+            if metrics.samples == 0 {
+                continue;
+            }
+
+            let rest_area = self.cavities[index].rest_area.max(EPSILON);
+            let area_fraction = (metrics.current_area / rest_area).clamp(0.0, 1.35);
+            let min_fraction = self.materials.cavity_min_area_fraction.clamp(0.35, 0.96);
+            let collapse =
+                ((1.0 - area_fraction) / (1.0 - min_fraction).max(EPSILON)).clamp(0.0, 1.0);
+            let load_drive_cap = if self.debug.tool == ToolMode::Heavy {
+                2.4
+            } else {
+                self.materials
+                    .cavity_non_heavy_pressure_load_cap
+                    .clamp(0.4, 2.4)
+            };
+            let load_drive = ((metrics.peak_load - self.materials.cavity_load_threshold)
+                / self.materials.cavity_load_threshold.max(1.0))
+            .clamp(0.0, load_drive_cap)
+                * self.materials.cavity_pressure_load_scale.max(0.0);
+            let target_pressure = (collapse * self.materials.cavity_pressure_stiffness.max(0.0)
+                + load_drive)
+                .clamp(0.0, 3.0);
+            let decay = (1.0 - dt * self.materials.cavity_pressure_decay.max(0.0)).clamp(0.0, 1.0);
+            let pressure = (self.cavities[index].pressure * decay)
+                .max(target_pressure)
+                .clamp(0.0, 3.0);
+            let stored_collapse = (self.cavities[index].collapse * decay)
+                .max(collapse)
+                .clamp(0.0, 1.0);
+
+            self.cavities[index].pressure = pressure;
+            self.cavities[index].collapse = stored_collapse;
+            self.cavities[index].centroid = metrics.centroid;
+            self.debug.max_cavity_pressure = self.debug.max_cavity_pressure.max(pressure);
+            self.debug.max_cavity_collapse = self.debug.max_cavity_collapse.max(stored_collapse);
+
+            if pressure > 0.02 {
+                self.apply_cavity_pressure_to_points(
+                    &area_indices,
+                    metrics.centroid,
+                    pressure,
+                    stored_collapse,
+                    metrics.average_load,
+                );
+            }
+
+            if pressure >= self.materials.cavity_contusion_pressure {
+                self.stats.cavity_pressure_events += 1;
+                self.debug.cavity_pressure_events += 1;
+            }
+
+            let heavy_impact_drive = self.debug.tool == ToolMode::Heavy
+                && self.debug.impact
+                    >= self.materials.cavity_load_threshold
+                        * self.materials.cavity_rupture_load_scale.max(1.0)
+                        * 2.0;
+            let rupture_load_scale = if self.debug.tool == ToolMode::Heavy {
+                self.materials.cavity_rupture_load_scale.max(0.0)
+            } else {
+                self.materials.cavity_rupture_load_scale.max(0.0)
+                    * self.materials.cavity_non_heavy_rupture_load_scale.max(1.0)
+            };
+            if !self.cavities[index].ruptured
+                && pressure >= self.materials.cavity_rupture_pressure
+                && stored_collapse >= self.materials.cavity_rupture_min_collapse
+                && (metrics.peak_load >= self.materials.cavity_load_threshold * rupture_load_scale
+                    || heavy_impact_drive)
+                && rupture_events.len() < self.materials.max_cavity_ruptures_per_step
+            {
+                self.cavities[index].ruptured = true;
+                let (site, normal, site_load) =
+                    self.cavity_rupture_site(&area_indices, metrics.centroid);
+                rupture_events.push((site, normal, pressure, stored_collapse, site_load));
+            }
+        }
+
+        for (position, normal, pressure, collapse, site_load) in rupture_events {
+            let drive = site_load.max(self.materials.cavity_load_threshold * pressure);
+            self.emit_fluid(
+                position,
+                normal,
+                2 + (pressure * 3.0).clamp(0.0, 6.0) as i32,
+                76.0 + drive * self.materials.fluid_impact_scale * 0.32,
+                2.0 + collapse * 0.55,
+                0.82 + pressure.min(1.4) * 0.12,
+            );
+            self.open_wound(
+                position,
+                normal,
+                TissueLayer::Muscle,
+                pressure * (0.82 + collapse * 0.28),
+                2.05 + collapse * 0.45,
+                0.96 + collapse * 0.22,
+            );
+            self.stats.cavity_ruptures += 1;
+            self.debug.cavity_ruptures += 1;
+        }
+    }
+
+    fn cavity_metrics(&self, area_indices: &[usize]) -> CavityMetrics {
+        let mut metrics = CavityMetrics::default();
+        let mut weighted_centroid = Vec2::default();
+        let mut centroid_weight = 0.0;
+        let mut load_sum = 0.0;
+        for &area_index in area_indices {
+            if area_index >= self.areas.len() {
+                continue;
+            }
+            let area = self.areas[area_index];
+            if area.layer != TissueLayer::Muscle
+                || area.a >= self.points.len()
+                || area.b >= self.points.len()
+                || area.c >= self.points.len()
+            {
+                continue;
+            }
+            let a = self.points[area.a];
+            let b = self.points[area.b];
+            let c = self.points[area.c];
+            let current_area = signed_area(a.position, b.position, c.position).abs();
+            let weight = area.rest_area.abs().max(current_area).max(1.0);
+            let centroid = Vec2 {
+                x: (a.position.x + b.position.x + c.position.x) / 3.0,
+                y: (a.position.y + b.position.y + c.position.y) / 3.0,
+            };
+            metrics.current_area += current_area;
+            weighted_centroid.x += centroid.x * weight;
+            weighted_centroid.y += centroid.y * weight;
+            centroid_weight += weight;
+            let area_load = a.load.max(b.load).max(c.load);
+            load_sum += area_load;
+            metrics.peak_load = metrics.peak_load.max(area_load);
+            metrics.samples += 1;
+        }
+        if metrics.samples > 0 {
+            metrics.centroid = scale(weighted_centroid, 1.0 / centroid_weight.max(EPSILON));
+            metrics.average_load = load_sum / metrics.samples as f64;
+        }
+        metrics
+    }
+
+    fn apply_cavity_pressure_to_points(
+        &mut self,
+        area_indices: &[usize],
+        centroid: Vec2,
+        pressure: f64,
+        collapse: f64,
+        _average_load: f64,
+    ) {
+        let mut point_indices = HashSet::new();
+        for &area_index in area_indices {
+            if let Some(area) = self.areas.get(area_index) {
+                point_indices.insert(area.a);
+                point_indices.insert(area.b);
+                point_indices.insert(area.c);
+            }
+        }
+
+        let push = pressure
+            * self.materials.cavity_tissue_push.max(0.0)
+            * (0.35 + collapse.clamp(0.0, 1.0) * 0.65);
+        let pressure_ratio = pressure / self.materials.cavity_contusion_pressure.max(0.1);
+        let cavity_load =
+            self.materials.cavity_load_threshold * pressure_ratio.clamp(0.0, 2.2) * 0.38;
+        for point_index in point_indices {
+            if point_index >= self.points.len() || self.points[point_index].pinned {
+                continue;
+            }
+            let fallback = subtract(self.points[point_index].home, centroid);
+            let direction = normalized(
+                subtract(self.points[point_index].position, centroid),
+                fallback,
+            );
+            self.points[point_index].position.x += direction.x * push;
+            self.points[point_index].position.y += direction.y * push;
+            self.points[point_index].load = self.points[point_index].load.max(cavity_load);
+            if pressure >= self.materials.cavity_contusion_pressure {
+                let contusion_load =
+                    self.materials.contusion_load_threshold * pressure_ratio.clamp(0.0, 2.2) * 0.74;
+                if apply_point_contusion(
+                    &mut self.points[point_index],
+                    self.materials,
+                    contusion_load,
+                    0.58,
+                ) {
+                    self.stats.contusion_events += 1;
+                    self.debug.contusion_events += 1;
+                    self.debug.max_contusion = self
+                        .debug
+                        .max_contusion
+                        .max(self.points[point_index].contusion);
+                }
+            }
+        }
+    }
+
+    fn cavity_rupture_site(
+        &self,
+        area_indices: &[usize],
+        fallback_centroid: Vec2,
+    ) -> (Vec2, Vec2, f64) {
+        let mut best_score = f64::NEG_INFINITY;
+        let mut best_site = fallback_centroid;
+        let mut best_normal = Vec2 { x: 0.0, y: -1.0 };
+        let mut best_load = 0.0;
+        for &area_index in area_indices {
+            if area_index >= self.areas.len() {
+                continue;
+            }
+            let area = self.areas[area_index];
+            if area.layer != TissueLayer::Muscle
+                || area.a >= self.points.len()
+                || area.b >= self.points.len()
+                || area.c >= self.points.len()
+            {
+                continue;
+            }
+            let a = self.points[area.a];
+            let b = self.points[area.b];
+            let c = self.points[area.c];
+            let load = (a.load + b.load + c.load) / 3.0;
+            let contusion = (a.contusion + b.contusion + c.contusion) / 3.0;
+            let compression = (1.0
+                - signed_area(a.position, b.position, c.position).abs()
+                    / area.rest_area.abs().max(EPSILON))
+            .max(0.0);
+            let score =
+                load + contusion * self.materials.cavity_load_threshold + compression * 220.0;
+            if score <= best_score {
+                continue;
+            }
+            let site = Vec2 {
+                x: (a.position.x + b.position.x + c.position.x) / 3.0,
+                y: (a.position.y + b.position.y + c.position.y) / 3.0,
+            };
+            let ab = subtract(b.position, a.position);
+            let ac = subtract(c.position, a.position);
+            let normal = normalized(
+                Vec2 {
+                    x: -(ab.y + ac.y * 0.45),
+                    y: ab.x + ac.x * 0.45 - 0.35,
+                },
+                normalized(subtract(site, fallback_centroid), Vec2 { x: 0.0, y: -1.0 }),
+            );
+            best_score = score;
+            best_site = site;
+            best_normal = normal;
+            best_load = load;
+        }
+        (best_site, best_normal, best_load)
+    }
+
+    fn update_organs(&mut self, dt: f64) {
+        if self.organs.is_empty() {
+            return;
+        }
+
+        let mut rupture_events = Vec::new();
+        for index in 0..self.organs.len() {
+            let organ = self.organs[index];
+            let pressure = self.organ_cavity_pressure(organ);
+            let cavity_collapse = self.organ_cavity_collapse(organ);
+            let local_load = self.organ_local_point_load(organ);
+            let fragment_load = self.organ_fragment_load(organ);
+
+            let pressure_damage = ((pressure - self.materials.organ_pressure_damage_threshold)
+                / self.materials.organ_pressure_damage_threshold.max(EPSILON))
+            .clamp(0.0, 2.4);
+            let load_damage = ((local_load.max(fragment_load)
+                - self.materials.organ_load_damage_threshold)
+                / self.materials.organ_load_damage_threshold.max(EPSILON))
+            .clamp(0.0, 2.8);
+            let fragment_damage = ((fragment_load
+                - self.materials.organ_fragment_damage_threshold)
+                / self.materials.organ_fragment_damage_threshold.max(EPSILON))
+            .clamp(0.0, 2.5);
+            let kind_scale = match organ.kind {
+                OrganKind::LeftLung | OrganKind::RightLung => 1.10,
+                OrganKind::Liver => 1.0,
+                OrganKind::Spleen => 1.24,
+            };
+            let delta = (pressure_damage * 0.46 + load_damage * 0.42 + fragment_damage * 0.72)
+                * self.materials.organ_damage_rate.max(0.0)
+                * (dt * 60.0).clamp(0.25, 2.0)
+                * kind_scale;
+            if delta > 0.0005 {
+                self.organs[index].damage = (self.organs[index].damage + delta).min(1.8);
+                self.organs[index].pressure_damage =
+                    self.organs[index].pressure_damage.max(pressure_damage);
+                self.organs[index].load_damage = self.organs[index]
+                    .load_damage
+                    .max(load_damage.max(fragment_damage));
+                self.stats.organ_damage_events += 1;
+                self.debug.organ_damage_events += 1;
+            }
+            self.debug.max_organ_damage =
+                self.debug.max_organ_damage.max(self.organs[index].damage);
+
+            let heavy_cavity_drive = self.debug.tool == ToolMode::Heavy
+                && pressure >= self.materials.organ_pressure_damage_threshold * 1.15
+                && cavity_collapse >= self.materials.cavity_rupture_min_collapse;
+            let cavity_rupture_drive = self.debug.tool == ToolMode::Heavy
+                && self.stats.cavity_ruptures > 0
+                && pressure >= self.materials.organ_pressure_damage_threshold * 0.75;
+            let fragment_drive = fragment_damage >= 1.0
+                && pressure >= self.materials.organ_pressure_damage_threshold
+                && cavity_collapse >= self.materials.cavity_rupture_min_collapse;
+            if !self.organs[index].ruptured
+                && self.organs[index].damage >= self.materials.organ_rupture_damage
+                && (heavy_cavity_drive || cavity_rupture_drive || fragment_drive)
+                && rupture_events.len() < self.materials.max_organ_ruptures_per_step
+                && self.stats.organ_ruptures as usize + rupture_events.len()
+                    < self.materials.max_total_organ_ruptures
+            {
+                self.organs[index].ruptured = true;
+                let direction = normalized(
+                    subtract(self.organs[index].center, self.nearest_body_center()),
+                    Vec2 { x: 0.0, y: -1.0 },
+                );
+                rupture_events.push((
+                    self.organs[index].center,
+                    direction,
+                    self.organs[index].damage,
+                    pressure,
+                    local_load.max(fragment_load),
+                ));
+            }
+        }
+
+        for (position, direction, damage, pressure, load) in rupture_events {
+            self.open_organ_rupture(position, direction, damage, pressure, load);
+        }
+    }
+
+    fn open_organ_rupture(
+        &mut self,
+        position: Vec2,
+        direction: Vec2,
+        damage: f64,
+        pressure: f64,
+        load: f64,
+    ) {
+        let bleed_pressure = self.materials.organ_bleed_pressure
+            * (0.82 + pressure.max(0.0) * 0.28 + damage.min(1.5) * 0.22);
+        self.emit_fluid(
+            position,
+            direction,
+            3 + (damage * 3.0).clamp(0.0, 5.0) as i32,
+            68.0 + load * self.materials.fluid_impact_scale * 0.22,
+            2.0 + damage.min(1.5) * 0.42,
+            0.92 + damage.min(1.5) * 0.16,
+        );
+        self.open_wound(
+            position,
+            direction,
+            TissueLayer::Muscle,
+            bleed_pressure,
+            2.1 + damage.min(1.5) * 0.36,
+            1.05,
+        );
+        self.stats.organ_ruptures += 1;
+        self.debug.organ_ruptures += 1;
+    }
+
+    fn organ_cavity_pressure(&self, organ: OrganRegion) -> f64 {
+        self.cavities
+            .iter()
+            .map(|cavity| {
+                let dx = (organ.center.x - cavity.centroid.x) / (organ.radius.x * 3.2).max(1.0);
+                let dy = (organ.center.y - cavity.centroid.y) / (organ.radius.y * 3.4).max(1.0);
+                let influence = (1.0 - (dx * dx + dy * dy).sqrt() * 0.34).clamp(0.0, 1.0);
+                cavity.pressure * influence * (0.74 + cavity.collapse * 0.36)
+            })
+            .fold(0.0, f64::max)
+    }
+
+    fn organ_cavity_collapse(&self, organ: OrganRegion) -> f64 {
+        self.cavities
+            .iter()
+            .map(|cavity| {
+                let dx = (organ.center.x - cavity.centroid.x) / (organ.radius.x * 3.2).max(1.0);
+                let dy = (organ.center.y - cavity.centroid.y) / (organ.radius.y * 3.4).max(1.0);
+                let influence = (1.0 - (dx * dx + dy * dy).sqrt() * 0.34).clamp(0.0, 1.0);
+                cavity.collapse * influence
+            })
+            .fold(0.0, f64::max)
+    }
+
+    fn organ_local_point_load(&self, organ: OrganRegion) -> f64 {
+        self.points
+            .iter()
+            .filter(|point| point.layer == TissueLayer::Muscle)
+            .filter(|point| point_in_organ(point.position, organ))
+            .map(|point| point.load)
+            .fold(0.0, f64::max)
+    }
+
+    fn organ_fragment_load(&self, organ: OrganRegion) -> f64 {
+        self.bones
+            .iter()
+            .filter(|bone| bone.fractured || bone.splinter)
+            .filter_map(|bone| {
+                let t = segment_t(organ.center, bone.a, bone.b);
+                let closest = bone_point(*bone, t);
+                if point_in_organ(closest, organ) {
+                    let speed = (distance(bone.a, bone.previous_a)
+                        + distance(bone.b, bone.previous_b))
+                        * 0.5;
+                    Some(bone.load.max(speed * bone.radius * 14.0))
+                } else {
+                    None
+                }
+            })
+            .fold(0.0, f64::max)
+    }
+
+    fn puncture_organs_from_rib_tip(
+        &mut self,
+        bone: BoneSegment,
+        tip: Vec2,
+        previous_tip: Vec2,
+        tip_normal: Vec2,
+        impulse: f64,
+        radius: f64,
+    ) {
+        let budget = self.materials.max_rib_organ_punctures_per_step;
+        let threshold = self.materials.rib_organ_puncture_impulse.max(EPSILON);
+        let severe_body_drive = self.debug.tool == ToolMode::Heavy
+            || self.debug.impact >= threshold * 3.0
+            || impulse >= threshold * 2.8;
+        if budget == 0
+            || bone.kind != BoneKind::Rib
+            || (!bone.fractured && !bone.splinter)
+            || (self.debug.rib_organ_punctures as usize) >= budget
+            || impulse < threshold * 0.45
+            || !severe_body_drive
+            || self.organs.is_empty()
+        {
+            return;
+        }
+
+        let travel = distance(tip, previous_tip);
+        let travel_dir = normalized(subtract(tip, previous_tip), tip_normal);
+        let reach = self
+            .materials
+            .rib_organ_puncture_radius
+            .max(radius * if bone.splinter { 1.9 } else { 1.45 });
+        let mut rupture_events = Vec::new();
+
+        for index in 0..self.organs.len() {
+            if (self.debug.rib_organ_punctures as usize) >= budget {
+                break;
+            }
+            let organ = self.organs[index];
+            if organ.rib_punctured {
+                continue;
+            }
+
+            let path_t = if travel > EPSILON {
+                segment_t(organ.center, previous_tip, tip)
+            } else {
+                1.0
+            };
+            let path_point = lerp(previous_tip, tip, path_t);
+            let dx = (path_point.x - organ.center.x) / organ.radius.x.max(EPSILON);
+            let dy = (path_point.y - organ.center.y) / organ.radius.y.max(EPSILON);
+            let normalized_distance = (dx * dx + dy * dy).sqrt();
+            let average_radius = ((organ.radius.x + organ.radius.y) * 0.5).max(1.0);
+            let normalized_reach = (reach / average_radius).max(0.06);
+            if normalized_distance > 1.0 + normalized_reach {
+                continue;
+            }
+
+            let contact = if normalized_distance <= 1.0 {
+                (1.0 - normalized_distance * 0.12).clamp(0.74, 1.0)
+            } else {
+                (1.0 - (normalized_distance - 1.0) / normalized_reach).clamp(0.0, 1.0)
+            };
+            if contact <= EPSILON {
+                continue;
+            }
+
+            let inward = normalized(subtract(organ.center, path_point), tip_normal);
+            let alignment = dot(travel_dir, inward).clamp(0.0, 1.0);
+            let drive = impulse
+                * contact
+                * (0.72 + alignment * 0.34)
+                * if bone.splinter { 1.16 } else { 1.0 };
+            if drive <= threshold {
+                continue;
+            }
+
+            let severity = ((drive - threshold) / threshold).clamp(0.0, 2.4);
+            let kind_scale = match organ.kind {
+                OrganKind::LeftLung | OrganKind::RightLung => 1.18,
+                OrganKind::Liver => 0.88,
+                OrganKind::Spleen => 0.94,
+            };
+            let damage = self.materials.rib_organ_puncture_damage.max(0.0)
+                * (0.74 + severity * 0.52)
+                * kind_scale;
+            let new_damage = (self.organs[index].damage + damage).min(1.8);
+            self.organs[index].damage = new_damage;
+            self.organs[index].penetration_damage = self.organs[index]
+                .penetration_damage
+                .max((damage / self.materials.organ_rupture_damage.max(EPSILON)).clamp(0.0, 1.8));
+            self.organs[index].load_damage = self.organs[index]
+                .load_damage
+                .max((drive / threshold).clamp(0.0, 2.8));
+            self.organs[index].penetrated = true;
+            self.organs[index].rib_punctured = true;
+            self.stats.organ_damage_events += 1;
+            self.debug.organ_damage_events += 1;
+            self.stats.rib_organ_punctures += 1;
+            self.debug.rib_organ_punctures += 1;
+            self.debug.max_organ_damage = self.debug.max_organ_damage.max(new_damage);
+
+            if new_damage >= self.materials.organ_rupture_damage
+                && rupture_events.len() < self.materials.max_organ_ruptures_per_step
+                && self.stats.organ_ruptures as usize + rupture_events.len()
+                    < self.materials.max_total_organ_ruptures
+            {
+                self.organs[index].ruptured = true;
+                let direction = normalized(
+                    add(scale(travel_dir, 0.72), scale(tip_normal, 0.28)),
+                    travel_dir,
+                );
+                rupture_events.push((
+                    path_point,
+                    direction,
+                    new_damage,
+                    0.0,
+                    drive * (0.34 + severity * 0.10),
+                ));
+            }
+        }
+
+        for (position, direction, damage, pressure, load) in rupture_events {
+            self.open_organ_rupture(position, direction, damage, pressure, load);
+        }
+    }
+
+    fn nearest_body_center(&self) -> Vec2 {
+        if self.cavities.is_empty() {
+            if self.points.is_empty() {
+                return Vec2::default();
+            }
+            let sum = self
+                .points
+                .iter()
+                .fold(Vec2::default(), |sum, point| add(sum, point.position));
+            return scale(sum, 1.0 / self.points.len() as f64);
+        }
+        self.cavities[0].centroid
     }
 
     fn collide_striker(&mut self, dt: f64, input: &InputState) {
@@ -1429,6 +3498,11 @@ impl World {
                 * contact
                 * profile.bone_load_scale;
             bone.load = bone.load.max(direct_load);
+            if direct_load > self.materials.fragment_wake_load
+                || speed > self.materials.fragment_sleep_speed * 2.0
+            {
+                self.wake_fragment(&mut bone);
+            }
             self.debug.bone_contacts += 1;
             if depth > self.debug.max_depth {
                 self.debug.max_depth = depth;
@@ -1497,9 +3571,14 @@ impl World {
             point.position.y +=
                 point_contact.normal.y * depth * contact_strength * profile.rebound_scale
                     + input.vy * dt * 0.45 * contact_strength * profile.drag_scale;
-            point.load = point
-                .load
-                .max(impact * (depth / influence) * contact_strength * profile.tissue_load_scale);
+            let contact_load =
+                impact * (depth / influence) * contact_strength * profile.tissue_load_scale;
+            point.load = point.load.max(contact_load);
+            if apply_point_contusion(point, self.materials, contact_load, profile.contusion_scale) {
+                self.stats.contusion_events += 1;
+                self.debug.contusion_events += 1;
+                self.debug.max_contusion = self.debug.max_contusion.max(point.contusion);
+            }
             self.debug.tissue_contacts += 1;
             if depth > self.debug.max_depth {
                 self.debug.max_depth = depth;
@@ -1507,6 +3586,9 @@ impl World {
             }
             self.debug.max_point_load = self.debug.max_point_load.max(point.load);
         }
+
+        self.lacerate_major_vessels_from_striker(input, profile, &shape, impact);
+        self.penetrate_organs_from_striker(input, profile, &shape, impact);
 
         if input.down && profile.tear_pressure_scale > 0.0 {
             let mut events = Vec::new();
@@ -1633,6 +3715,299 @@ impl World {
         }
     }
 
+    fn lacerate_major_vessels_from_striker(
+        &mut self,
+        input: &InputState,
+        profile: ToolProfile,
+        shape: &ToolContactShape,
+        impact: f64,
+    ) {
+        let budget = self.materials.max_vessel_lacerations_per_step;
+        if !input.down || budget == 0 || self.vessels.is_empty() {
+            return;
+        }
+
+        let mut events = Vec::new();
+        for index in 0..self.vessels.len() {
+            if events.len() >= budget {
+                break;
+            }
+            let vessel = self.vessels[index];
+            if vessel.lacerated {
+                continue;
+            }
+
+            let (tool_point, vessel_point, closest_distance) = if shape.blade_segment {
+                let closest =
+                    closest_segment_points(shape.axis_start, shape.axis_end, vessel.a, vessel.b);
+                (closest.point_a, closest.point_b, closest.distance)
+            } else {
+                let t = segment_t(shape.center, vessel.a, vessel.b);
+                let vessel_point = lerp(vessel.a, vessel.b, t);
+                (
+                    shape.center,
+                    vessel_point,
+                    distance(shape.center, vessel_point),
+                )
+            };
+
+            let reach = self.materials.major_vessel_cut_radius + vessel.radius;
+            if closest_distance > reach {
+                continue;
+            }
+
+            let contact = (1.0 - closest_distance / reach.max(EPSILON)).clamp(0.0, 1.0);
+            let tool_scale = match input.tool {
+                ToolMode::Sharp => 1.30 + profile.tear_pressure_scale * 0.18,
+                ToolMode::Heavy => 0.54,
+                ToolMode::Blunt => 0.18,
+            };
+            let threshold = match input.tool {
+                ToolMode::Sharp => vessel.laceration_impulse,
+                ToolMode::Heavy => {
+                    vessel.laceration_impulse * self.materials.major_vessel_blunt_impulse_scale
+                }
+                ToolMode::Blunt => {
+                    vessel.laceration_impulse
+                        * self.materials.major_vessel_blunt_impulse_scale
+                        * 1.35
+                }
+            };
+            let drive = impact * contact * tool_scale;
+            if drive <= threshold {
+                continue;
+            }
+
+            let severity = ((drive - threshold) / threshold.max(EPSILON)).clamp(0.0, 2.2);
+            let mut direction = normalized(subtract(vessel_point, tool_point), shape.blade_normal);
+            if dot(direction, shape.direction) < -0.35 {
+                direction = normalized(add(direction, scale(shape.direction, 0.35)), direction);
+            }
+            let wound_pressure = vessel.pressure
+                * self.materials.major_vessel_pressure_scale
+                * (1.0 + severity * 0.55);
+            let wound_radius = 2.2 + vessel.radius * (0.42 + severity * 0.16);
+            events.push((
+                index,
+                vessel_point,
+                direction,
+                wound_pressure,
+                wound_radius,
+                1.10 + severity * 0.12,
+            ));
+        }
+
+        for (index, position, direction, pressure, radius, depth) in events {
+            if self.open_wound(
+                position,
+                direction,
+                TissueLayer::Muscle,
+                pressure,
+                radius,
+                depth,
+            ) {
+                self.vessels[index].lacerated = true;
+                self.stats.vessel_lacerations += 1;
+                self.debug.vessel_lacerations += 1;
+                self.debug.max_wound_pressure = self.debug.max_wound_pressure.max(pressure);
+            }
+        }
+    }
+
+    fn lacerate_vessels_from_fragment_tip(
+        &mut self,
+        bone: BoneSegment,
+        tip: Vec2,
+        previous_tip: Vec2,
+        tip_normal: Vec2,
+        impulse: f64,
+        _radius: f64,
+    ) {
+        let budget = self.materials.max_fragment_vessel_lacerations_per_step;
+        let threshold = self
+            .materials
+            .fragment_vessel_laceration_impulse
+            .max(EPSILON);
+        let severe_body_drive = self.debug.tool == ToolMode::Heavy
+            || impulse >= threshold * 2.2
+            || (bone.splinter && impulse >= threshold * 1.45);
+        if budget == 0
+            || self.vessels.is_empty()
+            || (!bone.fractured && !bone.splinter)
+            || (self.debug.fragment_vessel_lacerations as usize) >= budget
+            || impulse < threshold * 0.45
+            || !severe_body_drive
+        {
+            return;
+        }
+
+        let travel = distance(tip, previous_tip);
+        let travel_dir = normalized(subtract(tip, previous_tip), tip_normal);
+        let reach = self
+            .materials
+            .fragment_vessel_laceration_radius
+            .max(bone.radius * if bone.splinter { 2.6 } else { 2.0 });
+        let mut events = Vec::new();
+
+        for index in 0..self.vessels.len() {
+            if (self.debug.fragment_vessel_lacerations as usize) + events.len() >= budget {
+                break;
+            }
+            let vessel = self.vessels[index];
+            if vessel.lacerated {
+                continue;
+            }
+
+            let closest = closest_segment_points(previous_tip, tip, vessel.a, vessel.b);
+            let contact_reach = reach + vessel.radius;
+            if closest.distance > contact_reach {
+                continue;
+            }
+
+            let contact = (1.0 - closest.distance / contact_reach.max(EPSILON)).clamp(0.0, 1.0);
+            if contact <= EPSILON {
+                continue;
+            }
+            let toward_vessel = normalized(subtract(closest.point_b, closest.point_a), tip_normal);
+            let alignment = if travel > EPSILON {
+                dot(travel_dir, toward_vessel).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let drive = impulse
+                * contact
+                * (0.72 + alignment * 0.34)
+                * if bone.splinter { 1.14 } else { 1.0 };
+            if drive <= threshold {
+                continue;
+            }
+
+            let severity = ((drive - threshold) / threshold).clamp(0.0, 2.4);
+            let direction = normalized(
+                add(scale(toward_vessel, 0.72), scale(tip_normal, 0.28)),
+                toward_vessel,
+            );
+            let wound_pressure = vessel.pressure
+                * self.materials.major_vessel_pressure_scale
+                * (0.92 + severity * 0.52);
+            let wound_radius = 2.0 + vessel.radius * (0.36 + severity * 0.18);
+            events.push((
+                index,
+                closest.point_b,
+                direction,
+                wound_pressure,
+                wound_radius,
+                1.04 + severity * 0.14,
+            ));
+        }
+
+        for (index, position, direction, pressure, radius, depth) in events {
+            if self.open_wound(
+                position,
+                direction,
+                TissueLayer::Muscle,
+                pressure,
+                radius,
+                depth,
+            ) {
+                self.vessels[index].lacerated = true;
+                self.stats.vessel_lacerations += 1;
+                self.stats.fragment_vessel_lacerations += 1;
+                self.debug.vessel_lacerations += 1;
+                self.debug.fragment_vessel_lacerations += 1;
+                self.debug.max_wound_pressure = self.debug.max_wound_pressure.max(pressure);
+            }
+        }
+    }
+
+    fn penetrate_organs_from_striker(
+        &mut self,
+        input: &InputState,
+        profile: ToolProfile,
+        shape: &ToolContactShape,
+        impact: f64,
+    ) {
+        let budget = self.materials.max_organ_penetrations_per_step;
+        if !input.down || input.tool != ToolMode::Sharp || budget == 0 || self.organs.is_empty() {
+            return;
+        }
+
+        let mut penetrations = 0;
+        let mut rupture_events = Vec::new();
+        for index in 0..self.organs.len() {
+            if penetrations >= budget {
+                break;
+            }
+            let organ = self.organs[index];
+            if organ.penetrated || organ.ruptured {
+                continue;
+            }
+            let Some(contact) =
+                tool_organ_contact(shape, organ, self.materials.organ_penetration_cut_radius)
+            else {
+                continue;
+            };
+
+            let drive =
+                impact * contact.contact * (1.22 + profile.tear_pressure_scale.max(0.0) * 0.24);
+            let threshold = self.materials.organ_penetration_impulse.max(EPSILON);
+            if drive <= threshold {
+                continue;
+            }
+
+            let severity = ((drive - threshold) / threshold).clamp(0.0, 2.2);
+            let kind_scale = match organ.kind {
+                OrganKind::LeftLung | OrganKind::RightLung => 0.92,
+                OrganKind::Liver => 1.04,
+                OrganKind::Spleen => 1.18,
+            };
+            let damage = self.materials.organ_penetration_damage.max(0.0)
+                * (0.68 + severity * 0.58)
+                * kind_scale;
+            let new_damage = (self.organs[index].damage + damage).min(1.8);
+            self.organs[index].damage = new_damage;
+            self.organs[index].penetration_damage = self.organs[index]
+                .penetration_damage
+                .max((damage / self.materials.organ_rupture_damage.max(EPSILON)).clamp(0.0, 1.8));
+            self.organs[index].load_damage = self.organs[index]
+                .load_damage
+                .max((drive / threshold).clamp(0.0, 2.8));
+            self.organs[index].penetrated = true;
+            self.stats.organ_damage_events += 1;
+            self.debug.organ_damage_events += 1;
+            self.stats.organ_penetrations += 1;
+            self.debug.organ_penetrations += 1;
+            self.debug.max_organ_damage = self.debug.max_organ_damage.max(new_damage);
+
+            if new_damage >= self.materials.organ_rupture_damage
+                && rupture_events.len() < self.materials.max_organ_ruptures_per_step
+                && self.stats.organ_ruptures as usize + rupture_events.len()
+                    < self.materials.max_total_organ_ruptures
+            {
+                self.organs[index].ruptured = true;
+                let site = lerp(contact.tool_point, self.organs[index].center, 0.62);
+                let mut direction =
+                    normalized(subtract(site, contact.tool_point), shape.blade_normal);
+                if dot(direction, shape.direction) < -0.25 {
+                    direction = normalized(add(direction, scale(shape.direction, 0.30)), direction);
+                }
+                rupture_events.push((
+                    site,
+                    direction,
+                    new_damage,
+                    0.0,
+                    drive * (0.42 + severity * 0.12),
+                ));
+            }
+
+            penetrations += 1;
+        }
+
+        for (position, direction, damage, pressure, load) in rupture_events {
+            self.open_organ_rupture(position, direction, damage, pressure, load);
+        }
+    }
+
     fn solve_springs(&mut self) {
         let mut events = Vec::new();
         for i in 0..self.springs.len() {
@@ -1647,17 +4022,89 @@ impl World {
             if len < EPSILON {
                 continue;
             }
-            let stretch_ratio = len / spring.rest.max(EPSILON);
+            let mut stretch_ratio = len / spring.rest.max(EPSILON);
             let endpoint_load = a.load.max(b.load);
+            let contusion = a.contusion.max(b.contusion).clamp(0.0, 1.0);
+            let fatigue_delta = tissue_fatigue_delta(
+                self.materials,
+                spring,
+                stretch_ratio,
+                endpoint_load,
+                contusion,
+            );
+            let fatigue = if fatigue_delta > 0.0 {
+                (self.springs[i].fatigue + fatigue_delta).min(1.35)
+            } else {
+                (self.springs[i].fatigue
+                    * (1.0 - self.materials.tissue_fatigue_decay).clamp(0.94, 1.0))
+                .max(0.0)
+            };
+            self.springs[i].fatigue = fatigue;
+            if fatigue_delta > 0.0004 {
+                self.stats.tissue_fatigue_events += 1;
+                self.debug.tissue_fatigue_events += 1;
+            }
+            self.debug.max_tissue_fatigue = self.debug.max_tissue_fatigue.max(fatigue);
+
+            if self.springs[i].rest_reference <= EPSILON {
+                self.springs[i].rest_reference = spring.rest.max(EPSILON);
+            }
+            let plastic_delta = tissue_plastic_rest_delta(
+                self.materials,
+                spring,
+                stretch_ratio,
+                endpoint_load,
+                contusion,
+                fatigue,
+            );
+            if self.debug.impact <= EPSILON && plastic_delta.abs() > EPSILON {
+                let reference = self.springs[i].rest_reference.max(EPSILON);
+                let limit = self.materials.tissue_plastic_limit.clamp(0.0, 0.45);
+                let min_rest = reference * (1.0 - limit * 0.62);
+                let max_rest = reference * (1.0 + limit);
+                let old_rest = self.springs[i].rest;
+                let new_rest = (old_rest + plastic_delta).clamp(min_rest, max_rest);
+                if (new_rest - old_rest).abs() > 0.0005 {
+                    self.springs[i].rest = new_rest;
+                    self.springs[i].plastic_strain =
+                        ((new_rest - reference) / reference).abs().clamp(0.0, 1.0);
+                    self.stats.tissue_plastic_events += 1;
+                    self.debug.tissue_plastic_events += 1;
+                    stretch_ratio = len / new_rest.max(EPSILON);
+                }
+            }
+            self.debug.max_tissue_plasticity = self
+                .debug
+                .max_tissue_plasticity
+                .max(self.springs[i].plastic_strain);
+
+            let contusion_tear_weakening = tissue_tear_weakening(self.materials, contusion);
+            let fatigue_tear_weakening = tissue_fatigue_tear_weakening(self.materials, fatigue);
+            let tear_weakening =
+                (contusion_tear_weakening + fatigue_tear_weakening).clamp(0.0, 0.58);
+            let contusion_stiffness_softening =
+                tissue_stiffness_softening(self.materials, contusion);
+            let fatigue_stiffness_softening =
+                tissue_fatigue_stiffness_softening(self.materials, fatigue);
+            let stiffness_softening =
+                (contusion_stiffness_softening + fatigue_stiffness_softening).clamp(0.0, 0.46);
             let tear_impulse = if spring.layer == TissueLayer::Muscle {
                 spring.tear_impulse * (1.0 - a.exposure.max(b.exposure) * 0.48)
             } else {
                 spring.tear_impulse
-            };
+            } * (1.0 - tear_weakening).clamp(0.48, 1.0);
+            let tear_stretch =
+                spring.tear_stretch * (1.0 - contusion * 0.18 - fatigue * 0.10).clamp(0.76, 1.0);
+            let load_tear_stretch = (1.12 - contusion * 0.055 - fatigue * 0.045).clamp(1.04, 1.12);
+            let stiffness = spring.stiffness * (1.0 - stiffness_softening).clamp(0.52, 1.0);
+            self.debug.max_tissue_softening = self
+                .debug
+                .max_tissue_softening
+                .max(tear_weakening.max(stiffness_softening));
             self.springs[i].stress =
                 (self.springs[i].stress * 0.9).max((stretch_ratio - 1.0).max(0.0));
-            if stretch_ratio > spring.tear_stretch
-                || (endpoint_load > tear_impulse && stretch_ratio > 1.12)
+            if stretch_ratio > tear_stretch
+                || (endpoint_load > tear_impulse && stretch_ratio > load_tear_stretch)
             {
                 let midpoint = midpoint(a.position, b.position);
                 let tangent = normalized(delta, Vec2 { x: 1.0, y: 0.0 });
@@ -1683,6 +4130,10 @@ impl World {
                     ));
                 } else {
                     self.stats.broken_muscle += 1;
+                    if spring.fiber {
+                        self.stats.muscle_fiber_tears += 1;
+                        self.debug.muscle_fiber_tears += 1;
+                    }
                     events.push((
                         midpoint,
                         normal,
@@ -1701,13 +4152,29 @@ impl World {
                 self.bump_point_exposure_load(spring.b, 1.0, endpoint_load * 0.35);
                 continue;
             }
-            let diff = (len - spring.rest) / len;
-            self.apply_pair_correction_idx(
-                spring.a,
-                spring.b,
-                delta.x * diff * spring.stiffness,
-                delta.y * diff * spring.stiffness,
-            );
+            let inv_a = if a.pinned { 0.0 } else { 1.0 / a.mass };
+            let inv_b = if b.pinned { 0.0 } else { 1.0 / b.mass };
+            let weighted_gradient = inv_a + inv_b;
+            if weighted_gradient <= EPSILON {
+                continue;
+            }
+            let compliance = tissue_spring_compliance(self.materials, spring.layer);
+            let alpha = xpbd_alpha(compliance, self.materials.fixed_dt);
+            let constraint = len - self.springs[i].rest;
+            let delta_lambda = (-constraint * stiffness - alpha * self.springs[i].lambda)
+                / (weighted_gradient + alpha);
+            self.springs[i].lambda += delta_lambda;
+            let nx = delta.x / len;
+            let ny = delta.y / len;
+            let (point_a, point_b) = two_mut(&mut self.points, spring.a, spring.b);
+            if !point_a.pinned {
+                point_a.position.x -= nx * delta_lambda * inv_a;
+                point_a.position.y -= ny * delta_lambda * inv_a;
+            }
+            if !point_b.pinned {
+                point_b.position.x += nx * delta_lambda * inv_b;
+                point_b.position.y += ny * delta_lambda * inv_b;
+            }
         }
         for (
             midpoint,
@@ -1732,6 +4199,389 @@ impl World {
                 intensity,
             );
             self.open_wound(midpoint, normal, layer, load / pressure_div, radius, depth);
+        }
+    }
+
+    fn propagate_skin_tears(&mut self) {
+        let max_propagations = self.materials.max_tear_propagations_per_step;
+        if max_propagations == 0
+            || self.debug.tool != ToolMode::Sharp
+            || self.debug.impact <= EPSILON
+            || self.springs.is_empty()
+            || self.points.is_empty()
+        {
+            return;
+        }
+
+        let mut broken_skin_endpoint = vec![false; self.points.len()];
+        for spring in &self.springs {
+            if spring.broken && spring.layer == TissueLayer::Skin {
+                if spring.a < broken_skin_endpoint.len() {
+                    broken_skin_endpoint[spring.a] = true;
+                }
+                if spring.b < broken_skin_endpoint.len() {
+                    broken_skin_endpoint[spring.b] = true;
+                }
+            }
+        }
+        if !broken_skin_endpoint.iter().any(|broken| *broken) {
+            return;
+        }
+
+        let mut candidates = Vec::new();
+        for (index, spring) in self.springs.iter().enumerate() {
+            if spring.broken
+                || spring.layer != TissueLayer::Skin
+                || spring.a >= self.points.len()
+                || spring.b >= self.points.len()
+            {
+                continue;
+            }
+            if !broken_skin_endpoint[spring.a] && !broken_skin_endpoint[spring.b] {
+                continue;
+            }
+
+            let a = self.points[spring.a];
+            let b = self.points[spring.b];
+            let endpoint_load = a.load.max(b.load);
+            let exposure = a.exposure.max(b.exposure);
+            let fatigue = spring.fatigue.clamp(0.0, 1.35);
+            let stress = spring.stress.max(0.0);
+            let load_ratio = endpoint_load / spring.tear_impulse.max(1.0);
+            let score = stress + fatigue * 0.72 + exposure * 0.36 + load_ratio * 0.30;
+            let stress_threshold = (self.materials.tear_propagation_stress_threshold
+                - exposure * 0.08)
+                .clamp(0.08, 1.0);
+            if stress >= stress_threshold
+                || fatigue >= self.materials.tear_propagation_fatigue_threshold
+                || endpoint_load >= self.materials.tear_propagation_load_threshold
+            {
+                candidates.push((score, index));
+            }
+        }
+
+        if candidates.is_empty() {
+            return;
+        }
+        candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut events = Vec::new();
+        for (_, index) in candidates.into_iter().take(max_propagations) {
+            let spring = self.springs[index];
+            if spring.broken || spring.a >= self.points.len() || spring.b >= self.points.len() {
+                continue;
+            }
+            let a = self.points[spring.a];
+            let b = self.points[spring.b];
+            let delta = subtract(b.position, a.position);
+            let len = hypot(delta.x, delta.y);
+            if len < EPSILON {
+                continue;
+            }
+            let endpoint_load = a.load.max(b.load).max(spring.tear_impulse * 0.36);
+            let tangent = scale(delta, 1.0 / len);
+            let normal = Vec2 {
+                x: -tangent.y,
+                y: tangent.x - 0.24,
+            };
+            self.springs[index].broken = true;
+            self.springs[index].stress = 1.0;
+            self.stats.broken_skin += 1;
+            self.stats.tear_propagations += 1;
+            self.debug.tear_propagations += 1;
+            self.bump_point_exposure_load(spring.a, 1.0, endpoint_load * 0.22);
+            self.bump_point_exposure_load(spring.b, 1.0, endpoint_load * 0.22);
+            events.push((midpoint(a.position, b.position), normal, endpoint_load));
+        }
+
+        for (midpoint, normal, load) in events {
+            self.emit_fluid(
+                midpoint,
+                normal,
+                2 + (load / 1250.0).clamp(0.0, 4.0) as i32,
+                70.0 + load * self.materials.fluid_impact_scale * 0.58,
+                1.55,
+                0.48,
+            );
+            self.open_wound(
+                midpoint,
+                normal,
+                TissueLayer::Skin,
+                load / 1650.0,
+                1.55,
+                0.42,
+            );
+        }
+    }
+
+    fn transfer_sharp_cut_to_exposed_muscle(&mut self) {
+        let max_transfers = self.materials.max_muscle_cut_transfers_per_step;
+        if max_transfers == 0
+            || self.debug.tool != ToolMode::Sharp
+            || self.debug.impact <= EPSILON
+            || self.springs.is_empty()
+            || self.points.is_empty()
+        {
+            return;
+        }
+
+        let mut skin_openings = Vec::new();
+        for spring in &self.springs {
+            if !spring.broken || spring.layer != TissueLayer::Skin {
+                continue;
+            }
+            if spring.a >= self.points.len() || spring.b >= self.points.len() {
+                continue;
+            }
+            let a = self.points[spring.a];
+            let b = self.points[spring.b];
+            let opening = midpoint(a.position, b.position);
+            let direction = normalized(subtract(b.position, a.position), Vec2 { x: 1.0, y: 0.0 });
+            let severity = a.exposure.max(b.exposure) + a.load.max(b.load) / 1600.0;
+            skin_openings.push((opening, direction, severity));
+        }
+        if skin_openings.is_empty() {
+            return;
+        }
+
+        let radius = self.materials.muscle_cut_transfer_radius.max(1.0);
+        let mut candidates = Vec::new();
+        for (index, spring) in self.springs.iter().enumerate() {
+            if spring.broken
+                || spring.layer != TissueLayer::Muscle
+                || spring.a >= self.points.len()
+                || spring.b >= self.points.len()
+            {
+                continue;
+            }
+            let a = self.points[spring.a];
+            let b = self.points[spring.b];
+            let midpoint = midpoint(a.position, b.position);
+            let exposure = a.exposure.max(b.exposure);
+            let endpoint_load = a.load.max(b.load);
+            let fatigue = spring.fatigue.clamp(0.0, 1.35);
+            if exposure < self.materials.muscle_cut_transfer_exposure_threshold
+                && endpoint_load < self.materials.muscle_cut_transfer_load_threshold
+                && fatigue < self.materials.tear_propagation_fatigue_threshold
+            {
+                continue;
+            }
+
+            let spring_dir = normalized(subtract(b.position, a.position), Vec2 { x: 1.0, y: 0.0 });
+            let mut best_score = 0.0;
+            let mut best_normal = Vec2 { x: 0.0, y: -1.0 };
+            for (opening, opening_dir, severity) in &skin_openings {
+                let d = distance(midpoint, *opening);
+                if d > radius {
+                    continue;
+                }
+                let proximity = 1.0 - d / radius;
+                let alignment = cross(spring_dir, *opening_dir).abs().clamp(0.0, 1.0);
+                let score = proximity
+                    * (0.42 + alignment * 0.34)
+                    * (0.70 + exposure * 0.26 + fatigue * 0.18 + endpoint_load / 3400.0)
+                    * (0.78 + severity * 0.18);
+                if score > best_score {
+                    best_score = score;
+                    best_normal = normalized(
+                        Vec2 {
+                            x: -opening_dir.y,
+                            y: opening_dir.x - 0.28,
+                        },
+                        Vec2 { x: 0.0, y: -1.0 },
+                    );
+                }
+            }
+            if best_score > 0.18 {
+                candidates.push((best_score, index, best_normal));
+            }
+        }
+
+        if candidates.is_empty() {
+            return;
+        }
+        candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut events = Vec::new();
+        for (_, index, normal) in candidates.into_iter().take(max_transfers) {
+            let spring = self.springs[index];
+            if spring.broken || spring.a >= self.points.len() || spring.b >= self.points.len() {
+                continue;
+            }
+            let a = self.points[spring.a];
+            let b = self.points[spring.b];
+            let load = a
+                .load
+                .max(b.load)
+                .max(spring.tear_impulse * (0.34 + spring.fatigue.clamp(0.0, 1.0) * 0.16));
+            self.springs[index].broken = true;
+            self.springs[index].stress = 1.0;
+            self.stats.broken_muscle += 1;
+            self.stats.muscle_cut_transfers += 1;
+            self.debug.muscle_cut_transfers += 1;
+            self.bump_point_exposure_load(spring.a, 1.0, load * 0.24);
+            self.bump_point_exposure_load(spring.b, 1.0, load * 0.24);
+            events.push((midpoint(a.position, b.position), normal, load));
+        }
+
+        for (midpoint, normal, load) in events {
+            self.emit_fluid(
+                midpoint,
+                normal,
+                2 + (load / 1350.0).clamp(0.0, 4.0) as i32,
+                82.0 + load * self.materials.fluid_impact_scale * 0.54,
+                1.75,
+                0.74,
+            );
+            self.open_wound(
+                midpoint,
+                normal,
+                TissueLayer::Muscle,
+                load / 1500.0,
+                1.75,
+                0.78,
+            );
+        }
+    }
+
+    fn delaminate_skin_flaps_from_cut_edges(&mut self) {
+        let max_detachments = self.materials.max_skin_flap_detachments_per_step;
+        if max_detachments == 0
+            || self.debug.tool != ToolMode::Sharp
+            || self.debug.impact <= EPSILON
+            || self.attachments.is_empty()
+            || self.springs.is_empty()
+            || self.points.is_empty()
+        {
+            return;
+        }
+
+        let mut skin_openings = Vec::new();
+        for spring in &self.springs {
+            if !spring.broken
+                || spring.layer != TissueLayer::Skin
+                || spring.a >= self.points.len()
+                || spring.b >= self.points.len()
+            {
+                continue;
+            }
+            let a = self.points[spring.a];
+            let b = self.points[spring.b];
+            skin_openings.push((
+                midpoint(a.position, b.position),
+                normalized(subtract(b.position, a.position), Vec2 { x: 1.0, y: 0.0 }),
+                a.load.max(b.load),
+                a.exposure.max(b.exposure),
+            ));
+        }
+        if skin_openings.is_empty() {
+            return;
+        }
+
+        let radius = self.materials.skin_flap_cut_radius.max(1.0);
+        let load_threshold = self.materials.skin_flap_load_threshold.max(1.0);
+        let stress_threshold = self.materials.skin_flap_stress_threshold.max(0.01);
+        let mut candidates = Vec::new();
+        for (index, attachment) in self.attachments.iter().enumerate() {
+            if attachment.broken
+                || attachment.skin_point >= self.points.len()
+                || attachment.muscle_point >= self.points.len()
+            {
+                continue;
+            }
+            let skin = self.points[attachment.skin_point];
+            let muscle = self.points[attachment.muscle_point];
+            let mut best_score = 0.0;
+            let mut best_direction = Vec2 { x: 0.0, y: -1.0 };
+            let mut best_load = 0.0;
+            let mut best_exposure = 0.0;
+            for (opening, direction, opening_load, opening_exposure) in &skin_openings {
+                let d = distance(skin.position, *opening);
+                if d > radius {
+                    continue;
+                }
+                let proximity = 1.0 - d / radius;
+                let cut_load = opening_load * (0.35 + proximity * 0.65);
+                let score = proximity * (0.55 + *opening_exposure * 0.30 + cut_load / 2600.0);
+                if score > best_score {
+                    best_score = score;
+                    best_direction = *direction;
+                    best_load = cut_load;
+                    best_exposure = *opening_exposure * proximity;
+                }
+            }
+            if best_score <= 0.0 {
+                continue;
+            }
+
+            let attachment_distance = distance(skin.position, muscle.position);
+            let attachment_stress = attachment
+                .stress
+                .max((attachment_distance / attachment.rest.max(1.0) - 1.0).max(0.0));
+            let exposure = skin.exposure.max(muscle.exposure).max(best_exposure);
+            let local_load = skin.load.max(muscle.load).max(best_load);
+            let weakened_load_threshold = load_threshold * (1.0 - exposure * 0.24).clamp(0.66, 1.0);
+            let weakened_stress_threshold =
+                stress_threshold * (1.0 - exposure * 0.22).clamp(0.70, 1.0);
+            if local_load < weakened_load_threshold && attachment_stress < weakened_stress_threshold
+            {
+                continue;
+            }
+
+            let score = best_score
+                * (0.54
+                    + local_load / load_threshold
+                    + attachment_stress / stress_threshold * 0.72
+                    + exposure * 0.26);
+            candidates.push((score, index, best_direction, local_load));
+        }
+
+        if candidates.is_empty() {
+            return;
+        }
+        candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut events = Vec::new();
+        for (_, index, direction, load) in candidates.into_iter().take(max_detachments) {
+            let attachment = self.attachments[index];
+            if attachment.broken
+                || attachment.skin_point >= self.points.len()
+                || attachment.muscle_point >= self.points.len()
+            {
+                continue;
+            }
+            let skin = self.points[attachment.skin_point];
+            let muscle = self.points[attachment.muscle_point];
+            let normal = normalized(
+                Vec2 {
+                    x: -direction.y,
+                    y: direction.x - 0.38,
+                },
+                normalized(
+                    subtract(skin.position, muscle.position),
+                    Vec2 { x: 0.0, y: -1.0 },
+                ),
+            );
+            self.attachments[index].broken = true;
+            self.attachments[index].stress = 1.0;
+            self.stats.broken_attachments += 1;
+            self.stats.skin_flap_detachments += 1;
+            self.debug.skin_flap_detachments += 1;
+            self.bump_point_exposure_load(attachment.skin_point, 1.0, load * 0.18);
+            self.bump_point_exposure_load(attachment.muscle_point, 1.0, load * 0.24);
+            events.push((midpoint(skin.position, muscle.position), normal, load));
+        }
+
+        for (point, normal, load) in events {
+            self.emit_fluid(
+                point,
+                normal,
+                1 + (load / 1450.0).clamp(0.0, 3.0) as i32,
+                68.0 + load * self.materials.fluid_impact_scale * 0.44,
+                1.5,
+                0.62,
+            );
+            self.open_wound(point, normal, TissueLayer::Muscle, load / 1750.0, 1.5, 0.62);
         }
     }
 
@@ -1907,6 +4757,7 @@ impl World {
 
     fn solve_bone_joints(&mut self) {
         let count = self.bone_joints.len();
+        let mut ligament_events = Vec::new();
         for i in 0..count {
             let mut joint = self.bone_joints[i];
             if joint.broken
@@ -1928,6 +4779,11 @@ impl World {
             let stretch_ratio = len / joint.rest.max(1.0);
             let impulse = a.load.max(b.load);
             joint.stress = (joint.stress * 0.9).max((stretch_ratio - 1.0).max(0.0));
+            let relative_angle = wrap_angle(bone_angle(b) - bone_angle(a) - joint.rest_angle);
+            let clamped_angle = relative_angle.clamp(joint.min_angle, joint.max_angle);
+            let angle_violation = relative_angle - clamped_angle;
+            let overextension = angle_violation.abs();
+            joint.torque_stress = (joint.torque_stress * 0.9).max(overextension);
             if stretch_ratio > self.materials.bone_joint_break_stretch
                 || (impulse > self.materials.bone_joint_break_impulse && stretch_ratio > 1.35)
             {
@@ -1936,11 +4792,6 @@ impl World {
                 self.bone_joints[i] = joint;
                 continue;
             }
-            let relative_angle = wrap_angle(bone_angle(b) - bone_angle(a) - joint.rest_angle);
-            let clamped_angle = relative_angle.clamp(joint.min_angle, joint.max_angle);
-            let angle_violation = relative_angle - clamped_angle;
-            let overextension = angle_violation.abs();
-            joint.torque_stress = (joint.torque_stress * 0.9).max(overextension);
             if overextension > self.materials.bone_joint_angular_break
                 || (impulse > self.materials.bone_joint_break_impulse
                     && overextension > self.materials.bone_joint_angular_break * 0.45)
@@ -1950,21 +4801,96 @@ impl World {
                 self.bone_joints[i] = joint;
                 continue;
             }
+            let stretch_subluxation = ((stretch_ratio
+                - self.materials.bone_joint_subluxation_stretch)
+                / (self.materials.bone_joint_break_stretch
+                    - self.materials.bone_joint_subluxation_stretch)
+                    .max(0.12))
+            .clamp(0.0, 1.4);
+            let impulse_subluxation = if impulse > self.materials.bone_joint_subluxation_impulse
+                && stretch_ratio > 1.12
+            {
+                ((impulse - self.materials.bone_joint_subluxation_impulse)
+                    / self.materials.bone_joint_subluxation_impulse.max(1.0))
+                .clamp(0.0, 1.2)
+                    * (stretch_ratio - 1.0).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let angular_subluxation = ((overextension
+                - self.materials.bone_joint_subluxation_angular)
+                / (self.materials.bone_joint_angular_break
+                    - self.materials.bone_joint_subluxation_angular)
+                    .max(0.12))
+            .clamp(0.0, 1.4);
+            let subluxation_drive = stretch_subluxation
+                .max(impulse_subluxation)
+                .max(angular_subluxation);
+            let loaded_subluxation = impulse > self.materials.bone_joint_subluxation_impulse * 0.35
+                || stretch_ratio
+                    > (self.materials.bone_joint_subluxation_stretch
+                        + self.materials.bone_joint_break_stretch)
+                        * 0.50
+                || overextension
+                    > (self.materials.bone_joint_subluxation_angular
+                        + self.materials.bone_joint_angular_break)
+                        * 0.50;
+            if subluxation_drive > 0.020 && loaded_subluxation {
+                if !joint.subluxated {
+                    self.stats.bone_joint_subluxations += 1;
+                    self.debug.bone_joint_subluxations += 1;
+                    let center = midpoint(anchor_a, anchor_b);
+                    let event_load = impulse
+                        .max(self.materials.bone_joint_subluxation_impulse * 0.65)
+                        * (0.55 + subluxation_drive.clamp(0.0, 1.0) * 0.65);
+                    ligament_events.push((center, event_load));
+                }
+                joint.subluxated = true;
+                joint.subluxation = joint
+                    .subluxation
+                    .max((0.22 + subluxation_drive * 0.68).clamp(0.0, 1.0));
+            }
+            self.debug.max_bone_joint_subluxation =
+                self.debug.max_bone_joint_subluxation.max(joint.subluxation);
             self.bones[joint.a].load = self.bones[joint.a]
                 .load
                 .max(self.bones[joint.b].load * 0.30);
             self.bones[joint.b].load = self.bones[joint.b]
                 .load
                 .max(self.bones[joint.a].load * 0.30);
-            let diff = (len - joint.rest) / len;
-            let correction = scale(delta, diff * self.materials.bone_joint_stiffness * 0.5);
+            let subluxation_slack = self.materials.bone_joint_subluxation_slack * joint.subluxation;
+            let effective_rest = joint.rest + subluxation_slack;
+            let diff = if joint.subluxated && len < effective_rest {
+                0.0
+            } else {
+                (len - effective_rest) / len
+            };
+            let stiffness_scale = if joint.subluxated {
+                self.materials.bone_joint_subluxation_stiffness_scale
+            } else {
+                1.0
+            };
+            let correction = scale(
+                delta,
+                diff * self.materials.bone_joint_stiffness * 0.5 * stiffness_scale,
+            );
             self.apply_bone_anchor_delta_idx(joint.a, joint.t_a, correction.x, correction.y);
             self.apply_bone_anchor_delta_idx(joint.b, joint.t_b, -correction.x, -correction.y);
+            let angle_slack =
+                self.materials.bone_joint_subluxation_angular * joint.subluxation * 0.55;
+            let relaxed_angle = relative_angle
+                - relative_angle
+                    .clamp(joint.min_angle - angle_slack, joint.max_angle + angle_slack);
             let angle_correction =
-                angle_violation * self.materials.bone_joint_angular_stiffness * 0.5;
+                relaxed_angle * self.materials.bone_joint_angular_stiffness * 0.5 * stiffness_scale;
             self.rotate_bone_around_anchor_idx(joint.a, joint.t_a, angle_correction);
             self.rotate_bone_around_anchor_idx(joint.b, joint.t_b, -angle_correction);
             self.bone_joints[i] = joint;
+        }
+        for (center, load) in ligament_events {
+            self.stats.joint_ligament_damage_events += 1;
+            self.debug.joint_ligament_damage_events += 1;
+            self.apply_joint_ligament_damage(center, load);
         }
     }
 
@@ -1976,6 +4902,12 @@ impl World {
             if bone.pinned {
                 bone.a = bone.home_a;
                 bone.b = bone.home_b;
+                bone.previous_a = bone.a;
+                bone.previous_b = bone.b;
+                self.bones[i] = bone;
+                continue;
+            }
+            if bone.sleeping && free_bone_fragment(bone) {
                 bone.previous_a = bone.a;
                 bone.previous_b = bone.b;
                 self.bones[i] = bone;
@@ -2112,11 +5044,13 @@ impl World {
     }
 
     fn solve_bone_fragment_tissue_contacts(&mut self) {
-        let count = self.bones.len();
+        let fragment_indices = self.budgeted_fragment_indices();
         let point_radius_base =
             (self.materials.point_spacing * FRAGMENT_TISSUE_POINT_RADIUS_SCALE).max(4.0);
+        let cell_size = self.fragment_tissue_cell_size();
+        let point_grid = self.build_point_spatial_grid(cell_size);
 
-        for bone_index in 0..count {
+        for bone_index in fragment_indices {
             let mut bone = self.bones[bone_index];
             if !free_bone_fragment(bone) {
                 continue;
@@ -2124,7 +5058,23 @@ impl World {
 
             let mut contact_count = 0;
             let mut strongest_depth: f64 = 0.0;
-            for point_index in 0..self.points.len() {
+            let query_radius = bone.radius
+                + point_radius_base * 1.12
+                + if bone.splinter {
+                    bone.radius * 0.22
+                } else {
+                    bone.radius * 0.08
+                }
+                + 1.0;
+            let candidate_points = self.point_candidates_near_aabb(
+                &point_grid,
+                segment_aabb(bone.a, bone.b, query_radius),
+                cell_size,
+            );
+            for point_index in candidate_points {
+                if !self.consume_fragment_tissue_check() {
+                    continue;
+                }
                 let point = self.points[point_index];
                 if point.pinned {
                     continue;
@@ -2231,7 +5181,7 @@ impl World {
                     -normal.x * correction * bone_share,
                     -normal.y * correction * bone_share,
                 );
-                damp_bone_velocity_against_tissue(
+                damp_bone_velocity_against_contact(
                     &mut bone,
                     normal,
                     (contact * FRAGMENT_TISSUE_NORMAL_DAMPING * layer_resistance).min(0.86),
@@ -2261,17 +5211,199 @@ impl World {
         }
     }
 
-    fn solve_bone_fragment_repulsion(&mut self) {
-        let count = self.bones.len();
-        for i in 0..count {
-            if !free_bone_fragment(self.bones[i]) {
+    fn solve_bone_fragment_bone_contacts(&mut self) {
+        let fragment_indices = self.budgeted_fragment_indices();
+        let cell_size = self.fragment_bone_cell_size();
+        let intact_grid = self.build_intact_bone_spatial_grid(cell_size);
+        for fragment_index in fragment_indices {
+            let fragment = self.bones[fragment_index];
+            if !free_bone_fragment(fragment) {
                 continue;
             }
-            for j in (i + 1)..count {
-                if !free_bone_fragment(self.bones[j]) {
+            let candidates = self.fragment_candidates_near_aabb(
+                &intact_grid,
+                segment_aabb(
+                    fragment.a,
+                    fragment.b,
+                    fragment.radius + self.materials.fragment_repulsion_slop + 1.0,
+                ),
+                cell_size,
+            );
+            for bone_index in candidates {
+                if bone_index == fragment_index {
                     continue;
                 }
-                let a = self.bones[i];
+                let support = self.bones[bone_index];
+                if free_bone_fragment(support) {
+                    continue;
+                }
+                if !self.consume_fragment_bone_check() {
+                    continue;
+                }
+
+                let closest = closest_segment_points(fragment.a, fragment.b, support.a, support.b);
+                let target_distance =
+                    fragment.radius + support.radius + self.materials.fragment_repulsion_slop;
+                let normal = normalized(
+                    subtract(closest.point_a, closest.point_b),
+                    normalized(
+                        subtract(
+                            midpoint(fragment.a, fragment.b),
+                            midpoint(support.a, support.b),
+                        ),
+                        Vec2 { x: 1.0, y: 0.0 },
+                    ),
+                );
+                let velocity_fragment = bone_anchor_velocity(fragment, closest.t_a);
+                let velocity_support = bone_anchor_velocity(support, closest.t_b);
+                let relative_velocity = subtract(velocity_fragment, velocity_support);
+                let normal_speed = dot(relative_velocity, normal);
+                let tangent_velocity = subtract(relative_velocity, scale(normal, normal_speed));
+                let dt = self.materials.fixed_dt.max(EPSILON);
+                let closing_speed = (-normal_speed).max(0.0) / dt;
+                let tangential_speed = hypot(tangent_velocity.x, tangent_velocity.y) / dt;
+                let rest_speed = self.materials.fragment_bone_rest_speed.max(1.0);
+                let resting_contact =
+                    closing_speed < rest_speed && tangential_speed < rest_speed * 1.75;
+                let penetration = target_distance - closest.distance;
+                let contact_skin = self
+                    .materials
+                    .fragment_repulsion_slop
+                    .mul_add(0.85, 0.25)
+                    .clamp(0.25, 1.0);
+                let use_resting_contact_skin = self.debug.impact <= EPSILON;
+                if penetration <= 0.0
+                    && (!use_resting_contact_skin
+                        || !resting_contact
+                        || closest.distance >= target_distance + contact_skin)
+                {
+                    continue;
+                }
+                let rest_factor = if resting_contact {
+                    (1.0 - closing_speed / rest_speed).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let overlap = if penetration > 0.0 {
+                    penetration
+                } else {
+                    ((target_distance + contact_skin - closest.distance) * 0.10).max(0.0)
+                };
+                let fragment_mass =
+                    bone_contact_mass(fragment, if fragment.splinter { 0.35 } else { 1.0 });
+                let support_mass = bone_contact_mass(support, 2.8);
+                let inv_fragment = 1.0 / fragment_mass;
+                let inv_support = if support.pinned {
+                    0.0
+                } else {
+                    1.0 / support_mass
+                };
+                let inv_sum = inv_fragment + inv_support;
+                if inv_sum <= EPSILON {
+                    continue;
+                }
+
+                let correction = overlap
+                    * (self.materials.fragment_repulsion_stiffness * 0.92
+                        + self.materials.fragment_bone_rest_stiffness * rest_factor);
+                let fragment_share = inv_fragment / inv_sum;
+                let support_share = inv_support / inv_sum;
+                self.apply_bone_anchor_delta_idx(
+                    fragment_index,
+                    closest.t_a,
+                    normal.x * correction * fragment_share,
+                    normal.y * correction * fragment_share,
+                );
+                self.apply_bone_anchor_delta_idx(
+                    bone_index,
+                    closest.t_b,
+                    -normal.x * correction * support_share,
+                    -normal.y * correction * support_share,
+                );
+
+                let contact = (overlap / target_distance.max(1.0)).clamp(0.0, 1.0);
+                let normal_damping = (contact
+                    * (self.materials.fragment_bone_normal_damping
+                        + self.materials.fragment_bone_rest_friction * rest_factor * 0.62))
+                    .min(0.78);
+                let tangential_friction = (contact
+                    * (self.materials.fragment_bone_tangential_friction
+                        + self.materials.fragment_bone_rest_friction * rest_factor))
+                    .min(0.54);
+                if normal_damping > EPSILON || tangential_friction > EPSILON {
+                    if let Some(bone) = self.bones.get_mut(fragment_index) {
+                        damp_bone_velocity_against_contact(
+                            bone,
+                            scale(normal, -1.0),
+                            normal_damping,
+                            tangential_friction,
+                        );
+                        bone.angular_velocity *= (1.0
+                            - contact
+                                * (self.materials.fragment_bone_angular_friction
+                                    + self.materials.fragment_bone_rest_friction
+                                        * rest_factor
+                                        * 0.30))
+                            .clamp(0.76, 1.0);
+                    }
+                    if !support.pinned {
+                        if let Some(bone) = self.bones.get_mut(bone_index) {
+                            damp_bone_velocity_against_contact(
+                                bone,
+                                normal,
+                                normal_damping * 0.45,
+                                tangential_friction * 0.45,
+                            );
+                        }
+                    }
+                    self.debug.fragment_bone_damping_events += 1;
+                }
+                let contact_load = overlap * 84.0 + closing_speed * fragment.radius.max(1.0) * 0.24;
+
+                self.bones[fragment_index].load =
+                    self.bones[fragment_index].load.max(contact_load * 0.72);
+                self.bones[bone_index].load = self.bones[bone_index].load.max(contact_load * 0.54);
+                self.debug.fragment_bone_contacts += 1;
+                if resting_contact {
+                    self.debug.fragment_bone_resting_contacts += 1;
+                }
+                self.debug.max_fragment_overlap = self.debug.max_fragment_overlap.max(overlap);
+                self.debug.max_bone_load = self.debug.max_bone_load.max(
+                    self.bones[fragment_index]
+                        .load
+                        .max(self.bones[bone_index].load),
+                );
+            }
+        }
+    }
+
+    fn solve_bone_fragment_repulsion(&mut self) {
+        let fragment_indices = self.budgeted_fragment_indices();
+        let cell_size = self.fragment_pair_cell_size();
+        let fragment_grid = self.build_fragment_spatial_grid(&fragment_indices, cell_size);
+        let mut seen_pairs = HashSet::new();
+        for i in fragment_indices.iter().copied() {
+            let a = self.bones[i];
+            let candidates = self.fragment_candidates_near_aabb(
+                &fragment_grid,
+                segment_aabb(
+                    a.a,
+                    a.b,
+                    a.radius + self.materials.fragment_repulsion_slop + 1.0,
+                ),
+                cell_size,
+            );
+            for j in candidates {
+                if i == j {
+                    continue;
+                }
+                let pair = if i < j { (i, j) } else { (j, i) };
+                if !seen_pairs.insert(pair) {
+                    continue;
+                }
+                if !self.consume_fragment_pair_check() {
+                    continue;
+                }
                 let b = self.bones[j];
                 let closest = closest_segment_points(a.a, a.b, b.a, b.b);
                 let target_distance = a.radius + b.radius + self.materials.fragment_repulsion_slop;
@@ -2304,7 +5436,25 @@ impl World {
                 if inv_sum <= EPSILON {
                     continue;
                 }
-                let correction = overlap * self.materials.fragment_repulsion_stiffness;
+                let velocity_a = bone_anchor_velocity(a, closest.t_a);
+                let velocity_b = bone_anchor_velocity(b, closest.t_b);
+                let relative_velocity = subtract(velocity_a, velocity_b);
+                let normal_speed = dot(relative_velocity, normal);
+                let tangent_velocity = subtract(relative_velocity, scale(normal, normal_speed));
+                let dt = self.materials.fixed_dt.max(EPSILON);
+                let closing_speed = (-normal_speed).max(0.0) / dt;
+                let tangential_speed = hypot(tangent_velocity.x, tangent_velocity.y) / dt;
+                let rest_speed = self.materials.fragment_pair_rest_speed.max(1.0);
+                let resting_contact =
+                    closing_speed < rest_speed && tangential_speed < rest_speed * 1.65;
+                let rest_factor = if resting_contact {
+                    (1.0 - closing_speed / rest_speed).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let correction = overlap
+                    * (self.materials.fragment_repulsion_stiffness
+                        + self.materials.fragment_pair_rest_stiffness * rest_factor);
                 let share_a = inv_mass_a / inv_sum;
                 let share_b = inv_mass_b / inv_sum;
                 self.apply_bone_anchor_delta_idx(
@@ -2319,6 +5469,51 @@ impl World {
                     -normal.x * correction * share_b,
                     -normal.y * correction * share_b,
                 );
+                let contact = (overlap / target_distance.max(1.0)).clamp(0.0, 1.0);
+                let normal_damping = (contact
+                    * (self.materials.fragment_pair_normal_damping
+                        + self.materials.fragment_pair_rest_friction * rest_factor * 0.65))
+                    .min(0.82);
+                let tangential_friction = (contact
+                    * (self.materials.fragment_pair_tangential_friction
+                        + self.materials.fragment_pair_rest_friction * rest_factor))
+                    .min(0.62);
+                if normal_damping > EPSILON || tangential_friction > EPSILON {
+                    if let Some(bone) = self.bones.get_mut(i) {
+                        damp_bone_velocity_against_contact(
+                            bone,
+                            scale(normal, -1.0),
+                            normal_damping,
+                            tangential_friction,
+                        );
+                        bone.angular_velocity *= (1.0
+                            - contact
+                                * (self.materials.fragment_pair_angular_friction
+                                    + self.materials.fragment_pair_rest_friction
+                                        * rest_factor
+                                        * 0.35))
+                            .clamp(0.72, 1.0);
+                    }
+                    if let Some(bone) = self.bones.get_mut(j) {
+                        damp_bone_velocity_against_contact(
+                            bone,
+                            normal,
+                            normal_damping,
+                            tangential_friction,
+                        );
+                        bone.angular_velocity *= (1.0
+                            - contact
+                                * (self.materials.fragment_pair_angular_friction
+                                    + self.materials.fragment_pair_rest_friction
+                                        * rest_factor
+                                        * 0.35))
+                            .clamp(0.72, 1.0);
+                    }
+                    self.debug.fragment_pair_damping_events += 1;
+                }
+                if resting_contact {
+                    self.debug.fragment_pair_resting_contacts += 1;
+                }
                 self.debug.fragment_pair_contacts += 1;
                 self.debug.max_fragment_overlap = self.debug.max_fragment_overlap.max(overlap);
             }
@@ -2326,8 +5521,8 @@ impl World {
     }
 
     fn collide_bone_fragments(&mut self) {
-        let initial_count = self.bones.len();
-        for i in 0..initial_count {
+        let fragment_indices = self.budgeted_fragment_indices();
+        for i in fragment_indices {
             let bone = self.bones[i];
             if bone.pinned || (!bone.fractured && !bone.splinter) {
                 continue;
@@ -2379,6 +5574,17 @@ impl World {
         }
         self.debug.max_fragment_impulse = self.debug.max_fragment_impulse.max(impulse);
         let tip_normal = normalized(normal, Vec2 { x: 0.0, y: -1.0 });
+        if bone.kind == BoneKind::Rib {
+            self.puncture_organs_from_rib_tip(bone, tip, previous_tip, tip_normal, impulse, radius);
+        }
+        self.lacerate_vessels_from_fragment_tip(
+            bone,
+            tip,
+            previous_tip,
+            tip_normal,
+            impulse,
+            radius,
+        );
         let mut torque_impulse = Vec2::default();
         let mut torque_weight = 0.0;
         let mut emissions = Vec::new();
@@ -2458,13 +5664,42 @@ impl World {
             if d > radius * 1.18 {
                 continue;
             }
+            let contact = 1.0 - d / (radius * 1.18);
+            if spring.layer == TissueLayer::Skin
+                && (self.debug.fragment_skin_punctures as usize)
+                    < self.materials.max_fragment_skin_punctures_per_step
+            {
+                let to_skin = normalized(subtract(mid, tip), tip_normal);
+                let travel_dir = normalized(subtract(tip, previous_tip), tip_normal);
+                let tip_alignment = dot(tip_normal, to_skin).clamp(0.0, 1.0);
+                let travel_alignment = dot(travel_dir, to_skin).clamp(0.0, 1.0);
+                let exposed = a.exposure.max(b.exposure).clamp(0.0, 1.0);
+                let puncture_drive = impulse
+                    * contact
+                    * (0.58 + tip_alignment * 0.24 + travel_alignment * 0.28)
+                    * if bone.splinter { 1.14 } else { 1.0 };
+                let puncture_threshold =
+                    self.materials.fragment_skin_puncture_impulse * (1.0 - exposed * 0.18);
+                if puncture_drive > puncture_threshold {
+                    self.springs[i].broken = true;
+                    self.springs[i].stress = 1.0;
+                    self.bump_point_exposure_load(spring.a, 1.0, puncture_drive * 0.42);
+                    self.bump_point_exposure_load(spring.b, 1.0, puncture_drive * 0.42);
+                    self.stats.broken_skin += 1;
+                    self.stats.fragment_tissue_tears += 1;
+                    self.stats.fragment_skin_punctures += 1;
+                    self.debug.fragment_tears += 1;
+                    self.debug.fragment_skin_punctures += 1;
+                    spring_events.push((mid, TissueLayer::Skin, puncture_drive));
+                    continue;
+                }
+            }
             let reachable = spring.layer == TissueLayer::Muscle
                 || a.exposure.max(b.exposure) > 0.35
                 || impulse > self.materials.fragment_damage_impulse * 1.75;
             if !reachable {
                 continue;
             }
-            let contact = 1.0 - d / (radius * 1.18);
             let threshold = spring.tear_impulse
                 * (if spring.layer == TissueLayer::Muscle {
                     0.46
@@ -2620,7 +5855,9 @@ impl World {
     }
 
     fn solve_areas(&mut self) {
-        for area in self.areas.clone() {
+        let blood_turgor = self.blood_turgor_scale_internal();
+        for index in 0..self.areas.len() {
+            let area = self.areas[index];
             if self.live_edge_count(area.edge_ab, area.edge_bc, area.edge_ca) < 2 {
                 continue;
             }
@@ -2644,7 +5881,12 @@ impl World {
             if weighted_gradient <= EPSILON {
                 continue;
             }
-            let lambda = -constraint * area.stiffness / weighted_gradient;
+            let compliance = tissue_area_compliance(self.materials, area.layer);
+            let alpha = xpbd_alpha(compliance, self.materials.fixed_dt);
+            let lambda = (-constraint * area.stiffness * blood_turgor
+                - alpha * self.areas[index].lambda)
+                / (weighted_gradient + alpha);
+            self.areas[index].lambda += lambda;
             if !self.points[area.a].pinned {
                 self.points[area.a].position.x += ax * lambda * inv_a;
                 self.points[area.a].position.y += ay * lambda * inv_a;
@@ -2669,14 +5911,46 @@ impl World {
             point.position.x = point.position.x.clamp(margin, width - margin);
             point.position.y = point.position.y.min(floor_y);
         }
-        for bone in &mut self.bones {
+        for index in 0..self.bones.len() {
+            let mut bone = self.bones[index];
             if bone.pinned {
                 continue;
             }
             bone.a.x = bone.a.x.clamp(margin, width - margin);
             bone.b.x = bone.b.x.clamp(margin, width - margin);
-            bone.a.y = bone.a.y.min(floor_y);
-            bone.b.y = bone.b.y.min(floor_y);
+            if free_bone_fragment(bone) {
+                let contact_floor_y = floor_y - bone.radius.max(1.0);
+                let (a_contact, a_resting) = constrain_fragment_endpoint_to_floor(
+                    self.materials,
+                    &mut bone.a,
+                    &mut bone.previous_a,
+                    contact_floor_y,
+                );
+                let (b_contact, b_resting) = constrain_fragment_endpoint_to_floor(
+                    self.materials,
+                    &mut bone.b,
+                    &mut bone.previous_b,
+                    contact_floor_y,
+                );
+                let contacts = usize::from(a_contact) + usize::from(b_contact);
+                if contacts > 0 {
+                    let resting = usize::from(a_resting) + usize::from(b_resting);
+                    self.debug.fragment_floor_contacts += contacts as i32;
+                    self.debug.fragment_floor_resting_contacts += resting as i32;
+                    let angular_friction =
+                        (self.materials.fragment_floor_angular_friction * contacts as f64 * 0.5)
+                            .clamp(0.0, 0.48);
+                    bone.angular_velocity *= 1.0 - angular_friction;
+                    self.debug.max_bone_angular_speed = self
+                        .debug
+                        .max_bone_angular_speed
+                        .max(bone.angular_velocity.abs());
+                }
+            } else {
+                bone.a.y = bone.a.y.min(floor_y);
+                bone.b.y = bone.b.y.min(floor_y);
+            }
+            self.bones[index] = bone;
         }
     }
 
@@ -2696,7 +5970,9 @@ impl World {
     }
 
     fn update_triangle_damage(&mut self) {
-        for triangle in &mut self.triangles {
+        let mut rupture_events = Vec::new();
+        for i in 0..self.triangles.len() {
+            let triangle = self.triangles[i];
             if triangle.layer != TissueLayer::Muscle || triangle.failed {
                 continue;
             }
@@ -2705,13 +5981,73 @@ impl World {
             let c = self.points[triangle.c];
             let load = (a.load + b.load + c.load) / 3.0;
             let exposed = (a.exposure + b.exposure + c.exposure) / 3.0;
+            let edge_fatigue = spring_fatigue(&self.springs, triangle.edge_ab)
+                .max(spring_fatigue(&self.springs, triangle.edge_bc))
+                .max(spring_fatigue(&self.springs, triangle.edge_ca));
+            let fiber_rupture_floor = if muscle_fiber_spring_broken(&self.springs, triangle.edge_ab)
+                || muscle_fiber_spring_broken(&self.springs, triangle.edge_bc)
+                || muscle_fiber_spring_broken(&self.springs, triangle.edge_ca)
+            {
+                self.materials.muscle_fiber_rupture_damage_floor
+            } else {
+                0.0
+            };
             let impulse_threshold =
                 self.materials.muscle_exposed_tear_impulse + (1.0 - exposed) * 560.0;
-            triangle.damage =
-                (triangle.damage * 0.996 + (load - impulse_threshold).max(0.0) / 1500.0).min(1.35);
-            if triangle.damage > 1.0 {
-                triangle.failed = true;
+            let load_damage = (load - impulse_threshold).max(0.0) / 1500.0;
+            let fatigue_floor = edge_fatigue * 0.38;
+            let damage = (triangle.damage * 0.996 + load_damage)
+                .max(fatigue_floor)
+                .max(fiber_rupture_floor)
+                .min(1.35);
+            self.triangles[i].damage = damage;
+            if damage > 1.0 {
+                self.triangles[i].failed = true;
+                let rupture_drive = load
+                    .max(edge_fatigue * self.materials.tissue_fatigue_load_threshold * 1.25)
+                    .max(damage * self.materials.muscle_crush_rupture_load_threshold);
+                let should_bleed = rupture_events.len()
+                    < self.materials.max_muscle_crush_ruptures_per_step
+                    && rupture_drive >= self.materials.muscle_crush_rupture_load_threshold
+                    && damage >= self.materials.muscle_crush_rupture_damage_threshold;
+                if should_bleed {
+                    let centroid = Vec2 {
+                        x: (a.position.x + b.position.x + c.position.x) / 3.0,
+                        y: (a.position.y + b.position.y + c.position.y) / 3.0,
+                    };
+                    let ab = subtract(b.position, a.position);
+                    let ac = subtract(c.position, a.position);
+                    let raw_normal = normalized(
+                        Vec2 {
+                            x: -(ab.y + ac.y * 0.45),
+                            y: ab.x + ac.x * 0.45 - 0.35,
+                        },
+                        Vec2 { x: 0.0, y: -1.0 },
+                    );
+                    rupture_events.push((centroid, raw_normal, rupture_drive, damage));
+                }
             }
+        }
+
+        for (position, normal, load, damage) in rupture_events {
+            self.emit_fluid(
+                position,
+                normal,
+                2 + (load / 1200.0).clamp(0.0, 5.0) as i32,
+                84.0 + load * self.materials.fluid_impact_scale * 0.36,
+                1.85 + damage.min(1.35) * 0.35,
+                0.76 + damage.min(1.35) * 0.18,
+            );
+            self.open_wound(
+                position,
+                normal,
+                TissueLayer::Muscle,
+                load / 1450.0,
+                1.95,
+                0.88,
+            );
+            self.stats.muscle_crush_ruptures += 1;
+            self.debug.muscle_crush_ruptures += 1;
         }
     }
 
@@ -2722,16 +6058,26 @@ impl World {
         impulse_normal: Vec2,
         impulse: f64,
     ) {
-        if bone_index >= self.bones.len() || !self.can_fracture_bone(self.bones[bone_index]) {
+        if bone_index >= self.bones.len() {
+            return;
+        }
+        let candidate = self.bones[bone_index];
+        if !self.can_fracture_bone_shape(candidate) {
+            return;
+        }
+        if !self.fracture_budget_allows(candidate) {
+            self.debug.fracture_budget_blocks += 1;
             return;
         }
         let old = self.bones[bone_index];
         let delta = subtract(old.b, old.a);
         let len = hypot(delta.x, delta.y).max(EPSILON);
-        let minimum_piece_length = self
-            .materials
-            .min_bone_fragment_length
-            .max(old.radius * 3.2);
+        let material_min_piece = if old.kind == BoneKind::Rib {
+            self.materials.min_rib_fragment_length
+        } else {
+            self.materials.min_bone_fragment_length
+        };
+        let minimum_piece_length = material_min_piece.max(old.radius * 3.2);
         let min_break_t = (minimum_piece_length / len).clamp(0.18, 0.46);
         if min_break_t >= 0.5 {
             return;
@@ -2774,6 +6120,12 @@ impl World {
             * (0.55 + (break_t - 0.5).abs() * 1.9))
             .clamp(0.0, 16.0);
 
+        let secondary_fracture_impulse = old.fracture_impulse
+            * self
+                .materials
+                .secondary_bone_fracture_impulse_scale
+                .clamp(0.45, 1.10);
+
         let mut first = old;
         first.a = Vec2 {
             x: old.a.x - normal.x * snap * 0.18,
@@ -2797,7 +6149,7 @@ impl World {
         first.broken_end = true;
         first.broken_end_normal = normal;
         first.fracture_generation += 1;
-        first.fracture_impulse = old.fracture_impulse * 0.82;
+        first.fracture_impulse = secondary_fracture_impulse;
         first.load = old.load * 0.28;
         first.angular_velocity = (first.angular_velocity
             + spin_sign * fracture_spin * (1.0 - break_t))
@@ -2805,6 +6157,7 @@ impl World {
         self.bones[bone_index] = first;
 
         let mut second = BoneSegment {
+            kind: old.kind,
             a: right_cap,
             b: Vec2 {
                 x: old.b.x + normal.x * snap * 0.18,
@@ -2825,7 +6178,7 @@ impl World {
             home_b: old.home_b,
             radius: old.radius,
             rest_length: 1.0,
-            fracture_impulse: old.fracture_impulse * 0.82,
+            fracture_impulse: secondary_fracture_impulse,
             load: old.load * 0.28,
             fractured: true,
             broken_start: true,
@@ -2934,6 +6287,7 @@ impl World {
 
         let chip_length = (old.radius * 1.8).max(8.0).min(len * 0.13);
         let mut splinter = BoneSegment {
+            kind: old.kind,
             a: Vec2 {
                 x: crack.x - dir.x * chip_length * 0.45 + normal.x * snap * 0.35,
                 y: crack.y - dir.y * chip_length * 0.45 + normal.y * snap * 0.35,
@@ -3002,6 +6356,22 @@ impl World {
             2.9,
             1.18,
         );
+        self.open_bone_marrow_wound(
+            bone_index,
+            1.0,
+            add(blood_direction, scale(dir, -0.35)),
+            load / 1780.0,
+            2.15,
+            1.05,
+        );
+        self.open_bone_marrow_wound(
+            second_index,
+            0.0,
+            add(blood_direction, scale(dir, 0.35)),
+            load / 1780.0,
+            2.15,
+            1.05,
+        );
         self.damage_tissue_around_fracture(
             crack,
             (old.radius * 3.8).max(24.0 + overload * 10.0),
@@ -3009,6 +6379,10 @@ impl World {
         );
         self.stats.fractured_bones += 1;
         self.debug.fractures += 1;
+        if old.kind == BoneKind::Rib {
+            self.stats.fractured_ribs += 1;
+            self.debug.rib_fractures += 1;
+        }
         self.debug.last_fracture_impulse = self.debug.last_fracture_impulse.max(load);
     }
 
@@ -3173,33 +6547,6 @@ impl World {
         }
     }
 
-    fn apply_pair_correction_idx(
-        &mut self,
-        a_index: usize,
-        b_index: usize,
-        correction_x: f64,
-        correction_y: f64,
-    ) {
-        if a_index == b_index || a_index >= self.points.len() || b_index >= self.points.len() {
-            return;
-        }
-        let (a, b) = two_mut(&mut self.points, a_index, b_index);
-        let inv_a = if a.pinned { 0.0 } else { 1.0 / a.mass };
-        let inv_b = if b.pinned { 0.0 } else { 1.0 / b.mass };
-        let sum = inv_a + inv_b;
-        if sum <= 0.0 {
-            return;
-        }
-        if !a.pinned {
-            a.position.x += correction_x * (inv_a / sum);
-            a.position.y += correction_y * (inv_a / sum);
-        }
-        if !b.pinned {
-            b.position.x -= correction_x * (inv_b / sum);
-            b.position.y -= correction_y * (inv_b / sum);
-        }
-    }
-
     fn apply_bone_anchor_delta_idx(&mut self, index: usize, t: f64, dx: f64, dy: f64) {
         if let Some(bone) = self.bones.get_mut(index) {
             apply_bone_anchor_delta(bone, t, dx, dy);
@@ -3213,11 +6560,247 @@ impl World {
     }
 
     fn bump_point_exposure_load(&mut self, index: usize, exposure: f64, load: f64) {
+        let mut contused = false;
+        let mut max_contusion = 0.0;
         if let Some(point) = self.points.get_mut(index) {
             point.exposure = point.exposure.max(exposure);
             point.load = point.load.max(load);
+            contused = apply_point_contusion(point, self.materials, load, 0.42);
+            max_contusion = point.contusion;
+        }
+        if contused {
+            self.stats.contusion_events += 1;
+            self.debug.contusion_events += 1;
+            self.debug.max_contusion = self.debug.max_contusion.max(max_contusion);
         }
     }
+
+    fn apply_joint_ligament_damage(&mut self, center: Vec2, load: f64) {
+        let radius = self
+            .materials
+            .joint_ligament_damage_radius
+            .max(self.materials.point_spacing);
+        if load <= 0.0 || radius <= 0.0 {
+            return;
+        }
+
+        let materials = self.materials;
+        let mut contusion_events = 0;
+        let mut max_contusion = self.debug.max_contusion;
+        for point in &mut self.points {
+            if point.layer != TissueLayer::Muscle {
+                continue;
+            }
+            let distance_to_joint = distance(point.position, center);
+            if distance_to_joint > radius {
+                continue;
+            }
+            let falloff = (1.0 - distance_to_joint / radius).clamp(0.0, 1.0);
+            let local_load = load * falloff;
+            point.load = point
+                .load
+                .max(local_load * materials.joint_ligament_damage_load_scale);
+            if apply_point_contusion(
+                point,
+                materials,
+                local_load,
+                materials.joint_ligament_damage_contusion_scale,
+            ) {
+                contusion_events += 1;
+                max_contusion = max_contusion.max(point.contusion);
+            }
+        }
+        if contusion_events > 0 {
+            self.stats.contusion_events += contusion_events;
+            self.debug.contusion_events += contusion_events;
+            self.debug.max_contusion = self.debug.max_contusion.max(max_contusion);
+        }
+    }
+}
+
+fn apply_point_contusion(
+    point: &mut Point,
+    materials: Materials,
+    load: f64,
+    scale_factor: f64,
+) -> bool {
+    if load <= 0.0 || scale_factor <= 0.0 {
+        return false;
+    }
+    let layer_threshold = if point.layer == TissueLayer::Skin {
+        1.0
+    } else {
+        1.22
+    };
+    let threshold = materials.contusion_load_threshold * layer_threshold;
+    if load <= threshold {
+        return false;
+    }
+    let layer_scale = if point.layer == TissueLayer::Skin {
+        1.0
+    } else {
+        0.72
+    };
+    let amount =
+        (((load - threshold) / threshold) * 0.24 * scale_factor * layer_scale).clamp(0.0, 0.46);
+    if amount <= 0.0 {
+        return false;
+    }
+    let before = point.contusion;
+    point.contusion = (point.contusion + amount).min(1.35);
+    point.contusion > before + 0.002
+}
+
+fn tissue_tear_weakening(materials: Materials, contusion: f64) -> f64 {
+    (contusion.clamp(0.0, 1.0) * materials.contusion_tear_weakening).clamp(0.0, 0.52)
+}
+
+fn tissue_stiffness_softening(materials: Materials, contusion: f64) -> f64 {
+    (contusion.clamp(0.0, 1.0) * materials.contusion_stiffness_softening).clamp(0.0, 0.44)
+}
+
+fn tissue_spring_compliance(materials: Materials, layer: TissueLayer) -> f64 {
+    match layer {
+        TissueLayer::Skin => materials.skin_spring_compliance,
+        TissueLayer::Muscle => materials.muscle_spring_compliance,
+    }
+    .max(0.0)
+}
+
+fn tissue_area_compliance(materials: Materials, layer: TissueLayer) -> f64 {
+    match layer {
+        TissueLayer::Skin => materials.skin_area_compliance,
+        TissueLayer::Muscle => materials.muscle_area_compliance,
+    }
+    .max(0.0)
+}
+
+fn xpbd_alpha(compliance: f64, dt: f64) -> f64 {
+    if compliance <= EPSILON {
+        0.0
+    } else {
+        compliance / dt.max(1.0e-5).powi(2)
+    }
+}
+
+fn tissue_fatigue_delta(
+    materials: Materials,
+    spring: Spring,
+    stretch_ratio: f64,
+    endpoint_load: f64,
+    contusion: f64,
+) -> f64 {
+    if spring.broken || materials.tissue_fatigue_rate <= 0.0 {
+        return 0.0;
+    }
+    let stretch_threshold = materials
+        .tissue_fatigue_stretch_threshold
+        .min(spring.tear_stretch * 0.86)
+        .max(1.0);
+    let stretch_window = (spring.tear_stretch - stretch_threshold).max(0.08);
+    let stretch_term = ((stretch_ratio - stretch_threshold) / stretch_window).clamp(0.0, 1.35);
+
+    let layer_load_scale = if spring.layer == TissueLayer::Muscle {
+        1.18
+    } else {
+        1.0
+    };
+    let load_threshold = materials.tissue_fatigue_load_threshold * layer_load_scale;
+    let load_window = (spring.tear_impulse - load_threshold).max(140.0);
+    let load_term = ((endpoint_load - load_threshold) / load_window).clamp(0.0, 1.45);
+
+    let combined = stretch_term * 0.62 + load_term * 0.38 + stretch_term * load_term * 0.28;
+    if combined <= 0.0 {
+        return 0.0;
+    }
+    let layer_scale = if spring.layer == TissueLayer::Muscle {
+        0.84
+    } else {
+        1.0
+    };
+    let contusion_boost = 1.0 + contusion.clamp(0.0, 1.0) * 0.55;
+    (combined * materials.tissue_fatigue_rate * layer_scale * contusion_boost).clamp(0.0, 0.075)
+}
+
+fn tissue_fatigue_tear_weakening(materials: Materials, fatigue: f64) -> f64 {
+    (fatigue.clamp(0.0, 1.0) * materials.tissue_fatigue_tear_weakening).clamp(0.0, 0.42)
+}
+
+fn tissue_fatigue_stiffness_softening(materials: Materials, fatigue: f64) -> f64 {
+    (fatigue.clamp(0.0, 1.0) * materials.tissue_fatigue_stiffness_softening).clamp(0.0, 0.26)
+}
+
+fn tissue_plastic_rest_delta(
+    materials: Materials,
+    spring: Spring,
+    stretch_ratio: f64,
+    endpoint_load: f64,
+    contusion: f64,
+    fatigue: f64,
+) -> f64 {
+    if spring.broken || spring.rest_reference <= EPSILON || materials.tissue_plastic_rate <= 0.0 {
+        return 0.0;
+    }
+
+    let stretch_threshold = materials
+        .tissue_plastic_stretch_threshold
+        .min(spring.tear_stretch * 0.88)
+        .max(1.01);
+    let stretch_drive = ((stretch_ratio - stretch_threshold)
+        / (spring.tear_stretch - stretch_threshold).max(0.10))
+    .clamp(0.0, 1.25);
+
+    let compression_threshold = materials
+        .tissue_plastic_compression_threshold
+        .clamp(0.42, 0.98);
+    let compression_drive = ((compression_threshold - stretch_ratio)
+        / (compression_threshold - 0.42).max(0.08))
+    .clamp(0.0, 1.0);
+
+    let layer_load_scale = if spring.layer == TissueLayer::Muscle {
+        1.12
+    } else {
+        1.0
+    };
+    let load_threshold = materials.tissue_fatigue_load_threshold * 0.78 * layer_load_scale;
+    let load_drive = ((endpoint_load - load_threshold)
+        / (spring.tear_impulse - load_threshold).max(180.0))
+    .clamp(0.0, 1.15);
+
+    let damage_memory = (fatigue * 0.62 + contusion.clamp(0.0, 1.0) * 0.32).clamp(0.0, 1.0);
+    let memory_boost = 0.55 + damage_memory;
+    let load_boost = 0.45 + load_drive * 0.55;
+    if stretch_drive >= compression_drive && stretch_drive > 0.0 {
+        return spring.rest_reference
+            * materials.tissue_plastic_rate
+            * stretch_drive
+            * memory_boost
+            * load_boost;
+    }
+    if compression_drive > 0.0 && load_drive > 0.0 {
+        return -spring.rest_reference
+            * materials.tissue_plastic_rate
+            * 0.62
+            * compression_drive
+            * memory_boost
+            * load_boost;
+    }
+    0.0
+}
+
+fn spring_fatigue(springs: &[Spring], index: usize) -> f64 {
+    springs
+        .get(index)
+        .map(|spring| spring.fatigue)
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.35)
+}
+
+fn muscle_fiber_spring_broken(springs: &[Spring], index: usize) -> bool {
+    springs
+        .get(index)
+        .map(|spring| spring.layer == TissueLayer::Muscle && spring.fiber && spring.broken)
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -3228,6 +6811,22 @@ mod tests {
         let a_speed = distance(bone.a, bone.previous_a);
         let b_speed = distance(bone.b, bone.previous_b);
         (a_speed + b_speed) * 0.5
+    }
+
+    fn average_fragment_velocity(bone: BoneSegment) -> Vec2 {
+        Vec2 {
+            x: ((bone.a.x - bone.previous_a.x) + (bone.b.x - bone.previous_b.x)) * 0.5,
+            y: ((bone.a.y - bone.previous_a.y) + (bone.b.y - bone.previous_b.y)) * 0.5,
+        }
+    }
+
+    fn pair_closing_speed(a: BoneSegment, b: BoneSegment, normal_from_b_to_a: Vec2) -> f64 {
+        dot(
+            average_fragment_velocity(a),
+            scale(normal_from_b_to_a, -1.0),
+        )
+        .max(0.0)
+            + dot(average_fragment_velocity(b), normal_from_b_to_a).max(0.0)
     }
 
     #[test]
@@ -3256,6 +6855,123 @@ mod tests {
             world.points[muscle].position.x < 70.0,
             "muscle should receive some opposing tether reaction"
         );
+    }
+
+    #[test]
+    fn stretched_bone_joint_subluxates_before_breaking() {
+        let mut materials = Materials::default();
+        materials.bone_joint_subluxation_stretch = 1.18;
+        materials.bone_joint_break_stretch = 2.8;
+        materials.bone_joint_subluxation_slack = 16.0;
+        materials.bone_joint_subluxation_stiffness_scale = 0.45;
+        let mut world = World::new(materials);
+        let a = world.add_bone_segment(
+            Vec2 { x: 0.0, y: 0.0 },
+            Vec2 { x: 40.0, y: 0.0 },
+            5.0,
+            9999.0,
+            false,
+        );
+        let b = world.add_bone_segment(
+            Vec2 { x: 42.0, y: 0.0 },
+            Vec2 { x: 82.0, y: 0.0 },
+            5.0,
+            9999.0,
+            false,
+        );
+        world.add_bone_joint(a, 1.0, b, 0.0, -0.5, 0.5);
+        world.bones[b].a.x += 8.5;
+        world.bones[b].b.x += 8.5;
+        world.bones[b].load = 760.0;
+
+        world.solve_bone_joints();
+
+        assert!(
+            world.bone_joints[0].subluxated,
+            "moderate joint stretch should enter a subluxated state"
+        );
+        assert!(
+            !world.bone_joints[0].broken,
+            "subluxation should happen before total joint break"
+        );
+        assert!(world.bone_joints[0].subluxation > 0.0);
+        assert_eq!(world.stats.bone_joint_subluxations, 1);
+        assert_eq!(world.debug.bone_joint_subluxations, 1);
+        assert!(world.debug.max_bone_joint_subluxation > 0.0);
+    }
+
+    #[test]
+    fn subluxated_joint_marks_ligament_tissue_damage() {
+        let mut materials = Materials::default();
+        materials.bone_joint_subluxation_stretch = 1.18;
+        materials.bone_joint_break_stretch = 2.8;
+        materials.joint_ligament_damage_radius = 16.0;
+        materials.joint_ligament_damage_load_scale = 0.50;
+        materials.joint_ligament_damage_contusion_scale = 0.90;
+        materials.contusion_load_threshold = 120.0;
+        let mut world = World::new(materials);
+        let tissue = world.add_point(Vec2 { x: 45.0, y: 0.0 }, TissueLayer::Muscle, false);
+        let a = world.add_bone_segment(
+            Vec2 { x: 0.0, y: 0.0 },
+            Vec2 { x: 40.0, y: 0.0 },
+            5.0,
+            9999.0,
+            false,
+        );
+        let b = world.add_bone_segment(
+            Vec2 { x: 42.0, y: 0.0 },
+            Vec2 { x: 82.0, y: 0.0 },
+            5.0,
+            9999.0,
+            false,
+        );
+        world.add_bone_joint(a, 1.0, b, 0.0, -0.5, 0.5);
+        world.bones[b].a.x += 8.5;
+        world.bones[b].b.x += 8.5;
+        world.bones[b].load = 760.0;
+
+        world.solve_bone_joints();
+
+        assert!(world.bone_joints[0].subluxated);
+        assert_eq!(world.stats.joint_ligament_damage_events, 1);
+        assert_eq!(world.debug.joint_ligament_damage_events, 1);
+        assert!(world.points[tissue].load > 0.0);
+        assert!(world.points[tissue].contusion > 0.0);
+        assert!(world.stats.contusion_events >= 1);
+    }
+
+    #[test]
+    fn quiet_bone_joint_does_not_subluxate_below_threshold() {
+        let mut materials = Materials::default();
+        materials.bone_joint_subluxation_stretch = 1.50;
+        materials.bone_joint_break_stretch = 2.8;
+        let mut world = World::new(materials);
+        let a = world.add_bone_segment(
+            Vec2 { x: 0.0, y: 0.0 },
+            Vec2 { x: 40.0, y: 0.0 },
+            5.0,
+            9999.0,
+            false,
+        );
+        let b = world.add_bone_segment(
+            Vec2 { x: 42.0, y: 0.0 },
+            Vec2 { x: 82.0, y: 0.0 },
+            5.0,
+            9999.0,
+            false,
+        );
+        world.add_bone_joint(a, 1.0, b, 0.0, -0.5, 0.5);
+        world.bones[b].a.x += 0.6;
+        world.bones[b].b.x += 0.6;
+
+        world.solve_bone_joints();
+
+        assert!(!world.bone_joints[0].subluxated);
+        assert!(!world.bone_joints[0].broken);
+        assert_eq!(world.stats.bone_joint_subluxations, 0);
+        assert_eq!(world.debug.bone_joint_subluxations, 0);
+        assert_eq!(world.stats.joint_ligament_damage_events, 0);
+        assert_eq!(world.debug.joint_ligament_damage_events, 0);
     }
 
     #[test]
@@ -3308,6 +7024,2402 @@ mod tests {
             after_point.load > 0.0 && world.debug.max_fragment_depth > 0.0,
             "fragment contact should report load/depth telemetry"
         );
+    }
+
+    #[test]
+    fn wound_source_follows_anchored_tissue_point() {
+        let mut world = World::new(Materials::default());
+        let point = world.add_point(Vec2 { x: 100.0, y: 100.0 }, TissueLayer::Muscle, false);
+
+        world.open_wound(
+            Vec2 { x: 102.0, y: 103.0 },
+            Vec2 { x: 1.0, y: 0.0 },
+            TissueLayer::Muscle,
+            2.0,
+            2.0,
+            1.0,
+        );
+
+        assert_eq!(
+            world.wounds[0].anchor_point, point,
+            "wound should anchor to the nearest matching tissue point"
+        );
+        let before = world.wounds[0].position;
+        world.points[point].position.x += 23.0;
+        world.points[point].position.y += 7.0;
+
+        world.update_wound_anchors();
+
+        let after = world.wounds[0].position;
+        assert!(
+            (after.x - (before.x + 23.0)).abs() < 0.001
+                && (after.y - (before.y + 7.0)).abs() < 0.001,
+            "anchored wound should move with damaged tissue"
+        );
+    }
+
+    #[test]
+    fn wound_source_can_follow_bone_when_no_tissue_anchor_exists() {
+        let mut world = World::new(Materials::default());
+        let bone = world.add_bone_segment(
+            Vec2 { x: 100.0, y: 100.0 },
+            Vec2 { x: 200.0, y: 100.0 },
+            5.0,
+            9999.0,
+            false,
+        );
+
+        world.open_wound(
+            Vec2 { x: 150.0, y: 110.0 },
+            Vec2 { x: 0.0, y: 1.0 },
+            TissueLayer::Muscle,
+            2.0,
+            2.0,
+            1.0,
+        );
+
+        assert_eq!(
+            world.wounds[0].anchor_bone, bone,
+            "wound should use a bone anchor when no tissue points exist"
+        );
+        let before = world.wounds[0].position;
+        world.bones[bone].a.x += 31.0;
+        world.bones[bone].b.x += 31.0;
+        world.bones[bone].a.y -= 9.0;
+        world.bones[bone].b.y -= 9.0;
+
+        world.update_wound_anchors();
+
+        let after = world.wounds[0].position;
+        assert!(
+            (after.x - (before.x + 31.0)).abs() < 0.001
+                && (after.y - (before.y - 9.0)).abs() < 0.001,
+            "anchored wound should move with the damaged bone feature"
+        );
+    }
+
+    #[test]
+    fn fracture_marrow_source_anchors_to_broken_bone_cap() {
+        let mut materials = Materials::default();
+        materials.max_fluid_particles = 0;
+        let mut world = World::new(materials);
+        let bone = world.add_bone_segment(
+            Vec2 { x: 100.0, y: 100.0 },
+            Vec2 { x: 180.0, y: 100.0 },
+            6.0,
+            9999.0,
+            false,
+        );
+        world.bones[bone].fractured = true;
+        world.bones[bone].broken_end = true;
+        world.bones[bone].broken_end_normal = Vec2 { x: 0.0, y: -1.0 };
+
+        world.open_bone_marrow_wound(bone, 1.0, Vec2 { x: 0.0, y: -1.0 }, 1.6, 2.2, 1.0);
+
+        assert_eq!(world.stats.fracture_marrow_sources, 1);
+        assert_eq!(world.debug.fracture_marrow_sources, 1);
+        assert_eq!(world.wounds[0].anchor_bone, bone);
+        assert_eq!(world.wounds[0].anchor_point, MISSING_ANCHOR);
+        assert!((world.wounds[0].anchor_t - 1.0).abs() < 0.001);
+
+        world.bones[bone].b.x += 19.0;
+        world.bones[bone].b.y += 8.0;
+        world.update_wound_anchors();
+
+        assert!(
+            distance(world.wounds[0].position, world.bones[bone].b) < 0.001,
+            "marrow source should stay fixed to the moving broken cap"
+        );
+    }
+
+    #[test]
+    fn fracture_marrow_source_leaks_through_wound_update() {
+        let mut materials = Materials::default();
+        materials.max_fluid_particles = 32;
+        materials.wound_leak_rate = 18.0;
+        let mut world = World::new(materials);
+        let bone = world.add_bone_segment(
+            Vec2 { x: 100.0, y: 100.0 },
+            Vec2 { x: 180.0, y: 100.0 },
+            6.0,
+            9999.0,
+            false,
+        );
+        world.bones[bone].fractured = true;
+        world.bones[bone].broken_end = true;
+        world.open_bone_marrow_wound(bone, 1.0, Vec2 { x: 0.0, y: -1.0 }, 2.4, 2.2, 1.0);
+
+        for _ in 0..8 {
+            world.update_wounds(world.materials.fixed_dt);
+        }
+
+        assert!(
+            world.stats.wound_fluid_particles > 0,
+            "marrow source should use the persistent wound leak path"
+        );
+        assert!(world.fluids.iter().any(|fluid| fluid.life > 0.0));
+    }
+
+    #[test]
+    fn persistent_wound_leak_drains_finite_blood_volume() {
+        let mut materials = Materials::default();
+        materials.max_fluid_particles = 0;
+        materials.wound_leak_rate = 120.0;
+        materials.wound_clot_rate = 0.0;
+        materials.blood_volume_capacity = 1.0;
+        materials.blood_loss_per_wound_particle = 0.05;
+        let mut world = World::new(materials);
+        world.open_wound(
+            Vec2 { x: 10.0, y: 10.0 },
+            Vec2 { x: 0.0, y: 1.0 },
+            TissueLayer::Muscle,
+            4.0,
+            2.4,
+            1.0,
+        );
+
+        world.update_wounds(world.materials.fixed_dt);
+
+        assert!(
+            world.stats.blood_loss > 0.0,
+            "persistent wound emission should drain finite blood volume"
+        );
+        assert!(world.blood_volume_fraction() < 1.0);
+        assert_eq!(world.debug.blood_loss, world.stats.blood_loss);
+        assert!(world.debug.blood_volume_fraction < 1.0);
+    }
+
+    #[test]
+    fn low_blood_volume_reduces_later_wound_pressure_and_loss() {
+        let mut materials = Materials::default();
+        materials.max_fluid_particles = 0;
+        materials.wound_leak_rate = 120.0;
+        materials.wound_clot_rate = 0.0;
+        materials.blood_volume_capacity = 1.0;
+        materials.blood_loss_per_wound_particle = 0.05;
+        materials.blood_pressure_min_scale = 0.34;
+
+        let mut full = World::new(materials);
+        full.open_wound(
+            Vec2 { x: 10.0, y: 10.0 },
+            Vec2 { x: 0.0, y: 1.0 },
+            TissueLayer::Muscle,
+            4.0,
+            2.4,
+            1.0,
+        );
+
+        let mut depleted = World::new(materials);
+        depleted.blood_volume = 0.10;
+        depleted.open_wound(
+            Vec2 { x: 10.0, y: 10.0 },
+            Vec2 { x: 0.0, y: 1.0 },
+            TissueLayer::Muscle,
+            4.0,
+            2.4,
+            1.0,
+        );
+
+        assert!(
+            depleted.wounds[0].pressure < full.wounds[0].pressure,
+            "new wound pressure should scale down after systemic blood loss"
+        );
+
+        full.update_wounds(full.materials.fixed_dt);
+        depleted.update_wounds(depleted.materials.fixed_dt);
+
+        assert!(
+            full.stats.blood_loss > depleted.stats.blood_loss,
+            "the same wound should drain less per frame after severe depletion lowers pressure"
+        );
+    }
+
+    #[test]
+    fn low_blood_volume_reduces_passive_shape_turgor() {
+        let mut materials = Materials::default();
+        materials.gravity = 0.0;
+        materials.damping = 1.0;
+        materials.skin_shape_stiffness = 0.20;
+        materials.blood_volume_capacity = 1.0;
+        materials.blood_turgor_min_scale = 0.25;
+
+        let mut full = World::new(materials);
+        let full_point = full.add_point(Vec2 { x: 100.0, y: 100.0 }, TissueLayer::Skin, false);
+        full.points[full_point].position.x = 200.0;
+        full.points[full_point].previous = full.points[full_point].position;
+
+        let mut depleted = World::new(materials);
+        depleted.blood_volume = 0.0;
+        let depleted_point =
+            depleted.add_point(Vec2 { x: 100.0, y: 100.0 }, TissueLayer::Skin, false);
+        depleted.points[depleted_point].position.x = 200.0;
+        depleted.points[depleted_point].previous = depleted.points[depleted_point].position;
+
+        full.integrate(full.materials.fixed_dt, 400.0, 360.0);
+        depleted.integrate(depleted.materials.fixed_dt, 400.0, 360.0);
+
+        assert!(
+            full.points[full_point].position.x < depleted.points[depleted_point].position.x,
+            "full blood reserve should preserve stronger passive shape recovery"
+        );
+        assert!((full.blood_turgor_scale() - 1.0).abs() < 0.001);
+        assert!((depleted.blood_turgor_scale() - 0.25).abs() < 0.001);
+    }
+
+    #[test]
+    fn low_blood_volume_reduces_area_constraint_turgor() {
+        fn area_error(world: &World, area_index: usize) -> f64 {
+            let area = world.areas[area_index];
+            let current = signed_area(
+                world.points[area.a].position,
+                world.points[area.b].position,
+                world.points[area.c].position,
+            );
+            (current - area.rest_area).abs()
+        }
+
+        fn build_area_world(materials: Materials, blood_volume: f64) -> World {
+            let mut world = World::new(materials);
+            world.blood_volume = blood_volume;
+            let a = world.add_point(Vec2 { x: 100.0, y: 100.0 }, TissueLayer::Skin, false);
+            let b = world.add_point(Vec2 { x: 200.0, y: 100.0 }, TissueLayer::Skin, false);
+            let c = world.add_point(Vec2 { x: 100.0, y: 200.0 }, TissueLayer::Skin, false);
+            world.add_spring(a, b, TissueLayer::Skin, 1.0, 99.0, 9999.0, false);
+            world.add_spring(b, c, TissueLayer::Skin, 1.0, 99.0, 9999.0, false);
+            world.add_spring(c, a, TissueLayer::Skin, 1.0, 99.0, 9999.0, false);
+            world.add_area(a, b, c, TissueLayer::Skin, 0.80);
+            world.points[c].position.y = 250.0;
+            world
+        }
+
+        let mut materials = Materials::default();
+        materials.blood_volume_capacity = 1.0;
+        materials.blood_turgor_min_scale = 0.20;
+
+        let mut full = build_area_world(materials, 1.0);
+        let mut depleted = build_area_world(materials, 0.0);
+        let initial_error = area_error(&full, 0);
+
+        full.solve_areas();
+        depleted.solve_areas();
+
+        let full_error = area_error(&full, 0);
+        let depleted_error = area_error(&depleted, 0);
+        assert!(full_error < initial_error);
+        assert!(
+            full_error < depleted_error,
+            "depleted reserve should make triangle area preservation less forceful"
+        );
+    }
+
+    #[test]
+    fn spring_compliance_softens_single_iteration_projection() {
+        fn stretched_spring_world(mut materials: Materials) -> World {
+            materials.skin_spring_compliance = 0.0;
+            materials.muscle_spring_compliance = 0.0;
+            let mut world = World::new(materials);
+            let a = world.add_point(Vec2 { x: 100.0, y: 100.0 }, TissueLayer::Skin, true);
+            let b = world.add_point(Vec2 { x: 120.0, y: 100.0 }, TissueLayer::Skin, false);
+            world.add_spring(a, b, TissueLayer::Skin, 1.0, 99.0, 9999.0, false);
+            world.points[b].position.x = 150.0;
+            world
+        }
+
+        fn spring_length(world: &World) -> f64 {
+            let spring = world.springs[0];
+            distance(
+                world.points[spring.a].position,
+                world.points[spring.b].position,
+            )
+        }
+
+        let legacy_materials = Materials::default();
+        let mut legacy = stretched_spring_world(legacy_materials);
+
+        let mut compliant_materials = Materials::default();
+        compliant_materials.skin_spring_compliance = 0.020;
+        let mut compliant = stretched_spring_world(compliant_materials);
+        compliant.materials.skin_spring_compliance = compliant_materials.skin_spring_compliance;
+
+        legacy.solve_springs();
+        compliant.solve_springs();
+
+        let legacy_error = (spring_length(&legacy) - legacy.springs[0].rest).abs();
+        let compliant_error = (spring_length(&compliant) - compliant.springs[0].rest).abs();
+
+        assert!(
+            compliant_error > legacy_error + 5.0,
+            "XPBD compliance should leave a controlled residual spring stretch in one solve"
+        );
+        assert!(
+            compliant.springs[0].lambda.abs() > 0.0,
+            "compliant spring projection should accumulate a constraint lambda"
+        );
+    }
+
+    #[test]
+    fn area_compliance_softens_single_iteration_projection() {
+        fn area_error(world: &World) -> f64 {
+            let area = world.areas[0];
+            let current = signed_area(
+                world.points[area.a].position,
+                world.points[area.b].position,
+                world.points[area.c].position,
+            );
+            (current - area.rest_area).abs()
+        }
+
+        fn distorted_area_world(mut materials: Materials) -> World {
+            materials.skin_area_compliance = 0.0;
+            materials.muscle_area_compliance = 0.0;
+            let mut world = World::new(materials);
+            let a = world.add_point(Vec2 { x: 100.0, y: 100.0 }, TissueLayer::Skin, true);
+            let b = world.add_point(Vec2 { x: 200.0, y: 100.0 }, TissueLayer::Skin, true);
+            let c = world.add_point(Vec2 { x: 100.0, y: 200.0 }, TissueLayer::Skin, false);
+            world.add_spring(a, b, TissueLayer::Skin, 1.0, 99.0, 9999.0, false);
+            world.add_spring(b, c, TissueLayer::Skin, 1.0, 99.0, 9999.0, false);
+            world.add_spring(c, a, TissueLayer::Skin, 1.0, 99.0, 9999.0, false);
+            world.add_area(a, b, c, TissueLayer::Skin, 1.0);
+            world.points[c].position.y = 260.0;
+            world
+        }
+
+        let legacy_materials = Materials::default();
+        let mut legacy = distorted_area_world(legacy_materials);
+
+        let mut compliant_materials = Materials::default();
+        compliant_materials.skin_area_compliance = 8.0;
+        let mut compliant = distorted_area_world(compliant_materials);
+        compliant.materials.skin_area_compliance = compliant_materials.skin_area_compliance;
+
+        legacy.solve_areas();
+        compliant.solve_areas();
+
+        assert!(
+            area_error(&compliant) > area_error(&legacy) + 500.0,
+            "XPBD compliance should leave a controlled residual area error in one solve"
+        );
+        assert!(
+            compliant.areas[0].lambda.abs() > 0.0,
+            "compliant area projection should accumulate a constraint lambda"
+        );
+    }
+
+    #[test]
+    fn compressed_muscle_cavity_builds_pressure_and_pushes_tissue() {
+        let mut materials = Materials::default();
+        materials.cavity_pressure_stiffness = 0.90;
+        materials.cavity_contusion_pressure = 0.24;
+        materials.cavity_rupture_pressure = 2.0;
+        let mut world = World::new(materials);
+        let a = world.add_point(Vec2 { x: 100.0, y: 100.0 }, TissueLayer::Muscle, false);
+        let b = world.add_point(Vec2 { x: 200.0, y: 100.0 }, TissueLayer::Muscle, false);
+        let c = world.add_point(Vec2 { x: 100.0, y: 200.0 }, TissueLayer::Muscle, false);
+        world.add_spring(a, b, TissueLayer::Muscle, 1.0, 99.0, 9999.0, false);
+        world.add_spring(b, c, TissueLayer::Muscle, 1.0, 99.0, 9999.0, false);
+        world.add_spring(c, a, TissueLayer::Muscle, 1.0, 99.0, 9999.0, false);
+        world.add_area(a, b, c, TissueLayer::Muscle, 0.6);
+        let cavity = world.add_cavity_from_areas(vec![0]);
+
+        world.points[c].position.y = 128.0;
+        let compressed_y = world.points[c].position.y;
+        world.update_cavities(world.materials.fixed_dt);
+
+        assert_ne!(cavity, MISSING_ANCHOR);
+        assert!(
+            world.cavities[cavity].pressure > 0.45,
+            "compressed internal volume should build bounded pressure"
+        );
+        assert!(
+            world.cavities[cavity].collapse > 0.60,
+            "cavity should report a meaningful collapse ratio"
+        );
+        assert!(
+            world.points[c].position.y > compressed_y,
+            "cavity pressure should push compressed tissue back outward"
+        );
+        assert!(world.points[c].load > 0.0);
+        assert!(world.stats.cavity_pressure_events > 0);
+        assert!(world.debug.max_cavity_pressure >= world.cavities[cavity].pressure);
+    }
+
+    #[test]
+    fn high_cavity_pressure_opens_capped_internal_rupture_wound() {
+        let mut materials = Materials::default();
+        materials.max_fluid_particles = 32;
+        materials.max_wound_sources = 8;
+        materials.cavity_pressure_stiffness = 1.15;
+        materials.cavity_rupture_pressure = 0.42;
+        materials.cavity_rupture_load_scale = 1.0;
+        materials.max_cavity_ruptures_per_step = 1;
+        let mut world = World::new(materials);
+        world.debug.tool = ToolMode::Heavy;
+        world.debug.impact = 5000.0;
+        let a = world.add_point(Vec2 { x: 100.0, y: 100.0 }, TissueLayer::Muscle, false);
+        let b = world.add_point(Vec2 { x: 200.0, y: 100.0 }, TissueLayer::Muscle, false);
+        let c = world.add_point(Vec2 { x: 100.0, y: 200.0 }, TissueLayer::Muscle, false);
+        world.add_spring(a, b, TissueLayer::Muscle, 1.0, 99.0, 9999.0, false);
+        world.add_spring(b, c, TissueLayer::Muscle, 1.0, 99.0, 9999.0, false);
+        world.add_spring(c, a, TissueLayer::Muscle, 1.0, 99.0, 9999.0, false);
+        world.add_area(a, b, c, TissueLayer::Muscle, 0.6);
+        let cavity = world.add_cavity_from_areas(vec![0]);
+
+        world.points[c].position.y = 120.0;
+        world.points[a].load = 980.0;
+        world.points[b].load = 980.0;
+        world.points[c].load = 980.0;
+        world.update_cavities(world.materials.fixed_dt);
+        world.update_cavities(world.materials.fixed_dt);
+
+        assert_ne!(cavity, MISSING_ANCHOR);
+        assert!(world.cavities[cavity].ruptured);
+        assert_eq!(world.stats.cavity_ruptures, 1);
+        assert_eq!(world.debug.cavity_ruptures, 1);
+        assert!(
+            world
+                .wounds
+                .iter()
+                .any(|wound| wound.layer == TissueLayer::Muscle),
+            "cavity rupture should use the persistent muscle wound path"
+        );
+        assert!(world.stats.emitted_fluid_particles > 0);
+    }
+
+    #[test]
+    fn medium_blunt_cavity_pressure_does_not_open_internal_rupture() {
+        let mut materials = Materials::default();
+        materials.max_fluid_particles = 32;
+        materials.max_wound_sources = 8;
+        materials.cavity_pressure_stiffness = 0.72;
+        materials.cavity_rupture_pressure = 0.80;
+        materials.cavity_rupture_load_scale = 3.2;
+        materials.cavity_non_heavy_pressure_load_cap = 1.85;
+        materials.cavity_non_heavy_rupture_load_scale = 2.05;
+        let mut world = World::new(materials);
+        world.debug.tool = ToolMode::Blunt;
+        world.debug.impact = 2800.0;
+        let a = world.add_point(Vec2 { x: 100.0, y: 100.0 }, TissueLayer::Muscle, false);
+        let b = world.add_point(Vec2 { x: 200.0, y: 100.0 }, TissueLayer::Muscle, false);
+        let c = world.add_point(Vec2 { x: 100.0, y: 200.0 }, TissueLayer::Muscle, false);
+        world.add_spring(a, b, TissueLayer::Muscle, 1.0, 99.0, 9999.0, false);
+        world.add_spring(b, c, TissueLayer::Muscle, 1.0, 99.0, 9999.0, false);
+        world.add_spring(c, a, TissueLayer::Muscle, 1.0, 99.0, 9999.0, false);
+        world.add_area(a, b, c, TissueLayer::Muscle, 0.6);
+        let cavity = world.add_cavity_from_areas(vec![0]);
+
+        world.points[c].position.y = 195.0;
+        world.points[a].load = 1900.0;
+        world.points[b].load = 1900.0;
+        world.points[c].load = 1900.0;
+        world.update_cavities(world.materials.fixed_dt);
+        world.update_cavities(world.materials.fixed_dt);
+
+        assert_ne!(cavity, MISSING_ANCHOR);
+        assert!(
+            world.cavities[cavity].pressure < world.materials.cavity_rupture_pressure,
+            "medium blunt cavity pressure should stay below the internal rupture threshold"
+        );
+        assert!(!world.cavities[cavity].ruptured);
+        assert_eq!(world.stats.cavity_ruptures, 0);
+        assert_eq!(world.debug.cavity_ruptures, 0);
+        assert!(
+            world.stats.cavity_pressure_events > 0,
+            "medium blunt compression should still produce internal pressure telemetry"
+        );
+    }
+
+    #[test]
+    fn cavity_pressure_accumulates_organ_damage_without_immediate_rupture() {
+        let mut materials = Materials::default();
+        materials.organ_pressure_damage_threshold = 0.20;
+        materials.organ_rupture_damage = 5.0;
+        materials.organ_damage_rate = 0.40;
+        let mut world = World::new(materials);
+        world.cavities.push(CavityRegion {
+            pressure: 0.82,
+            collapse: 0.18,
+            centroid: Vec2 { x: 100.0, y: 100.0 },
+            rest_area: 1.0,
+            ..CavityRegion::default()
+        });
+        let organ = world.add_organ_region(
+            OrganKind::Liver,
+            Vec2 { x: 106.0, y: 104.0 },
+            Vec2 { x: 30.0, y: 24.0 },
+        );
+
+        world.update_organs(world.materials.fixed_dt);
+
+        assert!(
+            world.organs[organ].damage > 0.0,
+            "organ pressure proxy should accumulate internal injury state"
+        );
+        assert!(!world.organs[organ].ruptured);
+        assert!(world.stats.organ_damage_events > 0);
+        assert!(world.debug.max_organ_damage >= world.organs[organ].damage);
+    }
+
+    #[test]
+    fn severe_organ_damage_opens_internal_bleeding_wound() {
+        let mut materials = Materials::default();
+        materials.max_fluid_particles = 32;
+        materials.max_wound_sources = 8;
+        materials.organ_pressure_damage_threshold = 0.10;
+        materials.organ_rupture_damage = 0.15;
+        materials.organ_damage_rate = 1.0;
+        materials.max_organ_ruptures_per_step = 1;
+        let mut world = World::new(materials);
+        world.cavities.push(CavityRegion {
+            pressure: 1.2,
+            collapse: 0.24,
+            centroid: Vec2 { x: 100.0, y: 100.0 },
+            rest_area: 1.0,
+            ..CavityRegion::default()
+        });
+        let organ = world.add_organ_region(
+            OrganKind::Spleen,
+            Vec2 { x: 108.0, y: 104.0 },
+            Vec2 { x: 28.0, y: 22.0 },
+        );
+        world.debug.tool = ToolMode::Heavy;
+        world.debug.impact = 6000.0;
+
+        world.update_organs(world.materials.fixed_dt);
+
+        assert!(world.organs[organ].ruptured);
+        assert_eq!(world.stats.organ_ruptures, 1);
+        assert_eq!(world.debug.organ_ruptures, 1);
+        assert!(
+            world
+                .wounds
+                .iter()
+                .any(|wound| wound.layer == TissueLayer::Muscle),
+            "organ rupture should reuse persistent internal muscle wound sources"
+        );
+        assert!(world.stats.emitted_fluid_particles > 0);
+    }
+
+    #[test]
+    fn sharp_striker_penetrates_organ_and_opens_internal_bleeding_wound() {
+        let mut materials = Materials::default();
+        materials.max_fluid_particles = 32;
+        materials.max_wound_sources = 8;
+        materials.organ_penetration_impulse = 80.0;
+        materials.organ_penetration_damage = 1.0;
+        materials.organ_rupture_damage = 0.65;
+        materials.max_organ_penetrations_per_step = 1;
+        materials.max_organ_ruptures_per_step = 1;
+        materials.max_total_organ_ruptures = 1;
+        let mut world = World::new(materials);
+        let organ = world.add_organ_region(
+            OrganKind::Liver,
+            Vec2 { x: 120.0, y: 100.0 },
+            Vec2 { x: 28.0, y: 20.0 },
+        );
+
+        world.collide_striker(
+            world.materials.fixed_dt,
+            &InputState {
+                active: true,
+                down: true,
+                x: 104.0,
+                y: 100.0,
+                vx: 640.0,
+                vy: 0.0,
+                power: 2.0,
+                tool: ToolMode::Sharp,
+            },
+        );
+
+        assert!(world.organs[organ].penetrated);
+        assert!(world.organs[organ].ruptured);
+        assert_eq!(world.stats.organ_penetrations, 1);
+        assert_eq!(world.debug.organ_penetrations, 1);
+        assert_eq!(world.stats.organ_ruptures, 1);
+        assert_eq!(world.debug.organ_ruptures, 1);
+        assert!(
+            world
+                .wounds
+                .iter()
+                .any(|wound| wound.layer == TissueLayer::Muscle),
+            "direct organ penetration should reuse persistent internal muscle wounds"
+        );
+    }
+
+    #[test]
+    fn blunt_striker_overlap_does_not_count_as_direct_organ_penetration() {
+        let mut materials = Materials::default();
+        materials.organ_penetration_impulse = 10.0;
+        materials.organ_penetration_damage = 1.0;
+        let mut world = World::new(materials);
+        let organ = world.add_organ_region(
+            OrganKind::Spleen,
+            Vec2 { x: 120.0, y: 100.0 },
+            Vec2 { x: 28.0, y: 20.0 },
+        );
+
+        world.collide_striker(
+            world.materials.fixed_dt,
+            &InputState {
+                active: true,
+                down: true,
+                x: 120.0,
+                y: 100.0,
+                vx: 1200.0,
+                vy: 0.0,
+                power: 4.0,
+                tool: ToolMode::Blunt,
+            },
+        );
+
+        assert!(!world.organs[organ].penetrated);
+        assert_eq!(world.stats.organ_penetrations, 0);
+        assert_eq!(world.debug.organ_penetrations, 0);
+        assert_eq!(world.stats.organ_ruptures, 0);
+    }
+
+    #[test]
+    fn fractured_rib_tip_can_puncture_organ_proxy() {
+        let mut materials = Materials::default();
+        materials.rib_organ_puncture_impulse = 80.0;
+        materials.rib_organ_puncture_damage = 1.0;
+        materials.organ_rupture_damage = 0.65;
+        materials.max_rib_organ_punctures_per_step = 1;
+        materials.max_organ_ruptures_per_step = 1;
+        materials.max_total_organ_ruptures = 1;
+        let mut world = World::new(materials);
+
+        let organ = world.add_organ_region(
+            OrganKind::RightLung,
+            Vec2 { x: 100.0, y: 100.0 },
+            Vec2 { x: 22.0, y: 18.0 },
+        );
+        let rib = world.add_bone_segment_with_kind(
+            Vec2 { x: 68.0, y: 100.0 },
+            Vec2 { x: 92.0, y: 100.0 },
+            3.2,
+            100.0,
+            false,
+            BoneKind::Rib,
+        );
+        world.bones[rib].fractured = true;
+        world.bones[rib].broken_end = true;
+        world.bones[rib].load = 420.0;
+
+        world.process_fragment_tip(
+            rib,
+            Vec2 { x: 101.0, y: 100.0 },
+            Vec2 { x: 74.0, y: 100.0 },
+            Vec2 { x: 1.0, y: 0.0 },
+            true,
+        );
+
+        assert!(world.organs[organ].penetrated);
+        assert!(world.organs[organ].damage >= materials.organ_rupture_damage);
+        assert!(world.organs[organ].ruptured);
+        assert_eq!(world.stats.rib_organ_punctures, 1);
+        assert_eq!(world.debug.rib_organ_punctures, 1);
+        assert_eq!(world.stats.organ_ruptures, 1);
+        assert!(
+            world
+                .wounds
+                .iter()
+                .any(|wound| wound.active && wound.layer == TissueLayer::Muscle),
+            "rib organ puncture should reuse the persistent internal wound path"
+        );
+    }
+
+    #[test]
+    fn generic_fragment_tip_does_not_count_as_rib_organ_puncture() {
+        let mut materials = Materials::default();
+        materials.rib_organ_puncture_impulse = 80.0;
+        materials.rib_organ_puncture_damage = 1.0;
+        materials.organ_rupture_damage = 0.65;
+        let mut world = World::new(materials);
+
+        let organ = world.add_organ_region(
+            OrganKind::RightLung,
+            Vec2 { x: 100.0, y: 100.0 },
+            Vec2 { x: 22.0, y: 18.0 },
+        );
+        let fragment = world.add_bone_segment(
+            Vec2 { x: 68.0, y: 100.0 },
+            Vec2 { x: 92.0, y: 100.0 },
+            3.2,
+            100.0,
+            false,
+        );
+        world.bones[fragment].fractured = true;
+        world.bones[fragment].broken_end = true;
+        world.bones[fragment].load = 420.0;
+
+        world.process_fragment_tip(
+            fragment,
+            Vec2 { x: 101.0, y: 100.0 },
+            Vec2 { x: 74.0, y: 100.0 },
+            Vec2 { x: 1.0, y: 0.0 },
+            true,
+        );
+
+        assert!(!world.organs[organ].penetrated);
+        assert_eq!(world.stats.rib_organ_punctures, 0);
+        assert_eq!(world.debug.rib_organ_punctures, 0);
+    }
+
+    #[test]
+    fn fragment_work_budget_prioritizes_loaded_fragments() {
+        let mut materials = Materials::default();
+        materials.max_active_bone_fragments = 1;
+        let mut world = World::new(materials);
+        let quiet = world.add_bone_segment(
+            Vec2 { x: 0.0, y: 0.0 },
+            Vec2 { x: 40.0, y: 0.0 },
+            4.0,
+            9999.0,
+            false,
+        );
+        let loaded = world.add_bone_segment(
+            Vec2 { x: 0.0, y: 20.0 },
+            Vec2 { x: 40.0, y: 20.0 },
+            4.0,
+            9999.0,
+            false,
+        );
+        let splinter = world.add_bone_segment(
+            Vec2 { x: 0.0, y: 40.0 },
+            Vec2 { x: 16.0, y: 40.0 },
+            2.5,
+            9999.0,
+            false,
+        );
+
+        for index in [quiet, loaded, splinter] {
+            world.bones[index].fractured = true;
+        }
+        world.bones[loaded].load = 900.0;
+        world.bones[splinter].splinter = true;
+        world.bones[splinter].load = 100.0;
+
+        let budgeted = world.budgeted_fragment_indices();
+
+        assert_eq!(budgeted, vec![loaded]);
+        assert_eq!(world.debug.active_fragments, 3);
+        assert_eq!(world.debug.fragment_budget_skips, 2);
+    }
+
+    #[test]
+    fn fragment_pair_check_budget_stops_repulsion_work() {
+        let mut materials = Materials::default();
+        materials.max_active_bone_fragments = 4;
+        materials.max_fragment_pair_checks = 1;
+        let mut world = World::new(materials);
+        for y in [100.0, 101.0, 102.0] {
+            let bone = world.add_bone_segment(
+                Vec2 { x: 100.0, y },
+                Vec2 { x: 160.0, y },
+                8.0,
+                9999.0,
+                false,
+            );
+            world.bones[bone].fractured = true;
+        }
+
+        world.solve_bone_fragment_repulsion();
+
+        assert_eq!(world.debug.fragment_pair_checks, 1);
+        assert!(
+            world.debug.fragment_pair_budget_skips > 0,
+            "pair budget should skip lower-priority checks after the cap"
+        );
+    }
+
+    #[test]
+    fn fragment_tissue_check_budget_stops_contact_work() {
+        let mut materials = Materials::default();
+        materials.max_active_bone_fragments = 1;
+        materials.max_fragment_tissue_checks = 1;
+        let mut world = World::new(materials);
+        let bone = world.add_bone_segment(
+            Vec2 { x: 100.0, y: 100.0 },
+            Vec2 { x: 160.0, y: 100.0 },
+            8.0,
+            9999.0,
+            false,
+        );
+        world.bones[bone].fractured = true;
+        world.add_point(Vec2 { x: 120.0, y: 105.0 }, TissueLayer::Muscle, false);
+        world.add_point(Vec2 { x: 130.0, y: 105.0 }, TissueLayer::Muscle, false);
+
+        world.solve_bone_fragment_tissue_contacts();
+
+        assert_eq!(world.debug.fragment_tissue_checks, 1);
+        assert!(
+            world.debug.fragment_tissue_budget_skips > 0,
+            "tissue budget should skip remaining point checks after the cap"
+        );
+    }
+
+    #[test]
+    fn fragment_tissue_broadphase_excludes_distant_points() {
+        let mut materials = Materials::default();
+        materials.max_active_bone_fragments = 1;
+        materials.max_fragment_tissue_checks = 32;
+        let mut world = World::new(materials);
+        let bone = world.add_bone_segment(
+            Vec2 { x: 100.0, y: 100.0 },
+            Vec2 { x: 160.0, y: 100.0 },
+            8.0,
+            9999.0,
+            false,
+        );
+        world.bones[bone].fractured = true;
+        world.add_point(Vec2 { x: 120.0, y: 105.0 }, TissueLayer::Muscle, false);
+        world.add_point(Vec2 { x: 520.0, y: 520.0 }, TissueLayer::Muscle, false);
+
+        world.solve_bone_fragment_tissue_contacts();
+
+        assert_eq!(
+            world.debug.fragment_tissue_checks, 1,
+            "broad phase should only spend tissue checks on nearby point candidates"
+        );
+        assert_eq!(world.debug.fragment_tissue_budget_skips, 0);
+    }
+
+    #[test]
+    fn moving_splinter_tip_punctures_intact_skin_spring() {
+        let mut materials = Materials::default();
+        materials.max_fluid_particles = 0;
+        materials.max_wound_sources = 0;
+        materials.fragment_skin_puncture_impulse = 420.0;
+        materials.max_fragment_skin_punctures_per_step = 2;
+        let mut world = World::new(materials);
+        let skin_a = world.add_point(Vec2 { x: 8.0, y: 0.0 }, TissueLayer::Skin, false);
+        let skin_b = world.add_point(Vec2 { x: 12.0, y: 0.0 }, TissueLayer::Skin, false);
+        world.add_spring(skin_a, skin_b, TissueLayer::Skin, 0.8, 1.7, 900.0, false);
+        let bone = world.add_bone_segment(
+            Vec2 { x: 0.0, y: 0.0 },
+            Vec2 { x: 10.0, y: 0.0 },
+            4.0,
+            9999.0,
+            false,
+        );
+        world.bones[bone].fractured = true;
+        world.bones[bone].splinter = true;
+        world.bones[bone].broken_end = true;
+        world.bones[bone].broken_end_normal = Vec2 { x: 0.0, y: 1.0 };
+        world.bones[bone].load = 900.0;
+        world.bones[bone].previous_b = Vec2 { x: 10.0, y: -6.0 };
+
+        world.process_fragment_tip(
+            bone,
+            world.bones[bone].b,
+            world.bones[bone].previous_b,
+            world.bones[bone].broken_end_normal,
+            true,
+        );
+
+        assert!(
+            world.springs[0].broken,
+            "a loaded splinter tip should puncture nearby intact skin"
+        );
+        assert_eq!(world.stats.broken_skin, 1);
+        assert_eq!(world.stats.fragment_tissue_tears, 1);
+        assert_eq!(world.stats.fragment_skin_punctures, 1);
+        assert_eq!(world.debug.fragment_skin_punctures, 1);
+    }
+
+    #[test]
+    fn quiet_splinter_tip_does_not_puncture_intact_skin_spring() {
+        let mut materials = Materials::default();
+        materials.max_fluid_particles = 0;
+        materials.max_wound_sources = 0;
+        materials.fragment_skin_puncture_impulse = 900.0;
+        materials.max_fragment_skin_punctures_per_step = 2;
+        let mut world = World::new(materials);
+        let skin_a = world.add_point(Vec2 { x: 8.0, y: 0.0 }, TissueLayer::Skin, false);
+        let skin_b = world.add_point(Vec2 { x: 12.0, y: 0.0 }, TissueLayer::Skin, false);
+        world.add_spring(skin_a, skin_b, TissueLayer::Skin, 0.8, 1.7, 900.0, false);
+        let bone = world.add_bone_segment(
+            Vec2 { x: 0.0, y: 0.0 },
+            Vec2 { x: 10.0, y: 0.0 },
+            4.0,
+            9999.0,
+            false,
+        );
+        world.bones[bone].fractured = true;
+        world.bones[bone].splinter = true;
+        world.bones[bone].broken_end = true;
+        world.bones[bone].broken_end_normal = Vec2 { x: 0.0, y: 1.0 };
+        world.bones[bone].load = 80.0;
+        world.bones[bone].previous_b = Vec2 { x: 10.0, y: -0.4 };
+
+        world.process_fragment_tip(
+            bone,
+            world.bones[bone].b,
+            world.bones[bone].previous_b,
+            world.bones[bone].broken_end_normal,
+            true,
+        );
+
+        assert!(
+            !world.springs[0].broken,
+            "a quiet splinter tip should not puncture intact skin by proximity alone"
+        );
+        assert_eq!(world.stats.fragment_skin_punctures, 0);
+        assert_eq!(world.debug.fragment_skin_punctures, 0);
+    }
+
+    #[test]
+    fn fragment_pair_broadphase_excludes_distant_pairs() {
+        let mut materials = Materials::default();
+        materials.max_active_bone_fragments = 4;
+        materials.max_fragment_pair_checks = 32;
+        let mut world = World::new(materials);
+        for y in [100.0, 105.0, 320.0] {
+            let bone = world.add_bone_segment(
+                Vec2 { x: 100.0, y },
+                Vec2 { x: 160.0, y },
+                8.0,
+                9999.0,
+                false,
+            );
+            world.bones[bone].fractured = true;
+        }
+
+        world.solve_bone_fragment_repulsion();
+
+        assert_eq!(
+            world.debug.fragment_pair_checks, 1,
+            "broad phase should only spend pair checks on nearby fragment candidates"
+        );
+        assert_eq!(world.debug.fragment_pair_budget_skips, 0);
+    }
+
+    #[test]
+    fn fragment_pair_contact_damps_closing_velocity_and_spin() {
+        let mut materials = Materials::default();
+        materials.max_active_bone_fragments = 2;
+        materials.max_fragment_pair_checks = 8;
+        materials.fragment_repulsion_stiffness = 0.35;
+        materials.fragment_pair_normal_damping = 0.72;
+        materials.fragment_pair_tangential_friction = 0.24;
+        materials.fragment_pair_angular_friction = 0.35;
+        let mut world = World::new(materials);
+        let upper = world.add_bone_segment(
+            Vec2 { x: 100.0, y: 100.0 },
+            Vec2 { x: 160.0, y: 100.0 },
+            8.0,
+            9999.0,
+            false,
+        );
+        let lower = world.add_bone_segment(
+            Vec2 { x: 100.0, y: 106.0 },
+            Vec2 { x: 160.0, y: 106.0 },
+            8.0,
+            9999.0,
+            false,
+        );
+        for index in [upper, lower] {
+            world.bones[index].fractured = true;
+        }
+        world.bones[upper].previous_a = Vec2 { x: 100.0, y: 94.0 };
+        world.bones[upper].previous_b = Vec2 { x: 160.0, y: 94.0 };
+        world.bones[lower].previous_a = Vec2 { x: 100.0, y: 112.0 };
+        world.bones[lower].previous_b = Vec2 { x: 160.0, y: 112.0 };
+        world.bones[upper].angular_velocity = 8.0;
+        world.bones[lower].angular_velocity = -7.0;
+        let normal = Vec2 { x: 0.0, y: -1.0 };
+        let before_closing = pair_closing_speed(world.bones[upper], world.bones[lower], normal);
+        let before_spin =
+            world.bones[upper].angular_velocity.abs() + world.bones[lower].angular_velocity.abs();
+
+        world.solve_bone_fragment_repulsion();
+
+        let after_closing = pair_closing_speed(world.bones[upper], world.bones[lower], normal);
+        let after_spin =
+            world.bones[upper].angular_velocity.abs() + world.bones[lower].angular_velocity.abs();
+        assert_eq!(world.debug.fragment_pair_contacts, 1);
+        assert_eq!(world.debug.fragment_pair_damping_events, 1);
+        assert!(
+            after_closing < before_closing * 0.82,
+            "pair damping should reduce closing velocity through an overlap"
+        );
+        assert!(
+            after_spin < before_spin,
+            "pair contact should bleed angular jitter while fragments overlap"
+        );
+    }
+
+    #[test]
+    fn fragment_pair_resting_contact_adds_support_for_slow_overlap() {
+        let mut materials = Materials::default();
+        materials.max_active_bone_fragments = 2;
+        materials.max_fragment_pair_checks = 8;
+        materials.fragment_repulsion_stiffness = 0.0;
+        materials.fragment_pair_normal_damping = 0.0;
+        materials.fragment_pair_tangential_friction = 0.0;
+        materials.fragment_pair_angular_friction = 0.0;
+        materials.fragment_pair_rest_speed = 120.0;
+        materials.fragment_pair_rest_stiffness = 0.65;
+        materials.fragment_pair_rest_friction = 0.0;
+        let mut world = World::new(materials);
+        let upper = world.add_bone_segment(
+            Vec2 { x: 100.0, y: 100.0 },
+            Vec2 { x: 160.0, y: 100.0 },
+            8.0,
+            9999.0,
+            false,
+        );
+        let lower = world.add_bone_segment(
+            Vec2 { x: 100.0, y: 106.0 },
+            Vec2 { x: 160.0, y: 106.0 },
+            8.0,
+            9999.0,
+            false,
+        );
+        for index in [upper, lower] {
+            world.bones[index].fractured = true;
+        }
+        world.bones[upper].previous_a = Vec2 { x: 100.0, y: 99.85 };
+        world.bones[upper].previous_b = Vec2 { x: 160.0, y: 99.85 };
+        world.bones[lower].previous_a = Vec2 {
+            x: 100.0,
+            y: 106.15,
+        };
+        world.bones[lower].previous_b = Vec2 {
+            x: 160.0,
+            y: 106.15,
+        };
+        let before_gap = distance(
+            midpoint(world.bones[upper].a, world.bones[upper].b),
+            midpoint(world.bones[lower].a, world.bones[lower].b),
+        );
+
+        world.solve_bone_fragment_repulsion();
+
+        let after_gap = distance(
+            midpoint(world.bones[upper].a, world.bones[upper].b),
+            midpoint(world.bones[lower].a, world.bones[lower].b),
+        );
+        assert_eq!(world.debug.fragment_pair_contacts, 1);
+        assert_eq!(world.debug.fragment_pair_resting_contacts, 1);
+        assert!(
+            after_gap > before_gap,
+            "resting support should separate gently overlapping fragments even without impact repulsion"
+        );
+    }
+
+    #[test]
+    fn fast_fragment_pair_contact_is_not_treated_as_resting() {
+        let mut materials = Materials::default();
+        materials.max_active_bone_fragments = 2;
+        materials.max_fragment_pair_checks = 8;
+        materials.fragment_pair_rest_speed = 30.0;
+        let mut world = World::new(materials);
+        let upper = world.add_bone_segment(
+            Vec2 { x: 100.0, y: 100.0 },
+            Vec2 { x: 160.0, y: 100.0 },
+            8.0,
+            9999.0,
+            false,
+        );
+        let lower = world.add_bone_segment(
+            Vec2 { x: 100.0, y: 106.0 },
+            Vec2 { x: 160.0, y: 106.0 },
+            8.0,
+            9999.0,
+            false,
+        );
+        for index in [upper, lower] {
+            world.bones[index].fractured = true;
+        }
+        world.bones[upper].previous_a = Vec2 { x: 100.0, y: 80.0 };
+        world.bones[upper].previous_b = Vec2 { x: 160.0, y: 80.0 };
+        world.bones[lower].previous_a = Vec2 { x: 100.0, y: 126.0 };
+        world.bones[lower].previous_b = Vec2 { x: 160.0, y: 126.0 };
+
+        world.solve_bone_fragment_repulsion();
+
+        assert_eq!(world.debug.fragment_pair_contacts, 1);
+        assert_eq!(
+            world.debug.fragment_pair_resting_contacts, 0,
+            "high-speed impacts should use impact damping without resting-contact support"
+        );
+    }
+
+    #[test]
+    fn fragment_bone_contact_pushes_fragment_and_loads_intact_bone() {
+        let mut materials = Materials::default();
+        materials.max_active_bone_fragments = 1;
+        materials.max_fragment_bone_checks = 8;
+        materials.fragment_repulsion_stiffness = 1.0;
+        let mut world = World::new(materials);
+        let support = world.add_bone_segment(
+            Vec2 { x: 100.0, y: 100.0 },
+            Vec2 { x: 170.0, y: 100.0 },
+            8.0,
+            9999.0,
+            false,
+        );
+        let fragment = world.add_bone_segment(
+            Vec2 { x: 112.0, y: 105.0 },
+            Vec2 { x: 182.0, y: 105.0 },
+            8.0,
+            9999.0,
+            false,
+        );
+        world.bones[fragment].fractured = true;
+        world.bones[fragment].previous_a = Vec2 { x: 112.0, y: 97.0 };
+        world.bones[fragment].previous_b = Vec2 { x: 182.0, y: 97.0 };
+
+        world.solve_bone_fragment_bone_contacts();
+
+        assert_eq!(world.debug.fragment_bone_checks, 1);
+        assert_eq!(world.debug.fragment_bone_contacts, 1);
+        assert!(
+            world.bones[fragment].a.y > 105.0,
+            "fragment should be pushed away from the intact bone"
+        );
+        assert!(
+            world.bones[support].load > 0.0,
+            "intact bone should receive contact load from the fragment"
+        );
+        assert!(world.debug.max_bone_load >= world.bones[support].load);
+    }
+
+    #[test]
+    fn fragment_bone_resting_contact_supports_slow_jam() {
+        let mut materials = Materials::default();
+        materials.max_active_bone_fragments = 1;
+        materials.max_fragment_bone_checks = 8;
+        materials.fragment_repulsion_stiffness = 0.0;
+        materials.fragment_bone_normal_damping = 0.0;
+        materials.fragment_bone_tangential_friction = 0.0;
+        materials.fragment_bone_angular_friction = 0.0;
+        materials.fragment_bone_rest_speed = 120.0;
+        materials.fragment_bone_rest_stiffness = 0.70;
+        materials.fragment_bone_rest_friction = 0.0;
+        let mut world = World::new(materials);
+        let support = world.add_bone_segment(
+            Vec2 { x: 100.0, y: 100.0 },
+            Vec2 { x: 170.0, y: 100.0 },
+            8.0,
+            9999.0,
+            true,
+        );
+        let fragment = world.add_bone_segment(
+            Vec2 { x: 112.0, y: 105.0 },
+            Vec2 { x: 182.0, y: 105.0 },
+            8.0,
+            9999.0,
+            false,
+        );
+        world.bones[fragment].fractured = true;
+        world.bones[fragment].previous_a = Vec2 { x: 112.0, y: 105.1 };
+        world.bones[fragment].previous_b = Vec2 { x: 182.0, y: 105.1 };
+        let before_y = world.bones[fragment].a.y;
+
+        world.solve_bone_fragment_bone_contacts();
+
+        assert_eq!(world.debug.fragment_bone_contacts, 1);
+        assert_eq!(world.debug.fragment_bone_resting_contacts, 1);
+        assert!(
+            world.bones[fragment].a.y > before_y,
+            "resting fragment-bone support should push a slow jammed fragment away from the support bone"
+        );
+        assert_eq!(
+            world.bones[support].a.y, 100.0,
+            "pinned support bone should remain fixed while supporting debris"
+        );
+    }
+
+    #[test]
+    fn fragment_bone_resting_contact_skin_supports_slow_near_jam() {
+        let mut materials = Materials::default();
+        materials.max_active_bone_fragments = 1;
+        materials.max_fragment_bone_checks = 8;
+        materials.fragment_repulsion_stiffness = 0.0;
+        materials.fragment_bone_normal_damping = 0.0;
+        materials.fragment_bone_tangential_friction = 0.0;
+        materials.fragment_bone_angular_friction = 0.0;
+        materials.fragment_bone_rest_speed = 120.0;
+        materials.fragment_bone_rest_stiffness = 0.70;
+        materials.fragment_bone_rest_friction = 0.0;
+        let mut world = World::new(materials);
+        world.add_bone_segment(
+            Vec2 { x: 100.0, y: 100.0 },
+            Vec2 { x: 170.0, y: 100.0 },
+            8.0,
+            9999.0,
+            true,
+        );
+        let fragment = world.add_bone_segment(
+            Vec2 {
+                x: 112.0,
+                y: 116.95,
+            },
+            Vec2 {
+                x: 182.0,
+                y: 116.95,
+            },
+            8.0,
+            9999.0,
+            false,
+        );
+        world.bones[fragment].fractured = true;
+        world.bones[fragment].previous_a = Vec2 {
+            x: 112.0,
+            y: 116.90,
+        };
+        world.bones[fragment].previous_b = Vec2 {
+            x: 182.0,
+            y: 116.90,
+        };
+        let before_y = world.bones[fragment].a.y;
+
+        world.solve_bone_fragment_bone_contacts();
+
+        assert_eq!(world.debug.fragment_bone_contacts, 1);
+        assert_eq!(world.debug.fragment_bone_resting_contacts, 1);
+        assert!(
+            world.bones[fragment].a.y > before_y,
+            "resting fragment-bone contact skin should support a slow near-contact fragment"
+        );
+    }
+
+    #[test]
+    fn fast_fragment_bone_contact_is_not_treated_as_resting() {
+        let mut materials = Materials::default();
+        materials.max_active_bone_fragments = 1;
+        materials.max_fragment_bone_checks = 8;
+        materials.fragment_bone_rest_speed = 30.0;
+        let mut world = World::new(materials);
+        world.add_bone_segment(
+            Vec2 { x: 100.0, y: 100.0 },
+            Vec2 { x: 170.0, y: 100.0 },
+            8.0,
+            9999.0,
+            true,
+        );
+        let fragment = world.add_bone_segment(
+            Vec2 { x: 112.0, y: 105.0 },
+            Vec2 { x: 182.0, y: 105.0 },
+            8.0,
+            9999.0,
+            false,
+        );
+        world.bones[fragment].fractured = true;
+        world.bones[fragment].previous_a = Vec2 { x: 112.0, y: 125.0 };
+        world.bones[fragment].previous_b = Vec2 { x: 182.0, y: 125.0 };
+
+        world.solve_bone_fragment_bone_contacts();
+
+        assert_eq!(world.debug.fragment_bone_contacts, 1);
+        assert_eq!(
+            world.debug.fragment_bone_resting_contacts, 0,
+            "high-speed fragment-bone impacts should not get resting-contact support"
+        );
+    }
+
+    #[test]
+    fn fragment_bone_check_budget_stops_contact_work() {
+        let mut materials = Materials::default();
+        materials.max_active_bone_fragments = 1;
+        materials.max_fragment_bone_checks = 1;
+        let mut world = World::new(materials);
+        let fragment = world.add_bone_segment(
+            Vec2 { x: 100.0, y: 105.0 },
+            Vec2 { x: 160.0, y: 105.0 },
+            8.0,
+            9999.0,
+            false,
+        );
+        world.bones[fragment].fractured = true;
+        for y in [100.0, 110.0] {
+            world.add_bone_segment(
+                Vec2 { x: 100.0, y },
+                Vec2 { x: 160.0, y },
+                8.0,
+                9999.0,
+                false,
+            );
+        }
+
+        world.solve_bone_fragment_bone_contacts();
+
+        assert_eq!(world.debug.fragment_bone_checks, 1);
+        assert!(
+            world.debug.fragment_bone_budget_skips > 0,
+            "bone-contact budget should skip remaining intact-bone checks after the cap"
+        );
+    }
+
+    #[test]
+    fn fragment_bone_broadphase_excludes_distant_bones() {
+        let mut materials = Materials::default();
+        materials.max_active_bone_fragments = 1;
+        materials.max_fragment_bone_checks = 32;
+        let mut world = World::new(materials);
+        let fragment = world.add_bone_segment(
+            Vec2 { x: 100.0, y: 105.0 },
+            Vec2 { x: 160.0, y: 105.0 },
+            8.0,
+            9999.0,
+            false,
+        );
+        world.bones[fragment].fractured = true;
+        world.add_bone_segment(
+            Vec2 { x: 100.0, y: 100.0 },
+            Vec2 { x: 160.0, y: 100.0 },
+            8.0,
+            9999.0,
+            false,
+        );
+        world.add_bone_segment(
+            Vec2 { x: 520.0, y: 520.0 },
+            Vec2 { x: 580.0, y: 520.0 },
+            8.0,
+            9999.0,
+            false,
+        );
+
+        world.solve_bone_fragment_bone_contacts();
+
+        assert_eq!(
+            world.debug.fragment_bone_checks, 1,
+            "broad phase should only spend bone checks on nearby intact bones"
+        );
+        assert_eq!(world.debug.fragment_bone_budget_skips, 0);
+    }
+
+    #[test]
+    fn fragment_floor_contact_uses_radius_and_damps_slide() {
+        let mut materials = Materials::default();
+        materials.fragment_floor_friction = 0.60;
+        materials.fragment_floor_normal_damping = 0.90;
+        materials.fragment_floor_angular_friction = 0.30;
+        materials.fragment_floor_rest_speed = 1.0;
+        let mut world = World::new(materials);
+        let bone = world.add_bone_segment(
+            Vec2 { x: 100.0, y: 116.0 },
+            Vec2 { x: 160.0, y: 110.0 },
+            8.0,
+            9999.0,
+            false,
+        );
+        world.bones[bone].fractured = true;
+        world.bones[bone].previous_a = Vec2 { x: 90.0, y: 106.0 };
+        world.bones[bone].previous_b = world.bones[bone].b;
+        world.bones[bone].angular_velocity = 10.0;
+
+        world.constrain_to_world(300.0, 120.0);
+
+        assert_eq!(world.debug.fragment_floor_contacts, 1);
+        assert_eq!(world.debug.fragment_floor_resting_contacts, 0);
+        assert!(
+            world.bones[bone].a.y <= 112.0,
+            "fragment radius should keep the bone center above the floor plane"
+        );
+        let remaining_x_velocity = world.bones[bone].a.x - world.bones[bone].previous_a.x;
+        let remaining_y_velocity = world.bones[bone].a.y - world.bones[bone].previous_a.y;
+        assert!(
+            remaining_x_velocity < 5.0,
+            "floor contact should apply tangential friction to sliding fragments"
+        );
+        assert!(
+            remaining_y_velocity < 2.0,
+            "floor contact should damp downward fragment velocity"
+        );
+        assert!(
+            world.bones[bone].angular_velocity.abs() < 10.0,
+            "floor contact should bleed angular jitter"
+        );
+    }
+
+    #[test]
+    fn slow_fragment_floor_contact_is_counted_as_resting() {
+        let mut materials = Materials::default();
+        materials.fragment_floor_rest_speed = 30.0;
+        let mut world = World::new(materials);
+        let bone = world.add_bone_segment(
+            Vec2 { x: 100.0, y: 112.4 },
+            Vec2 { x: 160.0, y: 110.0 },
+            8.0,
+            9999.0,
+            false,
+        );
+        world.bones[bone].fractured = true;
+        world.bones[bone].previous_a = Vec2 { x: 100.0, y: 112.2 };
+        world.bones[bone].previous_b = world.bones[bone].b;
+
+        world.constrain_to_world(300.0, 120.0);
+
+        assert_eq!(world.debug.fragment_floor_contacts, 1);
+        assert_eq!(world.debug.fragment_floor_resting_contacts, 1);
+        assert!(
+            (world.bones[bone].a.y - world.bones[bone].previous_a.y).abs() <= EPSILON,
+            "resting floor contact should remove tiny downward velocity"
+        );
+    }
+
+    #[test]
+    fn quiet_fragment_sleeps_and_leaves_active_budget() {
+        let mut materials = Materials::default();
+        materials.fragment_sleep_frames = 2;
+        materials.fragment_sleep_speed = 4.0;
+        materials.fragment_sleep_angular_speed = 0.04;
+        materials.fragment_sleep_load = 10.0;
+        let mut world = World::new(materials);
+        let bone = world.add_bone_segment(
+            Vec2 { x: 100.0, y: 100.0 },
+            Vec2 { x: 160.0, y: 100.0 },
+            6.0,
+            9999.0,
+            false,
+        );
+        world.bones[bone].fractured = true;
+        world.bones[bone].previous_a = world.bones[bone].a;
+        world.bones[bone].previous_b = world.bones[bone].b;
+
+        world.update_fragment_sleep_states();
+        assert!(
+            !world.bones[bone].sleeping,
+            "fragment should wait for the configured quiet frame count"
+        );
+        world.update_fragment_sleep_states();
+
+        assert!(world.bones[bone].sleeping);
+        assert_eq!(world.debug.fragment_sleep_events, 1);
+        assert_eq!(world.sleeping_fragment_count(), 1);
+        assert!(
+            world.budgeted_fragment_indices().is_empty(),
+            "sleeping debris should not consume active fragment budget"
+        );
+    }
+
+    #[test]
+    fn direct_striker_contact_wakes_sleeping_fragment() {
+        let mut materials = Materials::default();
+        materials.gravity = 0.0;
+        materials.fragment_wake_load = 20.0;
+        let mut world = World::new(materials);
+        let bone = world.add_bone_segment(
+            Vec2 { x: 100.0, y: 100.0 },
+            Vec2 { x: 160.0, y: 100.0 },
+            6.0,
+            999_999.0,
+            false,
+        );
+        world.bones[bone].fractured = true;
+        world.bones[bone].sleeping = true;
+        world.bones[bone].previous_a = world.bones[bone].a;
+        world.bones[bone].previous_b = world.bones[bone].b;
+
+        world.collide_striker(
+            world.materials.fixed_dt,
+            &InputState {
+                active: true,
+                down: true,
+                x: 130.0,
+                y: 100.0,
+                vx: 900.0,
+                vy: 0.0,
+                power: 2.0,
+                tool: ToolMode::Blunt,
+            },
+        );
+
+        assert!(
+            !world.bones[bone].sleeping,
+            "meaningful direct contact should wake a sleeping fragment"
+        );
+        assert_eq!(world.debug.fragment_wake_events, 1);
+        assert!(world.debug.bone_contacts > 0);
+    }
+
+    #[test]
+    fn blunt_tissue_contact_creates_contusion_without_tearing() {
+        let mut materials = Materials::default();
+        materials.gravity = 0.0;
+        materials.contusion_load_threshold = 120.0;
+        let mut world = World::new(materials);
+        world.add_point(Vec2 { x: 130.0, y: 100.0 }, TissueLayer::Skin, false);
+
+        world.collide_striker(
+            world.materials.fixed_dt,
+            &InputState {
+                active: true,
+                down: true,
+                x: 130.0,
+                y: 100.0,
+                vx: 900.0,
+                vy: 0.0,
+                power: 2.0,
+                tool: ToolMode::Blunt,
+            },
+        );
+
+        assert!(
+            world.points[0].contusion > 0.0,
+            "blunt load should leave a persistent tissue contusion"
+        );
+        assert_eq!(world.stats.broken_skin, 0);
+        assert_eq!(world.stats.contusion_events, 1);
+        assert_eq!(world.debug.contusion_events, 1);
+    }
+
+    #[test]
+    fn contused_spring_tears_at_lower_load() {
+        let mut materials = Materials::default();
+        materials.max_fluid_particles = 0;
+        materials.max_wound_sources = 0;
+        materials.contusion_tear_weakening = 0.50;
+        materials.contusion_stiffness_softening = 0.35;
+        let mut world = World::new(materials);
+        world.debug.tool = ToolMode::Sharp;
+        world.debug.impact = 1200.0;
+        let a = world.add_point(Vec2 { x: 0.0, y: 0.0 }, TissueLayer::Skin, false);
+        let b = world.add_point(Vec2 { x: 100.0, y: 0.0 }, TissueLayer::Skin, false);
+        world.add_spring(a, b, TissueLayer::Skin, 0.9, 1.68, 1000.0, false);
+        world.points[a].contusion = 1.0;
+        world.points[b].contusion = 1.0;
+        world.points[a].load = 700.0;
+        world.points[b].load = 700.0;
+        world.points[b].position.x = 112.0;
+
+        world.solve_springs();
+
+        assert!(
+            world.springs[0].broken,
+            "contusion should lower the load/stretch needed for a damaged spring to tear"
+        );
+        assert_eq!(world.stats.broken_skin, 1);
+        assert!(
+            world.debug.max_tissue_softening > 0.0,
+            "spring solve should report local contusion-driven softening"
+        );
+    }
+
+    #[test]
+    fn repeated_subcritical_load_fatigues_spring_until_it_tears() {
+        let mut materials = Materials::default();
+        materials.max_fluid_particles = 0;
+        materials.max_wound_sources = 0;
+        materials.tissue_fatigue_stretch_threshold = 1.05;
+        materials.tissue_fatigue_load_threshold = 500.0;
+        materials.tissue_fatigue_rate = 0.08;
+        materials.tissue_fatigue_decay = 0.0;
+        materials.tissue_fatigue_tear_weakening = 0.45;
+        materials.tissue_fatigue_stiffness_softening = 0.12;
+        let mut world = World::new(materials);
+        let a = world.add_point(Vec2 { x: 0.0, y: 0.0 }, TissueLayer::Skin, true);
+        let b = world.add_point(Vec2 { x: 100.0, y: 0.0 }, TissueLayer::Skin, true);
+        world.add_spring(a, b, TissueLayer::Skin, 0.9, 1.36, 1000.0, false);
+        world.points[a].load = 760.0;
+        world.points[b].load = 760.0;
+        world.points[b].position.x = 121.0;
+        world.points[b].previous.x = 121.0;
+
+        world.solve_springs();
+        assert!(
+            !world.springs[0].broken,
+            "a single subcritical load should accumulate fatigue without immediately tearing"
+        );
+        assert!(world.springs[0].fatigue > 0.0);
+
+        for _ in 0..24 {
+            if world.springs[0].broken {
+                break;
+            }
+            world.solve_springs();
+        }
+
+        assert!(
+            world.springs[0].broken,
+            "repeated subcritical load should become a tear once local fatigue weakens the spring"
+        );
+        assert_eq!(world.stats.broken_skin, 1);
+        assert!(
+            world.stats.tissue_fatigue_events > 0,
+            "fatigue accumulation should be visible in cumulative telemetry"
+        );
+        assert!(
+            world.debug.max_tissue_fatigue > 0.5,
+            "spring solve should report the local fatigue that drove the tear"
+        );
+    }
+
+    #[test]
+    fn spring_fatigue_contributes_to_muscle_triangle_damage_detail() {
+        let mut world = World::new(Materials::default());
+        let a = world.add_point(Vec2 { x: 0.0, y: 0.0 }, TissueLayer::Muscle, false);
+        let b = world.add_point(Vec2 { x: 12.0, y: 0.0 }, TissueLayer::Muscle, false);
+        let c = world.add_point(Vec2 { x: 0.0, y: 12.0 }, TissueLayer::Muscle, false);
+        world.add_spring(a, b, TissueLayer::Muscle, 0.8, 1.9, 1100.0, true);
+        world.add_spring(b, c, TissueLayer::Muscle, 0.8, 1.9, 1100.0, true);
+        world.add_spring(c, a, TissueLayer::Muscle, 0.8, 1.9, 1100.0, true);
+        world.add_triangle(a, b, c, TissueLayer::Muscle);
+        world.springs[0].fatigue = 0.80;
+
+        world.update_triangle_damage();
+
+        assert!(
+            world.triangles[0].damage >= 0.30,
+            "muscle detail should expose persistent spring fatigue before catastrophic failure"
+        );
+        assert!(
+            world.triangle_alive(&world.triangles[0]),
+            "fatigue detail should not immediately fail the whole muscle triangle"
+        );
+    }
+
+    #[test]
+    fn fiber_aligned_muscle_tear_reports_and_marks_local_detail() {
+        let mut materials = Materials::default();
+        materials.tissue_fatigue_rate = 0.0;
+        materials.muscle_fiber_rupture_damage_floor = 0.62;
+        let mut world = World::new(materials);
+        let a = world.add_point(Vec2 { x: 0.0, y: 0.0 }, TissueLayer::Muscle, false);
+        let b = world.add_point(Vec2 { x: 20.0, y: 0.0 }, TissueLayer::Muscle, false);
+        let c = world.add_point(Vec2 { x: 0.0, y: 20.0 }, TissueLayer::Muscle, false);
+        world.add_spring(a, b, TissueLayer::Muscle, 0.8, 1.18, 9999.0, true);
+        world.add_spring(b, c, TissueLayer::Muscle, 0.8, 9.0, 9999.0, false);
+        world.add_spring(c, a, TissueLayer::Muscle, 0.8, 9.0, 9999.0, false);
+        world.add_triangle(a, b, c, TissueLayer::Muscle);
+
+        world.points[b].position.x = 28.0;
+        world.solve_springs();
+        world.update_triangle_damage();
+
+        assert!(world.springs[0].broken);
+        assert_eq!(world.stats.broken_muscle, 1);
+        assert_eq!(world.stats.muscle_fiber_tears, 1);
+        assert_eq!(world.debug.muscle_fiber_tears, 1);
+        assert!(
+            world.triangles[0].damage >= 0.62,
+            "broken fiber-aligned muscle springs should feed local muscle detail"
+        );
+    }
+
+    #[test]
+    fn cross_fiber_muscle_tear_does_not_count_as_fiber_rupture() {
+        let mut materials = Materials::default();
+        materials.tissue_fatigue_rate = 0.0;
+        materials.muscle_fiber_rupture_damage_floor = 0.62;
+        let mut world = World::new(materials);
+        let a = world.add_point(Vec2 { x: 0.0, y: 0.0 }, TissueLayer::Muscle, false);
+        let b = world.add_point(Vec2 { x: 20.0, y: 0.0 }, TissueLayer::Muscle, false);
+        let c = world.add_point(Vec2 { x: 0.0, y: 20.0 }, TissueLayer::Muscle, false);
+        world.add_spring(a, b, TissueLayer::Muscle, 0.8, 1.18, 9999.0, false);
+        world.add_spring(b, c, TissueLayer::Muscle, 0.8, 9.0, 9999.0, false);
+        world.add_spring(c, a, TissueLayer::Muscle, 0.8, 9.0, 9999.0, false);
+        world.add_triangle(a, b, c, TissueLayer::Muscle);
+
+        world.points[b].position.x = 28.0;
+        world.solve_springs();
+        world.update_triangle_damage();
+
+        assert!(world.springs[0].broken);
+        assert_eq!(world.stats.broken_muscle, 1);
+        assert_eq!(world.stats.muscle_fiber_tears, 0);
+        assert_eq!(world.debug.muscle_fiber_tears, 0);
+        assert!(
+            world.triangles[0].damage < materials.muscle_fiber_rupture_damage_floor,
+            "ordinary cross-fiber muscle tears should not get fiber rupture detail"
+        );
+    }
+
+    #[test]
+    fn loaded_muscle_triangle_failure_creates_crush_rupture_bleeding() {
+        let mut materials = Materials::default();
+        materials.max_fluid_particles = 32;
+        materials.max_wound_sources = 8;
+        materials.muscle_exposed_tear_impulse = 120.0;
+        materials.muscle_crush_rupture_load_threshold = 180.0;
+        materials.muscle_crush_rupture_damage_threshold = 0.90;
+        materials.max_muscle_crush_ruptures_per_step = 2;
+        let mut world = World::new(materials);
+        let a = world.add_point(Vec2 { x: 0.0, y: 0.0 }, TissueLayer::Muscle, false);
+        let b = world.add_point(Vec2 { x: 12.0, y: 0.0 }, TissueLayer::Muscle, false);
+        let c = world.add_point(Vec2 { x: 0.0, y: 12.0 }, TissueLayer::Muscle, false);
+        world.add_triangle(a, b, c, TissueLayer::Muscle);
+        for point in [a, b, c] {
+            world.points[point].load = 1900.0;
+            world.points[point].exposure = 1.0;
+        }
+
+        world.update_triangle_damage();
+
+        assert!(world.triangles[0].failed);
+        assert_eq!(world.stats.muscle_crush_ruptures, 1);
+        assert_eq!(world.debug.muscle_crush_ruptures, 1);
+        assert!(world.stats.emitted_fluid_particles > 0);
+        assert_eq!(world.stats.opened_wounds, 1);
+    }
+
+    #[test]
+    fn quiet_muscle_triangle_damage_does_not_create_crush_rupture() {
+        let mut materials = Materials::default();
+        materials.max_fluid_particles = 32;
+        materials.max_wound_sources = 8;
+        materials.muscle_exposed_tear_impulse = 900.0;
+        materials.muscle_crush_rupture_load_threshold = 600.0;
+        let mut world = World::new(materials);
+        let a = world.add_point(Vec2 { x: 0.0, y: 0.0 }, TissueLayer::Muscle, false);
+        let b = world.add_point(Vec2 { x: 12.0, y: 0.0 }, TissueLayer::Muscle, false);
+        let c = world.add_point(Vec2 { x: 0.0, y: 12.0 }, TissueLayer::Muscle, false);
+        world.add_triangle(a, b, c, TissueLayer::Muscle);
+        for point in [a, b, c] {
+            world.points[point].load = 420.0;
+            world.points[point].exposure = 0.10;
+        }
+
+        world.update_triangle_damage();
+
+        assert!(!world.triangles[0].failed);
+        assert_eq!(world.stats.muscle_crush_ruptures, 0);
+        assert_eq!(world.debug.muscle_crush_ruptures, 0);
+        assert_eq!(world.stats.emitted_fluid_particles, 0);
+        assert_eq!(world.stats.opened_wounds, 0);
+    }
+
+    #[test]
+    fn sharp_deep_contact_lacerates_major_vessel_and_opens_pressure_wound() {
+        let mut materials = Materials::default();
+        materials.gravity = 0.0;
+        materials.max_fluid_particles = 32;
+        materials.max_wound_sources = 8;
+        materials.major_vessel_laceration_impulse = 240.0;
+        materials.major_vessel_cut_radius = 8.0;
+        let mut world = World::new(materials);
+        let anchor_a = world.add_point(Vec2 { x: 48.0, y: -14.0 }, TissueLayer::Muscle, false);
+        let anchor_b = world.add_point(Vec2 { x: 48.0, y: 14.0 }, TissueLayer::Muscle, false);
+        world.add_vessel_segment(
+            Vec2 { x: 48.0, y: -14.0 },
+            Vec2 { x: 48.0, y: 14.0 },
+            3.0,
+            1.55,
+        );
+        world.points[anchor_a].exposure = 0.75;
+        world.points[anchor_b].exposure = 0.75;
+
+        world.collide_striker(
+            world.materials.fixed_dt,
+            &InputState {
+                active: true,
+                down: true,
+                x: 44.0,
+                y: 0.0,
+                vx: 900.0,
+                vy: 0.0,
+                power: 3.0,
+                tool: ToolMode::Sharp,
+            },
+        );
+
+        assert!(world.vessels[0].lacerated);
+        assert_eq!(world.stats.vessel_lacerations, 1);
+        assert_eq!(world.debug.vessel_lacerations, 1);
+        assert_eq!(world.stats.opened_wounds, 1);
+        assert!(
+            world.wounds[0].pressure > 2.0,
+            "major vessel damage should open a stronger pressure wound than ordinary tissue tears"
+        );
+    }
+
+    #[test]
+    fn quiet_blunt_contact_does_not_lacerate_major_vessel_by_proximity() {
+        let mut materials = Materials::default();
+        materials.gravity = 0.0;
+        materials.max_fluid_particles = 32;
+        materials.max_wound_sources = 8;
+        materials.major_vessel_laceration_impulse = 900.0;
+        materials.major_vessel_cut_radius = 8.0;
+        let mut world = World::new(materials);
+        world.add_point(Vec2 { x: 48.0, y: -14.0 }, TissueLayer::Muscle, false);
+        world.add_point(Vec2 { x: 48.0, y: 14.0 }, TissueLayer::Muscle, false);
+        world.add_vessel_segment(
+            Vec2 { x: 48.0, y: -14.0 },
+            Vec2 { x: 48.0, y: 14.0 },
+            3.0,
+            1.55,
+        );
+
+        world.collide_striker(
+            world.materials.fixed_dt,
+            &InputState {
+                active: true,
+                down: true,
+                x: 44.0,
+                y: 0.0,
+                vx: 180.0,
+                vy: 0.0,
+                power: 1.0,
+                tool: ToolMode::Blunt,
+            },
+        );
+
+        assert!(!world.vessels[0].lacerated);
+        assert_eq!(world.stats.vessel_lacerations, 0);
+        assert_eq!(world.debug.vessel_lacerations, 0);
+        assert_eq!(world.stats.opened_wounds, 0);
+    }
+
+    #[test]
+    fn fractured_fragment_tip_can_lacerate_major_vessel() {
+        let mut materials = Materials::default();
+        materials.fragment_vessel_laceration_impulse = 90.0;
+        materials.fragment_vessel_laceration_radius = 8.0;
+        materials.max_fragment_vessel_lacerations_per_step = 1;
+        let mut world = World::new(materials);
+
+        world.add_vessel_segment(
+            Vec2 { x: 100.0, y: 82.0 },
+            Vec2 { x: 100.0, y: 118.0 },
+            3.0,
+            1.6,
+        );
+        let fragment = world.add_bone_segment(
+            Vec2 { x: 68.0, y: 100.0 },
+            Vec2 { x: 92.0, y: 100.0 },
+            3.2,
+            100.0,
+            false,
+        );
+        world.bones[fragment].fractured = true;
+        world.bones[fragment].broken_end = true;
+        world.bones[fragment].load = 420.0;
+
+        world.process_fragment_tip(
+            fragment,
+            Vec2 { x: 101.0, y: 100.0 },
+            Vec2 { x: 74.0, y: 100.0 },
+            Vec2 { x: 1.0, y: 0.0 },
+            true,
+        );
+
+        assert!(world.vessels[0].lacerated);
+        assert_eq!(world.stats.vessel_lacerations, 1);
+        assert_eq!(world.stats.fragment_vessel_lacerations, 1);
+        assert_eq!(world.debug.fragment_vessel_lacerations, 1);
+        assert!(
+            world
+                .wounds
+                .iter()
+                .any(|wound| wound.active && wound.pressure > 1.5),
+            "fragment-driven vessel laceration should reuse the persistent pressure wound path"
+        );
+    }
+
+    #[test]
+    fn quiet_fragment_tip_does_not_lacerate_major_vessel_by_proximity() {
+        let mut materials = Materials::default();
+        materials.fragment_vessel_laceration_impulse = 900.0;
+        materials.fragment_vessel_laceration_radius = 8.0;
+        let mut world = World::new(materials);
+
+        world.add_vessel_segment(
+            Vec2 { x: 100.0, y: 82.0 },
+            Vec2 { x: 100.0, y: 118.0 },
+            3.0,
+            1.6,
+        );
+        let fragment = world.add_bone_segment(
+            Vec2 { x: 68.0, y: 100.0 },
+            Vec2 { x: 92.0, y: 100.0 },
+            3.2,
+            100.0,
+            false,
+        );
+        world.bones[fragment].fractured = true;
+        world.bones[fragment].broken_end = true;
+        world.bones[fragment].load = 20.0;
+
+        world.process_fragment_tip(
+            fragment,
+            Vec2 { x: 96.0, y: 100.0 },
+            Vec2 { x: 95.4, y: 100.0 },
+            Vec2 { x: 1.0, y: 0.0 },
+            true,
+        );
+
+        assert!(!world.vessels[0].lacerated);
+        assert_eq!(world.stats.vessel_lacerations, 0);
+        assert_eq!(world.stats.fragment_vessel_lacerations, 0);
+        assert_eq!(world.debug.fragment_vessel_lacerations, 0);
+    }
+
+    #[test]
+    fn repeated_subcritical_stretch_plastically_lengthens_spring_rest_shape() {
+        let mut materials = Materials::default();
+        materials.max_fluid_particles = 0;
+        materials.max_wound_sources = 0;
+        materials.tissue_fatigue_rate = 0.0;
+        materials.tissue_plastic_stretch_threshold = 1.04;
+        materials.tissue_plastic_rate = 0.08;
+        materials.tissue_plastic_limit = 0.35;
+        let mut world = World::new(materials);
+        let a = world.add_point(Vec2 { x: 0.0, y: 0.0 }, TissueLayer::Skin, true);
+        let b = world.add_point(Vec2 { x: 100.0, y: 0.0 }, TissueLayer::Skin, true);
+        world.add_spring(a, b, TissueLayer::Skin, 0.9, 2.20, 5000.0, false);
+        let initial_rest = world.springs[0].rest;
+        world.points[a].load = 900.0;
+        world.points[b].load = 900.0;
+        world.points[b].position.x = 138.0;
+
+        world.solve_springs();
+
+        assert!(
+            !world.springs[0].broken,
+            "subcritical plastic stretching should not require immediate rupture"
+        );
+        assert!(
+            world.springs[0].rest > initial_rest,
+            "loaded overstretch should lengthen the spring rest shape"
+        );
+        assert!(world.springs[0].plastic_strain > 0.0);
+        assert_eq!(world.stats.tissue_plastic_events, 1);
+        assert!(world.debug.max_tissue_plasticity > 0.0);
+    }
+
+    #[test]
+    fn loaded_crush_plastically_shortens_spring_rest_shape() {
+        let mut materials = Materials::default();
+        materials.max_fluid_particles = 0;
+        materials.max_wound_sources = 0;
+        materials.tissue_fatigue_rate = 0.0;
+        materials.tissue_plastic_compression_threshold = 0.86;
+        materials.tissue_plastic_rate = 0.10;
+        materials.tissue_plastic_limit = 0.35;
+        let mut world = World::new(materials);
+        let a = world.add_point(Vec2 { x: 0.0, y: 0.0 }, TissueLayer::Muscle, true);
+        let b = world.add_point(Vec2 { x: 100.0, y: 0.0 }, TissueLayer::Muscle, true);
+        world.add_spring(a, b, TissueLayer::Muscle, 0.9, 2.20, 5000.0, true);
+        let initial_rest = world.springs[0].rest;
+        world.points[a].load = 900.0;
+        world.points[b].load = 900.0;
+        world.points[b].position.x = 62.0;
+
+        world.solve_springs();
+
+        assert!(
+            world.springs[0].rest < initial_rest,
+            "loaded compression should shorten the spring rest shape"
+        );
+        assert!(world.springs[0].plastic_strain > 0.0);
+        assert_eq!(world.stats.tissue_plastic_events, 1);
+        assert!(world.debug.max_tissue_plasticity > 0.0);
+    }
+
+    #[test]
+    fn stressed_skin_spring_propagates_from_existing_wound_edge() {
+        let mut materials = Materials::default();
+        materials.max_fluid_particles = 0;
+        materials.max_wound_sources = 0;
+        materials.tear_propagation_stress_threshold = 0.20;
+        materials.tear_propagation_fatigue_threshold = 0.60;
+        materials.tear_propagation_load_threshold = 5000.0;
+        materials.max_tear_propagations_per_step = 4;
+        let mut world = World::new(materials);
+        world.debug.tool = ToolMode::Sharp;
+        world.debug.impact = 1200.0;
+        let a = world.add_point(Vec2 { x: 0.0, y: 0.0 }, TissueLayer::Skin, false);
+        let b = world.add_point(Vec2 { x: 10.0, y: 0.0 }, TissueLayer::Skin, false);
+        let c = world.add_point(Vec2 { x: 20.0, y: 0.0 }, TissueLayer::Skin, false);
+        world.add_spring(a, b, TissueLayer::Skin, 0.8, 1.7, 1000.0, false);
+        world.add_spring(b, c, TissueLayer::Skin, 0.8, 1.7, 1000.0, false);
+        world.springs[0].broken = true;
+        world.springs[1].stress = 0.34;
+
+        world.propagate_skin_tears();
+
+        assert!(
+            world.springs[1].broken,
+            "a stressed skin edge adjacent to an existing wound should tear by propagation"
+        );
+        assert_eq!(world.stats.broken_skin, 1);
+        assert_eq!(world.stats.tear_propagations, 1);
+        assert_eq!(world.debug.tear_propagations, 1);
+    }
+
+    #[test]
+    fn quiet_skin_spring_does_not_propagate_from_existing_wound_edge() {
+        let mut materials = Materials::default();
+        materials.max_fluid_particles = 0;
+        materials.max_wound_sources = 0;
+        materials.tear_propagation_stress_threshold = 0.60;
+        materials.tear_propagation_fatigue_threshold = 0.60;
+        materials.tear_propagation_load_threshold = 5000.0;
+        materials.max_tear_propagations_per_step = 4;
+        let mut world = World::new(materials);
+        let a = world.add_point(Vec2 { x: 0.0, y: 0.0 }, TissueLayer::Skin, false);
+        let b = world.add_point(Vec2 { x: 10.0, y: 0.0 }, TissueLayer::Skin, false);
+        let c = world.add_point(Vec2 { x: 20.0, y: 0.0 }, TissueLayer::Skin, false);
+        world.add_spring(a, b, TissueLayer::Skin, 0.8, 1.7, 1000.0, false);
+        world.add_spring(b, c, TissueLayer::Skin, 0.8, 1.7, 1000.0, false);
+        world.springs[0].broken = true;
+        world.springs[1].stress = 0.12;
+
+        world.propagate_skin_tears();
+
+        assert!(
+            !world.springs[1].broken,
+            "tear propagation should require local stress, fatigue, or load"
+        );
+        assert_eq!(world.stats.tear_propagations, 0);
+        assert_eq!(world.debug.tear_propagations, 0);
+    }
+
+    #[test]
+    fn sharp_skin_opening_transfers_cut_into_exposed_muscle() {
+        let mut materials = Materials::default();
+        materials.max_fluid_particles = 0;
+        materials.max_wound_sources = 0;
+        materials.muscle_cut_transfer_exposure_threshold = 0.40;
+        materials.muscle_cut_transfer_load_threshold = 800.0;
+        materials.muscle_cut_transfer_radius = 16.0;
+        materials.max_muscle_cut_transfers_per_step = 2;
+        let mut world = World::new(materials);
+        world.debug.tool = ToolMode::Sharp;
+        world.debug.impact = 1200.0;
+        let skin_a = world.add_point(Vec2 { x: 0.0, y: 0.0 }, TissueLayer::Skin, false);
+        let skin_b = world.add_point(Vec2 { x: 12.0, y: 0.0 }, TissueLayer::Skin, false);
+        let muscle_a = world.add_point(Vec2 { x: 0.0, y: 5.0 }, TissueLayer::Muscle, false);
+        let muscle_b = world.add_point(Vec2 { x: 12.0, y: 5.0 }, TissueLayer::Muscle, false);
+        world.add_spring(skin_a, skin_b, TissueLayer::Skin, 0.8, 1.7, 1000.0, false);
+        world.add_spring(
+            muscle_a,
+            muscle_b,
+            TissueLayer::Muscle,
+            0.8,
+            1.9,
+            1200.0,
+            true,
+        );
+        world.springs[0].broken = true;
+        world.points[muscle_a].exposure = 0.62;
+        world.points[muscle_b].exposure = 0.62;
+        world.points[muscle_a].load = 520.0;
+        world.points[muscle_b].load = 520.0;
+
+        world.transfer_sharp_cut_to_exposed_muscle();
+
+        assert!(
+            world.springs[1].broken,
+            "open stressed skin should transfer a sharp cut into nearby exposed muscle"
+        );
+        assert_eq!(world.stats.broken_muscle, 1);
+        assert_eq!(world.stats.muscle_cut_transfers, 1);
+        assert_eq!(world.debug.muscle_cut_transfers, 1);
+    }
+
+    #[test]
+    fn quiet_muscle_does_not_get_cut_by_nearby_skin_opening() {
+        let mut materials = Materials::default();
+        materials.max_fluid_particles = 0;
+        materials.max_wound_sources = 0;
+        materials.muscle_cut_transfer_exposure_threshold = 0.70;
+        materials.muscle_cut_transfer_load_threshold = 1200.0;
+        materials.muscle_cut_transfer_radius = 16.0;
+        materials.max_muscle_cut_transfers_per_step = 2;
+        let mut world = World::new(materials);
+        world.debug.tool = ToolMode::Sharp;
+        world.debug.impact = 1200.0;
+        let skin_a = world.add_point(Vec2 { x: 0.0, y: 0.0 }, TissueLayer::Skin, false);
+        let skin_b = world.add_point(Vec2 { x: 12.0, y: 0.0 }, TissueLayer::Skin, false);
+        let muscle_a = world.add_point(Vec2 { x: 0.0, y: 5.0 }, TissueLayer::Muscle, false);
+        let muscle_b = world.add_point(Vec2 { x: 12.0, y: 5.0 }, TissueLayer::Muscle, false);
+        world.add_spring(skin_a, skin_b, TissueLayer::Skin, 0.8, 1.7, 1000.0, false);
+        world.add_spring(
+            muscle_a,
+            muscle_b,
+            TissueLayer::Muscle,
+            0.8,
+            1.9,
+            1200.0,
+            true,
+        );
+        world.springs[0].broken = true;
+        world.points[muscle_a].exposure = 0.15;
+        world.points[muscle_b].exposure = 0.15;
+        world.points[muscle_a].load = 120.0;
+        world.points[muscle_b].load = 120.0;
+
+        world.transfer_sharp_cut_to_exposed_muscle();
+
+        assert!(
+            !world.springs[1].broken,
+            "nearby quiet muscle should require exposure, load, or fatigue before cut transfer"
+        );
+        assert_eq!(world.stats.muscle_cut_transfers, 0);
+        assert_eq!(world.debug.muscle_cut_transfers, 0);
+    }
+
+    #[test]
+    fn loaded_skin_cut_edge_delaminates_nearby_attachment() {
+        let mut materials = Materials::default();
+        materials.max_fluid_particles = 0;
+        materials.max_wound_sources = 0;
+        materials.skin_flap_load_threshold = 120.0;
+        materials.skin_flap_stress_threshold = 0.70;
+        materials.skin_flap_cut_radius = 18.0;
+        materials.max_skin_flap_detachments_per_step = 2;
+        let mut world = World::new(materials);
+        let skin_a = world.add_point(Vec2 { x: 0.0, y: 0.0 }, TissueLayer::Skin, false);
+        let skin_b = world.add_point(Vec2 { x: 12.0, y: 0.0 }, TissueLayer::Skin, false);
+        let muscle = world.add_point(Vec2 { x: 0.0, y: 7.0 }, TissueLayer::Muscle, false);
+        world.debug.tool = ToolMode::Sharp;
+        world.debug.impact = 900.0;
+        world.add_spring(skin_a, skin_b, TissueLayer::Skin, 0.8, 1.7, 1000.0, false);
+        world.add_attachment(skin_a, muscle);
+        world.springs[0].broken = true;
+        world.points[skin_a].load = 180.0;
+        world.points[skin_b].load = 180.0;
+        world.points[skin_a].exposure = 0.85;
+        world.points[skin_b].exposure = 0.85;
+
+        world.delaminate_skin_flaps_from_cut_edges();
+
+        assert!(
+            world.attachments[0].broken,
+            "a loaded skin cut should peel nearby skin-muscle coupling"
+        );
+        assert_eq!(world.stats.broken_attachments, 1);
+        assert_eq!(world.stats.skin_flap_detachments, 1);
+        assert_eq!(world.debug.skin_flap_detachments, 1);
+        assert!(world.points[muscle].exposure > 0.9);
+    }
+
+    #[test]
+    fn quiet_skin_cut_edge_does_not_delaminate_attachment() {
+        let mut materials = Materials::default();
+        materials.max_fluid_particles = 0;
+        materials.max_wound_sources = 0;
+        materials.skin_flap_load_threshold = 400.0;
+        materials.skin_flap_stress_threshold = 0.60;
+        materials.skin_flap_cut_radius = 18.0;
+        materials.max_skin_flap_detachments_per_step = 2;
+        let mut world = World::new(materials);
+        let skin_a = world.add_point(Vec2 { x: 0.0, y: 0.0 }, TissueLayer::Skin, false);
+        let skin_b = world.add_point(Vec2 { x: 12.0, y: 0.0 }, TissueLayer::Skin, false);
+        let muscle = world.add_point(Vec2 { x: 0.0, y: 7.0 }, TissueLayer::Muscle, false);
+        world.debug.tool = ToolMode::Sharp;
+        world.debug.impact = 900.0;
+        world.add_spring(skin_a, skin_b, TissueLayer::Skin, 0.8, 1.7, 1000.0, false);
+        world.add_attachment(skin_a, muscle);
+        world.springs[0].broken = true;
+        world.points[skin_a].load = 80.0;
+        world.points[skin_b].load = 80.0;
+        world.points[skin_a].exposure = 0.20;
+        world.points[skin_b].exposure = 0.20;
+
+        world.delaminate_skin_flaps_from_cut_edges();
+
+        assert!(
+            !world.attachments[0].broken,
+            "a quiet cut edge should not peel attachment by proximity alone"
+        );
+        assert_eq!(world.stats.skin_flap_detachments, 0);
+        assert_eq!(world.debug.skin_flap_detachments, 0);
+    }
+
+    #[test]
+    fn inactive_wound_source_keeps_following_its_tissue_anchor() {
+        let mut materials = Materials::default();
+        materials.max_fluid_particles = 0;
+        let mut world = World::new(materials);
+        let point = world.add_point(Vec2 { x: 10.0, y: 10.0 }, TissueLayer::Skin, false);
+        world.open_wound(
+            Vec2 { x: 10.0, y: 10.0 },
+            Vec2 { x: 0.0, y: -1.0 },
+            TissueLayer::Skin,
+            1.0,
+            2.0,
+            0.6,
+        );
+        world.wounds[0].active = false;
+        world.wounds[0].clot = 1.0;
+        world.points[point].position = Vec2 { x: 34.0, y: 18.0 };
+
+        world.update_wound_anchors();
+
+        assert_eq!(world.wounds[0].position, world.points[point].position);
+    }
+
+    #[test]
+    fn loaded_tissue_reopens_clotted_wound_source() {
+        let mut materials = Materials::default();
+        materials.max_fluid_particles = 0;
+        materials.wound_reopen_load_threshold = 100.0;
+        materials.wound_reopen_radius = 14.0;
+        materials.wound_reopen_pressure_scale = 0.50;
+        materials.wound_reopen_clot_loss = 0.25;
+        materials.max_wound_reopens_per_step = 2;
+        let mut world = World::new(materials);
+        let point = world.add_point(Vec2 { x: 10.0, y: 10.0 }, TissueLayer::Skin, false);
+        world.open_wound(
+            Vec2 { x: 10.0, y: 10.0 },
+            Vec2 { x: 0.0, y: -1.0 },
+            TissueLayer::Skin,
+            1.0,
+            2.0,
+            0.6,
+        );
+        world.wounds[0].active = false;
+        world.wounds[0].age = 2.0;
+        world.wounds[0].pressure = 0.0;
+        world.wounds[0].clot = 0.92;
+        world.wounds[0].accumulator = 0.0;
+        world.points[point].load = 180.0;
+
+        world.disturb_wounds_from_loaded_tissue();
+
+        assert!(
+            world.wounds[0].active,
+            "a loaded clotted wound source should become active again"
+        );
+        assert!(world.wounds[0].pressure > 0.0);
+        assert!(world.wounds[0].clot < 0.92);
+        assert!(world.wounds[0].accumulator > 0.0);
+        assert_eq!(world.stats.wound_reopens, 1);
+        assert_eq!(world.debug.wound_reopens, 1);
+        assert_eq!(world.debug.active_wounds, 1);
+    }
+
+    #[test]
+    fn quiet_tissue_does_not_reopen_clotted_wound_source() {
+        let mut materials = Materials::default();
+        materials.max_fluid_particles = 0;
+        materials.wound_reopen_load_threshold = 100.0;
+        materials.wound_reopen_radius = 14.0;
+        let mut world = World::new(materials);
+        let point = world.add_point(Vec2 { x: 10.0, y: 10.0 }, TissueLayer::Skin, false);
+        world.open_wound(
+            Vec2 { x: 10.0, y: 10.0 },
+            Vec2 { x: 0.0, y: -1.0 },
+            TissueLayer::Skin,
+            1.0,
+            2.0,
+            0.6,
+        );
+        world.wounds[0].active = false;
+        world.wounds[0].age = 2.0;
+        world.wounds[0].pressure = 0.0;
+        world.wounds[0].clot = 0.92;
+        world.points[point].load = 80.0;
+
+        world.disturb_wounds_from_loaded_tissue();
+
+        assert!(!world.wounds[0].active);
+        assert_eq!(world.wounds[0].pressure, 0.0);
+        assert_eq!(world.wounds[0].clot, 0.92);
+        assert_eq!(world.stats.wound_reopens, 0);
+        assert_eq!(world.debug.wound_reopens, 0);
+    }
+
+    #[test]
+    fn sleeping_fragment_skips_fragment_contact_work() {
+        let mut materials = Materials::default();
+        materials.max_active_bone_fragments = 1;
+        let mut world = World::new(materials);
+        let bone = world.add_bone_segment(
+            Vec2 { x: 100.0, y: 100.0 },
+            Vec2 { x: 160.0, y: 100.0 },
+            8.0,
+            9999.0,
+            false,
+        );
+        world.bones[bone].fractured = true;
+        world.bones[bone].sleeping = true;
+        world.add_point(Vec2 { x: 120.0, y: 105.0 }, TissueLayer::Muscle, false);
+
+        world.solve_bone_fragment_tissue_contacts();
+        world.solve_bone_fragment_repulsion();
+
+        assert_eq!(world.debug.fragment_tissue_checks, 0);
+        assert_eq!(world.debug.fragment_pair_checks, 0);
+        assert_eq!(world.debug.active_fragments, 0);
+    }
+
+    #[test]
+    fn settled_fluid_deposits_blood_stain() {
+        let mut materials = Materials::default();
+        materials.gravity = 920.0;
+        materials.max_fluid_particles = 4;
+        materials.max_blood_stains = 8;
+        let mut world = World::new(materials);
+
+        world.emit_fluid(
+            Vec2 { x: 100.0, y: 108.0 },
+            Vec2 { x: 0.0, y: 1.0 },
+            1,
+            90.0,
+            3.0,
+            1.0,
+        );
+        for _ in 0..24 {
+            world.integrate(world.materials.fixed_dt, 220.0, 120.0);
+        }
+
+        assert!(
+            world.stats.blood_stain_deposits > 0,
+            "fluid floor impact should leave a persistent stain deposit"
+        );
+        assert!(
+            world.blood_stains.iter().any(|stain| stain.intensity > 0.0),
+            "deposited blood stain should remain inspectable after the particle settles"
+        );
+        assert!(
+            world.fluids.iter().any(|fluid| fluid.stained),
+            "each fluid particle should remember that it has already deposited a stain"
+        );
+    }
+
+    #[test]
+    fn fluid_and_wound_caps_report_budget_replacements() {
+        let mut materials = Materials::default();
+        materials.max_fluid_particles = 1;
+        materials.max_wound_sources = 1;
+        materials.max_blood_stains = 1;
+        let mut world = World::new(materials);
+
+        world.emit_fluid(
+            Vec2 { x: 100.0, y: 100.0 },
+            Vec2 { x: 0.0, y: -1.0 },
+            3,
+            120.0,
+            2.0,
+            1.0,
+        );
+        assert_eq!(world.fluids.len(), 1);
+        assert!(
+            world.debug.fluid_budget_replacements > 0,
+            "fluid ring buffer replacements should be visible in debug telemetry"
+        );
+
+        world.open_wound(
+            Vec2 { x: 10.0, y: 10.0 },
+            Vec2 { x: 1.0, y: 0.0 },
+            TissueLayer::Skin,
+            1.0,
+            2.0,
+            0.6,
+        );
+        world.open_wound(
+            Vec2 { x: 100.0, y: 100.0 },
+            Vec2 { x: -1.0, y: 0.0 },
+            TissueLayer::Muscle,
+            1.0,
+            2.0,
+            0.8,
+        );
+        assert_eq!(world.wounds.len(), 1);
+        assert_eq!(world.debug.wound_budget_replacements, 1);
+
+        world.deposit_blood_stain(Vec2 { x: 10.0, y: 120.0 }, 4.0, 1.0);
+        world.deposit_blood_stain(Vec2 { x: 110.0, y: 120.0 }, 4.0, 1.0);
+        assert_eq!(world.blood_stains.len(), 1);
+        assert_eq!(world.debug.blood_stain_budget_replacements, 1);
     }
 }
 
@@ -3489,6 +9601,35 @@ pub fn create_layered_body(width: f64, height: f64, materials: Materials) -> Wor
         }
     }
 
+    let torso_cavity_areas = world
+        .areas
+        .iter()
+        .enumerate()
+        .filter_map(|(index, area)| {
+            if area.layer != TissueLayer::Muscle {
+                return None;
+            }
+            let centroid = Vec2 {
+                x: (world.points[area.a].home.x
+                    + world.points[area.b].home.x
+                    + world.points[area.c].home.x)
+                    / 3.0,
+                y: (world.points[area.a].home.y
+                    + world.points[area.b].home.y
+                    + world.points[area.c].home.y)
+                    / 3.0,
+            };
+            let nx = ((centroid.x - origin_x) / body_width) * 0.7;
+            let ny = (centroid.y - origin_y) / body_height;
+            if (-0.17..=0.17).contains(&nx) && (0.255..=0.640).contains(&ny) {
+                Some(index)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    world.add_cavity_from_areas(torso_cavity_areas);
+
     for skin_point in skin_points.iter().copied() {
         let mut nearest = [(usize::MAX, f64::INFINITY); SKIN_ATTACHMENT_CANDIDATES];
         let max_attachment_distance = materials.point_spacing * 3.15;
@@ -3523,6 +9664,39 @@ pub fn create_layered_body(width: f64, height: f64, materials: Materials) -> Wor
         y: origin_y + ny * body_height,
     };
 
+    world.add_organ_region(
+        OrganKind::LeftLung,
+        body_point(-0.055, 0.385),
+        Vec2 {
+            x: body_width * 0.075,
+            y: body_height * 0.125,
+        },
+    );
+    world.add_organ_region(
+        OrganKind::RightLung,
+        body_point(0.055, 0.385),
+        Vec2 {
+            x: body_width * 0.075,
+            y: body_height * 0.125,
+        },
+    );
+    world.add_organ_region(
+        OrganKind::Liver,
+        body_point(0.058, 0.555),
+        Vec2 {
+            x: body_width * 0.112,
+            y: body_height * 0.074,
+        },
+    );
+    world.add_organ_region(
+        OrganKind::Spleen,
+        body_point(-0.098, 0.560),
+        Vec2 {
+            x: body_width * 0.060,
+            y: body_height * 0.064,
+        },
+    );
+
     let head_bone = world.add_bone_segment(
         body_point(0.0, 0.070),
         body_point(0.0, 0.205),
@@ -3551,6 +9725,33 @@ pub fn create_layered_body(width: f64, height: f64, materials: Materials) -> Wor
         materials.bone_fracture_impulse * 0.9,
         false,
     );
+    let rib_specs = [
+        (0.335, 0.080, 0.358, 0.62),
+        (0.405, 0.095, 0.428, 0.58),
+        (0.475, 0.080, 0.500, 0.55),
+        (0.520, 0.045, 0.550, 0.52),
+    ];
+    let mut rib_bones = Vec::new();
+    for (root_ny, lateral_nx, tip_ny, strength_scale) in rib_specs {
+        let left_rib = world.add_bone_segment_with_kind(
+            body_point(-0.012, root_ny),
+            body_point(-lateral_nx, tip_ny),
+            3.4,
+            materials.bone_fracture_impulse * strength_scale,
+            false,
+            BoneKind::Rib,
+        );
+        rib_bones.push((left_rib, root_ny));
+        let right_rib = world.add_bone_segment_with_kind(
+            body_point(0.012, root_ny),
+            body_point(lateral_nx, tip_ny),
+            3.4,
+            materials.bone_fracture_impulse * strength_scale,
+            false,
+            BoneKind::Rib,
+        );
+        rib_bones.push((right_rib, root_ny));
+    }
     let left_upper_arm_bone = world.add_bone_segment(
         body_point(-0.130, 0.405),
         body_point(-0.165, 0.585),
@@ -3611,6 +9812,10 @@ pub fn create_layered_body(width: f64, height: f64, materials: Materials) -> Wor
     world.add_bone_joint(head_bone, 1.0, spine_bone, 0.0, -0.45, 0.45);
     world.add_bone_joint(spine_bone, 0.27, shoulder_bone, 0.5, -0.55, 0.55);
     world.add_bone_joint(spine_bone, 1.0, pelvis_bone, 0.5, -0.45, 0.45);
+    for (rib_bone, root_ny) in rib_bones {
+        let spine_t = ((root_ny - 0.250) / (0.720 - 0.250)).clamp(0.0, 1.0);
+        world.add_bone_joint(spine_bone, spine_t, rib_bone, 0.0, -0.40, 0.40);
+    }
     world.add_bone_joint(shoulder_bone, 0.0, left_upper_arm_bone, 0.0, -1.25, 1.05);
     world.add_bone_joint(
         left_upper_arm_bone,
@@ -3653,6 +9858,44 @@ pub fn create_layered_body(width: f64, height: f64, materials: Materials) -> Wor
             world.add_bone_attachment(muscle_point, nearest_bone, nearest_t);
         }
     }
+
+    world.add_vessel_segment(body_point(0.0, 0.255), body_point(0.0, 0.725), 4.1, 1.65);
+    world.add_vessel_segment(
+        body_point(-0.035, 0.710),
+        body_point(-0.072, 0.952),
+        3.0,
+        1.22,
+    );
+    world.add_vessel_segment(
+        body_point(0.035, 0.710),
+        body_point(0.072, 0.952),
+        3.0,
+        1.22,
+    );
+    world.add_vessel_segment(
+        body_point(-0.078, 0.385),
+        body_point(-0.158, 0.698),
+        2.5,
+        1.05,
+    );
+    world.add_vessel_segment(
+        body_point(0.078, 0.385),
+        body_point(0.158, 0.698),
+        2.5,
+        1.05,
+    );
+    world.add_vessel_segment(
+        body_point(-0.030, 0.205),
+        body_point(-0.105, 0.382),
+        2.6,
+        1.10,
+    );
+    world.add_vessel_segment(
+        body_point(0.030, 0.205),
+        body_point(0.105, 0.382),
+        2.6,
+        1.10,
+    );
 
     world
 }
@@ -3769,6 +10012,7 @@ fn tool_profile(tool: ToolMode) -> ToolProfile {
             mass_scale: 0.72,
             tissue_push_scale: 0.38,
             tissue_load_scale: 2.05,
+            contusion_scale: 0.42,
             bone_push_scale: 0.30,
             bone_load_scale: 0.58,
             fracture_scale: 0.76,
@@ -3787,6 +10031,7 @@ fn tool_profile(tool: ToolMode) -> ToolProfile {
             mass_scale: 1.85,
             tissue_push_scale: 1.24,
             tissue_load_scale: 1.18,
+            contusion_scale: 1.55,
             bone_push_scale: 1.46,
             bone_load_scale: 1.72,
             fracture_scale: 1.34,
@@ -3863,6 +10108,54 @@ fn sample_point_contact(point: Vec2, shape: &ToolContactShape) -> ToolPointConta
         normal: normalized(delta, shape.blade_normal),
         distance: distance(point, contact_point),
     }
+}
+
+fn tool_organ_contact(
+    shape: &ToolContactShape,
+    organ: OrganRegion,
+    extra_radius: f64,
+) -> Option<OrganToolContact> {
+    let tool_point = if shape.blade_segment {
+        lerp(
+            shape.axis_start,
+            shape.axis_end,
+            segment_t(organ.center, shape.axis_start, shape.axis_end),
+        )
+    } else {
+        shape.center
+    };
+    let dx = (tool_point.x - organ.center.x) / organ.radius.x.max(EPSILON);
+    let dy = (tool_point.y - organ.center.y) / organ.radius.y.max(EPSILON);
+    let normalized_distance = (dx * dx + dy * dy).sqrt();
+    let average_radius = ((organ.radius.x + organ.radius.y) * 0.5).max(1.0);
+    let reach = if shape.blade_segment {
+        extra_radius.max(0.0) + shape.influence * 0.55
+    } else {
+        extra_radius.max(0.0) + shape.influence
+    };
+    let normalized_reach = (reach / average_radius).max(0.04);
+    if normalized_distance > 1.0 + normalized_reach {
+        return None;
+    }
+    let contact = if normalized_distance <= 1.0 {
+        (1.0 - normalized_distance * 0.18).clamp(0.72, 1.0)
+    } else {
+        (1.0 - (normalized_distance - 1.0) / normalized_reach).clamp(0.0, 1.0)
+    };
+    if contact <= EPSILON {
+        None
+    } else {
+        Some(OrganToolContact {
+            tool_point,
+            contact,
+        })
+    }
+}
+
+fn point_in_organ(point: Vec2, organ: OrganRegion) -> bool {
+    let dx = (point.x - organ.center.x) / organ.radius.x.max(EPSILON);
+    let dy = (point.y - organ.center.y) / organ.radius.y.max(EPSILON);
+    dx * dx + dy * dy <= 1.0
 }
 
 fn remap_joint_end(
@@ -3969,7 +10262,7 @@ fn fragment_tissue_fallback_normal(bone: BoneSegment, point: Vec2, t: f64) -> Ve
     normal
 }
 
-fn damp_bone_velocity_against_tissue(
+fn damp_bone_velocity_against_contact(
     bone: &mut BoneSegment,
     normal: Vec2,
     normal_damping: f64,
@@ -4142,6 +10435,44 @@ fn bone_point(bone: BoneSegment, t: f64) -> Vec2 {
     }
 }
 
+fn bone_anchor_velocity(bone: BoneSegment, t: f64) -> Vec2 {
+    subtract(
+        bone_point(bone, t),
+        lerp(bone.previous_a, bone.previous_b, t.clamp(0.0, 1.0)),
+    )
+}
+
+fn constrain_fragment_endpoint_to_floor(
+    materials: Materials,
+    point: &mut Vec2,
+    previous: &mut Vec2,
+    floor_y: f64,
+) -> (bool, bool) {
+    if point.y <= floor_y {
+        return (false, false);
+    }
+
+    let velocity = subtract(*point, *previous);
+    let speed = hypot(velocity.x, velocity.y) / materials.fixed_dt.max(EPSILON);
+    let resting = speed < materials.fragment_floor_rest_speed.max(1.0);
+    point.y = floor_y;
+
+    let tangent_retention = (1.0 - materials.fragment_floor_friction).clamp(0.0, 1.0);
+    previous.x = point.x - velocity.x * tangent_retention;
+    if velocity.y > 0.0 {
+        let normal_retention = if resting {
+            0.0
+        } else {
+            (1.0 - materials.fragment_floor_normal_damping).clamp(0.0, 0.55)
+        };
+        previous.y = point.y - velocity.y * normal_retention;
+    } else {
+        previous.y = previous.y.min(point.y);
+    }
+
+    (true, resting)
+}
+
 fn bone_angle(bone: BoneSegment) -> f64 {
     (bone.b.y - bone.a.y).atan2(bone.b.x - bone.a.x)
 }
@@ -4150,8 +10481,67 @@ fn free_bone_fragment(bone: BoneSegment) -> bool {
     !bone.pinned && (bone.fractured || bone.splinter)
 }
 
+fn awake_free_bone_fragment(bone: BoneSegment) -> bool {
+    free_bone_fragment(bone) && !bone.sleeping
+}
+
+fn fragment_endpoint_speed(bone: BoneSegment, dt: f64) -> f64 {
+    distance(bone.a, bone.previous_a).max(distance(bone.b, bone.previous_b)) / dt.max(EPSILON)
+}
+
+fn bone_contact_mass(bone: BoneSegment, scale: f64) -> f64 {
+    (bone.rest_length * bone.radius.max(1.0) * bone.radius.max(1.0) * scale.max(0.1)).max(1.0)
+}
+
 fn distance_to_segment(point: Vec2, a: Vec2, b: Vec2) -> f64 {
     distance(point, lerp(a, b, segment_t(point, a, b)))
+}
+
+fn segment_aabb(a: Vec2, b: Vec2, margin: f64) -> Aabb {
+    let margin = margin.max(0.0);
+    Aabb {
+        min: Vec2 {
+            x: a.x.min(b.x) - margin,
+            y: a.y.min(b.y) - margin,
+        },
+        max: Vec2 {
+            x: a.x.max(b.x) + margin,
+            y: a.y.max(b.y) + margin,
+        },
+    }
+}
+
+fn spatial_key(point: Vec2, cell_size: f64) -> GridKey {
+    let cell_size = cell_size.max(1.0);
+    GridKey {
+        x: (point.x / cell_size).floor() as i32,
+        y: (point.y / cell_size).floor() as i32,
+    }
+}
+
+fn for_spatial_cells<F>(aabb: Aabb, cell_size: f64, mut visit: F)
+where
+    F: FnMut(GridKey),
+{
+    let cell_size = cell_size.max(1.0);
+    let min_key = spatial_key(aabb.min, cell_size);
+    let max_key = spatial_key(aabb.max, cell_size);
+    for y in min_key.y.min(max_key.y)..=min_key.y.max(max_key.y) {
+        for x in min_key.x.min(max_key.x)..=min_key.x.max(max_key.x) {
+            visit(GridKey { x, y });
+        }
+    }
+}
+
+fn add_index_to_spatial_cells(
+    grid: &mut HashMap<GridKey, Vec<usize>>,
+    aabb: Aabb,
+    cell_size: f64,
+    index: usize,
+) {
+    for_spatial_cells(aabb, cell_size, |key| {
+        grid.entry(key).or_insert_with(Vec::new).push(index);
+    });
 }
 
 fn distance_sq(a: Vec2, b: Vec2) -> f64 {

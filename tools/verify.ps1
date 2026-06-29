@@ -14,6 +14,7 @@ Invoke-Cargo -Arguments @("run", "--bin", "strike_scenarios", "--", "output\stri
 
 if (-not $SkipDiagnostics) {
     Invoke-Cargo -Arguments @("run", "--bin", "anatomy_diagnostics", "--", "output\anatomy_debug.svg") -Label "Run Rust anatomy diagnostics"
+    Invoke-Cargo -Arguments @("run", "--bin", "visual_damage_diagnostics", "--", "output\damage_visual_debug.svg") -Label "Run Rust visual damage diagnostics"
 }
 
 if ($BuildApp) {
@@ -27,6 +28,8 @@ Write-Host "Verification complete."
 Write-Host "Strike tuning report: $repoRoot\output\strike_tuning_report.txt"
 if (-not $SkipDiagnostics) {
     Write-Host "Anatomy snapshot: $repoRoot\output\anatomy_debug.svg"
+    Write-Host "Damage visual snapshot: $repoRoot\output\damage_visual_debug.svg"
+    Write-Host "Damage visual metrics: $repoRoot\output\damage_visual_summary.csv"
 }
 if ($BuildApp) {
     Write-Host "App executable: $repoRoot\realistic_physics.exe"

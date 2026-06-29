@@ -20,5 +20,9 @@ path = "src/bin/anatomy_diagnostics.rs"
 name = "strike_scenarios"
 path = "src/bin/strike_scenarios.rs"
 
+[[bin]]
+name = "visual_damage_diagnostics"
+path = "src/bin/visual_damage_diagnostics.rs"
+
 [dependencies]
 macroquad = "0.4"

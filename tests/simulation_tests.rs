@@ -179,6 +179,29 @@ fn generated_body_has_expected_layers_and_anatomy() {
     if world.bone_joints().is_empty() {
         fail("bones should be connected by joints");
     }
+    if world
+        .bones()
+        .iter()
+        .filter(|bone| bone.kind == rp::BoneKind::Rib)
+        .count()
+        < 8
+    {
+        fail("body should contain a low-resolution rib cage proxy");
+    }
+    if world.vessels().len() < 7 {
+        fail("body should contain low-resolution major vessel anatomy");
+    }
+    if world.cavities().is_empty()
+        || world
+            .cavities()
+            .iter()
+            .all(|cavity| cavity.rest_area <= 0.0 || cavity.area_indices.is_empty())
+    {
+        fail("body should contain a low-resolution torso cavity pressure region");
+    }
+    if world.organs().len() < 4 {
+        fail("body should contain low-resolution anchored internal organ proxies");
+    }
 
     let skin_points = world
         .points()
@@ -282,30 +305,78 @@ fn rest_simulation_stays_stable_and_idle() {
         || stats.broken_attachments != 0
         || stats.broken_bone_attachments != 0
         || stats.broken_bone_joints != 0
+        || stats.bone_joint_subluxations != 0
+        || stats.joint_ligament_damage_events != 0
         || stats.emitted_fluid_particles != 0
+        || stats.fracture_marrow_sources != 0
+        || stats.blood_loss != 0.0
+        || stats.blood_stain_deposits != 0
         || stats.opened_wounds != 0
         || stats.wound_fluid_particles != 0
+        || stats.contusion_events != 0
+        || stats.tissue_fatigue_events != 0
+        || stats.tissue_plastic_events != 0
+        || stats.muscle_fiber_tears != 0
+        || stats.tear_propagations != 0
+        || stats.muscle_cut_transfers != 0
+        || stats.muscle_crush_ruptures != 0
+        || stats.cavity_ruptures != 0
+        || stats.organ_damage_events != 0
+        || stats.organ_penetrations != 0
+        || stats.rib_organ_punctures != 0
+        || stats.organ_ruptures != 0
+        || stats.skin_flap_detachments != 0
+        || stats.vessel_lacerations != 0
+        || stats.fragment_vessel_lacerations != 0
+        || stats.wound_reopens != 0
         || stats.fragment_tissue_hits != 0
         || stats.fragment_tissue_tears != 0
+        || stats.fragment_skin_punctures != 0
         || stats.fractured_bones != 0
     {
         panic!(
-            "FAIL: rest simulation should not tear tissue: skin={} muscle={} attachments={} bone_attachments={} bone_joints={} emitted_fluid={} wounds={} wound_fluid={} fragment_hits={} fragment_tears={} fractures={}",
+            "FAIL: rest simulation should not tear tissue: skin={} muscle={} fiber_tears={} attachments={} bone_attachments={} bone_joints={} subluxations={} ligament_damage={} emitted_fluid={} marrow_sources={} blood_loss={:.3} stains={} wounds={} wound_fluid={} contusions={} fatigue={} plastic={} propagation={} deep_cut={} crush_ruptures={} cavity={} organ_damage={} organ_penetrations={} rib_organ_punctures={} organ_ruptures={} flaps={} vessel_lacerations={} fragment_vessel_lacerations={} reopens={} fragment_hits={} fragment_tears={} fragment_punctures={} fractures={}",
             stats.broken_skin,
             stats.broken_muscle,
+            stats.muscle_fiber_tears,
             stats.broken_attachments,
             stats.broken_bone_attachments,
             stats.broken_bone_joints,
+            stats.bone_joint_subluxations,
+            stats.joint_ligament_damage_events,
             stats.emitted_fluid_particles,
+            stats.fracture_marrow_sources,
+            stats.blood_loss,
+            stats.blood_stain_deposits,
             stats.opened_wounds,
             stats.wound_fluid_particles,
+            stats.contusion_events,
+            stats.tissue_fatigue_events,
+            stats.tissue_plastic_events,
+            stats.tear_propagations,
+            stats.muscle_cut_transfers,
+            stats.muscle_crush_ruptures,
+            stats.cavity_ruptures,
+            stats.organ_damage_events,
+            stats.organ_penetrations,
+            stats.rib_organ_punctures,
+            stats.organ_ruptures,
+            stats.skin_flap_detachments,
+            stats.vessel_lacerations,
+            stats.fragment_vessel_lacerations,
+            stats.wound_reopens,
             stats.fragment_tissue_hits,
             stats.fragment_tissue_tears,
+            stats.fragment_skin_punctures,
             stats.fractured_bones
         );
     }
-    if !world.fluids().is_empty() || !world.wounds().is_empty() {
-        fail("rest simulation should not emit fluid particles");
+    if !world.fluids().is_empty() || !world.blood_stains().is_empty() || !world.wounds().is_empty()
+    {
+        fail("rest simulation should not emit fluid particles, stains, or wounds");
+    }
+    if world.blood_volume_fraction() < 0.999 {
+        fail("rest simulation should retain full finite blood volume");
     }
     let mut skin_displacement_sum = 0.0;
     let mut skin_displacement_count = 0usize;
