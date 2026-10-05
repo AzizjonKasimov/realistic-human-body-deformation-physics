@@ -16,9 +16,10 @@ This project is aiming for physically grounded, game-feasible body destruction r
    - Bone joints constrain relative motion before breakage.
    - Joints should have an intermediate subluxation/dislocation state under traumatic stretch or overextension, adding slack and reduced correction before total separation.
    - First-time subluxation should leave local ligament/capsule damage in the surrounding tissue proxy, modeled as a small radius-limited load/contusion event rather than a full finite-element capsule solve.
-   - Broken bones become independent fragments with caps, splinters, inertia, and fragment-tissue contact.
+   - Broken bones become independent fragments with caps, inertia, and fragment-tissue contact.
+   - A fracture should usually stay closed: the bone ends tear the muscle at the break and bruise the flesh around it while skin and bleeding stay inside. Only a break loaded far past the bone's strength should throw its pieces apart, chip a splinter, and tear out through the flesh as an open fracture.
    - Moving broken tips and splinters should be able to puncture intact skin from inside the body under impulse, tracked separately from generic fragment-tissue rubbing.
-   - Fresh fracture caps should spawn capped, bone-anchored marrow bleeding sources so exposed hard-structure injury has persistent fluid evidence tied to the moving fragment.
+   - Open fracture caps should spawn capped, bone-anchored marrow bleeding sources so exposed hard-structure injury has persistent fluid evidence tied to the moving fragment.
    - Severe fractured-rib tip motion should be able to puncture nearby organ proxies under a capped swept-tip query, tracked separately from direct sharp-tool organ penetration.
    - Severe moving fracture fragments should be able to lacerate nearby major vessel proxies under a capped swept-tip query, tracked separately from direct tool laceration.
    - Free fragments should also collide with intact skeleton segments and transfer load back into that structure so debris can jam, shove, or contribute to secondary fracture instead of passing through support bones.
@@ -42,7 +43,8 @@ This project is aiming for physically grounded, game-feasible body destruction r
    - Skin and muscle use PBD-style points, springs, area constraints, and breakable attachments.
    - XPBD-style compliance is the right next solver upgrade when stiffness tuning starts depending too much on timestep or iteration count; the Rust prototype now has opt-in compliant spring and area projection with per-step lambda reset and focused tests.
    - Sharp cuts should propagate from existing broken skin edges into adjacent high-stress or fatigued skin springs under a per-step cap, so cut growth follows local stress concentration without becoming an unbounded flood fill.
-   - A sharp blade is a thin segment swept along its motion each step: it severs only the fibers its edge or tip path crosses, nudges tissue off its thin edge instead of shoving it, and loads bone weakly, so knife wounds are incisions along the stroke rather than crush channels.
+   - Tools are solid bodies with momentum, driven toward the pointer by a hand spring whose pressing force is capped at what an arm can push. Blunt tools exchange momentum with the tissue and bone they shove, and their contact stays in the solver iterations so the tissue network pushes back on them; a swing therefore stops in the body instead of passing through it, and injury follows from the momentum actually delivered.
+   - A sharp blade is a thin segment swept along its motion each step that may only advance through fibers it severs: a fiber its tip or cutting edge reaches is cut when the blade's momentum or the hand's push overcomes it, and otherwise holds the blade, which can slide along it. Bone stops a blade. Skin is the tough layer and the muscle beneath parts readily. Knife wounds are incisions along the stroke rather than crush channels.
    - Fresh sharp skin openings should transfer into exposed or loaded muscle springs directly beneath them under a separate cap so deep injury follows the layer coupling, without older wounds widening while the blade works elsewhere.
    - Sharp cut edges should be able to delaminate nearby skin-to-muscle attachments under local load, creating capped skin flaps and exposure without letting every blunt tear peel the whole body.
    - Muscle should expose an anisotropic damage axis: fiber-aligned spring ruptures are tracked separately from cross-fiber muscle tears, and can feed local muscle detail through an opt-in damage floor once production tuning is ready.
@@ -57,7 +59,7 @@ This project is aiming for physically grounded, game-feasible body destruction r
    - Persistent wound leakage should drain a finite body-level blood reserve, and remaining reserve should scale later wound pressure plus passive tissue turgor/area support so severe bleeding has systemic state without simulating circulation.
    - Fatigue should feed both local tear thresholds and muscle damage detail, with conservative production defaults and stronger focused tests proving repeated-load failure.
    - Plastic deformation should be clamped against each spring's original rest shape and gated through long-settle strike telemetry so permanent set remains PC-feasible and does not silently replace tearing/fracture behavior.
-   - Clotted wound sources should remain attached to their tissue or bone anchors and reopen under later local load or fresh damage at their site, keeping their slot until the wound budget needs it, with capped per-step work so rebleeding behaves like material state instead of a new visual-only effect.
+   - Clotted wound sources should remain attached to their tissue or bone anchors and reopen under later local load, stretching of the tissue around the clot, or fresh damage at their site, keeping their slot until the wound budget needs it, with capped per-step work so rebleeding behaves like material state instead of a new visual-only effect.
    - Flesh detail should mostly be driven by a low-resolution physical proxy plus rendering detail, not by simulating every visible feature directly.
 
 4. **Coupling**

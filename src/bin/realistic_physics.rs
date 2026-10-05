@@ -34,26 +34,6 @@ const KEY_CONTROLS: [(KeyCode, ControlAction); 10] = [
 
 const FLOOR_HEIGHT: f32 = 38.0;
 
-struct StrikerDriveProfile {
-    down_drive: f64,
-    idle_drive: f64,
-    down_damping: f64,
-    idle_damping: f64,
-    max_speed: f64,
-}
-
-impl Default for StrikerDriveProfile {
-    fn default() -> Self {
-        Self {
-            down_drive: 118.0,
-            idle_drive: 62.0,
-            down_damping: 15.0,
-            idle_damping: 20.0,
-            max_speed: 4200.0,
-        }
-    }
-}
-
 struct AppState {
     world: rp::World,
     running: bool,
@@ -61,9 +41,8 @@ struct AppState {
     debug_overlay: bool,
     accumulator: f64,
     pointer_initialized: bool,
+    /// Where the hand is; the simulation pulls the tool toward it.
     pointer: rp::Vec2,
-    striker: rp::Vec2,
-    striker_velocity: rp::Vec2,
     impact_power: f64,
     tool: rp::ToolMode,
     view_mode: ViewMode,
@@ -96,7 +75,12 @@ struct SkinRim {
     /// Per point: rest distance across the body along the inward direction,
     /// which caps the shading strip so it never spills past a thin limb.
     reach: Vec<f32>,
+    /// Per spring: the skin triangles on either side, `NO_TRIANGLE` where there
+    /// is none, so wounds can find where intact skin meets an opening.
+    edge_triangles: Vec<[usize; 2]>,
 }
+
+const NO_TRIANGLE: usize = usize::MAX;
 
 impl AppState {
     fn new(width: f64, height: f64) -> Self {
@@ -114,8 +98,6 @@ impl AppState {
             accumulator: 0.0,
             pointer_initialized: false,
             pointer: initial_pointer,
-            striker: initial_pointer,
-            striker_velocity: rp::Vec2 { x: 0.0, y: 0.0 },
             impact_power: 2.0,
             tool: rp::ToolMode::Blunt,
             view_mode: ViewMode::Anatomy,
@@ -147,7 +129,6 @@ struct RenderPalette {
     muscle_hot: Color,
     muscle_contusion: Color,
     muscle_shadow: Color,
-    muscle_fiber: Color,
     bone: Color,
     bone_fractured: Color,
     bone_shadow: Color,
@@ -285,8 +266,6 @@ fn apply_control(app: &mut AppState, action: ControlAction) {
             app.skin_rim = skin_rim(&app.world);
             app.tool_blood = 0.0;
             app.seen_fluid = 0;
-            app.striker = app.pointer;
-            app.striker_velocity = rp::Vec2 { x: 0.0, y: 0.0 };
             app.accumulator = 0.0;
         }
     }
@@ -300,14 +279,13 @@ fn step_simulation(app: &mut AppState, frame_dt: f64) {
     app.accumulator += frame_dt;
     let fixed_dt = app.world.materials().fixed_dt;
     while app.accumulator >= fixed_dt {
-        advance_striker(app, fixed_dt);
         let input = rp::InputState {
             active: true,
             down: app.pointer_down,
-            x: app.striker.x,
-            y: app.striker.y,
-            vx: app.striker_velocity.x,
-            vy: app.striker_velocity.y,
+            x: app.pointer.x,
+            y: app.pointer.y,
+            vx: 0.0,
+            vy: 0.0,
             power: app.impact_power,
             tool: app.tool,
         };
@@ -325,53 +303,6 @@ fn step_simulation(app: &mut AppState, frame_dt: f64) {
         app.seen_fluid = emitted;
         app.tool_blood *= 0.9985;
         app.accumulator -= fixed_dt;
-    }
-}
-
-fn advance_striker(app: &mut AppState, dt: f64) {
-    let dx = app.pointer.x - app.striker.x;
-    let dy = app.pointer.y - app.striker.y;
-    let profile = striker_drive_profile(app.tool);
-    let drive = if app.pointer_down {
-        profile.down_drive
-    } else {
-        profile.idle_drive
-    };
-    let damping = if app.pointer_down {
-        profile.down_damping
-    } else {
-        profile.idle_damping
-    };
-
-    app.striker_velocity.x += (dx * drive - app.striker_velocity.x * damping) * dt;
-    app.striker_velocity.y += (dy * drive - app.striker_velocity.y * damping) * dt;
-    let speed = length(app.striker_velocity);
-    if speed > profile.max_speed {
-        let scale = profile.max_speed / speed;
-        app.striker_velocity.x *= scale;
-        app.striker_velocity.y *= scale;
-    }
-    app.striker.x += app.striker_velocity.x * dt;
-    app.striker.y += app.striker_velocity.y * dt;
-}
-
-fn striker_drive_profile(tool: rp::ToolMode) -> StrikerDriveProfile {
-    match tool {
-        rp::ToolMode::Sharp => StrikerDriveProfile {
-            down_drive: 132.0,
-            idle_drive: 70.0,
-            down_damping: 13.0,
-            idle_damping: 18.0,
-            max_speed: 4600.0,
-        },
-        rp::ToolMode::Heavy => StrikerDriveProfile {
-            down_drive: 74.0,
-            idle_drive: 42.0,
-            down_damping: 22.0,
-            idle_damping: 28.0,
-            max_speed: 3200.0,
-        },
-        rp::ToolMode::Blunt => StrikerDriveProfile::default(),
     }
 }
 
@@ -414,7 +345,6 @@ fn render_palette() -> RenderPalette {
         muscle_hot: rgba(190, 35, 47, 225),
         muscle_contusion: rgba(49, 13, 61, 215),
         muscle_shadow: rgba(47, 8, 13, 150),
-        muscle_fiber: rgba(235, 82, 79, 218),
         bone: rgba(222, 211, 181, 240),
         bone_fractured: rgba(255, 245, 218, 255),
         bone_shadow: rgba(53, 43, 35, 160),
@@ -475,35 +405,33 @@ fn draw_background(ctx: &RenderContext) {
 fn draw_body_layers(ctx: &RenderContext) {
     let world = &ctx.app.world;
 
-    if !ctx.anatomy {
-        draw_bones(ctx, BonePass::Subsurface);
-    }
-
-    draw_muscle_layer(ctx);
     if ctx.anatomy {
+        draw_muscle_layer(ctx);
+        draw_muscle_voids(ctx);
         draw_major_vessels(ctx);
-    }
-    draw_skin_layer(ctx);
-    draw_exposed_tissue_detail(ctx);
-    if !ctx.anatomy {
-        draw_closed_cut_skin(ctx);
-    }
-
-    if ctx.anatomy {
+        draw_skin_layer(ctx);
         draw_bone_attachments(ctx);
         draw_bones(ctx, BonePass::Anatomy);
     } else {
-        draw_bones(ctx, BonePass::ExposedDamage);
+        // Inside out: a cavity where muscle is torn away, the bones, the
+        // muscle, then the skin. Bone shows only through openings in the
+        // flesh, or where a broken end sticks out of the body.
+        draw_muscle_voids(ctx);
+        draw_bones(ctx, BonePass::Buried);
+        draw_muscle_layer(ctx);
+        draw_skin_layer(ctx);
+        draw_closed_cut_skin(ctx);
     }
 
-    draw_wound_edges(ctx);
+    draw_skin_wounds(ctx);
     if !ctx.anatomy {
         draw_major_vessels(ctx);
     }
     draw_wound_sources(ctx);
 
+    // Where the tool presses hardest; a debugging aid, so only with the panel.
     let debug = world.debug();
-    if debug.max_depth > 0.0 {
+    if ctx.app.debug_overlay && debug.max_depth > 0.0 {
         draw_soft_circle(
             to_mq(debug.strongest_contact),
             13.0,
@@ -521,6 +449,10 @@ fn draw_body_layers(ctx: &RenderContext) {
 }
 
 fn draw_muscle_layer(ctx: &RenderContext) {
+    if !ctx.anatomy {
+        draw_muscle_flesh(ctx);
+        return;
+    }
     let world = &ctx.app.world;
     for triangle in world.triangles() {
         if triangle.layer != rp::TissueLayer::Muscle || !world.triangle_alive(triangle) {
@@ -562,18 +494,66 @@ fn draw_muscle_layer(ctx: &RenderContext) {
         };
         fill_triangle(world, triangle, shadow);
         fill_triangle(world, triangle, fill);
+    }
+}
 
-        if triangle.damage > 0.12 || exposure > 0.35 {
-            outline_triangle(
-                world,
-                triangle,
-                with_alpha(
-                    ctx.palette.wound_edge,
-                    (0.20 + heat as f32 * 0.30).min(0.55),
-                ),
-                1.0,
-            );
+/// Muscle as solid flesh in one mesh. The skin covers it, so it shows only
+/// through openings in the skin, as red flesh rather than a faint wash.
+fn draw_muscle_flesh(ctx: &RenderContext) {
+    let world = &ctx.app.world;
+    let points = world.points();
+    let mut vertex_of = vec![u16::MAX; points.len()];
+    let mut mesh = Mesh {
+        vertices: Vec::new(),
+        indices: Vec::new(),
+        texture: None,
+    };
+    for triangle in world.triangles() {
+        if triangle.layer != rp::TissueLayer::Muscle || !world.triangle_alive(triangle) {
+            continue;
         }
+        for index in [triangle.a, triangle.b, triangle.c] {
+            if vertex_of[index] == u16::MAX {
+                let point = &points[index];
+                let heat = (point.load / 900.0 + point.exposure * 0.35).clamp(0.0, 1.0) as f32;
+                let mut color = mix(ctx.palette.muscle_base, ctx.palette.muscle_hot, heat);
+                color = mix(
+                    color,
+                    ctx.palette.muscle_contusion,
+                    (point.contusion * 0.48).clamp(0.0, 0.62) as f32,
+                );
+                color.a = 0.94;
+                vertex_of[index] = mesh.vertices.len() as u16;
+                mesh.vertices.push(Vertex::new(
+                    point.position.x as f32,
+                    point.position.y as f32,
+                    0.0,
+                    0.0,
+                    0.0,
+                    color,
+                ));
+            }
+            mesh.indices.push(vertex_of[index]);
+        }
+    }
+    draw_mesh(&mesh);
+}
+
+/// Torn-through muscle as a dark cavity. It is drawn beneath the skin, so it
+/// shows only where the skin over it is open.
+fn draw_muscle_voids(ctx: &RenderContext) {
+    let world = &ctx.app.world;
+    for triangle in world.triangles() {
+        if triangle.layer != rp::TissueLayer::Muscle || world.triangle_alive(triangle) {
+            continue;
+        }
+        let (load, exposure) = triangle_point_metrics(world, triangle);
+        let depth = (exposure * 0.55 + triangle.damage * 0.45 + load / 2200.0).clamp(0.0, 1.0);
+        fill_triangle(
+            world,
+            triangle,
+            with_alpha(ctx.palette.wound_shadow, 0.45 + depth as f32 * 0.30),
+        );
     }
 }
 
@@ -647,6 +627,25 @@ fn cut_gap(world: &rp::World, spring: &rp::Spring) -> f64 {
     length(sub(points[spring.b].position, points[spring.a].position)) / spring.rest.max(1.0)
 }
 
+/// How open a skin triangle is, from 0 (intact, or split by a cut whose edges
+/// still meet) to 1 (gone, showing whatever lies beneath).
+fn skin_opening(world: &rp::World, triangle: &rp::Triangle) -> f32 {
+    if world.triangle_alive(triangle) {
+        return 0.0;
+    }
+    if triangle.failed {
+        return 1.0;
+    }
+    let springs = world.springs();
+    let widest = [triangle.edge_ab, triangle.edge_bc, triangle.edge_ca]
+        .iter()
+        .filter_map(|&edge| springs.get(edge))
+        .filter(|spring| spring.broken)
+        .map(|spring| cut_gap(world, spring))
+        .fold(1.0, f64::max);
+    smoothstep(1.06, 1.4, widest as f32)
+}
+
 /// Skin triangles split by a clean cut that has not pulled apart yet. The mesh
 /// cannot split inside a triangle, so without this a thin knife cut would show
 /// as a whole row of missing skin; instead the skin stays closed over the cut
@@ -654,7 +653,6 @@ fn cut_gap(world: &rp::World, spring: &rp::Spring) -> f64 {
 fn draw_closed_cut_skin(ctx: &RenderContext) {
     let world = &ctx.app.world;
     let points = world.points();
-    let springs = world.springs();
     let mut mesh = Mesh {
         vertices: Vec::new(),
         indices: Vec::new(),
@@ -667,13 +665,7 @@ fn draw_closed_cut_skin(ctx: &RenderContext) {
         {
             continue;
         }
-        let widest = [triangle.edge_ab, triangle.edge_bc, triangle.edge_ca]
-            .iter()
-            .filter_map(|&edge| springs.get(edge))
-            .filter(|spring| spring.broken)
-            .map(|spring| cut_gap(world, spring))
-            .fold(1.0, f64::max);
-        let closed = 1.0 - smoothstep(1.06, 1.4, widest as f32);
+        let closed = 1.0 - skin_opening(world, triangle);
         if closed <= 0.02 || mesh.vertices.len() + 3 > u16::MAX as usize {
             continue;
         }
@@ -818,7 +810,8 @@ fn skin_rim(world: &rp::World) -> SkinRim {
     let points = world.points();
     let springs = world.springs();
     let mut owners: Vec<(u8, usize)> = vec![(0, 0); springs.len()];
-    for triangle in world.triangles() {
+    let mut edge_triangles = vec![[NO_TRIANGLE; 2]; springs.len()];
+    for (index, triangle) in world.triangles().iter().enumerate() {
         if triangle.layer != rp::TissueLayer::Skin {
             continue;
         }
@@ -829,6 +822,10 @@ fn skin_rim(world: &rp::World) -> SkinRim {
         ] {
             if let Some(owner) = owners.get_mut(edge) {
                 *owner = (owner.0.saturating_add(1), opposite);
+            }
+            if let Some(sides) = edge_triangles.get_mut(edge) {
+                let free = usize::from(sides[0] != NO_TRIANGLE);
+                sides[free.min(1)] = index;
             }
         }
     }
@@ -868,7 +865,11 @@ fn skin_rim(world: &rp::World) -> SkinRim {
             reach[index] = reach[index].max(nearest as f32);
         }
     }
-    SkinRim { edges, reach }
+    SkinRim {
+        edges,
+        reach,
+        edge_triangles,
+    }
 }
 
 /// Distance along the ray to segment `a`-`b`, if they cross.
@@ -892,90 +893,6 @@ fn ray_hits_segment(
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
-}
-
-fn draw_exposed_tissue_detail(ctx: &RenderContext) {
-    let world = &ctx.app.world;
-    for triangle in world.triangles() {
-        if triangle.layer != rp::TissueLayer::Muscle {
-            continue;
-        }
-        let (load, exposure) = triangle_point_metrics(world, triangle);
-        if world.triangle_alive(triangle) {
-            let detail = (triangle.damage * 0.75 + exposure * 0.85 + load / 1800.0).clamp(0.0, 1.0);
-            if detail > 0.18 {
-                draw_muscle_fibers(ctx, triangle, detail as f32);
-            }
-        } else if exposure > 0.22 || load > 260.0 || triangle.damage > 0.72 {
-            draw_failed_muscle_void(ctx, triangle, exposure, load);
-        }
-    }
-}
-
-fn draw_muscle_fibers(ctx: &RenderContext, triangle: &rp::Triangle, detail: f32) {
-    let points = ctx.app.world.points();
-    let a = points[triangle.a].position;
-    let b = points[triangle.b].position;
-    let c = points[triangle.c].position;
-    let centroid = scale(add(add(a, b), c), 1.0 / 3.0);
-    let edges = [(a, b), (b, c), (c, a)];
-    let mut longest = edges[0];
-    let mut longest_len = length(sub(longest.1, longest.0));
-    for edge in edges.iter().skip(1) {
-        let len = length(sub(edge.1, edge.0));
-        if len > longest_len {
-            longest = *edge;
-            longest_len = len;
-        }
-    }
-    if longest_len < 6.0 {
-        return;
-    }
-    let fiber_dir = normalized(sub(longest.1, longest.0), rp::Vec2 { x: 1.0, y: 0.0 });
-    let normal = rp::Vec2 {
-        x: -fiber_dir.y,
-        y: fiber_dir.x,
-    };
-    let span = longest_len * (0.18 + f64::from(detail) * 0.24);
-    let rows = if detail > 0.68 { 3 } else { 2 };
-    for row in 0..rows {
-        let row_t = if rows == 1 {
-            0.0
-        } else {
-            row as f64 / (rows - 1) as f64 - 0.5
-        };
-        let center = add(centroid, scale(normal, row_t * longest_len * 0.18));
-        let trim = 0.72 - f64::from(detail) * 0.16;
-        let start = sub(center, scale(fiber_dir, span * trim));
-        let end = add(center, scale(fiber_dir, span));
-        draw_line_vec(
-            start,
-            end,
-            0.8 + detail * 1.2,
-            with_alpha(ctx.palette.muscle_fiber, 0.16 + detail * 0.38),
-        );
-    }
-}
-
-fn draw_failed_muscle_void(ctx: &RenderContext, triangle: &rp::Triangle, exposure: f64, load: f64) {
-    let intensity = (exposure * 0.55 + triangle.damage * 0.45 + load / 2200.0).clamp(0.0, 1.0);
-    fill_triangle(
-        &ctx.app.world,
-        triangle,
-        with_alpha(
-            ctx.palette.wound_shadow,
-            (0.12 + intensity as f32 * 0.30).min(0.46),
-        ),
-    );
-    outline_triangle(
-        &ctx.app.world,
-        triangle,
-        with_alpha(
-            ctx.palette.wound_edge,
-            (0.18 + intensity as f32 * 0.36).min(0.58),
-        ),
-        1.1,
-    );
 }
 
 fn draw_major_vessels(ctx: &RenderContext) {
@@ -1045,23 +962,23 @@ fn point_along(a: rp::Vec2, b: rp::Vec2, t: f64) -> rp::Vec2 {
 #[derive(Clone, Copy)]
 enum BonePass {
     Anatomy,
-    Subsurface,
-    ExposedDamage,
+    /// Beneath the flesh in the normal view.
+    Buried,
 }
 
 fn draw_bones(ctx: &RenderContext, pass: BonePass) {
     for bone in ctx.app.world.bones() {
         match pass {
             BonePass::Anatomy => draw_bone(ctx, bone, 1.0, true),
-            BonePass::Subsurface => {
-                if !bone.fractured && !bone.splinter {
-                    draw_bone(ctx, bone, 0.20, false);
+            BonePass::Buried => {
+                // The spine runs down the back, behind everything a front
+                // wound can open.
+                if bone.kind == rp::BoneKind::Spine {
+                    continue;
                 }
-            }
-            BonePass::ExposedDamage => {
-                if bone.fractured || bone.splinter || bone.broken_start || bone.broken_end {
-                    draw_bone(ctx, bone, 0.95, true);
-                }
+                let broken =
+                    bone.fractured || bone.splinter || bone.broken_start || bone.broken_end;
+                draw_bone(ctx, bone, 1.0, broken);
             }
         }
     }
@@ -1191,126 +1108,85 @@ fn draw_bone_attachments(ctx: &RenderContext) {
     }
 }
 
-fn draw_wound_edges(ctx: &RenderContext) {
+/// Skin wounds drawn from the mesh itself. A cut is a line through the middle
+/// of every severed skin spring, joined across each triangle it passes through,
+/// so it follows the blade's path and fades as the cut pulls open. Where skin
+/// has opened, a thin dark rim marks the edge of the intact skin around it.
+fn draw_skin_wounds(ctx: &RenderContext) {
     let world = &ctx.app.world;
-    for spring in world.springs() {
-        if !spring.broken || spring.layer != rp::TissueLayer::Skin {
+    let points = world.points();
+    let springs = world.springs();
+    let triangles = world.triangles();
+    let opening: Vec<f32> = triangles
+        .iter()
+        .map(|triangle| {
+            if triangle.layer == rp::TissueLayer::Skin {
+                skin_opening(world, triangle)
+            } else {
+                1.0
+            }
+        })
+        .collect();
+    let line_color = mix(ctx.palette.wound_shadow, ctx.palette.wound_edge, 0.35);
+
+    for (index, triangle) in triangles.iter().enumerate() {
+        if triangle.layer != rp::TissueLayer::Skin || opening[index] >= 0.98 {
             continue;
         }
-        if spring.a >= world.points().len() || spring.b >= world.points().len() {
+        let mut cut = [(rp::Vec2 { x: 0.0, y: 0.0 }, 0.0f32); 3];
+        let mut count = 0;
+        for edge in [triangle.edge_ab, triangle.edge_bc, triangle.edge_ca] {
+            let Some(spring) = springs.get(edge).filter(|spring| spring.broken) else {
+                continue;
+            };
+            // A torn spring gapes at once; only a clean cut reads as a line.
+            let clean = 1.0 - smoothstep(1.3, 1.9, cut_gap(world, spring) as f32);
+            cut[count] = (
+                mid(points[spring.a].position, points[spring.b].position),
+                clean,
+            );
+            count += 1;
+        }
+        let shown = 1.0 - opening[index];
+        let centroid = scale(
+            add(
+                add(points[triangle.a].position, points[triangle.b].position),
+                points[triangle.c].position,
+            ),
+            1.0 / 3.0,
+        );
+        let stroke = |a: rp::Vec2, b: rp::Vec2, alpha: f32| {
+            if alpha > 0.03 {
+                draw_line_vec(a, b, 2.0, with_alpha(line_color, 0.85 * alpha));
+            }
+        };
+        match count {
+            1 => stroke(cut[0].0, mid(cut[0].0, centroid), shown * cut[0].1),
+            2 => stroke(cut[0].0, cut[1].0, shown * cut[0].1.min(cut[1].1)),
+            3 => {
+                for &(point, clean) in &cut {
+                    stroke(point, centroid, shown * clean);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    for (spring_index, sides) in ctx.app.skin_rim.edge_triangles.iter().enumerate() {
+        if sides[1] == NO_TRIANGLE {
             continue;
         }
-        let gap = cut_gap(world, spring);
-        if gap < 1.3 {
-            draw_incision(
-                ctx,
-                world.points()[spring.a],
-                world.points()[spring.b],
-                spring.rest,
-            );
-        } else {
-            draw_wound_edge(ctx, world.points()[spring.a], world.points()[spring.b]);
+        let rim = (opening[sides[0]] - opening[sides[1]]).abs();
+        if rim < 0.05 {
+            continue;
         }
-    }
-}
-
-/// A clean cut seen across one broken skin spring: a thin dark line along the
-/// cut, perpendicular to the severed fiber. Neighboring springs join into one
-/// incision line.
-fn draw_incision(ctx: &RenderContext, a: rp::Point, b: rp::Point, rest: f64) {
-    let across = normalized(sub(b.position, a.position), rp::Vec2 { x: 1.0, y: 0.0 });
-    let along = rp::Vec2 {
-        x: -across.y,
-        y: across.x,
-    };
-    let center = mid(a.position, b.position);
-    let half = rest * 0.55;
-    let severity = (a.load.max(b.load) / 1700.0).clamp(0.0, 1.0) as f32;
-    draw_line_vec(
-        sub(center, scale(along, half)),
-        add(center, scale(along, half)),
-        2.6 + severity,
-        with_alpha(ctx.palette.wound_shadow, 0.55),
-    );
-    draw_line_vec(
-        sub(center, scale(along, half * 0.92)),
-        add(center, scale(along, half * 0.92)),
-        1.3 + severity * 0.6,
-        with_alpha(ctx.palette.blood_fresh, 0.85),
-    );
-}
-
-fn draw_wound_edge(ctx: &RenderContext, a: rp::Point, b: rp::Point) {
-    let delta = sub(b.position, a.position);
-    let len = length(delta);
-    if len < 2.0 {
-        return;
-    }
-    let dir = scale(delta, 1.0 / len);
-    let normal = rp::Vec2 {
-        x: -dir.y,
-        y: dir.x,
-    };
-    let mark = (len * 0.19).clamp(4.0, 9.0);
-    let inset = (len * 0.14).clamp(2.0, 8.0);
-    let a_mid = add(a.position, scale(dir, inset));
-    let b_mid = sub(b.position, scale(dir, inset));
-    let exposure = a.exposure.max(b.exposure).clamp(0.0, 1.0);
-    let load = a.load.max(b.load);
-    let severity = (exposure * 0.58 + load / 1700.0).clamp(0.0, 1.0) as f32;
-
-    draw_line_vec(
-        add(a_mid, scale(normal, -mark)),
-        add(a_mid, scale(normal, mark)),
-        4.0 + severity * 1.8,
-        with_alpha(ctx.palette.wound_shadow, 0.58 + severity * 0.30),
-    );
-    draw_line_vec(
-        add(a_mid, scale(normal, -mark * 0.72)),
-        add(a_mid, scale(normal, mark * 0.72)),
-        2.0 + severity * 0.8,
-        with_alpha(ctx.palette.wound_edge, 0.68 + severity * 0.24),
-    );
-    draw_line_vec(
-        add(b_mid, scale(normal, -mark)),
-        add(b_mid, scale(normal, mark)),
-        4.0 + severity * 1.8,
-        with_alpha(ctx.palette.wound_shadow, 0.58 + severity * 0.30),
-    );
-    draw_line_vec(
-        add(b_mid, scale(normal, -mark * 0.72)),
-        add(b_mid, scale(normal, mark * 0.72)),
-        2.0 + severity * 0.8,
-        with_alpha(
-            mix(ctx.palette.wound_edge, ctx.palette.blood_fresh, severity),
-            0.66 + severity * 0.28,
-        ),
-    );
-    let tear_center = mid(a.position, b.position);
-    draw_line_vec(
-        sub(tear_center, scale(dir, len * 0.24)),
-        add(tear_center, scale(dir, len * 0.24)),
-        1.0 + severity * 1.1,
-        with_alpha(ctx.palette.wound_core, 0.44 + severity * 0.34),
-    );
-    if severity > 0.28 {
-        let fiber_count = if severity > 0.68 { 3 } else { 2 };
-        for i in 0..fiber_count {
-            let t = (i + 1) as f64 / (fiber_count + 1) as f64;
-            let base = add(a.position, scale(delta, t));
-            let side = if i % 2 == 0 { 1.0 } else { -1.0 };
-            let start = add(base, scale(normal, side * mark * 0.20));
-            let end = add(
-                base,
-                scale(normal, side * mark * (0.62 + f64::from(severity) * 0.36)),
-            );
-            draw_line_vec(
-                start,
-                end,
-                0.8 + severity * 0.7,
-                with_alpha(ctx.palette.muscle_fiber, 0.30 + severity * 0.34),
-            );
-        }
+        let spring = springs[spring_index];
+        draw_line_vec(
+            points[spring.a].position,
+            points[spring.b].position,
+            1.6,
+            with_alpha(ctx.palette.wound_shadow, 0.72 * rim),
+        );
     }
 }
 
@@ -1328,12 +1204,6 @@ fn draw_wound_sources(ctx: &RenderContext) {
             radius + 3.0 + pressure * 9.0,
             4,
             with_alpha(ctx.palette.blood_dark, 0.14 + pressure * 0.24),
-        );
-        draw_circle(
-            pos.x,
-            pos.y,
-            radius + 2.0,
-            with_alpha(ctx.palette.wound_core, 0.58),
         );
         draw_circle(
             pos.x,
@@ -1428,17 +1298,13 @@ fn draw_fluids(ctx: &RenderContext) {
 fn draw_striker(ctx: &RenderContext) {
     let app = ctx.app;
     // The same pose and geometry the simulation collides with.
-    let pose = rp::tool_pose(
-        app.tool,
-        app.striker,
-        app.world.tool_heading(),
-        app.world.tool_side(),
-    );
-    let geometry = rp::tool_geometry(app.tool);
-    match app.tool {
-        rp::ToolMode::Sharp => draw_knife(ctx, &pose, &geometry),
-        rp::ToolMode::Heavy => draw_sledgehammer(ctx, &pose, &geometry),
-        rp::ToolMode::Blunt => draw_bat(ctx, &pose, &geometry),
+    if let Some(pose) = app.world.current_tool_pose() {
+        let geometry = rp::tool_geometry(pose.tool);
+        match pose.tool {
+            rp::ToolMode::Sharp => draw_knife(ctx, &pose, &geometry),
+            rp::ToolMode::Heavy => draw_sledgehammer(ctx, &pose, &geometry),
+            rp::ToolMode::Blunt => draw_bat(ctx, &pose, &geometry),
+        }
     }
 
     let pointer = app.pointer;

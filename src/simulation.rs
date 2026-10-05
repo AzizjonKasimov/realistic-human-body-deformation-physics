@@ -71,6 +71,9 @@ impl Default for OrganKind {
 pub enum BoneKind {
     Generic,
     Rib,
+    /// Runs down the back of the trunk, behind the chest and belly; the
+    /// front view draws it down the middle.
+    Spine,
 }
 
 impl Default for BoneKind {
@@ -116,6 +119,17 @@ pub struct Materials {
     pub floor_friction: f64,
     pub striker_radius: f64,
     pub striker_mass: f64,
+    /// Momentum-carrying mass of a swung tool, as a multiple of `striker_mass`:
+    /// the arm behind the tool shoves tissue along with it.
+    pub tool_inertia_scale: f64,
+    /// Mass of bone a tool shoves, per unit of bone length times radius squared.
+    pub tool_bone_mass_scale: f64,
+    /// Most force a hand presses a tool into the body with, in tool inertia
+    /// times pixels per second squared.
+    pub hand_press_force: f64,
+    /// How far past its strength a bone must be loaded for the break to tear
+    /// out through the flesh; below it a fracture stays closed and bruised.
+    pub open_fracture_overload: f64,
     pub direct_muscle_contact: f64,
     pub skin_shape_stiffness: f64,
     pub muscle_shape_stiffness: f64,
@@ -264,6 +278,8 @@ pub struct Materials {
     pub wound_reopen_radius: f64,
     pub wound_reopen_pressure_scale: f64,
     pub wound_reopen_clot_loss: f64,
+    /// Reopening load per unit of stretch in the tissue around a clot.
+    pub wound_reopen_strain_load: f64,
     pub max_wound_reopens_per_step: usize,
     pub major_vessel_cut_radius: f64,
     pub major_vessel_laceration_impulse: f64,
@@ -310,6 +326,10 @@ impl Default for Materials {
             floor_friction: 0.78,
             striker_radius: 34.0,
             striker_mass: 2.9,
+            tool_inertia_scale: 4.0,
+            tool_bone_mass_scale: 0.01,
+            hand_press_force: 160_000.0,
+            open_fracture_overload: 0.9,
             direct_muscle_contact: 0.18,
             skin_shape_stiffness: 0.012,
             muscle_shape_stiffness: 0.030,
@@ -458,6 +478,7 @@ impl Default for Materials {
             wound_reopen_radius: 24.0,
             wound_reopen_pressure_scale: 0.52,
             wound_reopen_clot_loss: 0.22,
+            wound_reopen_strain_load: 3200.0,
             max_wound_reopens_per_step: 6,
             major_vessel_cut_radius: 10.5,
             major_vessel_laceration_impulse: 1450.0,
@@ -1277,15 +1298,7 @@ pub struct World {
     fluid_write_cursor: usize,
     blood_stain_write_cursor: usize,
     fluid_seed: u32,
-    /// Direction the current tool faces; it follows the motion when free.
-    tool_heading: Vec2,
-    /// Perpendicular to the heading, toward the hand on the hammer and bat.
-    tool_side: Vec2,
-    /// The tool was pressed into tissue last step, so it resists turning.
-    tool_embedded: bool,
-    /// Knife guard and tip at the end of the previous pressed step.
-    previous_blade: Option<(Vec2, Vec2)>,
-    tool_mode: ToolMode,
+    tool: tools::ToolBody,
     /// Skin springs a blade severed this step; cuts deepen into the muscle
     /// right under them.
     fresh_skin_cuts: Vec<usize>,
@@ -1321,11 +1334,7 @@ impl World {
             fluid_write_cursor: 0,
             blood_stain_write_cursor: 0,
             fluid_seed: 0x9e3779b9,
-            tool_heading: Vec2 { x: 1.0, y: 0.0 },
-            tool_side: Vec2 { x: 0.0, y: 1.0 },
-            tool_embedded: false,
-            previous_blade: None,
-            tool_mode: ToolMode::default(),
+            tool: tools::ToolBody::default(),
             fresh_skin_cuts: Vec::new(),
         }
     }
@@ -1724,9 +1733,8 @@ impl World {
         self.update_organ_anchors();
         self.update_wound_anchors();
         self.update_wounds(dt);
-        self.update_tool_pose(input, dt);
         self.fresh_skin_cuts.clear();
-        self.collide_striker(dt, input);
+        self.move_tool(input, dt);
         self.update_organ_anchors();
         self.update_cavities(dt);
         self.update_organs(dt);
@@ -1735,6 +1743,7 @@ impl World {
 
         for _ in 0..self.materials.solver_iterations {
             self.solve_springs();
+            self.solve_tool_contact();
             self.solve_attachments();
             self.solve_bone_attachments();
             self.solve_bone_joints();
@@ -1746,6 +1755,7 @@ impl World {
             self.solve_areas();
             self.constrain_to_world(width, floor_y);
         }
+        self.finish_tool_step(dt);
 
         self.update_vessel_anchors();
         self.update_organ_anchors();
@@ -2595,6 +2605,19 @@ impl World {
         }
 
         let radius_sq = radius * radius;
+        if !self.wounds.iter().any(wound_can_reopen) {
+            return;
+        }
+        // A scab also tears when the skin around it is stretched, as a blow
+        // that bends the flesh does without loading it hard enough to tear.
+        let mut strain = vec![0.0f64; self.points.len()];
+        for spring in &self.springs {
+            if spring.broken {
+                continue;
+            }
+            strain[spring.a] = strain[spring.a].max(spring.stress);
+            strain[spring.b] = strain[spring.b].max(spring.stress);
+        }
         let mut events = Vec::new();
         for (wound_index, wound) in self.wounds.iter().enumerate() {
             if events.len() >= budget {
@@ -2606,7 +2629,7 @@ impl World {
 
             let mut best_load = 0.0;
             let mut best_direction = wound.direction;
-            for point in &self.points {
+            for (point_index, point) in self.points.iter().enumerate() {
                 let d2 = distance_sq(point.position, wound.position);
                 if d2 > radius_sq {
                     continue;
@@ -2624,8 +2647,10 @@ impl World {
                 let motion_load = local_speed * point.mass * 0.11;
                 let contusion_load =
                     point.contusion * self.materials.contusion_load_threshold * 0.30;
-                let local_load =
-                    (point.load + motion_load + contusion_load) * layer_scale * falloff;
+                let strain_load = strain[point_index] * self.materials.wound_reopen_strain_load;
+                let local_load = (point.load + motion_load + contusion_load + strain_load)
+                    * layer_scale
+                    * falloff;
                 if local_load > best_load {
                     best_load = local_load;
                     best_direction =
@@ -5880,8 +5905,17 @@ impl World {
         let overload = ((impulse.max(old.load) - old.fracture_impulse)
             / old.fracture_impulse.max(1.0))
         .clamp(0.0, 1.4);
-        let gap = (5.0_f64.max(old.radius * (0.75 + overload * 0.25))).min(len * 0.10);
-        let snap = (5.5_f64.max(old.radius * (1.05 + overload * 0.42))).min(len * 0.09);
+        // An ordinary break barely shifts its ends; only a break far past the
+        // bone's strength throws the pieces apart and chips off a splinter.
+        let open = overload >= self.materials.open_fracture_overload;
+        let violence = if open {
+            1.0
+        } else {
+            0.2 + 0.4 * overload / self.materials.open_fracture_overload.max(EPSILON)
+        };
+        let gap = (5.0_f64.max(old.radius * (0.75 + overload * 0.25))).min(len * 0.10)
+            * violence.max(0.5);
+        let snap = (5.5_f64.max(old.radius * (1.05 + overload * 0.42))).min(len * 0.09) * violence;
         let shear = (2.5_f64.max(old.radius * 0.42)).min(len * 0.035);
         let recoil = snap * (2.1 + overload * 0.8);
         let left_cap = Vec2 {
@@ -5895,7 +5929,8 @@ impl World {
         let spin_sign = if cross(dir, normal) >= 0.0 { 1.0 } else { -1.0 };
         let fracture_spin = ((impulse.max(old.load) / old.fracture_impulse.max(1.0))
             * self.materials.fracture_spin_scale
-            * (0.55 + (break_t - 0.5).abs() * 1.9))
+            * (0.55 + (break_t - 0.5).abs() * 1.9)
+            * violence)
             .clamp(0.0, 16.0);
 
         let secondary_fracture_impulse = old.fracture_impulse
@@ -5972,6 +6007,7 @@ impl World {
         let second_index = self.bones.len();
         self.bones.push(second);
 
+        let fracture_bruise_load = self.materials.contusion_load_threshold * 1.6;
         for attachment in &mut self.bone_attachments {
             if attachment.bone != bone_index || attachment.broken {
                 continue;
@@ -5982,11 +6018,14 @@ impl World {
             if (original_t - break_t).abs() <= detach_zone {
                 attachment.broken = true;
                 attachment.stress = 1.0 + overload;
+                // The flesh around a break is bruised, not torn open: most
+                // fractures stay closed unless a fragment cuts its way out.
                 if attachment.point < self.points.len() {
                     self.points[attachment.point].exposure =
-                        self.points[attachment.point].exposure.max(0.95);
-                    self.points[attachment.point].load =
-                        self.points[attachment.point].load.max(old.load * 0.35);
+                        self.points[attachment.point].exposure.max(0.55);
+                    self.points[attachment.point].load = self.points[attachment.point]
+                        .load
+                        .max((old.load * 0.35).min(fracture_bruise_load));
                 }
                 self.stats.broken_bone_attachments += 1;
                 continue;
@@ -6063,61 +6102,36 @@ impl World {
             }
         }
 
-        let chip_length = (old.radius * 1.8).max(8.0).min(len * 0.13);
-        let mut splinter = BoneSegment {
-            kind: old.kind,
-            a: Vec2 {
-                x: crack.x - dir.x * chip_length * 0.45 + normal.x * snap * 0.35,
-                y: crack.y - dir.y * chip_length * 0.45 + normal.y * snap * 0.35,
-            },
-            b: Vec2 {
-                x: crack.x + dir.x * chip_length * 0.55 + normal.x * snap * 1.35,
-                y: crack.y + dir.y * chip_length * 0.55 + normal.y * snap * 1.35,
-            },
-            radius: (old.radius * 0.42).max(2.5),
-            fracture_impulse: old.fracture_impulse,
-            load: old.load * 0.5,
-            fractured: true,
-            broken_start: true,
-            broken_end: true,
-            broken_start_normal: normal,
-            broken_end_normal: normal,
-            fracture_generation: self.materials.max_bone_fracture_depth,
-            splinter: true,
-            angular_velocity: (spin_sign * fracture_spin * 1.65).clamp(-42.0, 42.0),
-            ..BoneSegment::default()
-        };
-        splinter.previous_a = Vec2 {
-            x: splinter.a.x - normal.x * recoil * 0.55,
-            y: splinter.a.y - normal.y * recoil * 0.55,
-        };
-        splinter.previous_b = Vec2 {
-            x: splinter.b.x - normal.x * recoil * 0.55,
-            y: splinter.b.y - normal.y * recoil * 0.55,
-        };
-        splinter.home_a = Vec2 {
-            x: home_crack.x - dir.x * chip_length * 0.45 + normal.x * snap * 0.2,
-            y: home_crack.y - dir.y * chip_length * 0.45 + normal.y * snap * 0.2,
-        };
-        splinter.home_b = Vec2 {
-            x: home_crack.x + dir.x * chip_length * 0.55 + normal.x * snap * 0.2,
-            y: home_crack.y + dir.y * chip_length * 0.55 + normal.y * snap * 0.2,
-        };
-        splinter.rest_length = distance(splinter.a, splinter.b).max(EPSILON);
         self.debug.max_bone_angular_speed = self.debug.max_bone_angular_speed.max(
             first
                 .angular_velocity
                 .abs()
-                .max(second.angular_velocity.abs())
-                .max(splinter.angular_velocity.abs()),
+                .max(second.angular_velocity.abs()),
         );
-        self.bones.push(splinter);
+        if open {
+            self.chip_splinter(
+                &old,
+                crack,
+                home_crack,
+                dir,
+                normal,
+                snap,
+                recoil,
+                spin_sign * fracture_spin,
+            );
+        }
 
         let blood_direction = Vec2 {
             x: normal.x + dir.x * 0.28,
             y: normal.y + dir.y * 0.28 - 0.30,
         };
         let load = impulse.max(old.load);
+        if !open {
+            self.bruise_tissue_around_fracture(crack, old.radius, load);
+            self.count_fracture(old.kind, load);
+            return;
+        }
+
         self.emit_fluid(
             crack,
             blood_direction,
@@ -6150,18 +6164,123 @@ impl World {
             2.15,
             1.05,
         );
-        self.damage_tissue_around_fracture(
-            crack,
-            (old.radius * 3.8).max(24.0 + overload * 10.0),
-            load,
-        );
+        // Scaled to the bone, so an open break in a thin shin or forearm tears
+        // out around the bone instead of through the whole limb.
+        self.damage_tissue_around_fracture(crack, old.radius * 1.6 + overload * 3.0, load);
+        self.count_fracture(old.kind, load);
+    }
+
+    /// A violent break also chips a splinter that flies out from the crack.
+    #[allow(clippy::too_many_arguments)]
+    fn chip_splinter(
+        &mut self,
+        old: &BoneSegment,
+        crack: Vec2,
+        home_crack: Vec2,
+        dir: Vec2,
+        normal: Vec2,
+        snap: f64,
+        recoil: f64,
+        spin: f64,
+    ) {
+        let len = distance(old.a, old.b).max(EPSILON);
+        let chip_length = (old.radius * 1.8).max(8.0).min(len * 0.13);
+        let mut splinter = BoneSegment {
+            kind: old.kind,
+            a: Vec2 {
+                x: crack.x - dir.x * chip_length * 0.45 + normal.x * snap * 0.35,
+                y: crack.y - dir.y * chip_length * 0.45 + normal.y * snap * 0.35,
+            },
+            b: Vec2 {
+                x: crack.x + dir.x * chip_length * 0.55 + normal.x * snap * 1.35,
+                y: crack.y + dir.y * chip_length * 0.55 + normal.y * snap * 1.35,
+            },
+            radius: (old.radius * 0.42).max(2.5),
+            fracture_impulse: old.fracture_impulse,
+            load: old.load * 0.5,
+            fractured: true,
+            broken_start: true,
+            broken_end: true,
+            broken_start_normal: normal,
+            broken_end_normal: normal,
+            fracture_generation: self.materials.max_bone_fracture_depth,
+            splinter: true,
+            angular_velocity: (spin * 1.65).clamp(-42.0, 42.0),
+            ..BoneSegment::default()
+        };
+        splinter.previous_a = Vec2 {
+            x: splinter.a.x - normal.x * recoil * 0.55,
+            y: splinter.a.y - normal.y * recoil * 0.55,
+        };
+        splinter.previous_b = Vec2 {
+            x: splinter.b.x - normal.x * recoil * 0.55,
+            y: splinter.b.y - normal.y * recoil * 0.55,
+        };
+        splinter.home_a = Vec2 {
+            x: home_crack.x - dir.x * chip_length * 0.45 + normal.x * snap * 0.2,
+            y: home_crack.y - dir.y * chip_length * 0.45 + normal.y * snap * 0.2,
+        };
+        splinter.home_b = Vec2 {
+            x: home_crack.x + dir.x * chip_length * 0.55 + normal.x * snap * 0.2,
+            y: home_crack.y + dir.y * chip_length * 0.55 + normal.y * snap * 0.2,
+        };
+        splinter.rest_length = distance(splinter.a, splinter.b).max(EPSILON);
+        self.debug.max_bone_angular_speed = self
+            .debug
+            .max_bone_angular_speed
+            .max(splinter.angular_velocity.abs());
+        self.bones.push(splinter);
+    }
+
+    fn count_fracture(&mut self, kind: BoneKind, load: f64) {
         self.stats.fractured_bones += 1;
         self.debug.fractures += 1;
-        if old.kind == BoneKind::Rib {
+        if kind == BoneKind::Rib {
             self.stats.fractured_ribs += 1;
             self.debug.rib_fractures += 1;
         }
         self.debug.last_fracture_impulse = self.debug.last_fracture_impulse.max(load);
+    }
+
+    /// A closed fracture: the bone ends tear the muscle right at the break and
+    /// bruise the flesh around it, while the skin and the bleeding stay inside.
+    fn bruise_tissue_around_fracture(&mut self, center: Vec2, bone_radius: f64, load: f64) {
+        let tear_radius = bone_radius * 1.5;
+        let bruise_radius = (bone_radius * 3.8).max(24.0);
+        let bruise_load = self.materials.contusion_load_threshold * 1.6;
+        for i in 0..self.springs.len() {
+            let spring = self.springs[i];
+            if spring.broken || spring.layer != TissueLayer::Muscle {
+                continue;
+            }
+            let a = self.points[spring.a].position;
+            let b = self.points[spring.b].position;
+            if distance_to_segment(center, a, b) > tear_radius {
+                continue;
+            }
+            self.springs[i].broken = true;
+            self.springs[i].stress = 1.0;
+            self.stats.broken_muscle += 1;
+            if spring.fiber {
+                self.stats.muscle_fiber_tears += 1;
+                self.debug.muscle_fiber_tears += 1;
+            }
+        }
+        let severity = (load / self.materials.bone_fracture_impulse.max(1.0)).clamp(0.5, 2.0);
+        for point in &mut self.points {
+            let d = distance(point.position, center);
+            if d > bruise_radius {
+                continue;
+            }
+            let falloff = 1.0 - d / bruise_radius;
+            let bruise = bruise_load * falloff * severity;
+            point.load = point.load.max(bruise.min(bruise_load));
+            if apply_point_contusion(point, self.materials, bruise, 1.0) {
+                self.stats.contusion_events += 1;
+                self.debug.contusion_events += 1;
+                self.debug.max_contusion = self.debug.max_contusion.max(point.contusion);
+            }
+        }
     }
 
     fn damage_tissue_around_fracture(&mut self, center: Vec2, radius: f64, impulse: f64) {
@@ -6584,6 +6703,15 @@ fn muscle_fiber_spring_broken(springs: &[Spring], index: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl World {
+        /// One tool step on its own: a tool coming into play arrives at the
+        /// input position moving at the input velocity, so a test can aim a
+        /// single strike precisely.
+        fn move_tool_for_test(&mut self, dt: f64, input: &InputState) {
+            self.move_tool(input, dt);
+        }
+    }
 
     fn average_fragment_speed(bone: BoneSegment) -> f64 {
         let a_speed = distance(bone.a, bone.previous_a);
@@ -7395,7 +7523,7 @@ mod tests {
             Vec2 { x: 28.0, y: 20.0 },
         );
 
-        world.collide_striker(
+        world.move_tool_for_test(
             world.materials.fixed_dt,
             &InputState {
                 active: true,
@@ -7436,7 +7564,7 @@ mod tests {
             Vec2 { x: 28.0, y: 20.0 },
         );
 
-        world.collide_striker(
+        world.move_tool_for_test(
             world.materials.fixed_dt,
             &InputState {
                 active: true,
@@ -8293,7 +8421,7 @@ mod tests {
         world.bones[bone].previous_a = world.bones[bone].a;
         world.bones[bone].previous_b = world.bones[bone].b;
 
-        world.collide_striker(
+        world.move_tool_for_test(
             world.materials.fixed_dt,
             &InputState {
                 active: true,
@@ -8323,7 +8451,7 @@ mod tests {
         let mut world = World::new(materials);
         world.add_point(Vec2 { x: 130.0, y: 100.0 }, TissueLayer::Skin, false);
 
-        world.collide_striker(
+        world.move_tool_for_test(
             world.materials.fixed_dt,
             &InputState {
                 active: true,
@@ -8581,7 +8709,7 @@ mod tests {
         world.points[anchor_a].exposure = 0.75;
         world.points[anchor_b].exposure = 0.75;
 
-        world.collide_striker(
+        world.move_tool_for_test(
             world.materials.fixed_dt,
             &InputState {
                 active: true,
@@ -8623,7 +8751,7 @@ mod tests {
             1.55,
         );
 
-        world.collide_striker(
+        world.move_tool_for_test(
             world.materials.fixed_dt,
             &InputState {
                 active: true,
@@ -9345,7 +9473,7 @@ fn tool_profile(tool: ToolMode) -> ToolProfile {
         ToolMode::Heavy => ToolProfile {
             mass_scale: 1.85,
             tissue_push_scale: 1.24,
-            tissue_load_scale: 1.18,
+            tissue_load_scale: 0.75,
             contusion_scale: 1.55,
             bone_push_scale: 1.46,
             bone_load_scale: 1.72,
@@ -9356,7 +9484,11 @@ fn tool_profile(tool: ToolMode) -> ToolProfile {
             drag_scale: 0.82,
             rebound_scale: 1.42,
         },
-        ToolMode::Blunt => ToolProfile::default(),
+        // A bat's broad barrel bruises far more than it tears.
+        ToolMode::Blunt => ToolProfile {
+            tissue_load_scale: 0.45,
+            ..ToolProfile::default()
+        },
     }
 }
 

@@ -26,7 +26,7 @@ struct VisualScenario {
 #[derive(Clone, Copy, Default)]
 struct VisualExpectations {
     min_skin_wound_edges: usize,
-    min_muscle_fiber_lines: usize,
+    min_incision_segments: usize,
     min_muscle_fiber_tears: usize,
     min_joint_ligament_damage_events: usize,
     min_failed_muscle_voids: usize,
@@ -53,10 +53,9 @@ struct VisualExpectations {
 #[derive(Clone, Copy, Default)]
 struct VisualMetrics {
     skin_wound_edges: usize,
-    wound_edge_fiber_ticks: usize,
+    incision_segments: usize,
+    wound_rim_edges: usize,
     exposed_muscle_triangles: usize,
-    muscle_detail_triangles: usize,
-    muscle_fiber_lines: usize,
     muscle_fiber_tears: usize,
     joint_ligament_damage_events: usize,
     failed_muscle_voids: usize,
@@ -144,27 +143,26 @@ fn visual_scenarios() -> Vec<VisualScenario> {
             name: "torso_sharp_cut_visual",
             intent: "cut",
             tool: rp::ToolMode::Sharp,
-            start: body(-0.100, 0.250),
-            end: body(0.070, 0.430),
-            windup_frames: 8,
-            strike_frames: 28,
-            settle_frames: 48,
+            start: body(-0.075, 0.385),
+            end: body(0.065, 0.485),
+            windup_frames: 6,
+            strike_frames: 16,
+            settle_frames: 60,
             power: 3.0,
-            // A knife cut: a clean incision that severs fibers and vessels and
-            // can reach organs, without bruising like a club or breaking bone.
+            // A knife cut on the belly: an incision line through skin and
+            // muscle that reaches a vessel and an organ, with no broken bone.
             expectations: VisualExpectations {
-                min_skin_wound_edges: 20,
-                min_muscle_fiber_lines: 48,
-                min_muscle_fiber_tears: 8,
-                min_failed_muscle_voids: 20,
-                min_visible_wound_sources: 8,
-                min_visible_fluid_particles: 120,
+                min_skin_wound_edges: 8,
+                min_incision_segments: 8,
+                min_muscle_fiber_tears: 4,
+                min_failed_muscle_voids: 8,
+                min_visible_wound_sources: 3,
+                min_visible_fluid_particles: 100,
                 min_lacerated_vessels: 1,
                 min_organ_penetrations: 1,
-                min_organ_ruptures: 1,
-                min_organ_damage: 1.0,
+                min_organ_damage: 0.4,
                 max_fractured_bones: Some(0),
-                min_damage_primitives: 500,
+                min_damage_primitives: 200,
                 ..VisualExpectations::default()
             },
         },
@@ -172,33 +170,28 @@ fn visual_scenarios() -> Vec<VisualScenario> {
             name: "torso_heavy_settle_visual",
             intent: "settle",
             tool: rp::ToolMode::Heavy,
-            start: body(-0.330, 0.355),
-            end: body(0.095, 0.355),
-            windup_frames: 12,
-            strike_frames: 30,
+            start: body(-0.360, 0.340),
+            end: body(0.200, 0.340),
+            windup_frames: 6,
+            strike_frames: 16,
             settle_frames: 260,
             power: 4.0,
+            // A full-force sledgehammer blow to the chest, left to settle:
+            // broken arm and ribs, deep bruising, torn flesh and bleeding.
             expectations: VisualExpectations {
-                min_skin_wound_edges: 140,
-                min_muscle_fiber_lines: 48,
-                min_muscle_fiber_tears: 40,
-                min_failed_muscle_voids: 160,
-                min_visible_contusions: 120,
-                min_visible_wound_sources: 50,
-                min_visible_fluid_particles: 120,
-                min_visible_blood_stains: 8,
-                min_lacerated_vessels: 1,
-                min_fragment_vessel_lacerations: 1,
-                min_fractured_bones: 18,
-                min_rib_fractures: 4,
-                min_fracture_caps: 18,
-                min_cavity_ruptures: 1,
-                min_cavity_pressure: 0.70,
-                min_organ_penetrations: 0,
-                min_rib_organ_punctures: 1,
-                min_organ_ruptures: 1,
-                min_organ_damage: 1.0,
-                min_damage_primitives: 1400,
+                min_skin_wound_edges: 30,
+                min_muscle_fiber_tears: 10,
+                min_failed_muscle_voids: 30,
+                min_visible_contusions: 25,
+                min_visible_wound_sources: 8,
+                min_visible_fluid_particles: 200,
+                min_visible_blood_stains: 4,
+                min_fractured_bones: 6,
+                min_rib_fractures: 1,
+                min_fracture_caps: 6,
+                min_cavity_pressure: 0.4,
+                min_organ_damage: 0.3,
+                min_damage_primitives: 500,
                 ..VisualExpectations::default()
             },
         },
@@ -213,11 +206,12 @@ fn run_scenario(scenario: &VisualScenario) -> (rp::World, f64, f64, f64) {
     let mut peak_cavity_collapse: f64 = 0.0;
     let mut peak_organ_damage: f64 = 0.0;
     for frame in 0..total_frames {
-        let input = if frame < scenario.windup_frames + scenario.strike_frames {
-            make_strike_input(scenario, frame, dt)
-        } else {
-            rp::InputState::default()
-        };
+        let input =
+            if frame < scenario.windup_frames + scenario.strike_frames + FOLLOW_THROUGH_FRAMES {
+                make_strike_input(scenario, frame, dt)
+            } else {
+                rp::InputState::default()
+            };
         world.step(dt, &input, WIDTH, HEIGHT);
         let debug = world.debug();
         peak_cavity_pressure = peak_cavity_pressure.max(debug.max_cavity_pressure);
@@ -232,10 +226,15 @@ fn run_scenario(scenario: &VisualScenario) -> (rp::World, f64, f64, f64) {
     )
 }
 
+/// Frames the hand holds at the end of a swing with the button down, since
+/// the tool trails the hand.
+const FOLLOW_THROUGH_FRAMES: i32 = 20;
+
 fn make_strike_input(scenario: &VisualScenario, frame: i32, dt: f64) -> rp::InputState {
     let t0 =
         (frame - scenario.windup_frames).max(0) as f64 / (scenario.strike_frames - 1).max(1) as f64;
     let t = t0.clamp(0.0, 1.0);
+    let moving = t0 < 1.0;
     let position = rp::Vec2 {
         x: scenario.start.x + (scenario.end.x - scenario.start.x) * t,
         y: scenario.start.y + (scenario.end.y - scenario.start.y) * t,
@@ -244,15 +243,15 @@ fn make_strike_input(scenario: &VisualScenario, frame: i32, dt: f64) -> rp::Inpu
         x: (scenario.end.x - scenario.start.x) / ((scenario.strike_frames - 1).max(1) as f64 * dt),
         y: (scenario.end.y - scenario.start.y) / ((scenario.strike_frames - 1).max(1) as f64 * dt),
     };
-    let down =
-        frame >= scenario.windup_frames && frame < scenario.windup_frames + scenario.strike_frames;
+    let down = frame >= scenario.windup_frames
+        && frame < scenario.windup_frames + scenario.strike_frames + FOLLOW_THROUGH_FRAMES;
     rp::InputState {
         active: down,
         down,
         x: position.x,
         y: position.y,
-        vx: if down { velocity.x } else { 0.0 },
-        vy: if down { velocity.y } else { 0.0 },
+        vx: if down && moving { velocity.x } else { 0.0 },
+        vy: if down && moving { velocity.y } else { 0.0 },
         power: scenario.power,
         tool: scenario.tool,
     }
@@ -276,12 +275,11 @@ fn inspect_visual_damage(world: &rp::World) -> VisualMetrics {
     for spring in world.springs() {
         if spring.broken && spring.layer == rp::TissueLayer::Skin {
             metrics.skin_wound_edges += 1;
-            if spring.a < world.points().len() && spring.b < world.points().len() {
-                metrics.wound_edge_fiber_ticks +=
-                    wound_edge_fiber_tick_count(world.points()[spring.a], world.points()[spring.b]);
-            }
         }
     }
+    let wound_lines = skin_wound_lines(world);
+    metrics.incision_segments = wound_lines.incisions.len();
+    metrics.wound_rim_edges = wound_lines.rims.len();
 
     for triangle in world.triangles() {
         if triangle.layer != rp::TissueLayer::Muscle {
@@ -292,13 +290,7 @@ fn inspect_visual_damage(world: &rp::World) -> VisualMetrics {
         if exposure > 0.035 || triangle.damage > 0.015 || load > 140.0 {
             metrics.exposed_muscle_triangles += 1;
         }
-        if world.triangle_alive(triangle) {
-            let detail = muscle_detail_amount(load, exposure, triangle.damage);
-            if detail > 0.18 && longest_edge_length(world, triangle) >= 6.0 {
-                metrics.muscle_detail_triangles += 1;
-                metrics.muscle_fiber_lines += muscle_fiber_row_count(detail);
-            }
-        } else if exposure > 0.22 || load > 260.0 || triangle.damage > 0.72 {
+        if !world.triangle_alive(triangle) {
             metrics.failed_muscle_voids += 1;
         }
     }
@@ -357,8 +349,8 @@ fn inspect_visual_damage(world: &rp::World) -> VisualMetrics {
     }
 
     metrics.damage_primitives = metrics.skin_wound_edges
-        + metrics.wound_edge_fiber_ticks
-        + metrics.muscle_fiber_lines
+        + metrics.incision_segments
+        + metrics.wound_rim_edges
         + metrics.failed_muscle_voids
         + metrics.visible_contusions
         + metrics.visible_wound_sources
@@ -391,9 +383,9 @@ fn validate_visual_metrics(
     );
     check_min(
         scenario,
-        "muscle_fiber_lines",
-        metrics.muscle_fiber_lines,
-        scenario.expectations.min_muscle_fiber_lines,
+        "incision_segments",
+        metrics.incision_segments,
+        scenario.expectations.min_incision_segments,
         warnings,
     );
     check_min(
@@ -613,7 +605,7 @@ fn draw_panel(out: &mut String, capture: &VisualCapture) {
 
     draw_tissue_layers(out, &capture.world);
     draw_bones(out, &capture.world);
-    draw_wound_edges(out, &capture.world);
+    draw_skin_wounds(out, &capture.world);
     draw_major_vessels(out, &capture.world);
     draw_wound_sources(out, &capture.world);
     draw_blood_stains(out, &capture.world);
@@ -652,76 +644,11 @@ fn draw_tissue_layers(out: &mut String, world: &rp::World) {
                 "#f05f62",
                 0.18 + heat * 0.24,
             );
-        } else if exposure > 0.22 || load > 260.0 || triangle.damage > 0.72 {
-            write_triangle(out, world, triangle, "#21040a", 0.30, "#9f1722", 0.46);
-        }
-    }
-    draw_muscle_detail(out, world);
-    draw_contusions(out, world);
-}
-
-fn draw_muscle_detail(out: &mut String, world: &rp::World) {
-    for triangle in world.triangles() {
-        if triangle.layer != rp::TissueLayer::Muscle {
-            continue;
-        }
-        let (load, exposure) = triangle_point_metrics(world, triangle);
-        if world.triangle_alive(triangle) {
-            let detail = muscle_detail_amount(load, exposure, triangle.damage);
-            if detail > 0.18 {
-                draw_muscle_fibers(out, world, triangle, detail);
-            }
-        } else if exposure > 0.22 || load > 260.0 || triangle.damage > 0.72 {
-            write_triangle(out, world, triangle, "#150105", 0.26, "#c3212b", 0.34);
-        }
-    }
-}
-
-fn draw_muscle_fibers(out: &mut String, world: &rp::World, triangle: &rp::Triangle, detail: f64) {
-    let points = world.points();
-    let a = points[triangle.a].position;
-    let b = points[triangle.b].position;
-    let c = points[triangle.c].position;
-    let centroid = scale(add(add(a, b), c), 1.0 / 3.0);
-    let edges = [(a, b), (b, c), (c, a)];
-    let mut longest = edges[0];
-    let mut longest_len = length(subtract(longest.1, longest.0));
-    for edge in edges.iter().skip(1) {
-        let len = length(subtract(edge.1, edge.0));
-        if len > longest_len {
-            longest = *edge;
-            longest_len = len;
-        }
-    }
-    if longest_len < 6.0 {
-        return;
-    }
-    let fiber_dir = normalized(subtract(longest.1, longest.0), rp::Vec2 { x: 1.0, y: 0.0 });
-    let normal = rp::Vec2 {
-        x: -fiber_dir.y,
-        y: fiber_dir.x,
-    };
-    let span = longest_len * (0.18 + detail * 0.24);
-    let rows = muscle_fiber_row_count(detail);
-    for row in 0..rows {
-        let row_t = if rows == 1 {
-            0.0
         } else {
-            row as f64 / (rows - 1) as f64 - 0.5
-        };
-        let center = add(centroid, scale(normal, row_t * longest_len * 0.18));
-        let trim = 0.72 - detail * 0.16;
-        let start = subtract(center, scale(fiber_dir, span * trim));
-        let end = add(center, scale(fiber_dir, span));
-        write_line(
-            out,
-            start,
-            end,
-            0.8 + detail * 1.2,
-            "#ec605f",
-            0.16 + detail * 0.38,
-        );
+            write_triangle(out, world, triangle, "#150105", 0.62, "#150105", 0.0);
+        }
     }
+    draw_contusions(out, world);
 }
 
 fn draw_contusions(out: &mut String, world: &rp::World) {
@@ -820,94 +747,138 @@ fn draw_major_vessels(out: &mut String, world: &rp::World) {
     }
 }
 
-fn draw_wound_edges(out: &mut String, world: &rp::World) {
-    for spring in world.springs() {
-        if !spring.broken || spring.layer != rp::TissueLayer::Skin {
-            continue;
-        }
-        if spring.a >= world.points().len() || spring.b >= world.points().len() {
-            continue;
-        }
-        draw_wound_edge(out, world.points()[spring.a], world.points()[spring.b]);
+/// Skin wounds as the app draws them.
+fn draw_skin_wounds(out: &mut String, world: &rp::World) {
+    let lines = skin_wound_lines(world);
+    for (a, b, alpha) in lines.incisions {
+        write_line(out, a, b, 2.0, "#5a0710", 0.85 * alpha);
+    }
+    for (a, b, alpha) in lines.rims {
+        write_line(out, a, b, 1.6, "#110004", 0.72 * alpha);
     }
 }
 
-fn draw_wound_edge(out: &mut String, a: rp::Point, b: rp::Point) {
-    let delta = subtract(b.position, a.position);
-    let len = length(delta);
-    if len < 2.0 {
-        return;
-    }
-    let dir = scale(delta, 1.0 / len);
-    let normal = rp::Vec2 {
-        x: -dir.y,
-        y: dir.x,
-    };
-    let mark = (len * 0.19).clamp(4.0, 9.0);
-    let inset = (len * 0.14).clamp(2.0, 8.0);
-    let a_mid = add(a.position, scale(dir, inset));
-    let b_mid = subtract(b.position, scale(dir, inset));
-    let exposure = a.exposure.max(b.exposure).clamp(0.0, 1.0);
-    let load = a.load.max(b.load);
-    let severity = (exposure * 0.58 + load / 1700.0).clamp(0.0, 1.0);
+/// Skin wound lines as the app draws them, each with its opacity: incisions
+/// through the middle of severed skin springs, joined across each triangle a
+/// cut crosses, and rims where intact skin meets an opening.
+struct SkinWoundLines {
+    incisions: Vec<(rp::Vec2, rp::Vec2, f64)>,
+    rims: Vec<(rp::Vec2, rp::Vec2, f64)>,
+}
 
-    write_line(
-        out,
-        add(a_mid, scale(normal, -mark)),
-        add(a_mid, scale(normal, mark)),
-        4.0 + severity * 1.8,
-        "#110004",
-        0.58 + severity * 0.30,
-    );
-    write_line(
-        out,
-        add(a_mid, scale(normal, -mark * 0.72)),
-        add(a_mid, scale(normal, mark * 0.72)),
-        2.0 + severity * 0.8,
-        "#ad1720",
-        0.68 + severity * 0.24,
-    );
-    write_line(
-        out,
-        add(b_mid, scale(normal, -mark)),
-        add(b_mid, scale(normal, mark)),
-        4.0 + severity * 1.8,
-        "#110004",
-        0.58 + severity * 0.30,
-    );
-    write_line(
-        out,
-        add(b_mid, scale(normal, -mark * 0.72)),
-        add(b_mid, scale(normal, mark * 0.72)),
-        2.0 + severity * 0.8,
-        "#d51b2c",
-        0.66 + severity * 0.28,
-    );
-    let tear_center = mid(a.position, b.position);
-    write_line(
-        out,
-        subtract(tear_center, scale(dir, len * 0.24)),
-        add(tear_center, scale(dir, len * 0.24)),
-        1.0 + severity * 1.1,
-        "#220005",
-        0.44 + severity * 0.34,
-    );
-    if severity > 0.28 {
-        let fiber_count = wound_edge_fiber_tick_count(a, b);
-        for i in 0..fiber_count {
-            let t = (i + 1) as f64 / (fiber_count + 1) as f64;
-            let base = add(a.position, scale(delta, t));
-            let side = if i % 2 == 0 { 1.0 } else { -1.0 };
-            write_line(
-                out,
-                add(base, scale(normal, side * mark * 0.20)),
-                add(base, scale(normal, side * mark * (0.62 + severity * 0.36))),
-                0.8 + severity * 0.7,
-                "#ec605f",
-                0.30 + severity * 0.34,
-            );
+fn skin_wound_lines(world: &rp::World) -> SkinWoundLines {
+    let points = world.points();
+    let springs = world.springs();
+    let triangles = world.triangles();
+    let opening: Vec<f64> = triangles
+        .iter()
+        .map(|triangle| {
+            if triangle.layer == rp::TissueLayer::Skin {
+                skin_opening(world, triangle)
+            } else {
+                1.0
+            }
+        })
+        .collect();
+    let mut sides = vec![[usize::MAX; 2]; springs.len()];
+    let mut lines = SkinWoundLines {
+        incisions: Vec::new(),
+        rims: Vec::new(),
+    };
+    for (index, triangle) in triangles.iter().enumerate() {
+        if triangle.layer != rp::TissueLayer::Skin {
+            continue;
+        }
+        let edges = [triangle.edge_ab, triangle.edge_bc, triangle.edge_ca];
+        for &edge in &edges {
+            if let Some(side) = sides.get_mut(edge) {
+                let free = usize::from(side[0] != usize::MAX);
+                side[free] = index;
+            }
+        }
+        if opening[index] >= 0.98 {
+            continue;
+        }
+        let cut: Vec<(rp::Vec2, f64)> = edges
+            .iter()
+            .filter_map(|&edge| springs.get(edge).filter(|spring| spring.broken))
+            .map(|spring| {
+                (
+                    mid(points[spring.a].position, points[spring.b].position),
+                    1.0 - smoothstep(1.3, 1.9, cut_gap(world, spring)),
+                )
+            })
+            .collect();
+        let shown = 1.0 - opening[index];
+        let centroid = scale(
+            add(
+                add(points[triangle.a].position, points[triangle.b].position),
+                points[triangle.c].position,
+            ),
+            1.0 / 3.0,
+        );
+        let mut push = |a: rp::Vec2, b: rp::Vec2, alpha: f64| {
+            if alpha > 0.03 {
+                lines.incisions.push((a, b, alpha));
+            }
+        };
+        match cut.len() {
+            1 => push(cut[0].0, mid(cut[0].0, centroid), shown * cut[0].1),
+            2 => push(cut[0].0, cut[1].0, shown * cut[0].1.min(cut[1].1)),
+            3 => {
+                for &(point, clean) in &cut {
+                    push(point, centroid, shown * clean);
+                }
+            }
+            _ => {}
         }
     }
+    for (spring_index, side) in sides.iter().enumerate() {
+        if side[1] == usize::MAX {
+            continue;
+        }
+        let rim = (opening[side[0]] - opening[side[1]]).abs();
+        if rim < 0.05 {
+            continue;
+        }
+        let spring = springs[spring_index];
+        lines
+            .rims
+            .push((points[spring.a].position, points[spring.b].position, rim));
+    }
+    lines
+}
+
+/// How open a skin triangle is, from 0 (intact, or split by a cut whose edges
+/// still meet) to 1 (gone).
+fn skin_opening(world: &rp::World, triangle: &rp::Triangle) -> f64 {
+    if world.triangle_alive(triangle) {
+        return 0.0;
+    }
+    if triangle.failed {
+        return 1.0;
+    }
+    let springs = world.springs();
+    let widest = [triangle.edge_ab, triangle.edge_bc, triangle.edge_ca]
+        .iter()
+        .filter_map(|&edge| springs.get(edge))
+        .filter(|spring| spring.broken)
+        .map(|spring| cut_gap(world, spring))
+        .fold(1.0, f64::max);
+    smoothstep(1.06, 1.4, widest)
+}
+
+fn cut_gap(world: &rp::World, spring: &rp::Spring) -> f64 {
+    let points = world.points();
+    length(subtract(
+        points[spring.b].position,
+        points[spring.a].position,
+    )) / spring.rest.max(1.0)
+}
+
+fn smoothstep(edge0: f64, edge1: f64, x: f64) -> f64 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn draw_wound_sources(out: &mut String, world: &rp::World) {
@@ -997,9 +968,10 @@ fn draw_label(out: &mut String, capture: &VisualCapture) {
     .expect("write label title");
     writeln!(
         out,
-        "<text class=\"muted\" x=\"34\" y=\"69\">wound edges={} fiber={} fiberT={} voids={} bruises={} wounds={} fluids={} stains={}</text>",
+        "<text class=\"muted\" x=\"34\" y=\"69\">wound edges={} incision={} rims={} fiberT={} voids={} bruises={} wounds={} fluids={} stains={}</text>",
         metrics.skin_wound_edges,
-        metrics.muscle_fiber_lines,
+        metrics.incision_segments,
+        metrics.wound_rim_edges,
         metrics.muscle_fiber_tears,
         metrics.failed_muscle_voids,
         metrics.visible_contusions,
@@ -1050,7 +1022,7 @@ fn write_summary(path: &Path, captures: &[VisualCapture]) -> std::io::Result<()>
     let mut out = BufWriter::new(File::create(path)?);
     writeln!(
         out,
-        "scenario,intent,tool,skin_wound_edges,wound_edge_fiber_ticks,exposed_muscle_triangles,muscle_detail_triangles,muscle_fiber_lines,stats_muscle_fiber_tears,stats_joint_ligament_damage_events,failed_muscle_voids,visible_contusions,visible_wound_sources,active_wound_sources,visible_fluid_particles,active_fluid_particles,visible_blood_stains,lacerated_vessels,fractured_bones,rib_fractures,fracture_caps,final_free_fragments,final_sleeping_fragments,damage_primitives,max_point_load,max_point_exposure,max_contusion,max_muscle_damage,stats_skin_tears,stats_muscle_tears,stats_muscle_crush_ruptures,stats_cavity_pressure_events,stats_cavity_ruptures,peak_cavity_pressure,peak_cavity_collapse,stats_organ_damage_events,stats_organ_penetrations,stats_rib_organ_punctures,stats_organ_ruptures,peak_organ_damage,stats_skin_flap_detachments,stats_vessel_lacerations,stats_fragment_vessel_lacerations,stats_fragment_skin_punctures,stats_bone_joint_subluxations,stats_fracture_marrow_sources,stats_contusion_events,stats_opened_wounds,stats_emitted_fluid,stats_wound_fluid,stats_blood_loss,final_blood_volume,final_blood_turgor,stats_blood_stain_deposits"
+        "scenario,intent,tool,skin_wound_edges,incision_segments,wound_rim_edges,exposed_muscle_triangles,stats_muscle_fiber_tears,stats_joint_ligament_damage_events,failed_muscle_voids,visible_contusions,visible_wound_sources,active_wound_sources,visible_fluid_particles,active_fluid_particles,visible_blood_stains,lacerated_vessels,fractured_bones,rib_fractures,fracture_caps,final_free_fragments,final_sleeping_fragments,damage_primitives,max_point_load,max_point_exposure,max_contusion,max_muscle_damage,stats_skin_tears,stats_muscle_tears,stats_muscle_crush_ruptures,stats_cavity_pressure_events,stats_cavity_ruptures,peak_cavity_pressure,peak_cavity_collapse,stats_organ_damage_events,stats_organ_penetrations,stats_rib_organ_punctures,stats_organ_ruptures,peak_organ_damage,stats_skin_flap_detachments,stats_vessel_lacerations,stats_fragment_vessel_lacerations,stats_fragment_skin_punctures,stats_bone_joint_subluxations,stats_fracture_marrow_sources,stats_contusion_events,stats_opened_wounds,stats_emitted_fluid,stats_wound_fluid,stats_blood_loss,final_blood_volume,final_blood_turgor,stats_blood_stain_deposits"
     )?;
     for capture in captures {
         let metrics = capture.metrics;
@@ -1060,10 +1032,9 @@ fn write_summary(path: &Path, captures: &[VisualCapture]) -> std::io::Result<()>
             capture.scenario.intent.to_string(),
             tool_name(capture.scenario.tool).to_string(),
             metrics.skin_wound_edges.to_string(),
-            metrics.wound_edge_fiber_ticks.to_string(),
+            metrics.incision_segments.to_string(),
+            metrics.wound_rim_edges.to_string(),
             metrics.exposed_muscle_triangles.to_string(),
-            metrics.muscle_detail_triangles.to_string(),
-            metrics.muscle_fiber_lines.to_string(),
             metrics.muscle_fiber_tears.to_string(),
             metrics.joint_ligament_damage_events.to_string(),
             metrics.failed_muscle_voids.to_string(),
@@ -1198,48 +1169,6 @@ fn triangle_point_contusion(world: &rp::World, triangle: &rp::Triangle) -> f64 {
     let b = world.points()[triangle.b];
     let c = world.points()[triangle.c];
     (a.contusion + b.contusion + c.contusion) / 3.0
-}
-
-fn muscle_detail_amount(load: f64, exposure: f64, damage: f64) -> f64 {
-    (damage * 0.75 + exposure * 0.85 + load / 1800.0).clamp(0.0, 1.0)
-}
-
-fn muscle_fiber_row_count(detail: f64) -> usize {
-    if detail > 0.82 {
-        4
-    } else if detail > 0.46 {
-        3
-    } else {
-        2
-    }
-}
-
-fn longest_edge_length(world: &rp::World, triangle: &rp::Triangle) -> f64 {
-    let points = world.points();
-    let a = points[triangle.a].position;
-    let b = points[triangle.b].position;
-    let c = points[triangle.c].position;
-    rp::distance(a, b)
-        .max(rp::distance(b, c))
-        .max(rp::distance(c, a))
-}
-
-fn wound_edge_fiber_tick_count(a: rp::Point, b: rp::Point) -> usize {
-    let delta = subtract(b.position, a.position);
-    let len = length(delta);
-    if len < 2.0 {
-        return 0;
-    }
-    let exposure = a.exposure.max(b.exposure).clamp(0.0, 1.0);
-    let load = a.load.max(b.load);
-    let severity = (exposure * 0.58 + load / 1700.0).clamp(0.0, 1.0);
-    if severity <= 0.28 {
-        0
-    } else if severity > 0.68 {
-        3
-    } else {
-        2
-    }
 }
 
 fn free_fragment(bone: &rp::BoneSegment) -> bool {

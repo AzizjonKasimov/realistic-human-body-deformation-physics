@@ -475,14 +475,15 @@ fn knife_slides_along_fibers_without_cutting_them() {
     }
 }
 
-/// Presses the knife into the abdomen while it moves (`first_vx`, `first_vy`),
-/// then draws it straight down; returns severed skin springs.
+/// Puts the knife down on the belly, below the ribs, while it moves
+/// (`first_vx`, `first_vy`), then draws the hand straight down toward the
+/// pelvis; returns severed skin springs.
 fn knife_stroke_down_abdomen(first_vx: f64, first_vy: f64) -> i32 {
     let (width, height) = (1280.0, 720.0);
     let frame = rp::body_frame(width, height);
     let mut world = rp::create_layered_body(width, height, rp::Materials::default());
     let dt = world.materials().fixed_dt;
-    let start = frame.point(0.03, 0.30);
+    let start = frame.point(0.035, 0.375);
     let mut input = rp::InputState {
         active: true,
         down: true,
@@ -494,10 +495,10 @@ fn knife_stroke_down_abdomen(first_vx: f64, first_vy: f64) -> i32 {
         tool: rp::ToolMode::Sharp,
     };
     world.step(dt, &input, width, height);
-    for step in 1..=24 {
+    for step in 1..=20 {
         input.vx = 0.0;
-        input.vy = 420.0;
-        input.y = start.y + 420.0 * dt * f64::from(step);
+        input.vy = 300.0;
+        input.y = start.y + 300.0 * dt * f64::from(step);
         world.step(dt, &input, width, height);
     }
     world.stats().broken_skin
@@ -505,13 +506,13 @@ fn knife_stroke_down_abdomen(first_vx: f64, first_vy: f64) -> i32 {
 
 #[test]
 fn knife_pressed_in_at_an_angle_still_cuts_a_line() {
-    let aligned = knife_stroke_down_abdomen(0.0, 420.0);
+    let aligned = knife_stroke_down_abdomen(0.0, 300.0);
     let turned = knife_stroke_down_abdomen(300.0, 0.0);
-    if !(10..=60).contains(&aligned) {
+    if !(4..=30).contains(&aligned) {
         panic!("FAIL: a straight knife stroke should cut a line of skin: severed={aligned}");
     }
     // A blade that swept sideways while turning would scythe a wide fan.
-    if turned > aligned + 40 {
+    if turned > aligned + 15 {
         panic!(
             "FAIL: tissue should steer an embedded knife into its stroke instead of it sweeping a fan: turned={turned} aligned={aligned}"
         );
@@ -564,5 +565,155 @@ fn direct_bone_strike_fractures_and_emits_fluid() {
     }
     if world.debug().bone_contacts <= 0 || world.debug().fractures <= 0 {
         fail("direct strike should expose contact debug metrics");
+    }
+}
+
+/// A knife creeping up to a lone skin fiber, pushed by a hand `lead` pixels
+/// ahead of it, for `frames` steps; returns the world and the tip's furthest x.
+fn press_knife_on_fiber(world: &mut rp::World, lead: f64, frames: i32) -> f64 {
+    let dt = world.materials().fixed_dt;
+    let mut furthest_tip = f64::MIN;
+    for _ in 0..frames {
+        let center = world.tool_position();
+        let input = rp::InputState {
+            active: true,
+            down: true,
+            x: center.x + lead,
+            y: 120.0,
+            vx: 0.0,
+            vy: 0.0,
+            power: 2.0,
+            tool: rp::ToolMode::Sharp,
+        };
+        world.step(dt, &input, 640.0, 480.0);
+        if let Some(pose) = world.current_tool_pose() {
+            furthest_tip = furthest_tip.max(pose.contact_end.x);
+        }
+    }
+    furthest_tip
+}
+
+#[test]
+fn knife_rests_against_skin_until_pressed_hard_enough_to_cut() {
+    let mut world = rp::World::new(rp::Materials::default());
+    world.add_point(rp::Vec2 { x: 176.0, y: 100.0 }, rp::TissueLayer::Skin, true);
+    world.add_point(rp::Vec2 { x: 176.0, y: 140.0 }, rp::TissueLayer::Skin, true);
+    world.add_spring(0, 1, rp::TissueLayer::Skin, 0.82, 40.0, 1000.0, false);
+    // The knife starts at rest with its tip just short of the fiber.
+    let start = rp::InputState {
+        active: true,
+        down: true,
+        x: 138.0,
+        y: 120.0,
+        vx: 0.0,
+        vy: 0.0,
+        power: 2.0,
+        tool: rp::ToolMode::Sharp,
+    };
+    world.step(world.materials().fixed_dt, &start, 640.0, 480.0);
+
+    let gentle_tip = press_knife_on_fiber(&mut world, 12.0, 90);
+    if world.springs()[0].broken {
+        fail("a gentle push should not cut skin");
+    }
+    if gentle_tip > 176.0 || !world.tool_held() {
+        panic!(
+            "FAIL: the knife should rest against skin it cannot cut, not pass through it: tip={gentle_tip:.1} held={}",
+            world.tool_held()
+        );
+    }
+
+    let firm_tip = press_knife_on_fiber(&mut world, 400.0, 30);
+    if !world.springs()[0].broken || world.stats().broken_skin != 1 {
+        fail("pressing hard enough should cut the skin");
+    }
+    if firm_tip <= 176.0 {
+        panic!("FAIL: once the fiber is cut the knife should go through it: tip={firm_tip:.1}");
+    }
+}
+
+#[test]
+fn knife_stops_at_bone_without_breaking_it() {
+    let mut world = rp::World::new(rp::Materials::default());
+    world.add_bone_segment(
+        rp::Vec2 { x: 176.0, y: 80.0 },
+        rp::Vec2 { x: 176.0, y: 160.0 },
+        5.0,
+        1850.0,
+        true,
+    );
+    let dt = world.materials().fixed_dt;
+    let mut furthest_tip = f64::MIN;
+    for frame in 0..40 {
+        // The knife comes in fast from the left, and the hand keeps pushing.
+        let input = rp::InputState {
+            active: true,
+            down: true,
+            x: if frame == 0 { 110.0 } else { 400.0 },
+            y: 120.0,
+            vx: if frame == 0 { 1500.0 } else { 0.0 },
+            vy: 0.0,
+            power: 4.0,
+            tool: rp::ToolMode::Sharp,
+        };
+        world.step(dt, &input, 640.0, 480.0);
+        if let Some(pose) = world.current_tool_pose() {
+            furthest_tip = furthest_tip.max(pose.contact_end.x);
+        }
+    }
+    if furthest_tip > 176.0 - 5.0 {
+        panic!("FAIL: a knife cannot cut through bone: tip reached {furthest_tip:.1}");
+    }
+    if !world.tool_held() || world.debug().bone_contacts <= 0 {
+        fail("a knife driven into bone should rest against it");
+    }
+    if world.stats().fractured_bones != 0 {
+        fail("a knife should not break bone");
+    }
+}
+
+#[test]
+fn bat_swing_stops_in_a_leg_and_bruises_without_tearing() {
+    let (width, height) = (1280.0, 720.0);
+    let frame = rp::body_frame(width, height);
+    let mut world = rp::create_layered_body(width, height, rp::Materials::default());
+    let dt = world.materials().fixed_dt;
+    let from = frame.point(-0.32, 0.66);
+    let to = frame.point(0.30, 0.66);
+    let far_side = frame.point(0.0, 0.66).x;
+    let swing_frames = 9;
+    let mut furthest = f64::MIN;
+    for step in 0..90 {
+        let t = (f64::from(step) / f64::from(swing_frames)).min(1.0);
+        let input = rp::InputState {
+            active: true,
+            down: step > 0,
+            x: from.x + (to.x - from.x) * t,
+            y: from.y,
+            vx: 0.0,
+            vy: 0.0,
+            power: 2.0,
+            tool: rp::ToolMode::Blunt,
+        };
+        world.step(dt, &input, width, height);
+        furthest = furthest.max(world.tool_position().x);
+    }
+    if furthest > far_side {
+        panic!(
+            "FAIL: a bat should stop in the leg it hits, not sweep through the body: reached x={furthest:.0}, midline x={far_side:.0}"
+        );
+    }
+    let stats = world.stats();
+    if stats.contusion_events < 10 {
+        panic!(
+            "FAIL: a bat blow should bruise: contusions={}",
+            stats.contusion_events
+        );
+    }
+    if stats.broken_skin > 4 || stats.fractured_bones > 0 {
+        panic!(
+            "FAIL: a bat blow to the thigh should bruise without tearing it open: skin={} fractures={}",
+            stats.broken_skin, stats.fractured_bones
+        );
     }
 }

@@ -264,7 +264,14 @@ fn add_skeleton(world: &mut World, frame: BodyFrame, materials: Materials) {
 
     // The skull is pinned with the crown, so it must stay at index 0 and the spine at 1.
     let head = world.add_bone_segment(at(SKULL[0]), at(SKULL[1]), 8.2, strength * 0.75, true);
-    let spine = bone(world, SPINE[0], SPINE[1], 7.2, 1.0);
+    let spine = world.add_bone_segment_with_kind(
+        at(SPINE[0]),
+        at(SPINE[1]),
+        7.2,
+        strength,
+        false,
+        BoneKind::Spine,
+    );
     let shoulders = bone(world, SHOULDER_GIRDLE[0], SHOULDER_GIRDLE[1], 6.2, 0.95);
     let pelvis = bone(world, PELVIS[0], PELVIS[1], 6.4, 0.9);
     let spine_t = |v: f64| ((v - SPINE[0].1) / (SPINE[1].1 - SPINE[0].1)).clamp(0.0, 1.0);

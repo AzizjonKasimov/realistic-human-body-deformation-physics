@@ -43,6 +43,7 @@ struct ScenarioExpectations {
     bone_fractures: IntBand,
     rib_fractures: IntBand,
     skin_tears: IntBand,
+    muscle_tears: IntBand,
     contusion_events: IntBand,
     tissue_fatigue_events: IntBand,
     tissue_plastic_events: IntBand,
@@ -290,41 +291,34 @@ fn scenarios() -> Vec<Scenario> {
             region: "torso",
             intent: "medium",
             tool: rp::ToolMode::Blunt,
-            start: body(-0.300, 0.350),
-            end: body(0.055, 0.350),
-            windup_frames: 12,
-            strike_frames: 34,
-            settle_frames: 42,
+            start: body(-0.360, 0.330),
+            end: body(0.200, 0.330),
+            windup_frames: 6,
+            strike_frames: 14,
+            settle_frames: 60,
             power: 3.0,
             followup: None,
+            // A hard bat swing into the upper arm and chest: deep bruising
+            // and perhaps a broken arm, but the torso is not torn open.
             expectations: ScenarioExpectations {
+                skin_tears: IntBand { min: 0, max: 30 },
+                muscle_tears: IntBand { min: 0, max: 60 },
+                muscle_fiber_tears: IntBand { min: 0, max: 40 },
+                contusion_events: IntBand {
+                    min: 40,
+                    max: i32::MAX,
+                },
+                bone_fractures: IntBand { min: 0, max: 2 },
+                rib_fractures: IntBand { min: 0, max: 1 },
                 vessel_lacerations: IntBand { min: 0, max: 0 },
                 fragment_vessel_lacerations: IntBand { min: 0, max: 0 },
-                muscle_fiber_tears: IntBand { min: 20, max: 90 },
-                bone_joint_subluxations: IntBand { min: 1, max: 4 },
-                joint_ligament_damage_events: IntBand { min: 1, max: 4 },
-                bone_joint_subluxation: DoubleBand {
-                    min: 0.20,
-                    max: 0.85,
-                },
-                rib_fractures: IntBand { min: 3, max: 6 },
-                cavity_pressure_events: IntBand { min: 0, max: 30 },
-                cavity_ruptures: IntBand { min: 0, max: 0 },
-                cavity_pressure: DoubleBand {
-                    min: 0.35,
-                    max: 0.78,
-                },
-                cavity_collapse: DoubleBand {
-                    min: 0.12,
-                    max: 0.55,
-                },
-                organ_damage_events: IntBand { min: 30, max: 80 },
                 organ_penetrations: IntBand { min: 0, max: 0 },
                 rib_organ_punctures: IntBand { min: 0, max: 0 },
                 organ_ruptures: IntBand { min: 0, max: 0 },
-                organ_damage: DoubleBand {
-                    min: 1.0,
-                    max: 1.81,
+                cavity_ruptures: IntBand { min: 0, max: 0 },
+                blood_loss: DoubleBand {
+                    min: 0.0,
+                    max: 0.02,
                 },
                 ..e
             },
@@ -334,56 +328,44 @@ fn scenarios() -> Vec<Scenario> {
             region: "torso",
             intent: "high",
             tool: rp::ToolMode::Heavy,
-            start: body(-0.330, 0.355),
-            end: body(0.095, 0.355),
-            windup_frames: 12,
-            strike_frames: 30,
-            settle_frames: 54,
+            start: body(-0.360, 0.340),
+            end: body(0.200, 0.340),
+            windup_frames: 6,
+            strike_frames: 16,
+            settle_frames: 60,
             power: 4.0,
             followup: None,
+            // A full-force sledgehammer blow through the arm into the chest
+            // breaks the arm and ribs, bruises deeply and injures organs,
+            // without pulping the chest.
             expectations: ScenarioExpectations {
-                fragment_skin_punctures: IntBand { min: 6, max: 60 },
-                rib_fractures: IntBand { min: 4, max: 8 },
-                fracture_marrow_sources: IntBand { min: 16, max: 45 },
-                muscle_crush_ruptures: IntBand { min: 12, max: 40 },
-                muscle_fiber_tears: IntBand { min: 40, max: 120 },
-                bone_joint_subluxations: IntBand { min: 0, max: 4 },
-                joint_ligament_damage_events: IntBand { min: 0, max: 4 },
-                bone_joint_subluxation: DoubleBand {
-                    min: 0.00,
-                    max: 0.95,
+                bone_fractures: IntBand { min: 3, max: 12 },
+                rib_fractures: IntBand { min: 1, max: 8 },
+                skin_tears: IntBand { min: 20, max: 160 },
+                muscle_tears: IntBand { min: 40, max: 260 },
+                muscle_fiber_tears: IntBand { min: 10, max: 80 },
+                contusion_events: IntBand {
+                    min: 200,
+                    max: i32::MAX,
                 },
-                cavity_pressure_events: IntBand { min: 25, max: 70 },
-                cavity_ruptures: IntBand { min: 1, max: 1 },
-                cavity_pressure: DoubleBand {
-                    min: 0.76,
-                    max: 0.92,
-                },
-                cavity_collapse: DoubleBand {
-                    min: 0.05,
-                    max: 0.16,
-                },
-                organ_damage_events: IntBand { min: 60, max: 120 },
+                muscle_crush_ruptures: IntBand { min: 4, max: 40 },
+                cavity_pressure_events: IntBand { min: 4, max: 60 },
+                cavity_ruptures: IntBand { min: 0, max: 1 },
+                organ_damage_events: IntBand { min: 1, max: 60 },
                 organ_penetrations: IntBand { min: 0, max: 0 },
-                rib_organ_punctures: IntBand { min: 1, max: 4 },
-                organ_ruptures: IntBand { min: 1, max: 2 },
+                fracture_marrow_sources: IntBand { min: 0, max: 20 },
+                vessel_lacerations: IntBand { min: 0, max: 4 },
+                cavity_pressure: DoubleBand {
+                    min: 0.30,
+                    max: 1.20,
+                },
                 organ_damage: DoubleBand {
-                    min: 1.0,
+                    min: 0.20,
                     max: 1.81,
                 },
-                vessel_lacerations: IntBand { min: 1, max: 4 },
-                fragment_vessel_lacerations: IntBand { min: 1, max: 2 },
                 blood_loss: DoubleBand {
-                    min: 0.08,
-                    max: 0.20,
-                },
-                final_blood_volume: DoubleBand {
-                    min: 0.78,
-                    max: 0.95,
-                },
-                final_blood_turgor: DoubleBand {
-                    min: 0.89,
-                    max: 0.99,
+                    min: 0.005,
+                    max: 0.08,
                 },
                 ..e
             },
@@ -393,28 +375,32 @@ fn scenarios() -> Vec<Scenario> {
             region: "torso",
             intent: "cut",
             tool: rp::ToolMode::Sharp,
-            start: body(-0.100, 0.250),
-            end: body(0.070, 0.430),
-            windup_frames: 8,
-            strike_frames: 28,
-            settle_frames: 48,
+            start: body(-0.075, 0.385),
+            end: body(0.065, 0.485),
+            windup_frames: 6,
+            strike_frames: 16,
+            settle_frames: 60,
             power: 3.0,
             followup: None,
+            // A knife slashed across the belly cuts a line through skin and
+            // muscle and can reach a vessel or organ, but breaks no bone.
             expectations: ScenarioExpectations {
-                tear_propagations: IntBand { min: 0, max: 20 },
-                muscle_cut_transfers: IntBand { min: 20, max: 90 },
-                skin_flap_detachments: IntBand { min: 25, max: 110 },
-                muscle_fiber_tears: IntBand { min: 8, max: 60 },
-                bone_joint_subluxations: IntBand { min: 0, max: 0 },
-                joint_ligament_damage_events: IntBand { min: 0, max: 0 },
-                vessel_lacerations: IntBand { min: 1, max: 4 },
-                fragment_vessel_lacerations: IntBand { min: 0, max: 0 },
-                rib_fractures: IntBand { min: 0, max: 0 },
-                organ_penetrations: IntBand { min: 1, max: 3 },
-                rib_organ_punctures: IntBand { min: 0, max: 0 },
-                organ_ruptures: IntBand { min: 1, max: 2 },
                 bone_fractures: IntBand { min: 0, max: 0 },
+                rib_fractures: IntBand { min: 0, max: 0 },
+                skin_tears: IntBand { min: 6, max: 40 },
+                muscle_tears: IntBand { min: 15, max: 100 },
                 contusion_events: IntBand { min: 0, max: 40 },
+                tear_propagations: IntBand { min: 0, max: 20 },
+                muscle_cut_transfers: IntBand { min: 10, max: 80 },
+                skin_flap_detachments: IntBand { min: 8, max: 60 },
+                organ_penetrations: IntBand { min: 0, max: 2 },
+                organ_ruptures: IntBand { min: 0, max: 1 },
+                vessel_lacerations: IntBand { min: 0, max: 2 },
+                cavity_ruptures: IntBand { min: 0, max: 0 },
+                blood_loss: DoubleBand {
+                    min: 0.002,
+                    max: 0.05,
+                },
                 ..e
             },
         },
@@ -423,27 +409,26 @@ fn scenarios() -> Vec<Scenario> {
             region: "shoulder",
             intent: "medium",
             tool: rp::ToolMode::Blunt,
-            start: body(-0.340, 0.225),
-            end: body(-0.030, 0.245),
-            windup_frames: 10,
-            strike_frames: 30,
-            settle_frames: 42,
+            start: body(-0.100, 0.000),
+            end: body(-0.100, 0.320),
+            windup_frames: 6,
+            strike_frames: 12,
+            settle_frames: 60,
             power: 3.2,
             followup: None,
+            // A bat brought down on the shoulder bruises it.
             expectations: ScenarioExpectations {
-                vessel_lacerations: IntBand { min: 0, max: 0 },
-                fragment_vessel_lacerations: IntBand { min: 0, max: 0 },
-                muscle_fiber_tears: IntBand { min: 15, max: 80 },
-                rib_fractures: IntBand { min: 2, max: 5 },
-                organ_penetrations: IntBand { min: 0, max: 0 },
-                rib_organ_punctures: IntBand { min: 0, max: 0 },
-                organ_ruptures: IntBand { min: 0, max: 0 },
-                bone_joint_subluxations: IntBand { min: 1, max: 3 },
-                joint_ligament_damage_events: IntBand { min: 1, max: 3 },
-                bone_joint_subluxation: DoubleBand {
-                    min: 0.20,
-                    max: 0.80,
+                skin_tears: IntBand { min: 0, max: 12 },
+                muscle_tears: IntBand { min: 0, max: 20 },
+                contusion_events: IntBand {
+                    min: 30,
+                    max: i32::MAX,
                 },
+                bone_fractures: IntBand { min: 0, max: 1 },
+                vessel_lacerations: IntBand { min: 0, max: 0 },
+                organ_penetrations: IntBand { min: 0, max: 0 },
+                organ_ruptures: IntBand { min: 0, max: 0 },
+                cavity_ruptures: IntBand { min: 0, max: 0 },
                 ..e
             },
         },
@@ -452,31 +437,26 @@ fn scenarios() -> Vec<Scenario> {
             region: "arm",
             intent: "cut",
             tool: rp::ToolMode::Sharp,
-            start: body(-0.112, 0.250),
-            end: body(-0.168, 0.530),
-            windup_frames: 8,
-            strike_frames: 32,
-            settle_frames: 42,
+            start: body(-0.115, 0.260),
+            end: body(-0.165, 0.530),
+            windup_frames: 6,
+            strike_frames: 24,
+            settle_frames: 48,
             power: 3.4,
             followup: None,
+            // A knife drawn down the arm cuts along it, lifts skin flaps and
+            // reaches the brachial artery, but breaks no bone.
             expectations: ScenarioExpectations {
-                tear_propagations: IntBand { min: 0, max: 20 },
-                muscle_cut_transfers: IntBand { min: 60, max: 180 },
-                skin_flap_detachments: IntBand { min: 10, max: 80 },
-                vessel_lacerations: IntBand { min: 1, max: 2 },
-                fragment_vessel_lacerations: IntBand { min: 0, max: 0 },
-                muscle_fiber_tears: IntBand { min: 1, max: 30 },
-                bone_joint_subluxations: IntBand { min: 0, max: 0 },
-                joint_ligament_damage_events: IntBand { min: 0, max: 0 },
-                bone_joint_subluxation: DoubleBand {
-                    min: 0.00,
-                    max: 0.05,
-                },
-                rib_fractures: IntBand { min: 0, max: 0 },
-                organ_penetrations: IntBand { min: 0, max: 0 },
-                rib_organ_punctures: IntBand { min: 0, max: 0 },
                 bone_fractures: IntBand { min: 0, max: 0 },
-                contusion_events: IntBand { min: 0, max: 40 },
+                rib_fractures: IntBand { min: 0, max: 0 },
+                skin_tears: IntBand { min: 10, max: 60 },
+                muscle_tears: IntBand { min: 20, max: 120 },
+                contusion_events: IntBand { min: 0, max: 60 },
+                tear_propagations: IntBand { min: 0, max: 20 },
+                muscle_cut_transfers: IntBand { min: 15, max: 100 },
+                skin_flap_detachments: IntBand { min: 15, max: 90 },
+                vessel_lacerations: IntBand { min: 1, max: 2 },
+                bone_joint_subluxations: IntBand { min: 0, max: 0 },
                 ..e
             },
         },
@@ -485,32 +465,26 @@ fn scenarios() -> Vec<Scenario> {
             region: "hip",
             intent: "high",
             tool: rp::ToolMode::Heavy,
-            start: body(-0.330, 0.505),
-            end: body(0.055, 0.535),
-            windup_frames: 10,
-            strike_frames: 30,
-            settle_frames: 54,
+            start: body(-0.340, 0.620),
+            end: body(0.100, 0.620),
+            windup_frames: 6,
+            strike_frames: 16,
+            settle_frames: 60,
             power: 4.0,
             followup: None,
+            // A sledgehammer into the thigh bruises it deeply; the femur, the
+            // strongest bone, holds.
             expectations: ScenarioExpectations {
-                vessel_lacerations: IntBand { min: 1, max: 3 },
-                fragment_vessel_lacerations: IntBand { min: 1, max: 2 },
-                muscle_fiber_tears: IntBand { min: 10, max: 70 },
-                rib_fractures: IntBand { min: 1, max: 3 },
-                bone_joint_subluxations: IntBand { min: 0, max: 6 },
-                joint_ligament_damage_events: IntBand { min: 0, max: 6 },
-                bone_joint_subluxation: DoubleBand {
-                    min: 0.00,
-                    max: 0.85,
+                contusion_events: IntBand {
+                    min: 15,
+                    max: i32::MAX,
                 },
-                cavity_ruptures: IntBand { min: 0, max: 0 },
-                cavity_collapse: DoubleBand {
-                    min: 0.0,
-                    max: 0.14,
-                },
+                skin_tears: IntBand { min: 0, max: 15 },
+                bone_fractures: IntBand { min: 0, max: 1 },
+                vessel_lacerations: IntBand { min: 0, max: 1 },
                 organ_penetrations: IntBand { min: 0, max: 0 },
-                rib_organ_punctures: IntBand { min: 0, max: 0 },
                 organ_ruptures: IntBand { min: 0, max: 0 },
+                cavity_ruptures: IntBand { min: 0, max: 0 },
                 ..e
             },
         },
@@ -519,108 +493,67 @@ fn scenarios() -> Vec<Scenario> {
             region: "leg",
             intent: "medium",
             tool: rp::ToolMode::Blunt,
-            start: body(-0.220, 0.765),
-            end: body(-0.012, 0.840),
-            windup_frames: 10,
-            strike_frames: 32,
-            settle_frames: 42,
+            start: body(-0.300, 0.780),
+            end: body(0.050, 0.800),
+            windup_frames: 6,
+            strike_frames: 12,
+            settle_frames: 60,
             power: 3.4,
             followup: None,
+            // A bat swung into the shin bruises it.
             expectations: ScenarioExpectations {
+                contusion_events: IntBand {
+                    min: 30,
+                    max: i32::MAX,
+                },
+                skin_tears: IntBand { min: 0, max: 10 },
+                bone_fractures: IntBand { min: 0, max: 1 },
                 vessel_lacerations: IntBand { min: 0, max: 0 },
-                blood_loss: DoubleBand {
-                    min: 0.0,
-                    max: 0.02,
-                },
-                final_blood_volume: DoubleBand {
-                    min: 0.98,
-                    max: 1.0,
-                },
-                final_blood_turgor: DoubleBand {
-                    min: 0.99,
-                    max: 1.0,
-                },
-                fragment_vessel_lacerations: IntBand { min: 0, max: 0 },
-                muscle_fiber_tears: IntBand { min: 0, max: 40 },
-                bone_joint_subluxations: IntBand { min: 0, max: 0 },
-                joint_ligament_damage_events: IntBand { min: 0, max: 0 },
-                cavity_pressure_events: IntBand { min: 0, max: 0 },
-                cavity_ruptures: IntBand { min: 0, max: 0 },
-                organ_damage_events: IntBand { min: 0, max: 0 },
-                rib_fractures: IntBand { min: 0, max: 0 },
                 organ_penetrations: IntBand { min: 0, max: 0 },
-                rib_organ_punctures: IntBand { min: 0, max: 0 },
-                organ_ruptures: IntBand { min: 0, max: 0 },
-                cavity_pressure: DoubleBand {
-                    min: 0.0,
-                    max: 0.05,
-                },
+                cavity_ruptures: IntBand { min: 0, max: 0 },
                 ..e
             },
         },
         Scenario {
-            name: "torso_cut_rebleed",
-            region: "torso",
+            name: "thigh_cut_rebleed",
+            region: "leg",
             intent: "rebleed",
             tool: rp::ToolMode::Sharp,
-            start: body(-0.100, 0.250),
-            end: body(0.070, 0.430),
-            windup_frames: 8,
-            strike_frames: 28,
+            start: body(-0.072, 0.585),
+            end: body(-0.072, 0.685),
+            windup_frames: 6,
+            strike_frames: 16,
             settle_frames: 190,
             power: 3.0,
-            // The bat starts outside the body, in the gap between the right
-            // forearm and the torso, then sweeps up along the healed cut.
+            // A knife cut down the outer thigh clots, then a bat swung into the
+            // thigh strikes the healed cut.
             followup: Some(FollowupStrike {
                 tool: rp::ToolMode::Blunt,
-                start: body(0.115, 0.475),
-                end: body(-0.100, 0.250),
-                windup_frames: 8,
-                strike_frames: 24,
-                settle_frames: 48,
+                start: body(-0.340, 0.640),
+                end: body(0.100, 0.640),
+                windup_frames: 6,
+                strike_frames: 14,
+                settle_frames: 60,
                 power: 3.0,
             }),
             expectations: ScenarioExpectations {
-                tear_propagations: IntBand { min: 0, max: 20 },
-                muscle_cut_transfers: IntBand { min: 20, max: 90 },
-                skin_flap_detachments: IntBand { min: 25, max: 110 },
-                vessel_lacerations: IntBand { min: 1, max: 4 },
-                fragment_vessel_lacerations: IntBand { min: 0, max: 0 },
-                // The knife's incision plus a full bat swing across the chest.
-                muscle_fiber_tears: IntBand { min: 20, max: 110 },
-                bone_joint_subluxations: IntBand { min: 0, max: 2 },
-                joint_ligament_damage_events: IntBand { min: 0, max: 2 },
-                // Most of the clotted cut sources should bleed again under the bat.
-                wound_reopens: IntBand { min: 4, max: 40 },
-                blood_loss: DoubleBand {
-                    min: 0.12,
-                    max: 0.36,
+                bone_fractures: IntBand { min: 0, max: 1 },
+                skin_tears: IntBand { min: 8, max: 50 },
+                muscle_tears: IntBand { min: 10, max: 80 },
+                muscle_cut_transfers: IntBand { min: 8, max: 60 },
+                skin_flap_detachments: IntBand { min: 0, max: 40 },
+                contusion_events: IntBand {
+                    min: 30,
+                    max: i32::MAX,
                 },
-                final_blood_volume: DoubleBand {
-                    min: 0.62,
-                    max: 0.84,
-                },
-                final_blood_turgor: DoubleBand {
-                    min: 0.82,
-                    max: 0.94,
-                },
+                // The bat must make the clotted cut bleed again.
+                wound_reopens: IntBand { min: 1, max: 30 },
+                organ_penetrations: IntBand { min: 0, max: 0 },
+                organ_ruptures: IntBand { min: 0, max: 0 },
                 cavity_ruptures: IntBand { min: 0, max: 0 },
-                cavity_pressure: DoubleBand {
-                    min: 0.60,
-                    max: 0.84,
-                },
-                cavity_collapse: DoubleBand {
-                    min: 0.0,
-                    max: 0.14,
-                },
-                organ_penetrations: IntBand { min: 1, max: 3 },
-                // The bat breaks ribs, so a fragment can reach an organ.
-                rib_organ_punctures: IntBand { min: 0, max: 2 },
-                organ_ruptures: IntBand { min: 1, max: 2 },
-                rib_fractures: IntBand { min: 3, max: 8 },
-                bone_spin: DoubleBand {
-                    min: 0.0,
-                    max: 32.0,
+                blood_loss: DoubleBand {
+                    min: 0.001,
+                    max: 0.05,
                 },
                 ..e
             },
@@ -630,120 +563,39 @@ fn scenarios() -> Vec<Scenario> {
             region: "torso",
             intent: "settle",
             tool: rp::ToolMode::Heavy,
-            start: body(-0.330, 0.355),
-            end: body(0.095, 0.355),
-            windup_frames: 12,
-            strike_frames: 30,
+            start: body(-0.360, 0.340),
+            end: body(0.200, 0.340),
+            windup_frames: 6,
+            strike_frames: 16,
             settle_frames: 260,
             power: 4.0,
             followup: None,
+            // The bone fragments from a full-force sledgehammer blow to the
+            // chest settle and come to rest.
             expectations: ScenarioExpectations {
-                bone_fractures: IntBand {
-                    min: 8,
-                    max: i32::MAX,
-                },
-                blood_stain_deposits: IntBand {
-                    min: 350,
-                    max: i32::MAX,
-                },
+                bone_fractures: IntBand { min: 3, max: 12 },
+                rib_fractures: IntBand { min: 1, max: 8 },
                 contusion_events: IntBand {
-                    min: 900,
+                    min: 200,
                     max: i32::MAX,
                 },
-                tissue_fatigue_events: IntBand {
-                    min: 1000,
-                    max: i32::MAX,
-                },
-                tissue_plastic_events: IntBand {
-                    min: 30,
-                    max: i32::MAX,
-                },
-                tissue_softening: DoubleBand {
-                    min: 0.10,
-                    max: 0.52,
-                },
-                tissue_fatigue: DoubleBand {
-                    min: 0.08,
-                    max: 1.35,
-                },
-                tissue_plasticity: DoubleBand {
-                    min: 0.001,
-                    max: 0.12,
-                },
-                final_free_fragments: IntBand { min: 18, max: 60 },
+                final_free_fragments: IntBand { min: 4, max: 40 },
+                sleeping_fragments: IntBand { min: 1, max: 40 },
+                sleep_events: IntBand { min: 1, max: 40 },
+                final_sleeping_fragments: IntBand { min: 1, max: 40 },
                 fragment_bone_contacts: IntBand {
-                    min: 1000,
+                    min: 1,
                     max: i32::MAX,
                 },
-                fragment_bone_damping_events: IntBand {
-                    min: 4000,
+                fragment_pair_contacts: IntBand {
+                    min: 1,
                     max: i32::MAX,
                 },
-                fragment_bone_resting_contacts: IntBand {
-                    min: 3500,
-                    max: i32::MAX,
-                },
-                sleeping_fragments: IntBand { min: 8, max: 40 },
-                sleep_events: IntBand { min: 8, max: 40 },
-                final_sleeping_fragments: IntBand { min: 8, max: 40 },
-                fragment_pair_damping_events: IntBand {
-                    min: 1000,
-                    max: i32::MAX,
-                },
-                fragment_pair_resting_contacts: IntBand {
-                    min: 7000,
-                    max: i32::MAX,
-                },
-                fragment_floor_contacts: IntBand {
-                    min: 500,
-                    max: i32::MAX,
-                },
-                fragment_floor_resting_contacts: IntBand {
-                    min: 500,
-                    max: i32::MAX,
-                },
-                fragment_skin_punctures: IntBand { min: 6, max: 60 },
-                rib_fractures: IntBand { min: 4, max: 8 },
-                fracture_marrow_sources: IntBand { min: 16, max: 45 },
-                muscle_crush_ruptures: IntBand { min: 12, max: 40 },
-                muscle_fiber_tears: IntBand { min: 40, max: 120 },
-                bone_joint_subluxations: IntBand { min: 0, max: 4 },
-                joint_ligament_damage_events: IntBand { min: 0, max: 4 },
-                bone_joint_subluxation: DoubleBand {
-                    min: 0.00,
-                    max: 0.95,
-                },
-                cavity_pressure_events: IntBand { min: 25, max: 80 },
-                cavity_ruptures: IntBand { min: 1, max: 1 },
-                cavity_pressure: DoubleBand {
-                    min: 0.76,
-                    max: 0.92,
-                },
-                cavity_collapse: DoubleBand {
-                    min: 0.05,
-                    max: 0.16,
-                },
-                organ_damage_events: IntBand { min: 60, max: 120 },
+                wound_reopens: IntBand { min: 0, max: 60 },
                 organ_penetrations: IntBand { min: 0, max: 0 },
-                rib_organ_punctures: IntBand { min: 1, max: 4 },
-                organ_ruptures: IntBand { min: 1, max: 2 },
-                organ_damage: DoubleBand {
-                    min: 1.0,
-                    max: 1.81,
-                },
-                vessel_lacerations: IntBand { min: 1, max: 4 },
-                fragment_vessel_lacerations: IntBand { min: 1, max: 2 },
                 blood_loss: DoubleBand {
-                    min: 0.20,
-                    max: 0.40,
-                },
-                final_blood_volume: DoubleBand {
-                    min: 0.60,
-                    max: 0.82,
-                },
-                final_blood_turgor: DoubleBand {
-                    min: 0.80,
-                    max: 0.93,
+                    min: 0.01,
+                    max: 0.15,
                 },
                 ..e
             },
@@ -763,20 +615,22 @@ fn run_scenario(scenario: &Scenario, csv: &mut dyn Write) -> std::io::Result<Sce
     let total_frames = primary_frames + followup_frames;
 
     for frame in 0..total_frames {
-        let input = if frame < scenario.windup_frames + scenario.strike_frames {
-            make_strike_input(scenario, frame, dt)
-        } else if let Some(followup) = scenario.followup {
-            let followup_frame = frame - primary_frames;
-            if followup_frame >= 0
-                && followup_frame < followup.windup_frames + followup.strike_frames
-            {
-                make_followup_input(followup, followup_frame, dt)
+        let input =
+            if frame < scenario.windup_frames + scenario.strike_frames + FOLLOW_THROUGH_FRAMES {
+                make_strike_input(scenario, frame, dt)
+            } else if let Some(followup) = scenario.followup {
+                let followup_frame = frame - primary_frames;
+                if followup_frame >= 0
+                    && followup_frame
+                        < followup.windup_frames + followup.strike_frames + FOLLOW_THROUGH_FRAMES
+                {
+                    make_followup_input(followup, followup_frame, dt)
+                } else {
+                    rp::InputState::default()
+                }
             } else {
                 rp::InputState::default()
-            }
-        } else {
-            rp::InputState::default()
-        };
+            };
         world.step(dt, &input, WIDTH, HEIGHT);
         accumulate_result(&world, &mut result);
         write_frame(csv, scenario, frame, &world)?;
@@ -827,6 +681,9 @@ fn run_scenario(scenario: &Scenario, csv: &mut dyn Write) -> std::io::Result<Sce
     Ok(result)
 }
 
+/// Frames the hand holds at the end of a swing with the button down.
+const FOLLOW_THROUGH_FRAMES: i32 = 20;
+
 fn make_strike_input(scenario: &Scenario, frame: i32, dt: f64) -> rp::InputState {
     make_pass_input(
         scenario.tool,
@@ -865,6 +722,7 @@ fn make_pass_input(
 ) -> rp::InputState {
     let t0 = (frame - windup_frames).max(0) as f64 / (strike_frames - 1).max(1) as f64;
     let t = t0.clamp(0.0, 1.0);
+    let moving = t0 < 1.0;
     let position = rp::Vec2 {
         x: start.x + (end.x - start.x) * t,
         y: start.y + (end.y - start.y) * t,
@@ -873,14 +731,17 @@ fn make_pass_input(
         x: (end.x - start.x) / ((strike_frames - 1).max(1) as f64 * dt),
         y: (end.y - start.y) / ((strike_frames - 1).max(1) as f64 * dt),
     };
-    let down = frame >= windup_frames && frame < windup_frames + strike_frames;
+    // The tool trails the hand, so the hand holds at the end of its path for
+    // a moment with the button still down, as a person follows through.
+    let down =
+        frame >= windup_frames && frame < windup_frames + strike_frames + FOLLOW_THROUGH_FRAMES;
     rp::InputState {
         active: down,
         down,
         x: position.x,
         y: position.y,
-        vx: if down { velocity.x } else { 0.0 },
-        vy: if down { velocity.y } else { 0.0 },
+        vx: if down && moving { velocity.x } else { 0.0 },
+        vy: if down && moving { velocity.y } else { 0.0 },
         power,
         tool,
     }
@@ -1258,6 +1119,13 @@ fn validate_result(scenario: &Scenario, result: &ScenarioResult, warnings: &mut 
         "skin_tears",
         result.skin_tears,
         scenario.expectations.skin_tears,
+        warnings,
+    );
+    check_int(
+        scenario,
+        "muscle_tears",
+        result.muscle_tears,
+        scenario.expectations.muscle_tears,
         warnings,
     );
     check_int(

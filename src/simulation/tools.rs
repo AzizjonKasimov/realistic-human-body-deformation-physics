@@ -1,4 +1,4 @@
-//! Tool geometry, pose, and contact. The app draws each tool from the same pose
+//! Tool geometry, pose, and motion. The app draws each tool from the same pose
 //! and dimensions used here, so what is on screen is what touches the body.
 //!
 //! Every tool's striking part is a segment with a radius: the knife's blade runs
@@ -6,6 +6,13 @@
 //! heading so a face leads, and the bat's barrel lies across its heading so the
 //! side of the barrel leads. `side` points from the striking part toward the
 //! hand along the handle of the hammer and bat.
+//!
+//! A tool is a solid object with momentum. The hand pulls it toward the pointer
+//! like a spring, no harder than an arm can push, and the body pushes back. A bat
+//! or hammer gives its momentum to the tissue and bone it shoves, so it slows and
+//! stops in the body instead of sweeping through it. A knife moves only through
+//! fibers it severs: it rests against skin it cannot cut until it moves fast
+//! enough or the hand presses hard enough, and bone stops it.
 
 use super::*;
 
@@ -17,10 +24,73 @@ const EMBEDDED_TURN_RATE: f64 = 2.5;
 /// How fast tissue steers an embedded knife to follow its stroke.
 const EMBEDDED_BLADE_TURN_RATE: f64 = 18.0;
 /// The front part of the blade, as a fraction of its length, that cuts what it
-/// passes; the rest of the blade only parts tissue already cut by the tip.
+/// passes; the rest of the blade follows the tip through the cut.
 const CUTTING_EDGE_SHARE: f64 = 0.25;
+/// Share of a fiber's cutting resistance the knife spends from its momentum to
+/// sever it, so a long slash slows down.
+const BLADE_CUT_COST: f64 = 0.5;
+/// A knife stopped by a fiber or bone keeps this share of its motion along it,
+/// so it slides along skin or between fibers it cannot cut.
+const BLADE_SLIDE: f64 = 0.5;
+/// Most motion steps one tool step is split into, so a fast swing cannot skip
+/// over a thin limb or fiber between steps.
+const MAX_TOOL_SUBSTEPS: usize = 12;
+/// How firmly tissue pushes back out of a blunt tool in each solver pass.
+const TOOL_CONTACT_STIFFNESS: f64 = 0.5;
+/// Share of the tissue's push-back that becomes the tool's rebound velocity.
+const TOOL_REBOUND: f64 = 0.6;
+/// Bruising load per unit of momentum a blow gives a point of tissue, so a
+/// point knocked hard is bruised while one pressed slowly is not.
+const BRUISE_PER_IMPULSE: f64 = 2.0;
 
-/// Dimensions of a tool in world pixels, measured from the point the mouse drives.
+/// How a hand moves a tool: a spring toward the pointer, with damping.
+#[derive(Clone, Copy, Debug)]
+struct ToolHandling {
+    /// Acceleration per pixel the pointer leads the tool, and velocity damping,
+    /// while the button is held.
+    drive: f64,
+    damping: f64,
+    /// The same while the button is up and the tool only follows the pointer.
+    idle_drive: f64,
+    idle_damping: f64,
+    max_speed: f64,
+    /// Farthest lead the hand presses with: pulling the pointer farther from a
+    /// tool stuck in the body does not press it any harder.
+    max_reach: f64,
+}
+
+fn tool_handling(tool: ToolMode) -> ToolHandling {
+    match tool {
+        ToolMode::Sharp => ToolHandling {
+            drive: 132.0,
+            damping: 13.0,
+            idle_drive: 70.0,
+            idle_damping: 18.0,
+            max_speed: 4600.0,
+            max_reach: 150.0,
+        },
+        // A sledgehammer is slower to get going than a bat and tops out
+        // lower, but carries far more momentum once it is swinging.
+        ToolMode::Heavy => ToolHandling {
+            drive: 96.0,
+            damping: 14.0,
+            idle_drive: 50.0,
+            idle_damping: 22.0,
+            max_speed: 3400.0,
+            max_reach: 150.0,
+        },
+        ToolMode::Blunt => ToolHandling {
+            drive: 118.0,
+            damping: 15.0,
+            idle_drive: 62.0,
+            idle_damping: 20.0,
+            max_speed: 4200.0,
+            max_reach: 150.0,
+        },
+    }
+}
+
+/// Dimensions of a tool in world pixels, measured from the point the hand drives.
 #[derive(Clone, Copy, Debug)]
 pub struct ToolGeometry {
     /// Contact segment extent behind and ahead of the driven point, along the
@@ -73,7 +143,7 @@ pub fn tool_geometry(tool: ToolMode) -> ToolGeometry {
 #[derive(Clone, Copy, Debug)]
 pub struct ToolPose {
     pub tool: ToolMode,
-    /// The point the mouse drives.
+    /// The point the hand drives.
     pub center: Vec2,
     /// Direction the tool travels and strikes with.
     pub heading: Vec2,
@@ -109,6 +179,84 @@ pub fn tool_pose(tool: ToolMode, center: Vec2, heading: Vec2, side: Vec2) -> Too
     }
 }
 
+/// The tool in play: where it is, how it moves, and what it presses on.
+#[derive(Clone, Debug)]
+pub(super) struct ToolBody {
+    mode: ToolMode,
+    /// A tool is in play. It appears at the hand when input becomes active.
+    present: bool,
+    /// The point the hand drives, in the middle of the striking part.
+    position: Vec2,
+    velocity: Vec2,
+    /// Direction the tool faces; it follows the motion when free.
+    heading: Vec2,
+    /// Perpendicular to the heading, toward the hand on the hammer and bat.
+    side: Vec2,
+    /// The tool was in tissue last step, so it resists turning.
+    embedded: bool,
+    /// The knife rests against a fiber or bone it could not get through.
+    held: bool,
+    /// The button was down last step.
+    was_down: bool,
+    /// A bat or hammer gripped while inside the body passes through it until
+    /// it is clear; it cannot appear in flesh and blast it apart.
+    ghost: bool,
+    /// A blunt tool's contact this step, which the solver keeps resolving so
+    /// the tissue pushes back on the tool.
+    contact: Option<ToolSolverContact>,
+    /// How far the tissue has pushed the tool back during this step's solver.
+    solver_shift: Vec2,
+}
+
+impl Default for ToolBody {
+    fn default() -> Self {
+        Self {
+            mode: ToolMode::default(),
+            present: false,
+            position: Vec2::default(),
+            velocity: Vec2::default(),
+            heading: Vec2 { x: 1.0, y: 0.0 },
+            side: Vec2 { x: 0.0, y: 1.0 },
+            embedded: false,
+            held: false,
+            was_down: false,
+            ghost: false,
+            contact: None,
+            solver_shift: Vec2::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ToolSolverContact {
+    shape: ToolContactShape,
+    inertia: f64,
+    /// Tissue points close enough to touch the tool this step.
+    candidates: Vec<usize>,
+}
+
+/// What one tool step did to a tissue point it touched.
+#[derive(Clone, Copy, Debug, Default)]
+struct PointHit {
+    /// Hardest contact load, from the tool's momentum and how deep it pressed.
+    load: f64,
+    /// Momentum the tool gave the point.
+    impulse: f64,
+}
+
+/// One step's physical values for the tool in hand.
+#[derive(Clone, Copy, Debug)]
+struct ToolStrike {
+    tool: ToolMode,
+    profile: ToolProfile,
+    power: f64,
+    /// The tool's mass, which sets how hard it hits.
+    mass: f64,
+    /// The mass that carries momentum into the body: the tool and the arm
+    /// swinging it.
+    inertia: f64,
+}
+
 fn contact_shape(pose: &ToolPose) -> ToolContactShape {
     let geometry = tool_geometry(pose.tool);
     ToolContactShape {
@@ -120,6 +268,15 @@ fn contact_shape(pose: &ToolPose) -> ToolContactShape {
         influence: pose.contact_radius + geometry.contact_padding,
         cutting_edge: pose.tool == ToolMode::Sharp,
     }
+}
+
+/// The front part of a blade, which cuts: from the end of the cutting edge to
+/// the tip.
+fn cutting_edge(shape: &ToolContactShape) -> (Vec2, Vec2) {
+    (
+        lerp(shape.axis_end, shape.axis_start, CUTTING_EDGE_SHARE),
+        shape.axis_end,
+    )
 }
 
 fn rotate_toward(from: Vec2, to: Vec2, max_angle: f64) -> Vec2 {
@@ -135,8 +292,9 @@ fn rotate_toward(from: Vec2, to: Vec2, max_angle: f64) -> Vec2 {
     }
 }
 
-/// Where two segments cross, as (point, position along the second segment).
-fn segment_crossing(a0: Vec2, a1: Vec2, b0: Vec2, b1: Vec2) -> Option<(Vec2, f64)> {
+/// Where two segments cross, as (position along the first, position along the
+/// second).
+fn segment_crossing(a0: Vec2, a1: Vec2, b0: Vec2, b1: Vec2) -> Option<(f64, f64)> {
     let r = subtract(a1, a0);
     let s = subtract(b1, b0);
     let denominator = cross(r, s);
@@ -146,319 +304,469 @@ fn segment_crossing(a0: Vec2, a1: Vec2, b0: Vec2, b1: Vec2) -> Option<(Vec2, f64
     let offset = subtract(b0, a0);
     let t = cross(offset, s) / denominator;
     let u = cross(offset, r) / denominator;
-    ((0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)).then(|| (lerp(a0, a1, t), u))
+    ((0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)).then_some((t, u))
+}
+
+/// The part of `velocity` along `along`, scaled by `keep`.
+fn slide_along(velocity: Vec2, along: Vec2, keep: f64) -> Vec2 {
+    let along = normalized(along, Vec2 { x: 1.0, y: 0.0 });
+    scale(along, dot(velocity, along) * keep)
 }
 
 impl World {
     /// Direction the current tool faces and strikes with.
     pub fn tool_heading(&self) -> Vec2 {
-        self.tool_heading
+        self.tool.heading
     }
 
     /// Perpendicular to the heading, toward the hand on the hammer and bat.
     pub fn tool_side(&self) -> Vec2 {
-        self.tool_side
+        self.tool.side
+    }
+
+    /// The point the hand drives, in the middle of the tool's striking part.
+    pub fn tool_position(&self) -> Vec2 {
+        self.tool.position
+    }
+
+    pub fn tool_velocity(&self) -> Vec2 {
+        self.tool.velocity
+    }
+
+    /// The knife is resting against tissue or bone it could not cut through.
+    pub fn tool_held(&self) -> bool {
+        self.tool.held
+    }
+
+    /// The tool's pose for drawing, once a tool is in play.
+    pub fn current_tool_pose(&self) -> Option<ToolPose> {
+        self.tool.present.then(|| {
+            tool_pose(
+                self.tool.mode,
+                self.tool.position,
+                self.tool.heading,
+                self.tool.side,
+            )
+        })
     }
 
     /// Turns the tool to follow its motion. A blunt tool pressed into tissue
     /// turns slowly. Tissue steers an embedded knife to follow its stroke, like
     /// a scalpel, except that a knife pulled backward keeps its line and
     /// withdraws rather than flipping around inside the wound.
-    pub(super) fn update_tool_pose(&mut self, input: &InputState, dt: f64) {
-        if input.tool != self.tool_mode {
-            self.tool_mode = input.tool;
-            self.previous_blade = None;
-            self.tool_embedded = false;
-        }
-        let speed = hypot(input.vx, input.vy);
+    fn turn_tool(&mut self, dt: f64) {
+        let velocity = self.tool.velocity;
+        let speed = hypot(velocity.x, velocity.y);
         if speed > TOOL_TURN_SPEED {
-            let target = Vec2 {
-                x: input.vx / speed,
-                y: input.vy / speed,
-            };
-            if !self.tool_embedded {
-                self.tool_heading = target;
-            } else if input.tool != ToolMode::Sharp {
-                self.tool_heading =
-                    rotate_toward(self.tool_heading, target, EMBEDDED_TURN_RATE * dt);
-            } else if dot(target, self.tool_heading) > -0.2 {
-                self.tool_heading =
-                    rotate_toward(self.tool_heading, target, EMBEDDED_BLADE_TURN_RATE * dt);
+            let target = scale(velocity, 1.0 / speed);
+            if !self.tool.embedded {
+                self.tool.heading = target;
+            } else if self.tool.mode != ToolMode::Sharp {
+                self.tool.heading =
+                    rotate_toward(self.tool.heading, target, EMBEDDED_TURN_RATE * dt);
+            } else if dot(target, self.tool.heading) > -0.2 {
+                self.tool.heading =
+                    rotate_toward(self.tool.heading, target, EMBEDDED_BLADE_TURN_RATE * dt);
             }
         }
-        let perpendicular = Vec2 {
-            x: -self.tool_heading.y,
-            y: self.tool_heading.x,
-        };
-        // Keep the handle on the same side as the tool turns.
-        self.tool_side = if dot(perpendicular, self.tool_side) >= 0.0 {
-            perpendicular
-        } else {
-            scale(perpendicular, -1.0)
-        };
+        self.tool.side = side_toward(self.tool.heading, self.tool.side);
     }
 
-    pub(super) fn collide_striker(&mut self, dt: f64, input: &InputState) {
+    /// Moves the tool one step: the hand pulls it toward the pointer and the
+    /// body resists. `input.x`/`y` is where the hand is. While the button is up
+    /// the tool only follows the pointer and passes over the body.
+    pub(super) fn move_tool(&mut self, input: &InputState, dt: f64) {
+        self.tool.contact = None;
+        self.tool.solver_shift = Vec2::default();
         if !input.active {
-            self.tool_embedded = false;
-            self.previous_blade = None;
+            self.tool.present = false;
+            self.tool.embedded = false;
+            self.tool.held = false;
+            self.tool.was_down = false;
+            self.tool.ghost = false;
             return;
         }
-        let profile = tool_profile(input.tool);
-        let speed = hypot(input.vx, input.vy);
-        let impact = speed * self.materials.striker_mass * input.power * profile.mass_scale;
-        let pose = tool_pose(
-            input.tool,
-            Vec2 {
-                x: input.x,
-                y: input.y,
-            },
-            self.tool_heading,
-            self.tool_side,
-        );
-        let shape = contact_shape(&pose);
-        let sweep = self.tool_sweep(input, &shape, dt);
-
-        self.collide_tool_with_bones(input, profile, &sweep, impact, speed, dt);
-        let tissue_contacts = if shape.cutting_edge {
-            let contacts = self.part_tissue_around_blade(input, profile, &shape, impact, dt);
-            if input.down {
-                self.cut_with_blade(profile, &sweep, impact);
-            }
-            contacts
-        } else {
-            self.push_tissue_with_tool(input, profile, &sweep, impact, dt)
+        if input.tool != self.tool.mode {
+            self.tool.mode = input.tool;
+            self.tool.embedded = false;
+            self.tool.held = false;
+        }
+        let target = Vec2 {
+            x: input.x,
+            y: input.y,
         };
-        self.tool_embedded = input.down && tissue_contacts > 0;
+        let handling = tool_handling(input.tool);
+        let profile = tool_profile(input.tool);
+        let mass = self.materials.striker_mass * input.power * profile.mass_scale;
+        let strike = ToolStrike {
+            tool: input.tool,
+            profile,
+            power: input.power,
+            mass,
+            inertia: mass * self.materials.tool_inertia_scale.max(EPSILON),
+        };
+        // A hand swings any tool quickly, but presses one into the body no
+        // harder than an arm can push, whatever the tool weighs.
+        let pressing = input.down && (self.tool.embedded || self.tool.held);
+        let gripped = input.down && !self.tool.was_down && self.tool.present;
+        self.tool.was_down = input.down;
+        let mut hand = Vec2::default();
+        if !self.tool.present {
+            // A tool appears at the hand already moving with it, so a scripted
+            // strike can begin mid-swing.
+            self.tool.present = true;
+            self.tool.velocity = Vec2 {
+                x: input.vx,
+                y: input.vy,
+            };
+            self.tool.position = subtract(target, scale(self.tool.velocity, dt));
+            self.tool.embedded = false;
+            self.tool.held = false;
+            self.turn_tool(dt);
+        } else {
+            let (drive, damping, reach) = if input.down {
+                (handling.drive, handling.damping, handling.max_reach)
+            } else {
+                (handling.idle_drive, handling.idle_damping, f64::MAX)
+            };
+            let lead = clamp_magnitude(subtract(target, self.tool.position), reach);
+            hand = scale(lead, drive);
+            if pressing {
+                hand = clamp_magnitude(hand, self.materials.hand_press_force / strike.inertia);
+            }
+            self.tool.velocity.x += (hand.x - self.tool.velocity.x * damping) * dt;
+            self.tool.velocity.y += (hand.y - self.tool.velocity.y * damping) * dt;
+            self.tool.velocity = clamp_magnitude(self.tool.velocity, handling.max_speed);
+        }
 
-        for pose in &sweep {
-            self.lacerate_major_vessels_from_striker(input, pose, impact);
-            self.penetrate_organs_from_striker(input, pose, impact);
+        let speed = hypot(self.tool.velocity.x, self.tool.velocity.y);
+        self.debug.striker_position = self.tool.position;
+        self.debug.striker_velocity = self.tool.velocity;
+        self.debug.striker_speed = speed;
+        self.debug.striker_mass = mass;
+        self.debug.impact = speed * mass;
+        for bone in &mut self.bones {
+            bone.load *= 0.88;
         }
-        if input.down && profile.crush_tear_scale > 0.0 {
-            self.crush_tear_under_tool(profile, &shape, impact);
+
+        let start = tool_pose(
+            input.tool,
+            self.tool.position,
+            self.tool.heading,
+            self.tool.side,
+        );
+        self.turn_tool(dt);
+        if input.tool == ToolMode::Sharp || !input.down {
+            self.tool.ghost = false;
+        } else if gripped || self.tool.ghost {
+            self.tool.ghost = self.blunt_overlaps_tissue(&start);
         }
-        self.previous_blade =
-            (shape.cutting_edge && input.down).then_some((shape.axis_start, shape.axis_end));
+        if !input.down || self.tool.ghost {
+            self.tool.position = add(self.tool.position, scale(self.tool.velocity, dt));
+            self.tool.embedded = false;
+            self.tool.held = false;
+            return;
+        }
+        if input.tool == ToolMode::Sharp {
+            self.move_blade(input, strike, &start, hand, dt);
+        } else {
+            self.move_blunt(input, strike, &start, dt);
+        }
     }
 
-    /// The contact shape at even steps along this frame's motion, ending at the
-    /// current pose, so a fast swing cannot skip over a thin limb. The knife
-    /// interpolates from where its blade was last frame, rotation included.
-    fn tool_sweep(
-        &self,
+    fn blunt_overlaps_tissue(&self, pose: &ToolPose) -> bool {
+        let shape = contact_shape(pose);
+        self.points.iter().any(|point| {
+            !point.pinned && sample_point_contact(point.position, &shape).distance < shape.radius
+        })
+    }
+
+    /// The knife advances only through fibers it severs. Each fiber its tip or
+    /// cutting edge reaches is cut if the knife's momentum or the hand's push
+    /// overcomes it; otherwise the knife stops against it, as it does at bone.
+    fn move_blade(
+        &mut self,
         input: &InputState,
-        shape: &ToolContactShape,
+        strike: ToolStrike,
+        start_pose: &ToolPose,
+        hand_push: Vec2,
         dt: f64,
-    ) -> Vec<ToolContactShape> {
-        let (start_a, start_b) = match self.previous_blade {
-            Some(previous) if shape.cutting_edge => previous,
-            _ => {
-                let back = Vec2 {
-                    x: input.vx * dt,
-                    y: input.vy * dt,
-                };
-                (
-                    subtract(shape.axis_start, back),
-                    subtract(shape.axis_end, back),
-                )
-            }
-        };
-        let travel = distance(start_a, shape.axis_start).max(distance(start_b, shape.axis_end));
-        let spacing = (shape.radius * 0.8).max(self.materials.point_spacing * 0.45);
-        let steps = ((travel / spacing).ceil() as usize).clamp(1, 10);
-        (0..=steps)
-            .map(|i| {
-                let t = i as f64 / steps as f64;
-                let axis_start = lerp(start_a, shape.axis_start, t);
-                let axis_end = lerp(start_b, shape.axis_end, t);
-                ToolContactShape {
-                    axis_start,
-                    axis_end,
-                    ..*shape
+    ) {
+        let start = contact_shape(start_pose);
+        let start_center = self.tool.position;
+        let end_center = add(start_center, scale(self.tool.velocity, dt));
+        let end = contact_shape(&tool_pose(
+            strike.tool,
+            end_center,
+            self.tool.heading,
+            self.tool.side,
+        ));
+        let travel =
+            distance(start.axis_end, end.axis_end).max(distance(start.axis_start, end.axis_start));
+        let spacing = (self.materials.point_spacing * 0.45).max(1.0);
+        let steps = ((travel / spacing).ceil() as usize).clamp(1, MAX_TOOL_SUBSTEPS);
+        let candidates = self.springs_near_blade(&start, &end);
+        // Fibers already lying across the edge were there when the knife came
+        // down into the body; only fibers it reaches now resist it.
+        let resting: Vec<usize> = candidates
+            .iter()
+            .copied()
+            .filter(|&index| self.spring_crosses_edge(index, &start))
+            .collect();
+
+        let mut speed = hypot(self.tool.velocity.x, self.tool.velocity.y);
+        let mut reached = start;
+        let mut reached_center = start_center;
+        let mut stop_along = None;
+        let mut passed = Vec::with_capacity(steps);
+        for step in 1..=steps {
+            let t = step as f64 / steps as f64;
+            let shape = ToolContactShape {
+                axis_start: lerp(start.axis_start, end.axis_start, t),
+                axis_end: lerp(start.axis_end, end.axis_end, t),
+                ..end
+            };
+            let direction = normalized(subtract(shape.axis_end, reached.axis_end), end.direction);
+            let push = strike.mass * dot(hand_push, direction).max(0.0) * dt;
+            // Fibers first: the skin over a bone has to be cut before the knife
+            // can reach it.
+            let mut stopped = None;
+            for (spring_index, _) in self.springs_reached(&candidates, &resting, &reached, &shape) {
+                let spring = self.springs[spring_index];
+                if spring.broken {
+                    continue;
                 }
+                let force = (strike.mass * speed).max(push);
+                let pressure =
+                    force * strike.profile.cut_pressure_scale * self.blade_layer_scale(spring);
+                let threshold = spring.tear_impulse * self.materials.sharp_tool_tear_pressure;
+                self.springs[spring_index].stress = self.springs[spring_index]
+                    .stress
+                    .max(pressure / threshold.max(1.0));
+                if pressure <= threshold {
+                    let a = self.points[spring.a].position;
+                    let b = self.points[spring.b].position;
+                    stopped = Some(subtract(b, a));
+                    break;
+                }
+                self.sever_with_blade(spring_index, pressure, shape.blade_normal, strike);
+                speed = (speed - threshold * BLADE_CUT_COST / strike.inertia).max(0.0);
+            }
+            if stopped.is_none() {
+                let force = (strike.mass * speed).max(push);
+                stopped = self.blade_meets_bone(&reached, &shape, strike, force);
+            }
+            if stopped.is_some() {
+                stop_along = stopped;
+                break;
+            }
+            reached = shape;
+            reached_center = lerp(start_center, end_center, t);
+            passed.push((shape, (strike.mass * speed).max(push)));
+        }
+
+        let direction = normalized(self.tool.velocity, self.tool.heading);
+        self.tool.velocity = match stop_along {
+            Some(along) => slide_along(self.tool.velocity, along, BLADE_SLIDE),
+            None => scale(direction, speed),
+        };
+        self.tool.position = reached_center;
+        self.tool.held = stop_along.is_some();
+        for (shape, impact) in &passed {
+            self.lacerate_major_vessels_from_striker(input, shape, *impact);
+            self.penetrate_organs_from_striker(input, shape, *impact);
+        }
+        let alongside = self.part_tissue_around_blade(strike, &reached, strike.mass * speed, dt);
+        self.tool.embedded = alongside > 0;
+    }
+
+    /// Unbroken springs whose bounds come near the cutting edge's path this step.
+    fn springs_near_blade(&self, start: &ToolContactShape, end: &ToolContactShape) -> Vec<usize> {
+        let (start_edge, start_tip) = cutting_edge(start);
+        let (end_edge, end_tip) = cutting_edge(end);
+        let margin = self.materials.point_spacing;
+        let min = Vec2 {
+            x: start_edge.x.min(start_tip.x).min(end_edge.x).min(end_tip.x) - margin,
+            y: start_edge.y.min(start_tip.y).min(end_edge.y).min(end_tip.y) - margin,
+        };
+        let max = Vec2 {
+            x: start_edge.x.max(start_tip.x).max(end_edge.x).max(end_tip.x) + margin,
+            y: start_edge.y.max(start_tip.y).max(end_edge.y).max(end_tip.y) + margin,
+        };
+        self.springs
+            .iter()
+            .enumerate()
+            .filter(|(_, spring)| {
+                if spring.broken {
+                    return false;
+                }
+                let a = self.points[spring.a].position;
+                let b = self.points[spring.b].position;
+                a.x.max(b.x) >= min.x
+                    && a.x.min(b.x) <= max.x
+                    && a.y.max(b.y) >= min.y
+                    && a.y.min(b.y) <= max.y
             })
+            .map(|(index, _)| index)
             .collect()
     }
 
-    fn collide_tool_with_bones(
+    fn spring_crosses_edge(&self, spring_index: usize, shape: &ToolContactShape) -> bool {
+        let spring = self.springs[spring_index];
+        let (edge, tip) = cutting_edge(shape);
+        segment_crossing(
+            self.points[spring.a].position,
+            self.points[spring.b].position,
+            edge,
+            tip,
+        )
+        .is_some()
+    }
+
+    /// Fibers the tip passes through between two blade positions, or that newly
+    /// lie across the cutting edge, nearest along the tip's path first. The rest
+    /// of the blade follows the tip through the cut, so it neither cuts nor
+    /// catches; letting it cut would scythe through tissue whenever the knife turns.
+    fn springs_reached(
+        &self,
+        candidates: &[usize],
+        resting: &[usize],
+        from: &ToolContactShape,
+        to: &ToolContactShape,
+    ) -> Vec<(usize, f64)> {
+        let mut reached: Vec<(usize, f64)> = candidates
+            .iter()
+            .filter_map(|&index| {
+                let spring = self.springs[index];
+                if spring.broken {
+                    return None;
+                }
+                let a = self.points[spring.a].position;
+                let b = self.points[spring.b].position;
+                if let Some((_, along)) = segment_crossing(a, b, from.axis_end, to.axis_end) {
+                    return Some((index, along));
+                }
+                (!resting.contains(&index) && self.spring_crosses_edge(index, to))
+                    .then_some((index, 1.0))
+            })
+            .collect();
+        reached.sort_by(|a, b| a.1.total_cmp(&b.1));
+        reached
+    }
+
+    /// A knife cannot cut bone: it stops where its tip or edge would move into
+    /// one. Returns the bone's direction, along which the blade can slide.
+    fn blade_meets_bone(
         &mut self,
-        input: &InputState,
-        profile: ToolProfile,
-        sweep: &[ToolContactShape],
-        impact: f64,
-        speed: f64,
-        dt: f64,
-    ) {
-        let initial_bone_count = self.bones.len();
-        for i in 0..initial_bone_count {
-            let mut bone = self.bones[i];
-            bone.load *= 0.88;
-            // Contact where this frame's sweep came closest to the bone.
-            let Some((shape, closest_pair)) = sweep
-                .iter()
-                .map(|shape| {
-                    (
-                        shape,
-                        closest_segment_points(shape.axis_start, shape.axis_end, bone.a, bone.b),
-                    )
-                })
-                .min_by(|a, b| a.1.distance.total_cmp(&b.1.distance))
-            else {
-                continue;
-            };
-            let influence = shape.influence;
-            let t = closest_pair.t_b;
-            let closest = closest_pair.point_b;
-            let tool_contact = closest_pair.point_a;
-            let mut dist = closest_pair.distance;
-            if !input.down || dist > influence + bone.radius {
-                self.bones[i] = bone;
+        from: &ToolContactShape,
+        to: &ToolContactShape,
+        strike: ToolStrike,
+        force: f64,
+    ) -> Option<Vec2> {
+        let (from_edge, from_tip) = cutting_edge(from);
+        let (to_edge, to_tip) = cutting_edge(to);
+        for index in 0..self.bones.len() {
+            let mut bone = self.bones[index];
+            // The spine lies behind the trunk, so a blade cutting the front of
+            // the chest or belly passes in front of it.
+            if bone.kind == BoneKind::Spine {
                 continue;
             }
-            let mut normal = normalized(
-                subtract(closest, tool_contact),
-                if shape.cutting_edge {
-                    shape.blade_normal
-                } else {
-                    shape.direction
-                },
-            );
-            if dist < EPSILON && !shape.cutting_edge && speed > EPSILON {
-                normal = shape.direction;
-                dist = 1.0;
+            let reach = bone.radius + to.radius;
+            let before = closest_segment_points(from_edge, from_tip, bone.a, bone.b).distance;
+            let path = closest_segment_points(from_tip, to_tip, bone.a, bone.b).distance;
+            let after = closest_segment_points(to_edge, to_tip, bone.a, bone.b);
+            let touches = path < reach || after.distance < reach;
+            // Resting on a bone already, the knife may still move off it.
+            let deeper = before >= reach || after.distance < before - 0.05;
+            if !touches || !deeper {
+                continue;
             }
-            let depth = (influence + bone.radius - dist).max(0.0);
-            let contact = (1.0 - ((dist - bone.radius) / influence).clamp(0.0, 1.0)).max(0.0);
-            let direct_load = (impact + self.materials.bone_direct_pressure * input.power)
-                * contact
-                * profile.bone_load_scale;
-            // The bone solver fractures any bone whose load exceeds its strength,
-            // so the tool's fracture resistance is applied to the load itself.
-            bone.load = bone
-                .load
-                .max(direct_load / profile.fracture_scale.max(EPSILON));
-            if direct_load > self.materials.fragment_wake_load
-                || speed > self.materials.fragment_sleep_speed * 2.0
-            {
+            let load = force * strike.profile.bone_load_scale / strike.profile.fracture_scale;
+            bone.load = bone.load.max(load);
+            if load > self.materials.fragment_wake_load {
                 self.wake_fragment(&mut bone);
             }
+            self.bones[index] = bone;
             self.debug.bone_contacts += 1;
+            self.debug.max_bone_load = self.debug.max_bone_load.max(bone.load);
+            let depth = (reach - after.distance).max(0.0);
             if depth > self.debug.max_depth {
                 self.debug.max_depth = depth;
-                self.debug.strongest_contact = closest;
+                self.debug.strongest_contact = after.point_b;
             }
-            self.debug.max_bone_load = self.debug.max_bone_load.max(bone.load);
-            if !bone.pinned {
-                let contact_strength = self.materials.bone_direct_contact
-                    * profile.bone_push_scale
-                    * (0.78 + input.power * 0.12);
-                let push_x = normal.x * depth * contact_strength * profile.rebound_scale
-                    + input.vx * dt * contact_strength * 0.58 * profile.drag_scale;
-                let push_y = normal.y * depth * contact_strength * profile.rebound_scale
-                    + input.vy * dt * contact_strength * 0.58 * profile.drag_scale;
-                bone.a.x += push_x * (1.0 - t);
-                bone.a.y += push_y * (1.0 - t);
-                bone.b.x += push_x * t;
-                bone.b.y += push_y * t;
-                apply_bone_torque(
-                    &self.materials,
-                    &mut self.debug,
-                    &mut bone,
-                    closest,
-                    Vec2 {
-                        x: normal.x * direct_load * 0.16 * profile.rebound_scale
-                            + input.vx
-                                * contact
-                                * profile.bone_load_scale
-                                * 0.22
-                                * profile.drag_scale,
-                        y: normal.y * direct_load * 0.16 * profile.rebound_scale
-                            + input.vy
-                                * contact
-                                * profile.bone_load_scale
-                                * 0.22
-                                * profile.drag_scale,
-                    },
-                );
-            }
-            let should_fracture = self.can_fracture_bone(bone) && bone.load > bone.fracture_impulse;
-            self.bones[i] = bone;
-            if should_fracture {
-                self.fracture_bone(i, t, normal, direct_load);
-            }
+            return Some(subtract(bone.b, bone.a));
+        }
+        None
+    }
+
+    /// How much more easily a blade parts this fiber than skin: skin is the
+    /// tough layer, and the muscle under it cuts readily once reached.
+    fn blade_layer_scale(&self, spring: Spring) -> f64 {
+        if spring.layer == TissueLayer::Skin {
+            1.0
+        } else {
+            let exposure = self.points[spring.a]
+                .exposure
+                .max(self.points[spring.b].exposure);
+            1.3 + exposure * 0.2
         }
     }
 
-    /// Blunt tools shove tissue out of the way and drag it along. Each sweep
-    /// step pushes, but load and bruising are recorded once per point from its
-    /// hardest hit. Returns how many tissue points were touched.
-    fn push_tissue_with_tool(
+    /// Severs one fiber under the blade and opens a wound where it parted.
+    fn sever_with_blade(
         &mut self,
-        input: &InputState,
-        profile: ToolProfile,
-        sweep: &[ToolContactShape],
-        impact: f64,
-        dt: f64,
-    ) -> usize {
-        // Hardest contact load per point this step; None if untouched.
-        let mut hardest: Vec<Option<f64>> = vec![None; self.points.len()];
-        // The drag along the motion is shared out over the sweep steps. Earlier
-        // steps only nudge what the tool passed over, so a fast swing still
-        // catches a thin limb without shoving tissue several times per frame;
-        // the current pose pushes fully, as a single contact would.
-        let share = 1.0 / sweep.len() as f64;
-        for (step, shape) in sweep.iter().enumerate() {
-            let push_share = if step + 1 == sweep.len() { 1.0 } else { share };
-            let influence = shape.influence;
-            for (index, point) in self.points.iter_mut().enumerate() {
-                if point.pinned {
-                    continue;
-                }
-                let point_contact = sample_point_contact(point.position, shape);
-                if point_contact.distance > influence {
-                    continue;
-                }
-                let mut contact_strength = (if input.down { 0.58 } else { 0.16 })
-                    * profile.tissue_push_scale
-                    * (0.85 + input.power * 0.15);
-                if point.layer == TissueLayer::Muscle {
-                    contact_strength *=
-                        self.materials.direct_muscle_contact + point.exposure * 0.82;
-                }
-                let depth = influence - point_contact.distance;
-                let drag = dt * 0.45 * contact_strength * profile.drag_scale * share;
-                let push = depth * contact_strength * profile.rebound_scale * push_share;
-                point.position.x += point_contact.normal.x * push + input.vx * drag;
-                point.position.y += point_contact.normal.y * push + input.vy * drag;
-                let contact_load =
-                    impact * (depth / influence) * contact_strength * profile.tissue_load_scale;
-                hardest[index] =
-                    Some(hardest[index].map_or(contact_load, |load| load.max(contact_load)));
-                if depth > self.debug.max_depth {
-                    self.debug.max_depth = depth;
-                    self.debug.strongest_contact = point.position;
-                }
+        spring_index: usize,
+        pressure: f64,
+        blade_normal: Vec2,
+        strike: ToolStrike,
+    ) {
+        let spring = self.springs[spring_index];
+        self.springs[spring_index].broken = true;
+        let skin = spring.layer == TissueLayer::Skin;
+        let exposure = if skin { 0.92 } else { 1.0 };
+        self.bump_point_exposure_load(spring.a, exposure, pressure * 0.18);
+        self.bump_point_exposure_load(spring.b, exposure, pressure * 0.18);
+        if skin {
+            self.stats.broken_skin += 1;
+            self.fresh_skin_cuts.push(spring_index);
+        } else {
+            self.stats.broken_muscle += 1;
+            if spring.fiber {
+                self.stats.muscle_fiber_tears += 1;
+                self.debug.muscle_fiber_tears += 1;
             }
         }
-
-        let mut touched = 0;
-        for (index, contact_load) in hardest.into_iter().enumerate() {
-            let Some(contact_load) = contact_load else {
-                continue;
-            };
-            touched += 1;
-            let point = &mut self.points[index];
-            point.load = point.load.max(contact_load);
-            if apply_point_contusion(point, self.materials, contact_load, profile.contusion_scale) {
-                self.stats.contusion_events += 1;
-                self.debug.contusion_events += 1;
-                self.debug.max_contusion = self.debug.max_contusion.max(point.contusion);
-            }
-            self.debug.tissue_contacts += 1;
-            self.debug.max_point_load = self.debug.max_point_load.max(point.load);
-        }
-        touched
+        let a = self.points[spring.a].position;
+        let b = self.points[spring.b].position;
+        let center = midpoint(a, b);
+        let tangent = normalized(subtract(b, a), Vec2 { x: 1.0, y: 0.0 });
+        let spring_normal = Vec2 {
+            x: -tangent.y,
+            y: tangent.x,
+        };
+        // Blood leaves the cut sideways, away from the blade plane.
+        let normal = if dot(blade_normal, spring_normal) < 0.0 {
+            scale(blade_normal, -1.0)
+        } else {
+            blade_normal
+        };
+        self.emit_fluid(
+            center,
+            normal,
+            if skin { 6 } else { 4 },
+            120.0 + pressure * self.materials.fluid_impact_scale * 0.42,
+            if skin { 2.1 } else { 1.8 },
+            strike.profile.fluid_scale,
+        );
+        self.open_wound(
+            center,
+            normal,
+            spring.layer,
+            pressure / if skin { 1250.0 } else { 1050.0 },
+            if skin { 2.1 } else { 1.8 },
+            if skin { 0.58 } else { 0.92 },
+        );
     }
 
     /// A blade only nudges tissue off its thin edge sideways; it parts tissue
@@ -467,13 +775,13 @@ impl World {
     /// it as embedded.
     fn part_tissue_around_blade(
         &mut self,
-        input: &InputState,
-        profile: ToolProfile,
+        strike: ToolStrike,
         shape: &ToolContactShape,
         impact: f64,
         dt: f64,
     ) -> usize {
         let along_reach = self.materials.point_spacing * 0.7;
+        let velocity = self.tool.velocity;
         let mut alongside = 0;
         for point in &mut self.points {
             if point.pinned {
@@ -491,13 +799,17 @@ impl World {
                 continue;
             }
             let depth = shape.influence - point_contact.distance;
-            let friction = if input.down { 0.06 } else { 0.0 };
-            point.position.x += point_contact.normal.x * depth + input.vx * dt * friction;
-            point.position.y += point_contact.normal.y * depth + input.vy * dt * friction;
+            point.position.x += point_contact.normal.x * depth + velocity.x * dt * 0.06;
+            point.position.y += point_contact.normal.y * depth + velocity.y * dt * 0.06;
             let contact_load =
-                impact * (depth / shape.influence) * 0.25 * profile.tissue_push_scale;
+                impact * (depth / shape.influence) * 0.25 * strike.profile.tissue_push_scale;
             point.load = point.load.max(contact_load);
-            if apply_point_contusion(point, self.materials, contact_load, profile.contusion_scale) {
+            if apply_point_contusion(
+                point,
+                self.materials,
+                contact_load,
+                strike.profile.contusion_scale,
+            ) {
                 self.stats.contusion_events += 1;
                 self.debug.contusion_events += 1;
                 self.debug.max_contusion = self.debug.max_contusion.max(point.contusion);
@@ -512,137 +824,311 @@ impl World {
         alongside
     }
 
-    /// Severs the springs the knife's tip and leading edge passed through this
-    /// frame. Only fibers the blade actually crosses part, so a cut is a clean
-    /// line along the stroke; a slow, light stroke slides through without cutting.
-    fn cut_with_blade(&mut self, profile: ToolProfile, sweep: &[ToolContactShape], impact: f64) {
-        let reach = sweep
+    /// A bat or hammer shoves the tissue and bone in its way and gives them its
+    /// momentum, so it slows and stops in the body instead of sweeping through.
+    /// Tissue then keeps pushing back on it while the solver runs.
+    fn move_blunt(
+        &mut self,
+        input: &InputState,
+        strike: ToolStrike,
+        start_pose: &ToolPose,
+        dt: f64,
+    ) {
+        let start = contact_shape(start_pose);
+        let initial_velocity = self.tool.velocity;
+        let end_center = add(self.tool.position, scale(initial_velocity, dt));
+        let end = contact_shape(&tool_pose(
+            strike.tool,
+            end_center,
+            self.tool.heading,
+            self.tool.side,
+        ));
+        let travel =
+            distance(start.axis_start, end.axis_start).max(distance(start.axis_end, end.axis_end));
+        let spacing = (end.radius * 0.8).max(self.materials.point_spacing * 0.45);
+        let steps = ((travel / spacing).ceil() as usize).clamp(1, MAX_TOOL_SUBSTEPS);
+        let sub_dt = dt / steps as f64;
+
+        let mut hits: Vec<Option<PointHit>> = vec![None; self.points.len()];
+        let mut velocity = initial_velocity;
+        let mut center = self.tool.position;
+        let mut shape = start;
+        let mut peak_impact: f64 = 0.0;
+        for step in 1..=steps {
+            let t = step as f64 / steps as f64;
+            center = add(center, scale(velocity, sub_dt));
+            let heading = normalized(
+                lerp(start_pose.heading, self.tool.heading, t),
+                self.tool.heading,
+            );
+            let side = side_toward(heading, self.tool.side);
+            shape = contact_shape(&tool_pose(strike.tool, center, heading, side));
+            let impact = strike.mass * hypot(velocity.x, velocity.y);
+            let tissue = self.shove_tissue(&shape, velocity, impact, strike, dt, sub_dt, &mut hits);
+            let bone = self.shove_bones(&shape, velocity, impact, strike, dt, sub_dt);
+            let given = add(tissue, bone);
+            if hypot(given.x, given.y) > EPSILON {
+                peak_impact = peak_impact.max(impact);
+            }
+            self.lacerate_major_vessels_from_striker(input, &shape, impact);
+            velocity = subtract(velocity, scale(given, 1.0 / strike.inertia));
+            if dot(velocity, initial_velocity) <= 0.0 {
+                // The body has taken all of the swing's momentum.
+                velocity = Vec2::default();
+                break;
+            }
+        }
+        self.tool.position = center;
+        self.tool.velocity = velocity;
+        self.tool.held = false;
+
+        let mut touched = 0;
+        for (index, hit) in hits.into_iter().enumerate() {
+            let Some(hit) = hit else {
+                continue;
+            };
+            touched += 1;
+            let point = &mut self.points[index];
+            // A blow bruises what it knocks hard, but a broad face spreads its
+            // force, so it loads the tissue toward tearing far less.
+            point.load = point.load.max(hit.load * strike.profile.tissue_load_scale);
+            let bruise = hit.load.max(hit.impulse * BRUISE_PER_IMPULSE);
+            if apply_point_contusion(
+                point,
+                self.materials,
+                bruise,
+                strike.profile.contusion_scale,
+            ) {
+                self.stats.contusion_events += 1;
+                self.debug.contusion_events += 1;
+                self.debug.max_contusion = self.debug.max_contusion.max(point.contusion);
+            }
+            self.debug.tissue_contacts += 1;
+            self.debug.max_point_load = self.debug.max_point_load.max(point.load);
+        }
+        self.tool.embedded = touched > 0;
+        if strike.profile.crush_tear_scale > 0.0 && peak_impact > 0.0 {
+            self.crush_tear_under_tool(strike.profile, &shape, peak_impact);
+        }
+
+        let reach = shape.influence + self.materials.point_spacing;
+        let candidates: Vec<usize> = self
+            .points
             .iter()
-            .flat_map(|shape| [shape.axis_start, shape.axis_end])
-            .fold(
-                (
-                    Vec2 {
-                        x: f64::MAX,
-                        y: f64::MAX,
-                    },
-                    Vec2 {
-                        x: f64::MIN,
-                        y: f64::MIN,
-                    },
-                ),
-                |(min, max), p| {
-                    (
-                        Vec2 {
-                            x: min.x.min(p.x),
-                            y: min.y.min(p.y),
-                        },
-                        Vec2 {
-                            x: max.x.max(p.x),
-                            y: max.y.max(p.y),
-                        },
-                    )
-                },
-            );
-        let blade_normal = sweep
-            .last()
-            .map(|shape| shape.blade_normal)
-            .unwrap_or_default();
-        let mut events = Vec::new();
-        for spring_index in 0..self.springs.len() {
-            let spring = self.springs[spring_index];
-            if spring.broken {
-                continue;
-            }
-            let a = self.points[spring.a];
-            let b = self.points[spring.b];
-            if a.position.x.max(b.position.x) < reach.0.x
-                || a.position.x.min(b.position.x) > reach.1.x
-                || a.position.y.max(b.position.y) < reach.0.y
-                || a.position.y.min(b.position.y) > reach.1.y
-            {
-                continue;
-            }
-            // Fibers the tip passed through, or that lie across the cutting edge
-            // just behind it. The back of the blade follows the tip's path, so
-            // letting it cut would scythe through tissue whenever the knife turns.
-            let crossed = sweep.iter().enumerate().skip(1).any(|(i, shape)| {
-                let edge_start = lerp(shape.axis_end, shape.axis_start, CUTTING_EDGE_SHARE);
-                segment_crossing(a.position, b.position, edge_start, shape.axis_end).is_some()
-                    || segment_crossing(
-                        a.position,
-                        b.position,
-                        sweep[i - 1].axis_end,
-                        shape.axis_end,
-                    )
-                    .is_some()
+            .enumerate()
+            .filter(|(_, point)| {
+                !point.pinned && sample_point_contact(point.position, &shape).distance <= reach
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if !candidates.is_empty() {
+            self.tool.contact = Some(ToolSolverContact {
+                shape,
+                inertia: strike.inertia,
+                candidates,
             });
-            if !crossed {
+        }
+    }
+
+    /// Pushes tissue out of the tool at one point of its motion and drags it
+    /// along. Returns the momentum the tissue took. What happened to each point
+    /// gathers in `hits`, so load and bruising are recorded once per point.
+    #[allow(clippy::too_many_arguments)]
+    fn shove_tissue(
+        &mut self,
+        shape: &ToolContactShape,
+        velocity: Vec2,
+        impact: f64,
+        strike: ToolStrike,
+        dt: f64,
+        sub_dt: f64,
+        hits: &mut [Option<PointHit>],
+    ) -> Vec2 {
+        let mut given = Vec2::default();
+        let base_strength = 0.58 * strike.profile.tissue_push_scale * (0.85 + strike.power * 0.15);
+        for (index, point) in self.points.iter_mut().enumerate() {
+            if point.pinned {
                 continue;
             }
-            let layer_scale = if spring.layer == TissueLayer::Skin {
-                1.0
-            } else {
-                0.78 + a.exposure.max(b.exposure) * 0.42
-            };
-            let pressure = impact * profile.cut_pressure_scale * layer_scale;
-            let threshold = spring.tear_impulse * self.materials.sharp_tool_tear_pressure;
-            self.springs[spring_index].stress = self.springs[spring_index]
-                .stress
-                .max(pressure / threshold.max(1.0));
-            if pressure <= threshold {
+            let point_contact = sample_point_contact(point.position, shape);
+            if point_contact.distance > shape.influence {
                 continue;
             }
-            self.springs[spring_index].broken = true;
-            let exposure = if spring.layer == TissueLayer::Skin {
-                0.92
-            } else {
-                1.0
+            // The tool presses on skin and the muscle beneath it together;
+            // pushing only the skin would shear it off the muscle.
+            let strength = base_strength;
+            let depth = shape.influence - point_contact.distance;
+            let push = depth * strength * strike.profile.rebound_scale;
+            let drag = sub_dt * 0.45 * strength * strike.profile.drag_scale;
+            let moved = Vec2 {
+                x: point_contact.normal.x * push + velocity.x * drag,
+                y: point_contact.normal.y * push + velocity.y * drag,
             };
-            self.bump_point_exposure_load(spring.a, exposure, pressure * 0.18);
-            self.bump_point_exposure_load(spring.b, exposure, pressure * 0.18);
-            if spring.layer == TissueLayer::Skin {
-                self.stats.broken_skin += 1;
-                self.fresh_skin_cuts.push(spring_index);
-            } else {
-                self.stats.broken_muscle += 1;
-                if spring.fiber {
-                    self.stats.muscle_fiber_tears += 1;
-                    self.debug.muscle_fiber_tears += 1;
-                }
+            point.position = add(point.position, moved);
+            let momentum = scale(moved, point.mass / dt);
+            given = add(given, momentum);
+            let hit = hits[index].get_or_insert_with(PointHit::default);
+            hit.load = hit.load.max(impact * (depth / shape.influence) * strength);
+            hit.impulse += hypot(momentum.x, momentum.y);
+            if depth > self.debug.max_depth {
+                self.debug.max_depth = depth;
+                self.debug.strongest_contact = point.position;
             }
-            let center = midpoint(a.position, b.position);
-            let tangent = normalized(subtract(b.position, a.position), Vec2 { x: 1.0, y: 0.0 });
-            let spring_normal = Vec2 {
-                x: -tangent.y,
-                y: tangent.x,
-            };
-            // Blood leaves the cut sideways, away from the blade plane.
-            let normal = if dot(blade_normal, spring_normal) < 0.0 {
-                scale(blade_normal, -1.0)
+        }
+        given
+    }
+
+    /// Pushes and loads bone the tool meets at one point of its motion, and
+    /// breaks it if the load is too much. Returns the momentum the bones took.
+    fn shove_bones(
+        &mut self,
+        shape: &ToolContactShape,
+        velocity: Vec2,
+        impact: f64,
+        strike: ToolStrike,
+        dt: f64,
+        sub_dt: f64,
+    ) -> Vec2 {
+        let speed = hypot(velocity.x, velocity.y);
+        let mut given = Vec2::default();
+        let initial_bone_count = self.bones.len();
+        for i in 0..initial_bone_count {
+            let mut bone = self.bones[i];
+            let pair = closest_segment_points(shape.axis_start, shape.axis_end, bone.a, bone.b);
+            let mut dist = pair.distance;
+            if dist > shape.influence + bone.radius {
+                continue;
+            }
+            let t = pair.t_b;
+            let closest = pair.point_b;
+            let mut normal = normalized(subtract(closest, pair.point_a), shape.direction);
+            if dist < EPSILON && speed > EPSILON {
+                normal = shape.direction;
+                dist = 1.0;
+            }
+            let depth = (shape.influence + bone.radius - dist).max(0.0);
+            let contact = (1.0 - ((dist - bone.radius) / shape.influence).clamp(0.0, 1.0)).max(0.0);
+            let direct_load = (impact + self.materials.bone_direct_pressure * strike.power)
+                * contact
+                * strike.profile.bone_load_scale;
+            // The bone solver fractures any bone whose load exceeds its strength,
+            // so the tool's fracture resistance is applied to the load itself.
+            bone.load = bone
+                .load
+                .max(direct_load / strike.profile.fracture_scale.max(EPSILON));
+            if direct_load > self.materials.fragment_wake_load
+                || speed > self.materials.fragment_sleep_speed * 2.0
+            {
+                self.wake_fragment(&mut bone);
+            }
+            self.debug.bone_contacts += 1;
+            if depth > self.debug.max_depth {
+                self.debug.max_depth = depth;
+                self.debug.strongest_contact = closest;
+            }
+            self.debug.max_bone_load = self.debug.max_bone_load.max(bone.load);
+            if bone.pinned {
+                // A fixed bone stops whatever of the swing drives into it.
+                let into = dot(velocity, normal).max(0.0);
+                given = add(given, scale(normal, into * contact * strike.inertia));
             } else {
-                blade_normal
-            };
-            events.push((center, normal, spring.layer, pressure));
+                let contact_strength = self.materials.bone_direct_contact
+                    * strike.profile.bone_push_scale
+                    * (0.78 + strike.power * 0.12);
+                let push = Vec2 {
+                    x: normal.x * depth * contact_strength * strike.profile.rebound_scale
+                        + velocity.x * sub_dt * contact_strength * 0.58 * strike.profile.drag_scale,
+                    y: normal.y * depth * contact_strength * strike.profile.rebound_scale
+                        + velocity.y * sub_dt * contact_strength * 0.58 * strike.profile.drag_scale,
+                };
+                bone.a.x += push.x * (1.0 - t);
+                bone.a.y += push.y * (1.0 - t);
+                bone.b.x += push.x * t;
+                bone.b.y += push.y * t;
+                let mass = (bone.rest_length
+                    * bone.radius
+                    * bone.radius
+                    * self.materials.tool_bone_mass_scale)
+                    .max(1.0);
+                given = add(given, scale(push, mass / dt));
+                apply_bone_torque(
+                    &self.materials,
+                    &mut self.debug,
+                    &mut bone,
+                    closest,
+                    Vec2 {
+                        x: normal.x * direct_load * 0.16 * strike.profile.rebound_scale
+                            + velocity.x
+                                * contact
+                                * strike.profile.bone_load_scale
+                                * 0.22
+                                * strike.profile.drag_scale,
+                        y: normal.y * direct_load * 0.16 * strike.profile.rebound_scale
+                            + velocity.y
+                                * contact
+                                * strike.profile.bone_load_scale
+                                * 0.22
+                                * strike.profile.drag_scale,
+                    },
+                );
+            }
+            let should_fracture = self.can_fracture_bone(bone) && bone.load > bone.fracture_impulse;
+            self.bones[i] = bone;
+            if should_fracture {
+                self.fracture_bone(i, t, normal, direct_load);
+            }
         }
-        for (center, normal, layer, pressure) in events {
-            let skin = layer == TissueLayer::Skin;
-            self.emit_fluid(
-                center,
-                normal,
-                if skin { 6 } else { 4 },
-                120.0 + pressure * self.materials.fluid_impact_scale * 0.42,
-                if skin { 2.1 } else { 1.8 },
-                profile.fluid_scale,
+        given
+    }
+
+    /// Tissue a blunt tool presses into pushes back on it, split by mass, so a
+    /// tool held against the body sinks only as deep as the tissue gives way.
+    pub(super) fn solve_tool_contact(&mut self) {
+        let Some(contact) = &self.tool.contact else {
+            return;
+        };
+        let shift = self.tool.solver_shift;
+        let shape = ToolContactShape {
+            axis_start: add(contact.shape.axis_start, shift),
+            axis_end: add(contact.shape.axis_end, shift),
+            ..contact.shape
+        };
+        let surface = shape.radius + 1.0;
+        let tool_weight = 1.0 / contact.inertia.max(EPSILON);
+        let mut pushed_back = Vec2::default();
+        for &index in &contact.candidates {
+            let point = &mut self.points[index];
+            let point_contact = sample_point_contact(point.position, &shape);
+            let depth = surface - point_contact.distance;
+            if depth <= 0.0 {
+                continue;
+            }
+            let correction = depth * TOOL_CONTACT_STIFFNESS;
+            let point_weight = 1.0 / point.mass.max(EPSILON);
+            let point_share = point_weight / (point_weight + tool_weight);
+            point.position = add(
+                point.position,
+                scale(point_contact.normal, correction * point_share),
             );
-            self.open_wound(
-                center,
-                normal,
-                layer,
-                pressure / if skin { 1250.0 } else { 1050.0 },
-                if skin { 2.1 } else { 1.8 },
-                if skin { 0.58 } else { 0.92 },
+            pushed_back = subtract(
+                pushed_back,
+                scale(point_contact.normal, correction * (1.0 - point_share)),
             );
         }
+        self.tool.solver_shift = add(shift, pushed_back);
+    }
+
+    /// Applies the solver's push-back to the tool, partly as a rebound.
+    pub(super) fn finish_tool_step(&mut self, dt: f64) {
+        let shift = self.tool.solver_shift;
+        if hypot(shift.x, shift.y) <= EPSILON {
+            return;
+        }
+        self.tool.position = add(self.tool.position, shift);
+        self.tool.velocity = add(
+            self.tool.velocity,
+            scale(shift, TOOL_REBOUND / dt.max(EPSILON)),
+        );
     }
 
     /// A heavy head can split tissue it crushes against bone and itself.
@@ -724,5 +1210,19 @@ impl World {
                 if skin { 0.58 } else { 0.92 },
             );
         }
+    }
+}
+
+/// The perpendicular to `heading` on the same side as `previous`, so the
+/// handle stays on one side as the tool turns.
+fn side_toward(heading: Vec2, previous: Vec2) -> Vec2 {
+    let perpendicular = Vec2 {
+        x: -heading.y,
+        y: heading.x,
+    };
+    if dot(perpendicular, previous) >= 0.0 {
+        perpendicular
+    } else {
+        scale(perpendicular, -1.0)
     }
 }
