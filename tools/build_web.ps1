@@ -50,9 +50,31 @@ if (Test-Path -LiteralPath $siteDir) {
     Remove-Item -LiteralPath $siteDir -Recurse -Force
 }
 New-Item -ItemType Directory -Force -Path $siteDir | Out-Null
-Copy-Item -LiteralPath (Join-Path $repoRoot "web/index.html") -Destination $siteDir
 Copy-Item -LiteralPath $wasm -Destination $siteDir
 Copy-Item -LiteralPath (Get-MiniquadLoader) -Destination $siteDir
+
+# GitHub Pages lets browsers cache every file for ten minutes, so a returning
+# visitor could get a new page with the previous simulation. Stamping the wasm
+# and loader URLs with their content hashes makes each page load its own build.
+function Get-ContentStamp([string]$Path) {
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.Substring(0, 12).ToLowerInvariant()
+}
+
+$wasmStamp = Get-ContentStamp (Join-Path $siteDir "realistic_physics.wasm")
+$loaderStamp = Get-ContentStamp (Join-Path $siteDir "gl.js")
+$page = [IO.File]::ReadAllText((Join-Path $repoRoot "web/index.html"))
+$references = @(
+    @{ From = 'src="gl.js"'; To = "src=`"gl.js?v=$loaderStamp`"" },
+    @{ From = 'load("realistic_physics.wasm")'; To = "load(`"realistic_physics.wasm?v=$wasmStamp`")" }
+)
+foreach ($reference in $references) {
+    $count = ([regex]::Matches($page, [regex]::Escape($reference.From))).Count
+    if ($count -ne 1) {
+        throw "web/index.html should contain $($reference.From) exactly once, found $count."
+    }
+    $page = $page.Replace($reference.From, $reference.To)
+}
+[IO.File]::WriteAllText((Join-Path $siteDir "index.html"), $page, [Text.UTF8Encoding]::new($false))
 
 $wasmKb = (Get-Item -LiteralPath (Join-Path $siteDir "realistic_physics.wasm")).Length / 1KB
 Write-Host ""
