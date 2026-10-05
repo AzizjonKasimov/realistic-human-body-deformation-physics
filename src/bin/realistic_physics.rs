@@ -76,6 +76,10 @@ struct AppState {
     touch_ui: bool,
     /// The skin's silhouette edge, rebuilt with each new body.
     skin_rim: SkinRim,
+    /// How bloody the current tool is, from 0 to 1; fades over time.
+    tool_blood: f32,
+    /// Fluid particles emitted so far, to see how much new blood each step adds.
+    seen_fluid: i32,
 }
 
 /// A skin spring on the body's outline, with the third corner of its triangle
@@ -119,6 +123,8 @@ impl AppState {
             ui_release: None,
             touch_ui: false,
             skin_rim,
+            tool_blood: 0.0,
+            seen_fluid: 0,
         }
     }
 }
@@ -159,8 +165,6 @@ struct RenderPalette {
     hud_border: Color,
     hud_text: Color,
     hud_muted: Color,
-    tool_handle_dark: Color,
-    tool_handle_light: Color,
     tool_accent: Color,
 }
 
@@ -247,7 +251,12 @@ fn handle_input(app: &mut AppState) {
 
 fn apply_control(app: &mut AppState, action: ControlAction) {
     match action {
-        ControlAction::Tool(tool) => app.tool = tool,
+        ControlAction::Tool(tool) => {
+            if app.tool != tool {
+                app.tool = tool;
+                app.tool_blood = 0.0;
+            }
+        }
         ControlAction::ToggleView => {
             app.view_mode = if app.view_mode == ViewMode::Anatomy {
                 ViewMode::Normal
@@ -274,6 +283,8 @@ fn apply_control(app: &mut AppState, action: ControlAction) {
                 rp::Materials::default(),
             );
             app.skin_rim = skin_rim(&app.world);
+            app.tool_blood = 0.0;
+            app.seen_fluid = 0;
             app.striker = app.pointer;
             app.striker_velocity = rp::Vec2 { x: 0.0, y: 0.0 };
             app.accumulator = 0.0;
@@ -306,6 +317,13 @@ fn step_simulation(app: &mut AppState, frame_dt: f64) {
             screen_width() as f64,
             screen_height() as f64,
         );
+        let emitted = app.world.stats().emitted_fluid_particles;
+        if app.pointer_down {
+            let fresh = (emitted - app.seen_fluid).max(0) as f32;
+            app.tool_blood = (app.tool_blood + fresh * 0.012).min(1.0);
+        }
+        app.seen_fluid = emitted;
+        app.tool_blood *= 0.9985;
         app.accumulator -= fixed_dt;
     }
 }
@@ -414,8 +432,6 @@ fn render_palette() -> RenderPalette {
         hud_border: rgba(118, 97, 83, 170),
         hud_text: rgba(232, 226, 212, 245),
         hud_muted: rgba(168, 156, 143, 220),
-        tool_handle_dark: rgba(62, 47, 34, 255),
-        tool_handle_light: rgba(164, 132, 82, 255),
         tool_accent: rgba(255, 188, 66, 245),
     }
 }
@@ -469,6 +485,9 @@ fn draw_body_layers(ctx: &RenderContext) {
     }
     draw_skin_layer(ctx);
     draw_exposed_tissue_detail(ctx);
+    if !ctx.anatomy {
+        draw_closed_cut_skin(ctx);
+    }
 
     if ctx.anatomy {
         draw_bone_attachments(ctx);
@@ -621,6 +640,62 @@ fn draw_shaded_skin(ctx: &RenderContext) {
     draw_skin_rim(ctx);
 }
 
+/// How far a broken skin spring's ends have pulled apart, relative to its rest
+/// length. A clean cut starts near 1; tissue torn by stretching starts wide.
+fn cut_gap(world: &rp::World, spring: &rp::Spring) -> f64 {
+    let points = world.points();
+    length(sub(points[spring.b].position, points[spring.a].position)) / spring.rest.max(1.0)
+}
+
+/// Skin triangles split by a clean cut that has not pulled apart yet. The mesh
+/// cannot split inside a triangle, so without this a thin knife cut would show
+/// as a whole row of missing skin; instead the skin stays closed over the cut
+/// and fades away only as the edges separate.
+fn draw_closed_cut_skin(ctx: &RenderContext) {
+    let world = &ctx.app.world;
+    let points = world.points();
+    let springs = world.springs();
+    let mut mesh = Mesh {
+        vertices: Vec::new(),
+        indices: Vec::new(),
+        texture: None,
+    };
+    for triangle in world.triangles() {
+        if triangle.layer != rp::TissueLayer::Skin
+            || triangle.failed
+            || world.triangle_alive(triangle)
+        {
+            continue;
+        }
+        let widest = [triangle.edge_ab, triangle.edge_bc, triangle.edge_ca]
+            .iter()
+            .filter_map(|&edge| springs.get(edge))
+            .filter(|spring| spring.broken)
+            .map(|spring| cut_gap(world, spring))
+            .fold(1.0, f64::max);
+        let closed = 1.0 - smoothstep(1.06, 1.4, widest as f32);
+        if closed <= 0.02 || mesh.vertices.len() + 3 > u16::MAX as usize {
+            continue;
+        }
+        let base = mesh.vertices.len() as u16;
+        for index in [triangle.a, triangle.b, triangle.c] {
+            let point = &points[index];
+            let mut color = mix(skin_point_color(ctx, point), ctx.palette.blood_mid, 0.18);
+            color.a *= closed;
+            mesh.vertices.push(Vertex::new(
+                point.position.x as f32,
+                point.position.y as f32,
+                0.0,
+                0.0,
+                0.0,
+                color,
+            ));
+        }
+        mesh.indices.extend_from_slice(&[base, base + 1, base + 2]);
+    }
+    draw_mesh(&mesh);
+}
+
 /// Soft shading strips just inside the silhouette plus a thin outline. Kept
 /// separate from the mesh colors because thin wrists and ankles are meshed only
 /// from outline points, so per-point shading alone would leave them dark.
@@ -641,7 +716,7 @@ fn draw_skin_rim(ctx: &RenderContext) {
     }
 
     // A wide faint strip gives limbs volume; a narrow stronger one defines the edge.
-    for (width, alpha, reach_share) in [(24.0, 0.18, 0.5), (9.0, 0.45, 0.42)] {
+    for (width, alpha, reach_share) in [(24.0_f64, 0.18, 0.5), (9.0, 0.45, 0.42)] {
         let mut mesh = Mesh {
             vertices: Vec::new(),
             indices: Vec::new(),
@@ -655,7 +730,7 @@ fn draw_skin_rim(ctx: &RenderContext) {
             let base = mesh.vertices.len() as u16;
             for index in [spring.a, spring.b] {
                 let position = points[index].position;
-                let depth = (width as f64).min(rim.reach[index] as f64 * reach_share);
+                let depth = width.min(rim.reach[index] as f64 * reach_share);
                 let direction = normalized(inward[index], rp::Vec2 { x: 0.0, y: 0.0 });
                 let inner = add(position, scale(direction, depth));
                 mesh.vertices.push(Vertex::new(
@@ -905,41 +980,66 @@ fn draw_failed_muscle_void(ctx: &RenderContext, triangle: &rp::Triangle, exposur
 
 fn draw_major_vessels(ctx: &RenderContext) {
     for vessel in ctx.app.world.vessels() {
-        if !ctx.anatomy && !vessel.lacerated {
-            continue;
-        }
-        let opacity = if vessel.lacerated {
-            0.82
-        } else if ctx.anatomy {
-            0.34
-        } else {
-            0.0
-        };
-        if opacity <= 0.0 {
-            continue;
-        }
-        draw_line_vec(
-            vessel.a,
-            vessel.b,
-            (vessel.radius * 2.5 + 2.0) as f32,
-            with_alpha(ctx.palette.major_vessel_shadow, opacity * 0.64),
-        );
-        draw_line_vec(
-            vessel.a,
-            vessel.b,
-            (vessel.radius * 1.35 + 0.8) as f32,
-            with_alpha(ctx.palette.major_vessel, opacity),
-        );
-        if vessel.lacerated {
-            let center = mid(vessel.a, vessel.b);
-            draw_soft_circle(
-                to_mq(center),
-                (vessel.radius * 3.8 + 7.0) as f32,
-                4,
-                with_alpha(ctx.palette.blood_fresh, 0.18),
-            );
+        if ctx.anatomy {
+            let opacity = if vessel.lacerated { 0.82 } else { 0.34 };
+            draw_vessel_run(ctx, vessel.a, vessel.b, vessel.radius, opacity);
+            if vessel.lacerated {
+                draw_soft_circle(
+                    to_mq(point_along(vessel.a, vessel.b, vessel.laceration_t)),
+                    (vessel.radius * 3.8 + 7.0) as f32,
+                    4,
+                    with_alpha(ctx.palette.blood_fresh, 0.18),
+                );
+            }
+        } else if vessel.lacerated {
+            draw_severed_vessel(ctx, vessel);
         }
     }
+}
+
+fn draw_vessel_run(ctx: &RenderContext, a: rp::Vec2, b: rp::Vec2, radius: f64, opacity: f32) {
+    draw_line_vec(
+        a,
+        b,
+        (radius * 2.5 + 2.0) as f32,
+        with_alpha(ctx.palette.major_vessel_shadow, opacity * 0.64),
+    );
+    draw_line_vec(
+        a,
+        b,
+        (radius * 1.35 + 0.8) as f32,
+        with_alpha(ctx.palette.major_vessel, opacity),
+    );
+}
+
+/// With the skin on, only the cut is visible: two retracted vessel ends in a
+/// pool of fresh blood, not the whole artery.
+fn draw_severed_vessel(ctx: &RenderContext, vessel: &rp::VesselSegment) {
+    let cut = point_along(vessel.a, vessel.b, vessel.laceration_t);
+    let along = normalized(sub(vessel.b, vessel.a), rp::Vec2 { x: 0.0, y: 1.0 });
+    let gap = vessel.radius * 1.4 + 1.5;
+    let stump = vessel.radius * 2.2 + 4.0;
+    draw_soft_circle(
+        to_mq(cut),
+        (vessel.radius * 3.4 + 6.0) as f32,
+        4,
+        with_alpha(ctx.palette.blood_fresh, 0.22),
+    );
+    for direction in [1.0, -1.0] {
+        let near = add(cut, scale(along, gap * direction));
+        let far = add(cut, scale(along, (gap + stump) * direction));
+        draw_vessel_run(ctx, near, far, vessel.radius * 0.8, 0.75);
+        draw_circle(
+            near.x as f32,
+            near.y as f32,
+            (vessel.radius * 0.75 + 0.6) as f32,
+            ctx.palette.wound_core,
+        );
+    }
+}
+
+fn point_along(a: rp::Vec2, b: rp::Vec2, t: f64) -> rp::Vec2 {
+    add(a, scale(sub(b, a), t.clamp(0.0, 1.0)))
 }
 
 #[derive(Clone, Copy)]
@@ -1100,8 +1200,44 @@ fn draw_wound_edges(ctx: &RenderContext) {
         if spring.a >= world.points().len() || spring.b >= world.points().len() {
             continue;
         }
-        draw_wound_edge(ctx, world.points()[spring.a], world.points()[spring.b]);
+        let gap = cut_gap(world, spring);
+        if gap < 1.3 {
+            draw_incision(
+                ctx,
+                world.points()[spring.a],
+                world.points()[spring.b],
+                spring.rest,
+            );
+        } else {
+            draw_wound_edge(ctx, world.points()[spring.a], world.points()[spring.b]);
+        }
     }
+}
+
+/// A clean cut seen across one broken skin spring: a thin dark line along the
+/// cut, perpendicular to the severed fiber. Neighboring springs join into one
+/// incision line.
+fn draw_incision(ctx: &RenderContext, a: rp::Point, b: rp::Point, rest: f64) {
+    let across = normalized(sub(b.position, a.position), rp::Vec2 { x: 1.0, y: 0.0 });
+    let along = rp::Vec2 {
+        x: -across.y,
+        y: across.x,
+    };
+    let center = mid(a.position, b.position);
+    let half = rest * 0.55;
+    let severity = (a.load.max(b.load) / 1700.0).clamp(0.0, 1.0) as f32;
+    draw_line_vec(
+        sub(center, scale(along, half)),
+        add(center, scale(along, half)),
+        2.6 + severity,
+        with_alpha(ctx.palette.wound_shadow, 0.55),
+    );
+    draw_line_vec(
+        sub(center, scale(along, half * 0.92)),
+        add(center, scale(along, half * 0.92)),
+        1.3 + severity * 0.6,
+        with_alpha(ctx.palette.blood_fresh, 0.85),
+    );
 }
 
 fn draw_wound_edge(ctx: &RenderContext, a: rp::Point, b: rp::Point) {
@@ -1189,9 +1325,9 @@ fn draw_wound_sources(ctx: &RenderContext) {
         let pos = to_mq(wound.position);
         draw_soft_circle(
             pos,
-            radius + 7.0 + pressure * 7.0,
+            radius + 3.0 + pressure * 9.0,
             4,
-            with_alpha(ctx.palette.blood_dark, 0.22 + pressure * 0.18),
+            with_alpha(ctx.palette.blood_dark, 0.14 + pressure * 0.24),
         );
         draw_circle(
             pos.x,
@@ -1208,13 +1344,16 @@ fn draw_wound_sources(ctx: &RenderContext) {
                 0.84 - clot * 0.28,
             ),
         );
-        let dir = normalized(wound.direction, rp::Vec2 { x: 0.0, y: 1.0 });
-        draw_line_vec(
-            wound.position,
-            add(wound.position, scale(dir, 8.0 + wound.pressure * 3.2)),
-            1.4,
-            with_alpha(ctx.palette.blood_fresh, 0.44 + pressure * 0.28),
-        );
+        // Only a spurting, high-pressure bleed gets a streak.
+        if pressure > 0.3 {
+            let dir = normalized(wound.direction, rp::Vec2 { x: 0.0, y: 1.0 });
+            draw_line_vec(
+                wound.position,
+                add(wound.position, scale(dir, 8.0 + wound.pressure * 3.2)),
+                1.4,
+                with_alpha(ctx.palette.blood_fresh, 0.30 + pressure * 0.40),
+            );
+        }
     }
 }
 
@@ -1288,198 +1427,319 @@ fn draw_fluids(ctx: &RenderContext) {
 
 fn draw_striker(ctx: &RenderContext) {
     let app = ctx.app;
-    let radius = app.world.debug().striker_radius.max(tool_radius(app.tool)) as f32;
-    let dir = striker_direction(app);
-    let normal = rp::Vec2 {
-        x: -dir.y,
-        y: dir.x,
-    };
-    let striker = app.striker;
-    let pointer = app.pointer;
-    let target_delta = sub(pointer, striker);
-    let target_distance = length(target_delta);
-    let handle_end = if target_distance > f64::from(radius) * 0.65 {
-        add(
-            striker,
-            scale(normalized(target_delta, dir), f64::from(radius) * 0.72),
-        )
-    } else {
-        sub(striker, scale(dir, f64::from(radius) * 0.55))
-    };
-    let handle_start = if target_distance > f64::from(radius) * 0.65 {
-        pointer
-    } else {
-        sub(striker, scale(dir, f64::from(radius) + 58.0))
-    };
+    // The same pose and geometry the simulation collides with.
+    let pose = rp::tool_pose(
+        app.tool,
+        app.striker,
+        app.world.tool_heading(),
+        app.world.tool_side(),
+    );
+    let geometry = rp::tool_geometry(app.tool);
+    match app.tool {
+        rp::ToolMode::Sharp => draw_knife(ctx, &pose, &geometry),
+        rp::ToolMode::Heavy => draw_sledgehammer(ctx, &pose, &geometry),
+        rp::ToolMode::Blunt => draw_bat(ctx, &pose, &geometry),
+    }
 
-    draw_line_vec(handle_start, handle_end, 10.0, ctx.palette.tool_handle_dark);
-    draw_line_vec(handle_start, handle_end, 4.0, ctx.palette.tool_handle_light);
-    let pointer_radius = if app.pointer_down { 5.0 } else { 4.0 };
-    draw_circle(
+    let pointer = app.pointer;
+    let ring = if app.pointer_down { 6.0 } else { 5.0 };
+    draw_circle_lines(
         pointer.x as f32,
         pointer.y as f32,
-        pointer_radius,
+        ring,
+        1.5,
         if app.pointer_down {
             ctx.palette.tool_accent
         } else {
-            rgba(130, 119, 96, 235)
+            rgba(150, 138, 112, 200)
         },
     );
-    draw_circle_lines(
-        pointer.x as f32,
-        pointer.y as f32,
-        pointer_radius + 1.0,
-        1.0,
-        rgba(24, 20, 17, 230),
-    );
-
-    draw_impact_arrow(ctx, dir, radius);
-
-    match app.tool {
-        rp::ToolMode::Sharp => draw_sharp_tool(ctx, striker, dir, normal, radius),
-        rp::ToolMode::Heavy => draw_heavy_tool(ctx, striker, dir, normal, radius),
-        rp::ToolMode::Blunt => draw_blunt_tool(ctx, striker, dir, radius),
-    }
 }
 
-fn draw_impact_arrow(ctx: &RenderContext, dir: rp::Vec2, radius: f32) {
-    let app = ctx.app;
-    let speed = length(app.striker_velocity);
-    if !app.pointer_down || speed <= 80.0 {
-        return;
-    }
-    let arrow_length = (speed * 0.030).clamp(18.0, 82.0);
-    let start = add(app.striker, scale(dir, f64::from(radius) * 0.35));
-    let end = add(app.striker, scale(dir, f64::from(radius) + arrow_length));
-    let normal = rp::Vec2 {
+/// Perpendicular to `dir`, rotated a quarter turn.
+fn perpendicular(dir: rp::Vec2) -> rp::Vec2 {
+    rp::Vec2 {
         x: -dir.y,
         y: dir.x,
-    };
-    draw_line_vec(start, end, 3.0, ctx.palette.tool_accent);
-    draw_triangle(
-        to_mq(end),
-        to_mq(add(sub(end, scale(dir, 12.0)), scale(normal, 6.0))),
-        to_mq(sub(sub(end, scale(dir, 12.0)), scale(normal, 6.0))),
-        ctx.palette.tool_accent,
-    );
+    }
 }
 
-fn draw_sharp_tool(
-    ctx: &RenderContext,
-    center: rp::Vec2,
-    dir: rp::Vec2,
-    normal: rp::Vec2,
-    radius: f32,
-) {
-    let r = f64::from(radius);
-    let tip = add(center, scale(dir, r * 1.58));
-    let spine = sub(center, scale(dir, r * 0.65));
-    let waist = sub(center, scale(dir, r * 0.18));
+fn draw_polygon(points: &[rp::Vec2], color: Color) {
+    for i in 1..points.len().saturating_sub(1) {
+        draw_triangle(
+            to_mq(points[0]),
+            to_mq(points[i]),
+            to_mq(points[i + 1]),
+            color,
+        );
+    }
+}
+
+/// Double-edged blade with a center ridge, crossguard, wrapped grip, and pommel.
+fn draw_knife(ctx: &RenderContext, pose: &rp::ToolPose, geometry: &rp::ToolGeometry) {
+    let heading = pose.heading;
+    let across = perpendicular(heading);
+    let guard = pose.contact_start;
+    let tip = pose.contact_end;
+    let length = length(sub(tip, guard));
+    let width = geometry.body_half_width;
+    let shoulder = add(guard, scale(heading, length * 0.58));
+
     let blade = [
+        add(guard, scale(across, width * 0.85)),
+        add(shoulder, scale(across, width)),
         tip,
-        add(spine, scale(normal, r * 0.55)),
-        waist,
-        sub(spine, scale(normal, r * 0.55)),
+        sub(shoulder, scale(across, width)),
+        sub(guard, scale(across, width * 0.85)),
     ];
-    draw_quad(
-        blade,
-        if ctx.app.pointer_down {
-            rgba(218, 228, 228, 255)
-        } else {
-            rgba(160, 177, 178, 245)
-        },
-    );
-    draw_polyline_closed(&blade, 2.0, rgba(47, 55, 58, 255));
-    draw_line_vec(
-        add(spine, scale(normal, r * 0.62)),
-        sub(spine, scale(normal, r * 0.62)),
-        5.0,
-        rgba(76, 48, 31, 255),
-    );
-    draw_line_vec(
-        add(tip, scale(normal, -r * 0.08)),
-        sub(spine, scale(normal, r * 0.34)),
-        1.5,
-        rgba(255, 255, 246, 190),
-    );
-}
-
-fn draw_heavy_tool(
-    ctx: &RenderContext,
-    center: rp::Vec2,
-    dir: rp::Vec2,
-    normal: rp::Vec2,
-    radius: f32,
-) {
-    let r = f64::from(radius);
-    let half_width = r * 0.96;
-    let half_height = r * 0.58;
-    let head = [
-        add(
-            add(center, scale(normal, half_width)),
-            scale(dir, half_height),
-        ),
-        add(
-            sub(center, scale(normal, half_width)),
-            scale(dir, half_height),
-        ),
-        sub(
-            sub(center, scale(normal, half_width)),
-            scale(dir, half_height),
-        ),
-        sub(
-            add(center, scale(normal, half_width)),
-            scale(dir, half_height),
-        ),
-    ];
-    draw_quad(
-        head,
-        if ctx.app.pointer_down {
-            rgba(74, 80, 84, 255)
-        } else {
-            rgba(91, 92, 90, 255)
-        },
-    );
-    draw_polyline_closed(&head, 3.0, rgba(18, 19, 21, 255));
-    draw_line_vec(
-        sub(center, scale(normal, half_width * 0.52)),
-        add(center, scale(normal, half_width * 0.52)),
-        3.0,
-        rgba(152, 157, 154, 230),
-    );
-}
-
-fn draw_blunt_tool(ctx: &RenderContext, center: rp::Vec2, dir: rp::Vec2, radius: f32) {
-    let shell = rgba(31, 27, 24, 255);
-    let fill = if ctx.app.pointer_down {
-        rgba(181, 51, 40, 255)
+    let steel = if ctx.app.pointer_down {
+        rgba(214, 222, 226, 255)
     } else {
-        rgba(190, 164, 109, 255)
+        rgba(186, 196, 201, 255)
     };
-    draw_circle(center.x as f32, center.y as f32, radius + 4.0, shell);
-    draw_circle(center.x as f32, center.y as f32, radius, fill);
-    draw_circle_lines(
-        center.x as f32,
-        center.y as f32,
-        radius,
-        3.0,
-        rgba(42, 30, 22, 255),
+    draw_polygon(&blade, steel);
+    // The far bevel catches less light than the near one.
+    draw_polygon(
+        &[
+            guard,
+            shoulder,
+            tip,
+            sub(shoulder, scale(across, width)),
+            sub(guard, scale(across, width * 0.85)),
+        ],
+        rgba(146, 157, 164, 255),
     );
-    let highlight = add(
-        sub(center, scale(dir, f64::from(radius) * 0.18)),
-        scale(
-            rp::Vec2 {
-                x: -dir.y,
-                y: dir.x,
-            },
-            f64::from(radius) * 0.20,
-        ),
+    if ctx.app.tool_blood > 0.02 {
+        let bloodied = add(guard, scale(heading, length * 0.35));
+        draw_polygon(
+            &[
+                add(bloodied, scale(across, width * 0.92)),
+                add(shoulder, scale(across, width)),
+                tip,
+                sub(shoulder, scale(across, width)),
+                sub(bloodied, scale(across, width * 0.92)),
+            ],
+            with_alpha(ctx.palette.blood_mid, ctx.app.tool_blood * 0.8),
+        );
+    }
+    draw_line_vec(guard, tip, 1.2, rgba(236, 242, 244, 220));
+    draw_polyline_closed(&blade, 1.2, rgba(52, 58, 62, 255));
+
+    let guard_half = width + 5.0;
+    draw_line_vec(
+        add(guard, scale(across, guard_half)),
+        sub(guard, scale(across, guard_half)),
+        5.0,
+        rgba(64, 66, 70, 255),
     );
+    draw_line_vec(
+        add(guard, scale(across, guard_half - 1.0)),
+        sub(guard, scale(across, guard_half - 1.0)),
+        1.4,
+        rgba(150, 154, 158, 255),
+    );
+
+    let grip_start = sub(guard, scale(heading, 2.5));
+    let grip_end = sub(guard, scale(heading, 2.5 + geometry.handle_length));
+    draw_line_vec(
+        grip_start,
+        grip_end,
+        (geometry.handle_half_width * 2.0) as f32,
+        rgba(44, 32, 26, 255),
+    );
+    let handle_half = geometry.handle_half_width;
+    for i in 1..6 {
+        let at = sub(
+            grip_start,
+            scale(heading, geometry.handle_length * i as f64 / 6.0),
+        );
+        draw_line_vec(
+            add(at, scale(across, handle_half)),
+            sub(at, scale(across, handle_half)),
+            1.0,
+            rgba(92, 70, 54, 255),
+        );
+    }
     draw_circle(
-        highlight.x as f32,
-        highlight.y as f32,
-        (radius * 0.25).max(5.0),
-        rgba(238, 218, 158, 220),
+        grip_end.x as f32,
+        grip_end.y as f32,
+        (handle_half + 1.5) as f32,
+        rgba(118, 122, 126, 255),
+    );
+}
+
+/// Steel head with polished striking faces on a long wooden handle.
+fn draw_sledgehammer(ctx: &RenderContext, pose: &rp::ToolPose, geometry: &rp::ToolGeometry) {
+    let heading = pose.heading;
+    let side = pose.side;
+    let center = pose.center;
+    let half_length = length(sub(pose.contact_end, pose.contact_start)) * 0.5 + pose.contact_radius;
+    let half_width = geometry.body_half_width;
+
+    // Handle first, so the head covers the joint.
+    let handle_start = add(center, scale(side, half_width * 0.6));
+    let handle_end = add(center, scale(side, half_width + geometry.handle_length));
+    let handle_width = (geometry.handle_half_width * 2.0) as f32;
+    draw_line_vec(
+        handle_start,
+        handle_end,
+        handle_width + 2.0,
+        rgba(58, 40, 26, 255),
+    );
+    draw_line_vec(
+        handle_start,
+        handle_end,
+        handle_width,
+        rgba(156, 112, 64, 255),
+    );
+    draw_line_vec(
+        add(handle_start, scale(heading, -1.5)),
+        add(handle_end, scale(heading, -1.5)),
+        1.2,
+        rgba(196, 150, 96, 200),
+    );
+    let wrap_start = add(
+        center,
+        scale(side, half_width + geometry.handle_length * 0.72),
+    );
+    draw_line_vec(
+        wrap_start,
+        handle_end,
+        handle_width + 1.0,
+        rgba(44, 36, 30, 255),
+    );
+
+    let corner = |along: f64, out: f64| add(center, add(scale(heading, along), scale(side, out)));
+    let head = [
+        corner(half_length, -half_width),
+        corner(half_length, half_width),
+        corner(-half_length, half_width),
+        corner(-half_length, -half_width),
+    ];
+    draw_quad(head, rgba(74, 78, 83, 255));
+    // Light falls on the side away from the handle.
+    draw_quad(
+        [
+            corner(half_length - 2.0, -half_width + 2.0),
+            corner(half_length - 2.0, -half_width * 0.15),
+            corner(-half_length + 2.0, -half_width * 0.15),
+            corner(-half_length + 2.0, -half_width + 2.0),
+        ],
+        rgba(118, 124, 130, 255),
+    );
+    for face in [half_length, -half_length] {
+        let inset = if face > 0.0 { -4.0 } else { 4.0 };
+        draw_quad(
+            [
+                corner(face, -half_width),
+                corner(face, half_width),
+                corner(face + inset, half_width),
+                corner(face + inset, -half_width),
+            ],
+            rgba(168, 174, 178, 255),
+        );
+    }
+    if ctx.app.tool_blood > 0.02 {
+        // Blood collects on the striking face that leads.
+        let face = half_length;
+        draw_quad(
+            [
+                corner(face, -half_width),
+                corner(face, half_width),
+                corner(face - 12.0, half_width),
+                corner(face - 12.0, -half_width),
+            ],
+            with_alpha(ctx.palette.blood_mid, ctx.app.tool_blood * 0.75),
+        );
+    }
+    draw_polyline_closed(&head, 2.0, rgba(22, 23, 25, 255));
+}
+
+/// Ash bat: full barrel where it hits, tapering to a taped handle and knob.
+fn draw_bat(ctx: &RenderContext, pose: &rp::ToolPose, geometry: &rp::ToolGeometry) {
+    let side = pose.side;
+    let center = pose.center;
+    let radius = geometry.body_half_width;
+    let along = |distance: f64| add(center, scale(side, distance));
+    // Positions along the bat from the driven point toward the hand.
+    let end = -(geometry.contact_front + radius * 0.5);
+    let barrel_end = geometry.contact_back + 2.0;
+    let taper_end = barrel_end + 62.0;
+    let knob = barrel_end + geometry.handle_length - 30.0;
+    let handle_radius = geometry.handle_half_width;
+
+    let wood = rgba(212, 176, 122, 255);
+    let wood_dark = rgba(96, 70, 44, 255);
+    let across = perpendicular(side);
+    let outline = [
+        add(along(end), scale(across, radius)),
+        add(along(barrel_end), scale(across, radius)),
+        add(along(taper_end), scale(across, handle_radius)),
+        add(along(knob), scale(across, handle_radius)),
+        sub(along(knob), scale(across, handle_radius)),
+        sub(along(taper_end), scale(across, handle_radius)),
+        sub(along(barrel_end), scale(across, radius)),
+        sub(along(end), scale(across, radius)),
+    ];
+    draw_polygon(&outline, wood);
+    let cap = along(end);
+    draw_circle(cap.x as f32, cap.y as f32, radius as f32, wood);
+    draw_polyline_closed(&outline[..], 1.4, wood_dark);
+    draw_circle_lines(cap.x as f32, cap.y as f32, radius as f32, 1.4, wood_dark);
+    draw_line_vec(
+        add(along(end), scale(across, radius * 0.45)),
+        add(along(barrel_end), scale(across, radius * 0.45)),
+        2.0,
+        rgba(236, 210, 164, 200),
+    );
+    draw_line_vec(
+        sub(along(end + 6.0), scale(across, radius * 0.4)),
+        sub(along(barrel_end - 8.0), scale(across, radius * 0.4)),
+        1.0,
+        rgba(170, 132, 84, 200),
+    );
+    if ctx.app.tool_blood > 0.02 {
+        draw_polygon(
+            &[
+                add(along(end), scale(across, radius)),
+                add(along(end + 52.0), scale(across, radius)),
+                sub(along(end + 52.0), scale(across, radius)),
+                sub(along(end), scale(across, radius)),
+            ],
+            with_alpha(ctx.palette.blood_mid, ctx.app.tool_blood * 0.7),
+        );
+    }
+
+    let tape_start = taper_end + 4.0;
+    draw_line_vec(
+        along(tape_start),
+        along(knob),
+        (handle_radius * 2.0 + 1.0) as f32,
+        rgba(38, 38, 42, 255),
+    );
+    let mut wrap = tape_start + 5.0;
+    while wrap < knob - 2.0 {
+        draw_line_vec(
+            add(along(wrap), scale(across, handle_radius)),
+            sub(along(wrap + 3.0), scale(across, handle_radius)),
+            1.0,
+            rgba(84, 84, 90, 255),
+        );
+        wrap += 6.0;
+    }
+    let knob_center = along(knob + 2.0);
+    draw_circle(
+        knob_center.x as f32,
+        knob_center.y as f32,
+        (handle_radius + 3.0) as f32,
+        wood,
+    );
+    draw_circle_lines(
+        knob_center.x as f32,
+        knob_center.y as f32,
+        (handle_radius + 3.0) as f32,
+        1.4,
+        wood_dark,
     );
 }
 
@@ -1578,21 +1838,21 @@ fn control_hints(app: &AppState, palette: &RenderPalette) -> [ControlHint; 9] {
         },
         ControlHint {
             key: "B",
-            label: "blunt",
+            label: "bat",
             accent: tool_color(rp::ToolMode::Blunt),
             active: app.tool == rp::ToolMode::Blunt,
             action: Some(ControlAction::Tool(rp::ToolMode::Blunt)),
         },
         ControlHint {
             key: "S",
-            label: "sharp",
+            label: "knife",
             accent: tool_color(rp::ToolMode::Sharp),
             active: app.tool == rp::ToolMode::Sharp,
             action: Some(ControlAction::Tool(rp::ToolMode::Sharp)),
         },
         ControlHint {
             key: "H",
-            label: "heavy",
+            label: "hammer",
             accent: tool_color(rp::ToolMode::Heavy),
             active: app.tool == rp::ToolMode::Heavy,
             action: Some(ControlAction::Tool(rp::ToolMode::Heavy)),
@@ -2015,17 +2275,9 @@ fn draw_line_vec(a: rp::Vec2, b: rp::Vec2, width: f32, color: Color) {
 
 fn tool_name(tool: rp::ToolMode) -> &'static str {
     match tool {
-        rp::ToolMode::Blunt => "blunt",
-        rp::ToolMode::Sharp => "sharp",
-        rp::ToolMode::Heavy => "heavy",
-    }
-}
-
-fn tool_radius(tool: rp::ToolMode) -> f64 {
-    match tool {
-        rp::ToolMode::Sharp => 34.0 * 0.48,
-        rp::ToolMode::Heavy => 34.0 * 1.18,
-        rp::ToolMode::Blunt => 34.0,
+        rp::ToolMode::Blunt => "bat",
+        rp::ToolMode::Sharp => "knife",
+        rp::ToolMode::Heavy => "hammer",
     }
 }
 
@@ -2035,21 +2287,6 @@ fn tool_color(tool: rp::ToolMode) -> Color {
         rp::ToolMode::Sharp => rgba(192, 220, 224, 235),
         rp::ToolMode::Heavy => rgba(132, 141, 147, 235),
     }
-}
-
-fn striker_direction(app: &AppState) -> rp::Vec2 {
-    let speed = length(app.striker_velocity);
-    if speed > 1.0 {
-        return scale(app.striker_velocity, 1.0 / speed);
-    }
-
-    let target_delta = sub(app.striker, app.pointer);
-    let distance = length(target_delta);
-    if distance > 1.0 {
-        return scale(target_delta, 1.0 / distance);
-    }
-
-    rp::Vec2 { x: 1.0, y: 0.0 }
 }
 
 fn bone_point(bone: rp::BoneSegment, t: f64) -> rp::Vec2 {

@@ -58,6 +58,8 @@ const RIBS: [(f64, f64, f64); 4] = [
     (0.343, 0.058, 0.52),
 ];
 const RIB_DROP: f64 = 0.022;
+/// The aorta sits deep in the torso, so it takes this much more force to cut.
+const AORTA_DEPTH_SCALE: f64 = 2.4;
 /// Torso muscle inside this box forms the pressurized cavity.
 const CAVITY_U: f64 = 0.078;
 const CAVITY_V: (f64, f64) = (0.215, 0.505);
@@ -201,7 +203,11 @@ pub fn create_layered_body(width: f64, height: f64, materials: Materials) -> Wor
         }
     }
 
-    world.add_vessel_segment(frame.point(0.0, 0.155), frame.point(0.0, 0.525), 4.1, 1.65);
+    // The aorta runs deep behind the sternum and ribs: a surface slash should not
+    // reach it, only a deep stab or crushing trauma.
+    let aorta =
+        world.add_vessel_segment(frame.point(0.0, 0.155), frame.point(0.0, 0.525), 4.1, 1.65);
+    world.vessels[aorta].laceration_impulse *= AORTA_DEPTH_SCALE;
     for side in [-1.0, 1.0] {
         let shift = |base: f64, right: f64| if side < 0.0 { base } else { right };
         world.add_vessel_segment(

@@ -118,7 +118,11 @@ impl SilhouetteField {
         let position = |key: usize| -> (f64, f64) {
             let node = key / 2;
             let (x, y) = (node % cols, node / cols);
-            let (x1, y1) = if key % 2 == 0 { (x + 1, y) } else { (x, y + 1) };
+            let (x1, y1) = if key.is_multiple_of(2) {
+                (x + 1, y)
+            } else {
+                (x, y + 1)
+            };
             let a = value(x, y);
             let b = value(x1, y1);
             let t = if (a - b).abs() > 1.0e-12 {

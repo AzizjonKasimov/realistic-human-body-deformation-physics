@@ -42,7 +42,8 @@ This project is aiming for physically grounded, game-feasible body destruction r
    - Skin and muscle use PBD-style points, springs, area constraints, and breakable attachments.
    - XPBD-style compliance is the right next solver upgrade when stiffness tuning starts depending too much on timestep or iteration count; the Rust prototype now has opt-in compliant spring and area projection with per-step lambda reset and focused tests.
    - Sharp cuts should propagate from existing broken skin edges into adjacent high-stress or fatigued skin springs under a per-step cap, so cut growth follows local stress concentration without becoming an unbounded flood fill.
-   - Sharp skin openings should transfer into nearby exposed or loaded muscle springs under a separate cap so deep injury follows the layer coupling instead of depending only on direct blade overlap.
+   - A sharp blade is a thin segment swept along its motion each step: it severs only the fibers its edge or tip path crosses, nudges tissue off its thin edge instead of shoving it, and loads bone weakly, so knife wounds are incisions along the stroke rather than crush channels.
+   - Fresh sharp skin openings should transfer into exposed or loaded muscle springs directly beneath them under a separate cap so deep injury follows the layer coupling, without older wounds widening while the blade works elsewhere.
    - Sharp cut edges should be able to delaminate nearby skin-to-muscle attachments under local load, creating capped skin flaps and exposure without letting every blunt tear peel the whole body.
    - Muscle should expose an anisotropic damage axis: fiber-aligned spring ruptures are tracked separately from cross-fiber muscle tears, and can feed local muscle detail through an opt-in damage floor once production tuning is ready.
    - Springs should accumulate fatigue from repeated subcritical stretch/load so tissue has material memory instead of behaving as freshly intact until a single threshold is crossed.
@@ -56,7 +57,7 @@ This project is aiming for physically grounded, game-feasible body destruction r
    - Persistent wound leakage should drain a finite body-level blood reserve, and remaining reserve should scale later wound pressure plus passive tissue turgor/area support so severe bleeding has systemic state without simulating circulation.
    - Fatigue should feed both local tear thresholds and muscle damage detail, with conservative production defaults and stronger focused tests proving repeated-load failure.
    - Plastic deformation should be clamped against each spring's original rest shape and gated through long-settle strike telemetry so permanent set remains PC-feasible and does not silently replace tearing/fracture behavior.
-   - Clotted wound sources should remain attached to their tissue or bone anchors and reopen under later local load, with capped per-step work so rebleeding behaves like material state instead of a new visual-only effect.
+   - Clotted wound sources should remain attached to their tissue or bone anchors and reopen under later local load or fresh damage at their site, keeping their slot until the wound budget needs it, with capped per-step work so rebleeding behaves like material state instead of a new visual-only effect.
    - Flesh detail should mostly be driven by a low-resolution physical proxy plus rendering detail, not by simulating every visible feature directly.
 
 4. **Coupling**

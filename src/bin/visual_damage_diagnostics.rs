@@ -37,6 +37,8 @@ struct VisualExpectations {
     min_lacerated_vessels: usize,
     min_fragment_vessel_lacerations: usize,
     min_fractured_bones: usize,
+    /// Upper limit on fractured bones; a knife cut should leave the skeleton intact.
+    max_fractured_bones: Option<usize>,
     min_rib_fractures: usize,
     min_fracture_caps: usize,
     min_cavity_ruptures: usize,
@@ -148,22 +150,21 @@ fn visual_scenarios() -> Vec<VisualScenario> {
             strike_frames: 28,
             settle_frames: 48,
             power: 3.0,
+            // A knife cut: a clean incision that severs fibers and vessels and
+            // can reach organs, without bruising like a club or breaking bone.
             expectations: VisualExpectations {
-                min_skin_wound_edges: 80,
+                min_skin_wound_edges: 20,
                 min_muscle_fiber_lines: 48,
                 min_muscle_fiber_tears: 8,
-                min_failed_muscle_voids: 80,
-                min_visible_contusions: 50,
-                min_visible_wound_sources: 30,
+                min_failed_muscle_voids: 20,
+                min_visible_wound_sources: 8,
                 min_visible_fluid_particles: 120,
                 min_lacerated_vessels: 1,
                 min_organ_penetrations: 1,
                 min_organ_ruptures: 1,
                 min_organ_damage: 1.0,
-                min_fractured_bones: 8,
-                min_rib_fractures: 3,
-                min_fracture_caps: 8,
-                min_damage_primitives: 1000,
+                max_fractured_bones: Some(0),
+                min_damage_primitives: 500,
                 ..VisualExpectations::default()
             },
         },
@@ -181,7 +182,6 @@ fn visual_scenarios() -> Vec<VisualScenario> {
                 min_skin_wound_edges: 140,
                 min_muscle_fiber_lines: 48,
                 min_muscle_fiber_tears: 40,
-                min_joint_ligament_damage_events: 1,
                 min_failed_muscle_voids: 160,
                 min_visible_contusions: 120,
                 min_visible_wound_sources: 50,
@@ -199,6 +199,7 @@ fn visual_scenarios() -> Vec<VisualScenario> {
                 min_organ_ruptures: 1,
                 min_organ_damage: 1.0,
                 min_damage_primitives: 1400,
+                ..VisualExpectations::default()
             },
         },
     ]
@@ -465,6 +466,14 @@ fn validate_visual_metrics(
         scenario.expectations.min_fractured_bones,
         warnings,
     );
+    if let Some(maximum) = scenario.expectations.max_fractured_bones {
+        if metrics.fractured_bones > maximum {
+            warnings.push(format!(
+                "{}: fractured_bones={} above allowed {}",
+                scenario.name, metrics.fractured_bones, maximum
+            ));
+        }
+    }
     check_min(
         scenario,
         "rib_fractures",

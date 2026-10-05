@@ -2,8 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
 
 mod body;
+mod tools;
 
 pub use body::{body_frame, create_layered_body, BodyFrame};
+pub use tools::{tool_geometry, tool_pose, ToolGeometry, ToolPose};
 
 const EPSILON: f64 = 0.0001;
 const FRAGMENT_TISSUE_POINT_RADIUS_SCALE: f64 = 0.36;
@@ -12,6 +14,11 @@ const FRAGMENT_TISSUE_NORMAL_DAMPING: f64 = 0.58;
 const FRAGMENT_TISSUE_TANGENTIAL_FRICTION: f64 = 0.34;
 const FRAGMENT_TISSUE_ANGULAR_FRICTION: f64 = 0.18;
 const SKIN_ATTACHMENT_CANDIDATES: usize = 4;
+/// A wound can reopen once it is this old (seconds) and its clot has reached the
+/// level below: a still-bleeding wound needs a firmer clot to count as healing.
+const WOUND_REOPEN_MIN_AGE: f64 = 0.24;
+const WOUND_REOPEN_ACTIVE_CLOT: f64 = 0.42;
+const WOUND_REOPEN_INACTIVE_CLOT: f64 = 0.18;
 pub const MISSING_ANCHOR: usize = usize::MAX;
 pub const MISSING_SPRING: usize = usize::MAX;
 
@@ -343,7 +350,7 @@ impl Default for Materials {
             max_tear_propagations_per_step: 4,
             muscle_cut_transfer_exposure_threshold: 0.42,
             muscle_cut_transfer_load_threshold: 520.0,
-            muscle_cut_transfer_radius: 18.0,
+            muscle_cut_transfer_radius: 12.0,
             max_muscle_cut_transfers_per_step: 3,
             muscle_crush_rupture_load_threshold: 820.0,
             muscle_crush_rupture_damage_threshold: 1.0,
@@ -836,6 +843,8 @@ pub struct VesselSegment {
     pub pressure: f64,
     pub laceration_impulse: f64,
     pub lacerated: bool,
+    /// Where along the vessel (0 at `a`, 1 at `b`) it was severed.
+    pub laceration_t: f64,
     pub anchor_a: usize,
     pub anchor_b: usize,
     pub offset_a: Vec2,
@@ -851,6 +860,7 @@ impl Default for VesselSegment {
             pressure: 1.0,
             laceration_impulse: 1450.0,
             lacerated: false,
+            laceration_t: 0.5,
             anchor_a: MISSING_ANCHOR,
             anchor_b: MISSING_ANCHOR,
             offset_a: Vec2::default(),
@@ -1145,30 +1155,26 @@ pub struct AnatomyValidation {
 
 #[derive(Clone, Copy, Debug)]
 struct ToolProfile {
-    radius_scale: f64,
-    reach_padding: f64,
     mass_scale: f64,
     tissue_push_scale: f64,
     tissue_load_scale: f64,
     contusion_scale: f64,
     bone_push_scale: f64,
     bone_load_scale: f64,
+    /// Divides the load a tool puts into bone; above 1 the tool struggles to break it.
     fracture_scale: f64,
-    tear_pressure_scale: f64,
+    /// How readily a blade edge severs the fibers it crosses.
+    cut_pressure_scale: f64,
+    /// How readily a heavy head splits tissue it crushes.
+    crush_tear_scale: f64,
     fluid_scale: f64,
-    blade_normal_bias: f64,
     drag_scale: f64,
     rebound_scale: f64,
-    blade_front_scale: f64,
-    blade_back_scale: f64,
-    blade_contact_radius_scale: f64,
 }
 
 impl Default for ToolProfile {
     fn default() -> Self {
         Self {
-            radius_scale: 1.0,
-            reach_padding: 12.0,
             mass_scale: 1.0,
             tissue_push_scale: 1.0,
             tissue_load_scale: 1.0,
@@ -1176,27 +1182,25 @@ impl Default for ToolProfile {
             bone_push_scale: 1.0,
             bone_load_scale: 1.0,
             fracture_scale: 1.0,
-            tear_pressure_scale: 0.0,
+            cut_pressure_scale: 0.0,
+            crush_tear_scale: 0.0,
             fluid_scale: 1.0,
-            blade_normal_bias: 0.0,
             drag_scale: 1.0,
             rebound_scale: 1.0,
-            blade_front_scale: 0.0,
-            blade_back_scale: 0.0,
-            blade_contact_radius_scale: 1.0,
         }
     }
 }
 
+/// A tool's striking part as a segment with a radius.
 #[derive(Clone, Copy, Debug, Default)]
 struct ToolContactShape {
-    center: Vec2,
     axis_start: Vec2,
     axis_end: Vec2,
     direction: Vec2,
     blade_normal: Vec2,
+    radius: f64,
     influence: f64,
-    blade_segment: bool,
+    cutting_edge: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1273,6 +1277,18 @@ pub struct World {
     fluid_write_cursor: usize,
     blood_stain_write_cursor: usize,
     fluid_seed: u32,
+    /// Direction the current tool faces; it follows the motion when free.
+    tool_heading: Vec2,
+    /// Perpendicular to the heading, toward the hand on the hammer and bat.
+    tool_side: Vec2,
+    /// The tool was pressed into tissue last step, so it resists turning.
+    tool_embedded: bool,
+    /// Knife guard and tip at the end of the previous pressed step.
+    previous_blade: Option<(Vec2, Vec2)>,
+    tool_mode: ToolMode,
+    /// Skin springs a blade severed this step; cuts deepen into the muscle
+    /// right under them.
+    fresh_skin_cuts: Vec<usize>,
 }
 
 impl Default for World {
@@ -1305,6 +1321,12 @@ impl World {
             fluid_write_cursor: 0,
             blood_stain_write_cursor: 0,
             fluid_seed: 0x9e3779b9,
+            tool_heading: Vec2 { x: 1.0, y: 0.0 },
+            tool_side: Vec2 { x: 0.0, y: 1.0 },
+            tool_embedded: false,
+            previous_blade: None,
+            tool_mode: ToolMode::default(),
+            fresh_skin_cuts: Vec::new(),
         }
     }
 
@@ -1669,7 +1691,7 @@ impl World {
     pub fn step(&mut self, dt: f64, input: &InputState, width: f64, height: f64) {
         let floor_y = height - 38.0;
         let profile = tool_profile(input.tool);
-        let striker_radius = self.materials.striker_radius * profile.radius_scale;
+        let striker_radius = tool_geometry(input.tool).contact_radius;
         let striker_mass = self.materials.striker_mass * input.power * profile.mass_scale;
         let striker_speed = hypot(input.vx, input.vy);
 
@@ -1702,6 +1724,8 @@ impl World {
         self.update_organ_anchors();
         self.update_wound_anchors();
         self.update_wounds(dt);
+        self.update_tool_pose(input, dt);
+        self.fresh_skin_cuts.clear();
         self.collide_striker(dt, input);
         self.update_organ_anchors();
         self.update_cavities(dt);
@@ -2240,11 +2264,15 @@ impl World {
         let clamped_depth = depth.clamp(0.12, 1.35);
         let clamped_radius = radius.clamp(1.3, 5.2);
 
-        let mut target_index = self.wounds.iter().position(|wound| !wound.active);
+        // New damage merges into a bleeding source nearby, and a clotted wound
+        // at this spot reopens rather than a fresh source appearing beside it
+        // while the old one is recycled elsewhere.
+        let mut target_index = None;
+        let mut reopening = false;
         if merge_active_sources {
             let mut best_distance = self.materials.wound_merge_radius;
             for (index, wound) in self.wounds.iter().enumerate() {
-                if !wound.active {
+                if !wound.active && !wound_can_reopen(wound) {
                     continue;
                 }
                 let d = distance(wound.position, center);
@@ -2253,7 +2281,16 @@ impl World {
                     target_index = Some(index);
                 }
             }
+            reopening = target_index.is_some_and(|index| wound_can_reopen(&self.wounds[index]));
         }
+        // Only a stopped wound that can never reopen gives up its slot; a
+        // clotted one stays so later trauma at its site can make it bleed
+        // again, until the budget forces the weakest source out below.
+        let target_index = target_index.or_else(|| {
+            self.wounds
+                .iter()
+                .position(|wound| !wound.active && !wound_can_reopen(wound))
+        });
 
         let index = if let Some(index) = target_index {
             index
@@ -2275,15 +2312,17 @@ impl World {
         };
 
         let was_active = self.wounds[index].active;
+        // A reopened wound keeps its site like a merge, even if it had stopped.
+        let keeps_site = was_active || reopening;
         let previous_position = self.wounds[index].position;
         let previous_layer = self.wounds[index].layer;
-        let merged_position = if was_active {
+        let merged_position = if keeps_site {
             lerp(previous_position, center, 0.35)
         } else {
             center
         };
         let merged_layer = if layer == TissueLayer::Muscle
-            || (was_active && previous_layer == TissueLayer::Muscle)
+            || (keeps_site && previous_layer == TissueLayer::Muscle)
         {
             TissueLayer::Muscle
         } else {
@@ -2291,12 +2330,13 @@ impl World {
         };
         let anchor = forced_anchor
             .unwrap_or_else(|| self.choose_wound_anchor(merged_position, merged_layer));
+        let wound_reopen_clot_loss = self.materials.wound_reopen_clot_loss;
 
         let target = &mut self.wounds[index];
         target.position = merged_position;
         target.direction = normalized(
             add(
-                scale(target.direction, if was_active { 0.45 } else { 0.0 }),
+                scale(target.direction, if keeps_site { 0.45 } else { 0.0 }),
                 dir,
             ),
             dir,
@@ -2304,22 +2344,24 @@ impl World {
         target.layer = merged_layer;
         target.pressure = (target.pressure * 0.72).max(clamped_pressure) + clamped_pressure * 0.34;
         target.pressure = target.pressure.min(6.0);
-        target.clot = if was_active {
+        target.clot = if reopening {
+            (target.clot - wound_reopen_clot_loss).clamp(0.0, 0.36)
+        } else if was_active {
             (target.clot - clamped_pressure * 0.045).max(0.0)
         } else {
             0.0
         };
-        target.age = if was_active {
+        target.age = if keeps_site {
             target.age.min(0.45)
         } else {
             0.0
         };
-        target.radius = if was_active {
+        target.radius = if keeps_site {
             target.radius.max(clamped_radius)
         } else {
             clamped_radius
         };
-        target.depth = if was_active {
+        target.depth = if keeps_site {
             target.depth.max(clamped_depth)
         } else {
             clamped_depth
@@ -2329,7 +2371,10 @@ impl World {
         target.anchor_t = anchor.t;
         target.anchor_offset = anchor.offset;
         target.active = true;
-        if !was_active {
+        if reopening {
+            self.stats.wound_reopens += 1;
+            self.debug.wound_reopens += 1;
+        } else if !was_active {
             self.stats.opened_wounds += 1;
         }
         true
@@ -2555,8 +2600,7 @@ impl World {
             if events.len() >= budget {
                 break;
             }
-            let clot_gate = if wound.active { 0.42 } else { 0.18 };
-            if wound.age < 0.24 || wound.clot < clot_gate {
+            if !wound_can_reopen(wound) {
                 continue;
             }
 
@@ -3453,276 +3497,9 @@ impl World {
         self.cavities[0].centroid
     }
 
-    fn collide_striker(&mut self, dt: f64, input: &InputState) {
-        if !input.active {
-            return;
-        }
-        let profile = tool_profile(input.tool);
-        let speed = hypot(input.vx, input.vy);
-        let radius = self.materials.striker_radius * profile.radius_scale;
-        let impact = speed * self.materials.striker_mass * input.power * profile.mass_scale;
-        let shape = make_tool_contact_shape(input, profile, radius);
-        let influence = shape.influence;
-
-        let initial_bone_count = self.bones.len();
-        for i in 0..initial_bone_count {
-            let mut bone = self.bones[i];
-            bone.load *= 0.88;
-            let mut t = segment_t(shape.center, bone.a, bone.b);
-            let mut closest = bone_point(bone, t);
-            let mut tool_contact = shape.center;
-            let mut dist = distance(closest, tool_contact);
-            if shape.blade_segment {
-                let closest_pair =
-                    closest_segment_points(shape.axis_start, shape.axis_end, bone.a, bone.b);
-                t = closest_pair.t_b;
-                closest = closest_pair.point_b;
-                tool_contact = closest_pair.point_a;
-                dist = closest_pair.distance;
-            }
-            if !input.down || dist > influence + bone.radius {
-                self.bones[i] = bone;
-                continue;
-            }
-            let mut normal = normalized(
-                subtract(closest, tool_contact),
-                if shape.blade_segment {
-                    shape.blade_normal
-                } else {
-                    shape.direction
-                },
-            );
-            if dist < EPSILON && !shape.blade_segment && speed > EPSILON {
-                normal = shape.direction;
-                dist = 1.0;
-            }
-            let depth = (influence + bone.radius - dist).max(0.0);
-            let contact = (1.0 - ((dist - bone.radius) / influence).clamp(0.0, 1.0)).max(0.0);
-            let direct_load = (impact + self.materials.bone_direct_pressure * input.power)
-                * contact
-                * profile.bone_load_scale;
-            bone.load = bone.load.max(direct_load);
-            if direct_load > self.materials.fragment_wake_load
-                || speed > self.materials.fragment_sleep_speed * 2.0
-            {
-                self.wake_fragment(&mut bone);
-            }
-            self.debug.bone_contacts += 1;
-            if depth > self.debug.max_depth {
-                self.debug.max_depth = depth;
-                self.debug.strongest_contact = closest;
-            }
-            self.debug.max_bone_load = self.debug.max_bone_load.max(bone.load);
-            if !bone.pinned {
-                let contact_strength = self.materials.bone_direct_contact
-                    * profile.bone_push_scale
-                    * (0.78 + input.power * 0.12);
-                let push_x = normal.x * depth * contact_strength * profile.rebound_scale
-                    + input.vx * dt * contact_strength * 0.58 * profile.drag_scale;
-                let push_y = normal.y * depth * contact_strength * profile.rebound_scale
-                    + input.vy * dt * contact_strength * 0.58 * profile.drag_scale;
-                bone.a.x += push_x * (1.0 - t);
-                bone.a.y += push_y * (1.0 - t);
-                bone.b.x += push_x * t;
-                bone.b.y += push_y * t;
-                apply_bone_torque(
-                    &self.materials,
-                    &mut self.debug,
-                    &mut bone,
-                    closest,
-                    Vec2 {
-                        x: normal.x * direct_load * 0.16 * profile.rebound_scale
-                            + input.vx
-                                * contact
-                                * profile.bone_load_scale
-                                * 0.22
-                                * profile.drag_scale,
-                        y: normal.y * direct_load * 0.16 * profile.rebound_scale
-                            + input.vy
-                                * contact
-                                * profile.bone_load_scale
-                                * 0.22
-                                * profile.drag_scale,
-                    },
-                );
-            }
-            let should_fracture = self.can_fracture_bone(bone)
-                && bone.load > bone.fracture_impulse * profile.fracture_scale;
-            self.bones[i] = bone;
-            if should_fracture {
-                self.fracture_bone(i, t, normal, direct_load);
-            }
-        }
-
-        for point in &mut self.points {
-            if point.pinned {
-                continue;
-            }
-            let point_contact = sample_point_contact(point.position, &shape);
-            if point_contact.distance > influence {
-                continue;
-            }
-            let mut contact_strength = (if input.down { 0.58 } else { 0.16 })
-                * profile.tissue_push_scale
-                * (0.85 + input.power * 0.15);
-            if point.layer == TissueLayer::Muscle {
-                contact_strength *= self.materials.direct_muscle_contact + point.exposure * 0.82;
-            }
-            let depth = influence - point_contact.distance;
-            point.position.x +=
-                point_contact.normal.x * depth * contact_strength * profile.rebound_scale
-                    + input.vx * dt * 0.45 * contact_strength * profile.drag_scale;
-            point.position.y +=
-                point_contact.normal.y * depth * contact_strength * profile.rebound_scale
-                    + input.vy * dt * 0.45 * contact_strength * profile.drag_scale;
-            let contact_load =
-                impact * (depth / influence) * contact_strength * profile.tissue_load_scale;
-            point.load = point.load.max(contact_load);
-            if apply_point_contusion(point, self.materials, contact_load, profile.contusion_scale) {
-                self.stats.contusion_events += 1;
-                self.debug.contusion_events += 1;
-                self.debug.max_contusion = self.debug.max_contusion.max(point.contusion);
-            }
-            self.debug.tissue_contacts += 1;
-            if depth > self.debug.max_depth {
-                self.debug.max_depth = depth;
-                self.debug.strongest_contact = point.position;
-            }
-            self.debug.max_point_load = self.debug.max_point_load.max(point.load);
-        }
-
-        self.lacerate_major_vessels_from_striker(input, profile, &shape, impact);
-        self.penetrate_organs_from_striker(input, profile, &shape, impact);
-
-        if input.down && profile.tear_pressure_scale > 0.0 {
-            let mut events = Vec::new();
-            for spring_index in 0..self.springs.len() {
-                let spring = self.springs[spring_index];
-                if spring.broken {
-                    continue;
-                }
-                let a = self.points[spring.a];
-                let b = self.points[spring.b];
-                let midpoint = midpoint(a.position, b.position);
-                let tear_contact = sample_point_contact(midpoint, &shape);
-                if tear_contact.distance > influence * 0.82 {
-                    continue;
-                }
-                let contact =
-                    1.0 - (tear_contact.distance / (influence * 0.82).max(1.0)).clamp(0.0, 1.0);
-                let layer_scale = if spring.layer == TissueLayer::Skin {
-                    1.0
-                } else {
-                    0.78 + a.exposure.max(b.exposure) * 0.42
-                };
-                let pressure = impact * profile.tear_pressure_scale * contact * layer_scale;
-                let threshold = spring.tear_impulse * self.materials.sharp_tool_tear_pressure;
-                self.springs[spring_index].stress = self.springs[spring_index]
-                    .stress
-                    .max(pressure / threshold.max(1.0));
-                if pressure <= threshold {
-                    continue;
-                }
-                let tangent = normalized(subtract(b.position, a.position), Vec2 { x: 1.0, y: 0.0 });
-                let mut cut_normal = shape.blade_normal;
-                let spring_normal = normalized(
-                    Vec2 {
-                        x: -tangent.y,
-                        y: tangent.x - 0.25,
-                    },
-                    Vec2 {
-                        x: -tangent.y,
-                        y: tangent.x,
-                    },
-                );
-                if dot(cut_normal, spring_normal) < 0.0 {
-                    cut_normal = scale(cut_normal, -1.0);
-                }
-                let normal = normalized(
-                    Vec2 {
-                        x: spring_normal.x * (1.0 - profile.blade_normal_bias)
-                            + cut_normal.x * profile.blade_normal_bias,
-                        y: spring_normal.y * (1.0 - profile.blade_normal_bias)
-                            + cut_normal.y * profile.blade_normal_bias,
-                    },
-                    spring_normal,
-                );
-                self.springs[spring_index].broken = true;
-                self.bump_point_exposure_load(
-                    spring.a,
-                    if spring.layer == TissueLayer::Skin {
-                        0.92
-                    } else {
-                        1.0
-                    },
-                    pressure * 0.18,
-                );
-                self.bump_point_exposure_load(
-                    spring.b,
-                    if spring.layer == TissueLayer::Skin {
-                        0.92
-                    } else {
-                        1.0
-                    },
-                    pressure * 0.18,
-                );
-                if spring.layer == TissueLayer::Skin {
-                    self.stats.broken_skin += 1;
-                } else {
-                    self.stats.broken_muscle += 1;
-                }
-                events.push((
-                    midpoint,
-                    normal,
-                    spring.layer,
-                    pressure,
-                    if spring.layer == TissueLayer::Skin {
-                        6
-                    } else {
-                        4
-                    },
-                    if spring.layer == TissueLayer::Skin {
-                        2.1
-                    } else {
-                        1.8
-                    },
-                    if spring.layer == TissueLayer::Skin {
-                        0.58
-                    } else {
-                        0.92
-                    },
-                ));
-            }
-            for (midpoint, normal, layer, pressure, count, radius, depth) in events {
-                self.emit_fluid(
-                    midpoint,
-                    normal,
-                    count,
-                    120.0 + pressure * self.materials.fluid_impact_scale * 0.42,
-                    radius,
-                    profile.fluid_scale,
-                );
-                self.open_wound(
-                    midpoint,
-                    normal,
-                    layer,
-                    pressure
-                        / (if layer == TissueLayer::Skin {
-                            1250.0
-                        } else {
-                            1050.0
-                        }),
-                    radius,
-                    depth,
-                );
-            }
-        }
-    }
-
     fn lacerate_major_vessels_from_striker(
         &mut self,
         input: &InputState,
-        profile: ToolProfile,
         shape: &ToolContactShape,
         impact: f64,
     ) {
@@ -3741,20 +3518,10 @@ impl World {
                 continue;
             }
 
-            let (tool_point, vessel_point, closest_distance) = if shape.blade_segment {
-                let closest =
-                    closest_segment_points(shape.axis_start, shape.axis_end, vessel.a, vessel.b);
-                (closest.point_a, closest.point_b, closest.distance)
-            } else {
-                let t = segment_t(shape.center, vessel.a, vessel.b);
-                let vessel_point = lerp(vessel.a, vessel.b, t);
-                (
-                    shape.center,
-                    vessel_point,
-                    distance(shape.center, vessel_point),
-                )
-            };
-
+            let closest =
+                closest_segment_points(shape.axis_start, shape.axis_end, vessel.a, vessel.b);
+            let (tool_point, vessel_point, closest_distance) =
+                (closest.point_a, closest.point_b, closest.distance);
             let reach = self.materials.major_vessel_cut_radius + vessel.radius;
             if closest_distance > reach {
                 continue;
@@ -3762,7 +3529,7 @@ impl World {
 
             let contact = (1.0 - closest_distance / reach.max(EPSILON)).clamp(0.0, 1.0);
             let tool_scale = match input.tool {
-                ToolMode::Sharp => 1.30 + profile.tear_pressure_scale * 0.18,
+                ToolMode::Sharp => 1.48,
                 ToolMode::Heavy => 0.54,
                 ToolMode::Blunt => 0.18,
             };
@@ -3810,6 +3577,8 @@ impl World {
                 radius,
                 depth,
             ) {
+                let vessel = self.vessels[index];
+                self.vessels[index].laceration_t = segment_t(position, vessel.a, vessel.b);
                 self.vessels[index].lacerated = true;
                 self.stats.vessel_lacerations += 1;
                 self.debug.vessel_lacerations += 1;
@@ -3914,6 +3683,8 @@ impl World {
                 radius,
                 depth,
             ) {
+                let vessel = self.vessels[index];
+                self.vessels[index].laceration_t = segment_t(position, vessel.a, vessel.b);
                 self.vessels[index].lacerated = true;
                 self.stats.vessel_lacerations += 1;
                 self.stats.fragment_vessel_lacerations += 1;
@@ -3927,7 +3698,6 @@ impl World {
     fn penetrate_organs_from_striker(
         &mut self,
         input: &InputState,
-        profile: ToolProfile,
         shape: &ToolContactShape,
         impact: f64,
     ) {
@@ -3952,8 +3722,7 @@ impl World {
                 continue;
             };
 
-            let drive =
-                impact * contact.contact * (1.22 + profile.tear_pressure_scale.max(0.0) * 0.24);
+            let drive = impact * contact.contact * 1.46;
             let threshold = self.materials.organ_penetration_impulse.max(EPSILON);
             if drive <= threshold {
                 continue;
@@ -4329,8 +4098,13 @@ impl World {
             return;
         }
 
+        // Only cuts made this step deepen, so a wound does not keep widening
+        // while the knife moves elsewhere.
         let mut skin_openings = Vec::new();
-        for spring in &self.springs {
+        for &index in &self.fresh_skin_cuts {
+            let Some(spring) = self.springs.get(index) else {
+                continue;
+            };
             if !spring.broken || spring.layer != TissueLayer::Skin {
                 continue;
             }
@@ -9101,6 +8875,7 @@ mod tests {
             true,
         );
         world.springs[0].broken = true;
+        world.fresh_skin_cuts.push(0);
         world.points[muscle_a].exposure = 0.62;
         world.points[muscle_b].exposure = 0.62;
         world.points[muscle_a].load = 520.0;
@@ -9144,6 +8919,7 @@ mod tests {
             true,
         );
         world.springs[0].broken = true;
+        world.fresh_skin_cuts.push(0);
         world.points[muscle_a].exposure = 0.15;
         world.points[muscle_b].exposure = 0.15;
         world.points[muscle_a].load = 120.0;
@@ -9322,6 +9098,52 @@ mod tests {
     }
 
     #[test]
+    fn fresh_trauma_on_a_clotted_wound_reopens_it_in_place() {
+        let mut materials = Materials::default();
+        materials.max_fluid_particles = 0;
+        let mut world = World::new(materials);
+        world.add_point(Vec2 { x: 10.0, y: 10.0 }, TissueLayer::Skin, false);
+        let open_at = |world: &mut World, x: f64, y: f64| {
+            world.open_wound(
+                Vec2 { x, y },
+                Vec2 { x: 0.0, y: -1.0 },
+                TissueLayer::Skin,
+                1.0,
+                2.0,
+                0.6,
+            );
+        };
+        open_at(&mut world, 10.0, 10.0);
+        world.wounds[0].active = false;
+        world.wounds[0].age = 2.0;
+        world.wounds[0].pressure = 0.0;
+        world.wounds[0].clot = 0.92;
+
+        // Damage elsewhere takes a new slot instead of recycling the clotted wound.
+        open_at(&mut world, 200.0, 200.0);
+        assert_eq!(world.wounds.len(), 2);
+        assert!(!world.wounds[0].active);
+        assert_eq!(world.wounds[0].position, Vec2 { x: 10.0, y: 10.0 });
+
+        open_at(&mut world, 12.0, 11.0);
+        assert_eq!(
+            world.wounds.len(),
+            2,
+            "the old wound should reopen, not a new one"
+        );
+        assert!(world.wounds[0].active);
+        assert!(world.wounds[0].clot <= 0.36);
+        assert!(world.wounds[0].pressure > 0.0);
+        assert_eq!(world.stats.opened_wounds, 2);
+        assert_eq!(world.stats.wound_reopens, 1);
+
+        // Fresh damage while it still bleeds merges without counting again.
+        open_at(&mut world, 11.0, 10.0);
+        assert_eq!(world.wounds.len(), 2);
+        assert_eq!(world.stats.wound_reopens, 1);
+    }
+
+    #[test]
     fn sleeping_fragment_skips_fragment_contact_work() {
         let mut materials = Materials::default();
         materials.max_active_bone_fragments = 1;
@@ -9493,105 +9315,57 @@ pub fn validate_anatomy(world: &World, samples_per_bone: usize) -> AnatomyValida
     validation
 }
 
+/// Whether a wound has healed enough that disturbing it counts as reopening.
+fn wound_can_reopen(wound: &WoundSource) -> bool {
+    let clot_gate = if wound.active {
+        WOUND_REOPEN_ACTIVE_CLOT
+    } else {
+        WOUND_REOPEN_INACTIVE_CLOT
+    };
+    wound.age >= WOUND_REOPEN_MIN_AGE && wound.clot >= clot_gate
+}
+
 fn tool_profile(tool: ToolMode) -> ToolProfile {
     match tool {
+        // A knife cuts what its edge crosses but barely moves or breaks bone.
         ToolMode::Sharp => ToolProfile {
-            radius_scale: 0.48,
-            reach_padding: 5.0,
             mass_scale: 0.72,
             tissue_push_scale: 0.38,
             tissue_load_scale: 2.05,
             contusion_scale: 0.42,
-            bone_push_scale: 0.30,
-            bone_load_scale: 0.58,
-            fracture_scale: 0.76,
-            tear_pressure_scale: 1.0,
+            bone_push_scale: 0.25,
+            bone_load_scale: 0.30,
+            fracture_scale: 3.2,
+            cut_pressure_scale: 1.0,
+            crush_tear_scale: 0.0,
             fluid_scale: 1.35,
-            blade_normal_bias: 0.82,
             drag_scale: 0.72,
             rebound_scale: 0.58,
-            blade_front_scale: 1.55,
-            blade_back_scale: 0.65,
-            blade_contact_radius_scale: 0.42,
         },
         ToolMode::Heavy => ToolProfile {
-            radius_scale: 1.18,
-            reach_padding: 16.0,
             mass_scale: 1.85,
             tissue_push_scale: 1.24,
             tissue_load_scale: 1.18,
             contusion_scale: 1.55,
             bone_push_scale: 1.46,
             bone_load_scale: 1.72,
-            fracture_scale: 1.34,
-            tear_pressure_scale: 0.10,
+            fracture_scale: 1.0,
+            cut_pressure_scale: 0.0,
+            crush_tear_scale: 0.10,
             fluid_scale: 0.92,
-            blade_normal_bias: 0.0,
             drag_scale: 0.82,
             rebound_scale: 1.42,
-            blade_front_scale: 0.0,
-            blade_back_scale: 0.0,
-            blade_contact_radius_scale: 1.0,
         },
         ToolMode::Blunt => ToolProfile::default(),
     }
 }
 
-fn make_tool_contact_shape(
-    input: &InputState,
-    profile: ToolProfile,
-    radius: f64,
-) -> ToolContactShape {
-    let center = Vec2 {
-        x: input.x,
-        y: input.y,
-    };
-    let direction = normalized(
-        Vec2 {
-            x: input.vx,
-            y: input.vy,
-        },
-        Vec2 { x: 1.0, y: 0.0 },
-    );
-    let blade_normal = Vec2 {
-        x: -direction.y,
-        y: direction.x,
-    };
-    let blade_segment = profile.blade_front_scale > 0.0;
-    let contact_radius = if blade_segment {
-        radius * profile.blade_contact_radius_scale
-    } else {
-        radius
-    };
-    ToolContactShape {
-        center,
-        direction,
-        blade_normal,
-        influence: contact_radius + profile.reach_padding,
-        blade_segment,
-        axis_start: if blade_segment {
-            subtract(center, scale(direction, radius * profile.blade_back_scale))
-        } else {
-            center
-        },
-        axis_end: if blade_segment {
-            add(center, scale(direction, radius * profile.blade_front_scale))
-        } else {
-            center
-        },
-    }
-}
-
 fn sample_point_contact(point: Vec2, shape: &ToolContactShape) -> ToolPointContact {
-    let contact_point = if shape.blade_segment {
-        lerp(
-            shape.axis_start,
-            shape.axis_end,
-            segment_t(point, shape.axis_start, shape.axis_end),
-        )
-    } else {
-        shape.center
-    };
+    let contact_point = lerp(
+        shape.axis_start,
+        shape.axis_end,
+        segment_t(point, shape.axis_start, shape.axis_end),
+    );
     let delta = subtract(point, contact_point);
     ToolPointContact {
         normal: normalized(delta, shape.blade_normal),
@@ -9604,20 +9378,16 @@ fn tool_organ_contact(
     organ: OrganRegion,
     extra_radius: f64,
 ) -> Option<OrganToolContact> {
-    let tool_point = if shape.blade_segment {
-        lerp(
-            shape.axis_start,
-            shape.axis_end,
-            segment_t(organ.center, shape.axis_start, shape.axis_end),
-        )
-    } else {
-        shape.center
-    };
+    let tool_point = lerp(
+        shape.axis_start,
+        shape.axis_end,
+        segment_t(organ.center, shape.axis_start, shape.axis_end),
+    );
     let dx = (tool_point.x - organ.center.x) / organ.radius.x.max(EPSILON);
     let dy = (tool_point.y - organ.center.y) / organ.radius.y.max(EPSILON);
     let normalized_distance = (dx * dx + dy * dy).sqrt();
     let average_radius = ((organ.radius.x + organ.radius.y) * 0.5).max(1.0);
-    let reach = if shape.blade_segment {
+    let reach = if shape.cutting_edge {
         extra_radius.max(0.0) + shape.influence * 0.55
     } else {
         extra_radius.max(0.0) + shape.influence

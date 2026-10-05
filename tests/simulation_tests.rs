@@ -427,19 +427,12 @@ fn rest_simulation_stays_stable_and_idle() {
     }
 }
 
-#[test]
-fn sharp_tool_cuts_skin_and_opens_wound() {
+/// One skin spring between `a` and `b`, struck by `tool` driven right through
+/// (150, 120). This frame the knife's tip sweeps from about x=168 to x=183.
+fn strike_single_spring(tool: rp::ToolMode, a: rp::Vec2, b: rp::Vec2) -> rp::World {
     let mut world = rp::World::new(rp::Materials::default());
-    world.add_point(
-        rp::Vec2 { x: 130.0, y: 120.0 },
-        rp::TissueLayer::Skin,
-        false,
-    );
-    world.add_point(
-        rp::Vec2 { x: 170.0, y: 120.0 },
-        rp::TissueLayer::Skin,
-        false,
-    );
+    world.add_point(a, rp::TissueLayer::Skin, false);
+    world.add_point(b, rp::TissueLayer::Skin, false);
     world.add_spring(0, 1, rp::TissueLayer::Skin, 0.82, 10.0, 1000.0, false);
     let input = rp::InputState {
         active: true,
@@ -449,14 +442,94 @@ fn sharp_tool_cuts_skin_and_opens_wound() {
         vx: 900.0,
         vy: 0.0,
         power: 3.0,
-        tool: rp::ToolMode::Sharp,
+        tool,
     };
     world.step(world.materials().fixed_dt, &input, 640.0, 480.0);
-    if world.debug().tool != rp::ToolMode::Sharp || world.stats().broken_skin <= 0 {
-        fail("sharp tool should concentrate pressure into skin tearing");
+    world
+}
+
+#[test]
+fn knife_cuts_fibers_it_crosses_and_opens_a_wound() {
+    let across = strike_single_spring(
+        rp::ToolMode::Sharp,
+        rp::Vec2 { x: 176.0, y: 100.0 },
+        rp::Vec2 { x: 176.0, y: 140.0 },
+    );
+    if across.debug().tool != rp::ToolMode::Sharp || across.stats().broken_skin != 1 {
+        fail("a knife drawn across a skin fiber should sever it");
     }
-    if world.stats().opened_wounds <= 0 || !world.wounds().iter().any(|wound| wound.active) {
-        fail("sharp skin tears should open a persistent wound source");
+    if across.stats().opened_wounds <= 0 || !across.wounds().iter().any(|wound| wound.active) {
+        fail("a knife cut should open a persistent wound source");
+    }
+}
+
+#[test]
+fn knife_slides_along_fibers_without_cutting_them() {
+    let along = strike_single_spring(
+        rp::ToolMode::Sharp,
+        rp::Vec2 { x: 130.0, y: 120.0 },
+        rp::Vec2 { x: 170.0, y: 120.0 },
+    );
+    if along.stats().broken_skin != 0 {
+        fail("a blade moving along a fiber parts tissue beside it but should not sever it");
+    }
+}
+
+/// Presses the knife into the abdomen while it moves (`first_vx`, `first_vy`),
+/// then draws it straight down; returns severed skin springs.
+fn knife_stroke_down_abdomen(first_vx: f64, first_vy: f64) -> i32 {
+    let (width, height) = (1280.0, 720.0);
+    let frame = rp::body_frame(width, height);
+    let mut world = rp::create_layered_body(width, height, rp::Materials::default());
+    let dt = world.materials().fixed_dt;
+    let start = frame.point(0.03, 0.30);
+    let mut input = rp::InputState {
+        active: true,
+        down: true,
+        x: start.x,
+        y: start.y,
+        vx: first_vx,
+        vy: first_vy,
+        power: 2.0,
+        tool: rp::ToolMode::Sharp,
+    };
+    world.step(dt, &input, width, height);
+    for step in 1..=24 {
+        input.vx = 0.0;
+        input.vy = 420.0;
+        input.y = start.y + 420.0 * dt * f64::from(step);
+        world.step(dt, &input, width, height);
+    }
+    world.stats().broken_skin
+}
+
+#[test]
+fn knife_pressed_in_at_an_angle_still_cuts_a_line() {
+    let aligned = knife_stroke_down_abdomen(0.0, 420.0);
+    let turned = knife_stroke_down_abdomen(300.0, 0.0);
+    if !(10..=60).contains(&aligned) {
+        panic!("FAIL: a straight knife stroke should cut a line of skin: severed={aligned}");
+    }
+    // A blade that swept sideways while turning would scythe a wide fan.
+    if turned > aligned + 40 {
+        panic!(
+            "FAIL: tissue should steer an embedded knife into its stroke instead of it sweeping a fan: turned={turned} aligned={aligned}"
+        );
+    }
+}
+
+#[test]
+fn bat_bruises_a_fiber_the_knife_would_cut() {
+    let batted = strike_single_spring(
+        rp::ToolMode::Blunt,
+        rp::Vec2 { x: 150.0, y: 100.0 },
+        rp::Vec2 { x: 150.0, y: 140.0 },
+    );
+    if batted.stats().broken_skin != 0 {
+        fail("a blunt bat should not slice through skin like a blade");
+    }
+    if batted.stats().contusion_events <= 0 {
+        fail("a hard bat hit should leave a contusion");
     }
 }
 
