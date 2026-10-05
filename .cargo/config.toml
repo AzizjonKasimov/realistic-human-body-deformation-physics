@@ -1,0 +1,5 @@
+# miniquad's WebGL functions are provided by mq_js_bundle.js when the page loads,
+# so the wasm linker must leave them as imports. Recent Rust versions no longer
+# allow undefined symbols on this target by default.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=--allow-undefined"]

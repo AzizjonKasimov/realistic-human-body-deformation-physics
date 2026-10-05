@@ -1,6 +1,8 @@
 # Realistic Physics
 
-A no-engine 2D physics sandbox rewritten in Rust. The simulation is kept separate from the renderer so the physics model can be tested, tuned, and eventually shipped on more than one desktop platform.
+A no-engine 2D physics sandbox rewritten in Rust. The simulation is kept separate from the renderer so the physics model can be tested, tuned, and shipped on more than one platform, including the web.
+
+**[Play it in your browser](https://azizjonkasimov.github.io/realistic-human-body-deformation-physics/)**: no install, and the simulation runs entirely on your own device.
 
 See [docs/VISION.md](docs/VISION.md) for the original project description and agreed direction.
 See [docs/DESTRUCTION_ARCHITECTURE.md](docs/DESTRUCTION_ARCHITECTURE.md) for the research-backed simulation architecture the Rust prototype is moving toward.
@@ -12,7 +14,8 @@ See [docs/DESTRUCTION_ARCHITECTURE.md](docs/DESTRUCTION_ARCHITECTURE.md) for the
 ## Current Rust Milestone
 
 - Rust Cargo project with a reusable `realistic_physics` simulation library.
-- Cross-platform `macroquad` desktop app for windowing, input, and rendering.
+- Cross-platform `macroquad` app for windowing, input, and rendering, built as a desktop app and as a WebAssembly browser version that GitHub Pages hosts.
+- On-screen control buttons that work with mouse and touch, so the browser version is playable on phones and tablets.
 - Verlet/PBD-style soft body points, springs, area constraints, and attachments.
 - XPBD-style compliant spring and area-constraint projection is available behind material knobs, with focused tests covering compliant residual stretch/area behavior before production tuning raises those defaults.
 - Separate skin and muscle meshes generated from nested body masks so muscle stays inside the skin silhouette.
@@ -72,6 +75,8 @@ Restart PowerShell after installation so `cargo.exe` is on `PATH`, then confirm:
 cargo --version
 ```
 
+The scripts under `tools\` need PowerShell 7 (`pwsh`). Windows PowerShell 5.1 stops on cargo's normal progress output.
+
 ## Run On Windows
 
 Build the Rust app and copy the release executable to the repository root:
@@ -103,6 +108,24 @@ On a Mac with Rust installed:
 cargo run --release --bin realistic_physics
 ```
 
+## Run In A Browser
+
+The live version is at <https://azizjonkasimov.github.io/realistic-human-body-deformation-physics/>. The same Rust app compiles to WebAssembly and runs entirely in the visitor's browser, so the site is only static files and needs no server-side compute. [`.github/workflows/deploy-web.yml`](.github/workflows/deploy-web.yml) rebuilds and redeploys it on every push to `main`. If the build fails, the previous version stays live.
+
+To build and try it locally, install the WebAssembly target once:
+
+```powershell
+rustup target add wasm32-unknown-unknown
+```
+
+Then build and serve it:
+
+```powershell
+.\tools\build_web.ps1 -Serve
+```
+
+Open <http://localhost:8080>, or <http://localhost:8080/?stats> to show the frame rate and how long each frame takes. `.\tools\serve_web.ps1` serves the last build again without rebuilding. The site is assembled in `target\web`: the page from `web\index.html`, the wasm module, and the `gl.js` loader copied from the miniquad version in `Cargo.lock`.
+
 ## Controls
 
 - Left-drag to swing the selected tool into the body. Damage comes from tool shape, overlap, swing speed, and selected striker mass.
@@ -112,6 +135,8 @@ cargo run --release --bin realistic_physics
 - `R` resets the body.
 - `Space` pauses or resumes.
 - `1`, `2`, and `4` change striker mass.
+- The control chips along the bottom are also buttons: click or tap them for the same actions. The mass chip cycles 1x, 2x, and 4x.
+- On touch screens, drag a finger to strike. The chips grow to finger size after the first touch.
 
 ## Verify
 
@@ -179,7 +204,10 @@ The visual diagnostic exits nonzero if the captures no longer include expected w
 
 - `Cargo.toml` defines the Rust library, app, diagnostics, and strike scenario binaries.
 - `src/simulation.rs` contains the physics data model, body generation, integration, constraints, tearing, bone fracture, major vessels, wounds, and fluid particles.
-- `src/bin/realistic_physics.rs` owns the `macroquad` app shell, input, timing, and rendering.
+- `src/bin/realistic_physics.rs` owns the `macroquad` app shell, input, timing, and rendering. It also runs in the browser, so the app and simulation must avoid file I/O, threads, and `std::time`, none of which work on `wasm32-unknown-unknown`.
+- `web/index.html` is the browser page: start screen with a content warning, loader, error messages, and the `?stats` frame-time overlay (also exposed as `window.__perf` for automated checks).
+- `tools/build_web.ps1` builds the browser version into `target\web`; `tools/serve_web.ps1` serves it locally with the `application/wasm` content type browsers require.
+- `.cargo/config.toml` lets the wasm linker leave miniquad's WebGL functions as imports for `gl.js` to provide; recent Rust versions no longer do that by default.
 - `src/bin/anatomy_diagnostics.rs` writes a deterministic SVG anatomy snapshot and reports geometry validation metrics.
 - `src/bin/strike_scenarios.rs` writes deterministic strike telemetry and tuning summaries.
 - `src/bin/visual_damage_diagnostics.rs` writes deterministic SVG damage captures and visual primitive metrics.
@@ -197,7 +225,7 @@ The next Rust simulation milestones are:
 
 ## Toolchain
 
-The primary build now uses Rust and Cargo. The app frontend uses `macroquad` for a cross-platform window, input, and 2D drawing path while the simulation stays in a reusable Rust library.
+The primary build now uses Rust and Cargo. The app frontend uses `macroquad` for a cross-platform window, input, and 2D drawing path while the simulation stays in a reusable Rust library. The browser version is the same app compiled for `wasm32-unknown-unknown` and drawn with WebGL.
 
 ## License
 

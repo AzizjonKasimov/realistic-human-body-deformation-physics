@@ -17,6 +17,7 @@ The end product is a free standalone download that someone can install, play wit
 - Do not use a pre-made game engine for the core prototype.
 - Use the Rust implementation as the main path, with `macroquad` for the cross-platform desktop renderer.
 - Target Windows first while keeping the renderer and simulation portable enough for macOS.
+- Also ship a browser version so anyone can try the sandbox from a link: the same Rust app compiles to WebAssembly, runs entirely on the visitor's device, and is published on GitHub Pages behind a click-to-start content warning.
 - Start one system at a time, beginning with soft-body skin tearing.
 - Prioritize real simulation behavior over scripted decals or canned animations.
 - Aim as close as practical to real-life body destruction physics.

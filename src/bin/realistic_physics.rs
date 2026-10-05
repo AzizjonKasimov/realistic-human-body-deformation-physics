@@ -7,6 +7,33 @@ enum ViewMode {
     Anatomy,
 }
 
+/// App commands shared by keyboard shortcuts and the on-screen control buttons.
+#[derive(Clone, Copy)]
+enum ControlAction {
+    Tool(rp::ToolMode),
+    ToggleView,
+    ToggleDebug,
+    TogglePause,
+    SetMass(f64),
+    CycleMass,
+    Reset,
+}
+
+const KEY_CONTROLS: [(KeyCode, ControlAction); 10] = [
+    (KeyCode::B, ControlAction::Tool(rp::ToolMode::Blunt)),
+    (KeyCode::S, ControlAction::Tool(rp::ToolMode::Sharp)),
+    (KeyCode::H, ControlAction::Tool(rp::ToolMode::Heavy)),
+    (KeyCode::D, ControlAction::ToggleDebug),
+    (KeyCode::Tab, ControlAction::ToggleView),
+    (KeyCode::Space, ControlAction::TogglePause),
+    (KeyCode::Key1, ControlAction::SetMass(1.0)),
+    (KeyCode::Key2, ControlAction::SetMass(2.0)),
+    (KeyCode::Key4, ControlAction::SetMass(4.0)),
+    (KeyCode::R, ControlAction::Reset),
+];
+
+const FLOOR_HEIGHT: f32 = 38.0;
+
 struct StrikerDriveProfile {
     down_drive: f64,
     idle_drive: f64,
@@ -40,6 +67,13 @@ struct AppState {
     impact_power: f64,
     tool: rp::ToolMode,
     view_mode: ViewMode,
+    /// The current press started on the control panel, so it must not strike.
+    ui_capture: bool,
+    /// Where the last control press ended. Touch screens leave the pointer there,
+    /// so the striker waits for the pointer to move before following it again.
+    ui_release: Option<(f32, f32)>,
+    /// Set after the first touch so the control buttons grow to finger size.
+    touch_ui: bool,
 }
 
 impl AppState {
@@ -61,6 +95,9 @@ impl AppState {
             impact_power: 2.0,
             tool: rp::ToolMode::Blunt,
             view_mode: ViewMode::Anatomy,
+            ui_capture: false,
+            ui_release: None,
+            touch_ui: false,
         }
     }
 }
@@ -138,8 +175,37 @@ async fn main() {
 
 fn handle_input(app: &mut AppState) {
     let (mx, my) = mouse_position();
-    let pointer_down = is_mouse_button_down(MouseButton::Left);
-    if app.pointer_initialized || pointer_down || mx.abs() > 1.0 || my.abs() > 1.0 {
+    if is_mouse_button_pressed(MouseButton::Left) {
+        let hints = control_hints(app, &render_palette());
+        let layout = layout_control_hints(&hints, screen_width(), screen_floor_y(), app.touch_ui);
+        let point = vec2(mx, my);
+        if layout.panel.contains(point) {
+            app.ui_capture = true;
+            if let Some(action) = layout.action_at(point) {
+                apply_control(app, action);
+            }
+        }
+    }
+    // Switch to finger-sized buttons only after hit-testing, so the first tap
+    // lands on the layout that was actually on screen.
+    if !touches().is_empty() {
+        app.touch_ui = true;
+    }
+
+    let mouse_down = is_mouse_button_down(MouseButton::Left);
+    if app.ui_capture && !mouse_down {
+        app.ui_capture = false;
+        app.ui_release = Some((mx, my));
+    }
+    if app.ui_release.is_some_and(|(x, y)| x != mx || y != my) {
+        app.ui_release = None;
+    }
+
+    let pointer_down = mouse_down && !app.ui_capture;
+    let follows_pointer = !app.ui_capture && app.ui_release.is_none();
+    if follows_pointer
+        && (app.pointer_initialized || pointer_down || mx.abs() > 1.0 || my.abs() > 1.0)
+    {
         app.pointer = rp::Vec2 {
             x: mx as f64,
             y: my as f64,
@@ -148,46 +214,45 @@ fn handle_input(app: &mut AppState) {
     }
     app.pointer_down = pointer_down;
 
-    if is_key_pressed(KeyCode::B) {
-        app.tool = rp::ToolMode::Blunt;
+    for (key, action) in KEY_CONTROLS {
+        if is_key_pressed(key) {
+            apply_control(app, action);
+        }
     }
-    if is_key_pressed(KeyCode::S) {
-        app.tool = rp::ToolMode::Sharp;
-    }
-    if is_key_pressed(KeyCode::H) {
-        app.tool = rp::ToolMode::Heavy;
-    }
-    if is_key_pressed(KeyCode::D) {
-        app.debug_overlay = !app.debug_overlay;
-    }
-    if is_key_pressed(KeyCode::Tab) {
-        app.view_mode = if app.view_mode == ViewMode::Anatomy {
-            ViewMode::Normal
-        } else {
-            ViewMode::Anatomy
-        };
-    }
-    if is_key_pressed(KeyCode::Space) {
-        app.running = !app.running;
-    }
-    if is_key_pressed(KeyCode::Key1) {
-        app.impact_power = 1.0;
-    }
-    if is_key_pressed(KeyCode::Key2) {
-        app.impact_power = 2.0;
-    }
-    if is_key_pressed(KeyCode::Key4) {
-        app.impact_power = 4.0;
-    }
-    if is_key_pressed(KeyCode::R) {
-        app.world = rp::create_layered_body(
-            screen_width() as f64,
-            screen_height() as f64,
-            rp::Materials::default(),
-        );
-        app.striker = app.pointer;
-        app.striker_velocity = rp::Vec2 { x: 0.0, y: 0.0 };
-        app.accumulator = 0.0;
+}
+
+fn apply_control(app: &mut AppState, action: ControlAction) {
+    match action {
+        ControlAction::Tool(tool) => app.tool = tool,
+        ControlAction::ToggleView => {
+            app.view_mode = if app.view_mode == ViewMode::Anatomy {
+                ViewMode::Normal
+            } else {
+                ViewMode::Anatomy
+            };
+        }
+        ControlAction::ToggleDebug => app.debug_overlay = !app.debug_overlay,
+        ControlAction::TogglePause => app.running = !app.running,
+        ControlAction::SetMass(power) => app.impact_power = power,
+        ControlAction::CycleMass => {
+            app.impact_power = if app.impact_power < 2.0 {
+                2.0
+            } else if app.impact_power < 4.0 {
+                4.0
+            } else {
+                1.0
+            };
+        }
+        ControlAction::Reset => {
+            app.world = rp::create_layered_body(
+                screen_width() as f64,
+                screen_height() as f64,
+                rp::Materials::default(),
+            );
+            app.striker = app.pointer;
+            app.striker_velocity = rp::Vec2 { x: 0.0, y: 0.0 };
+            app.accumulator = 0.0;
+        }
     }
 }
 
@@ -273,7 +338,7 @@ fn draw_app(app: &AppState) {
         palette: render_palette(),
         width: screen_width(),
         height: screen_height(),
-        floor_y: screen_height() - 38.0,
+        floor_y: screen_floor_y(),
         anatomy: app.view_mode == ViewMode::Anatomy,
     };
 
@@ -327,6 +392,10 @@ fn render_palette() -> RenderPalette {
     }
 }
 
+fn screen_floor_y() -> f32 {
+    screen_height() - FLOOR_HEIGHT
+}
+
 fn draw_background(ctx: &RenderContext) {
     clear_background(ctx.palette.background);
     draw_rectangle(
@@ -336,7 +405,7 @@ fn draw_background(ctx: &RenderContext) {
         ctx.height * 0.46,
         ctx.palette.background_low,
     );
-    draw_rectangle(0.0, ctx.floor_y, ctx.width, 38.0, ctx.palette.floor);
+    draw_rectangle(0.0, ctx.floor_y, ctx.width, FLOOR_HEIGHT, ctx.palette.floor);
     draw_line(
         0.0,
         ctx.floor_y,
@@ -1198,8 +1267,15 @@ fn draw_hud(ctx: &RenderContext) {
         format!("FLUID {}", stats.emitted_fluid_particles),
     ];
 
-    let mut x = 14.0;
+    let margin = 14.0;
+    let mut x = margin;
+    let mut y = margin;
     for (index, item) in items.iter().enumerate() {
+        let width = chip_width(item);
+        if x > margin && x + width > ctx.width - margin {
+            x = margin;
+            y += 31.0;
+        }
         let accent = match index {
             0 => {
                 if ctx.anatomy {
@@ -1219,123 +1295,188 @@ fn draw_hud(ctx: &RenderContext) {
             4 | 5 | 6 | 7 => ctx.palette.blood_fresh,
             _ => ctx.palette.hud_border,
         };
-        x += draw_chip(
+        draw_chip(
             x,
-            14.0,
+            y,
             item,
             accent,
             ctx.palette.hud_text,
             ctx.palette.hud_back,
-        ) + 7.0;
+        );
+        x += width + 7.0;
     }
 }
 
 #[derive(Clone, Copy)]
-struct ControlHint<'a> {
-    key: &'a str,
-    label: &'a str,
+struct ControlHint {
+    key: &'static str,
+    label: &'static str,
     accent: Color,
     active: bool,
+    /// What tapping or clicking the hint does; `None` for instruction-only hints.
+    action: Option<ControlAction>,
 }
 
-fn draw_controls_hint(ctx: &RenderContext) {
-    let hints = [
+struct ControlChip {
+    rect: Rect,
+    hint: ControlHint,
+}
+
+struct ControlLayout {
+    panel: Rect,
+    chips: Vec<ControlChip>,
+}
+
+impl ControlLayout {
+    fn action_at(&self, point: Vec2) -> Option<ControlAction> {
+        self.chips
+            .iter()
+            .find(|chip| chip.rect.contains(point))
+            .and_then(|chip| chip.hint.action)
+    }
+}
+
+fn control_hints(app: &AppState, palette: &RenderPalette) -> [ControlHint; 9] {
+    [
         ControlHint {
             key: "DRAG",
             label: "strike",
-            accent: ctx.palette.tool_accent,
-            active: ctx.app.pointer_down,
+            accent: palette.tool_accent,
+            active: app.pointer_down,
+            action: None,
         },
         ControlHint {
             key: "B",
             label: "blunt",
             accent: tool_color(rp::ToolMode::Blunt),
-            active: ctx.app.tool == rp::ToolMode::Blunt,
+            active: app.tool == rp::ToolMode::Blunt,
+            action: Some(ControlAction::Tool(rp::ToolMode::Blunt)),
         },
         ControlHint {
             key: "S",
             label: "sharp",
             accent: tool_color(rp::ToolMode::Sharp),
-            active: ctx.app.tool == rp::ToolMode::Sharp,
+            active: app.tool == rp::ToolMode::Sharp,
+            action: Some(ControlAction::Tool(rp::ToolMode::Sharp)),
         },
         ControlHint {
             key: "H",
             label: "heavy",
             accent: tool_color(rp::ToolMode::Heavy),
-            active: ctx.app.tool == rp::ToolMode::Heavy,
+            active: app.tool == rp::ToolMode::Heavy,
+            action: Some(ControlAction::Tool(rp::ToolMode::Heavy)),
         },
         ControlHint {
             key: "TAB",
             label: "view",
-            accent: ctx.palette.tool_accent,
-            active: ctx.anatomy,
+            accent: palette.tool_accent,
+            active: app.view_mode == ViewMode::Anatomy,
+            action: Some(ControlAction::ToggleView),
         },
         ControlHint {
             key: "D",
             label: "debug",
             accent: rgba(94, 176, 108, 230),
-            active: ctx.app.debug_overlay,
+            active: app.debug_overlay,
+            action: Some(ControlAction::ToggleDebug),
         },
         ControlHint {
             key: "SPACE",
             label: "pause",
             accent: rgba(211, 93, 70, 230),
-            active: !ctx.app.running,
+            active: !app.running,
+            action: Some(ControlAction::TogglePause),
         },
         ControlHint {
             key: "R",
             label: "reset",
-            accent: ctx.palette.hud_border,
+            accent: palette.hud_border,
             active: false,
+            action: Some(ControlAction::Reset),
         },
         ControlHint {
             key: "1 2 4",
-            label: "mass",
-            accent: ctx.palette.hud_border,
+            label: mass_label(app.impact_power),
+            accent: palette.hud_border,
             active: false,
+            action: Some(ControlAction::CycleMass),
         },
-    ];
+    ]
+}
 
-    let margin = 14.0;
-    let pad = 8.0;
-    let gap = 7.0;
-    let row_h = 24.0;
-    let row_gap = 6.0;
-    let available_w = (ctx.width - margin * 2.0 - pad * 2.0).max(260.0);
-    let row_count = control_hint_row_count(&hints, available_w, gap);
-    let panel_h =
-        pad * 2.0 + row_count as f32 * row_h + (row_count.saturating_sub(1)) as f32 * row_gap;
-    let panel_y = (ctx.floor_y - panel_h - 10.0).max(54.0);
-    draw_panel(ctx, margin, panel_y, ctx.width - margin * 2.0, panel_h);
-
-    let mut x = margin + pad;
-    let mut y = panel_y + pad;
-    for hint in hints {
-        let width = control_hint_width(hint);
-        if x > margin + pad && x + width > margin + pad + available_w {
-            x = margin + pad;
-            y += row_h + row_gap;
-        }
-
-        draw_control_hint(ctx, x, y, hint);
-        x += width + gap;
+fn mass_label(power: f64) -> &'static str {
+    if power >= 4.0 {
+        "mass 4x"
+    } else if power >= 2.0 {
+        "mass 2x"
+    } else {
+        "mass 1x"
     }
 }
 
-fn control_hint_row_count(hints: &[ControlHint], available_w: f32, gap: f32) -> usize {
-    let mut rows = 1usize;
+/// Places the control hints above the floor, wrapping rows on narrow screens.
+/// Input hit-testing and drawing share this so presses land on what is drawn.
+fn layout_control_hints(
+    hints: &[ControlHint],
+    width: f32,
+    floor_y: f32,
+    touch_ui: bool,
+) -> ControlLayout {
+    let margin = 14.0;
+    let pad = 8.0;
+    let gap = 7.0;
+    let row_h = if touch_ui { 36.0 } else { 24.0 };
+    let row_gap = 6.0;
+    let available_w = (width - margin * 2.0 - pad * 2.0).max(260.0);
+
+    let mut placed = Vec::with_capacity(hints.len());
     let mut x = 0.0;
+    let mut row = 0;
     for hint in hints {
-        let width = control_hint_width(*hint);
-        let next_x = if x > 0.0 { x + gap + width } else { width };
-        if x > 0.0 && next_x > available_w {
-            rows += 1;
-            x = width;
-        } else {
-            x = next_x;
+        let chip_w = control_hint_width(*hint);
+        if x > 0.0 && x + chip_w > available_w {
+            x = 0.0;
+            row += 1;
         }
+        placed.push((x, row, chip_w));
+        x += chip_w + gap;
     }
-    rows
+
+    let rows = row + 1;
+    let panel_h = pad * 2.0 + rows as f32 * row_h + (rows - 1) as f32 * row_gap;
+    let panel_y = (floor_y - panel_h - 10.0).max(54.0);
+    let chips = hints
+        .iter()
+        .zip(placed)
+        .map(|(hint, (x, row, chip_w))| ControlChip {
+            rect: Rect::new(
+                margin + pad + x,
+                panel_y + pad + row as f32 * (row_h + row_gap),
+                chip_w,
+                row_h,
+            ),
+            hint: *hint,
+        })
+        .collect();
+
+    ControlLayout {
+        panel: Rect::new(margin, panel_y, width - margin * 2.0, panel_h),
+        chips,
+    }
+}
+
+fn draw_controls_hint(ctx: &RenderContext) {
+    let hints = control_hints(ctx.app, &ctx.palette);
+    let layout = layout_control_hints(&hints, ctx.width, ctx.floor_y, ctx.app.touch_ui);
+    let panel = layout.panel;
+    draw_panel(ctx, panel.x, panel.y, panel.w, panel.h);
+
+    let (mx, my) = mouse_position();
+    for chip in &layout.chips {
+        let hovered =
+            !ctx.app.touch_ui && chip.hint.action.is_some() && chip.rect.contains(vec2(mx, my));
+        draw_control_hint(ctx, chip.rect, chip.hint, hovered);
+    }
 }
 
 fn control_hint_width(hint: ControlHint) -> f32 {
@@ -1344,46 +1485,45 @@ fn control_hint_width(hint: ControlHint) -> f32 {
     key.width + label.width + 32.0
 }
 
-fn draw_control_hint(ctx: &RenderContext, x: f32, y: f32, hint: ControlHint) -> f32 {
-    let width = control_hint_width(hint);
+fn draw_control_hint(ctx: &RenderContext, rect: Rect, hint: ControlHint, hovered: bool) {
     let key_width = measure_text(hint.key, None, 15, 1.0).width + 13.0;
+    let text_y = rect.y + rect.h * 0.5 + 4.0;
     let back = if hint.active {
         with_alpha(hint.accent, 0.20)
     } else {
         rgba(8, 8, 9, 160)
     };
-    let border = if hint.active {
+    let border = if hint.active || hovered {
         with_alpha(hint.accent, 0.85)
     } else {
         with_alpha(ctx.palette.hud_border, 0.38)
     };
 
-    draw_rectangle(x, y, width, 24.0, back);
-    draw_rectangle_lines(x, y, width, 24.0, 1.0, border);
+    draw_rectangle(rect.x, rect.y, rect.w, rect.h, back);
+    draw_rectangle_lines(rect.x, rect.y, rect.w, rect.h, 1.0, border);
     draw_rectangle(
-        x + 3.0,
-        y + 3.0,
+        rect.x + 3.0,
+        rect.y + 3.0,
         key_width,
-        18.0,
+        rect.h - 6.0,
         with_alpha(hint.accent, 0.24),
     );
     draw_rectangle_lines(
-        x + 3.0,
-        y + 3.0,
+        rect.x + 3.0,
+        rect.y + 3.0,
         key_width,
-        18.0,
+        rect.h - 6.0,
         1.0,
         with_alpha(hint.accent, 0.72),
     );
-    draw_text(hint.key, x + 9.0, y + 16.0, 15.0, ctx.palette.hud_text);
+    draw_text(hint.key, rect.x + 9.0, text_y, 15.0, ctx.palette.hud_text);
     draw_text(
         hint.label,
-        x + key_width + 11.0,
-        y + 16.0,
+        rect.x + key_width + 11.0,
+        text_y,
         15.0,
         ctx.palette.hud_muted,
     );
-    width
 }
 
 fn draw_debug_panel(ctx: &RenderContext) {
@@ -1566,14 +1706,16 @@ fn draw_panel(ctx: &RenderContext, x: f32, y: f32, w: f32, h: f32) {
     );
 }
 
-fn draw_chip(x: f32, y: f32, label: &str, accent: Color, text: Color, back: Color) -> f32 {
-    let metrics = measure_text(label, None, 17, 1.0);
-    let width = metrics.width + 20.0;
+fn chip_width(label: &str) -> f32 {
+    measure_text(label, None, 17, 1.0).width + 20.0
+}
+
+fn draw_chip(x: f32, y: f32, label: &str, accent: Color, text: Color, back: Color) {
+    let width = chip_width(label);
     draw_rectangle(x, y, width, 25.0, back);
     draw_rectangle_lines(x, y, width, 25.0, 1.0, with_alpha(accent, 0.58));
     draw_rectangle(x, y, 4.0, 25.0, accent);
     draw_text(label, x + 10.0, y + 17.0, 17.0, text);
-    width
 }
 
 fn fill_triangle(world: &rp::World, triangle: &rp::Triangle, color: Color) {
