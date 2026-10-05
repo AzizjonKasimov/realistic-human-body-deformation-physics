@@ -4,6 +4,9 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
+const WIDTH: f64 = 1280.0;
+const HEIGHT: f64 = 720.0;
+
 #[derive(Clone, Copy)]
 struct IntBand {
     min: i32,
@@ -287,8 +290,8 @@ fn scenarios() -> Vec<Scenario> {
             region: "torso",
             intent: "medium",
             tool: rp::ToolMode::Blunt,
-            start: v(515.0, 360.0),
-            end: v(690.0, 360.0),
+            start: body(-0.300, 0.350),
+            end: body(0.055, 0.350),
             windup_frames: 12,
             strike_frames: 34,
             settle_frames: 42,
@@ -331,8 +334,8 @@ fn scenarios() -> Vec<Scenario> {
             region: "torso",
             intent: "high",
             tool: rp::ToolMode::Heavy,
-            start: v(500.0, 365.0),
-            end: v(720.0, 365.0),
+            start: body(-0.330, 0.355),
+            end: body(0.095, 0.355),
             windup_frames: 12,
             strike_frames: 30,
             settle_frames: 54,
@@ -390,8 +393,8 @@ fn scenarios() -> Vec<Scenario> {
             region: "torso",
             intent: "cut",
             tool: rp::ToolMode::Sharp,
-            start: v(575.0, 300.0),
-            end: v(710.0, 410.0),
+            start: body(-0.100, 0.250),
+            end: body(0.070, 0.430),
             windup_frames: 8,
             strike_frames: 28,
             settle_frames: 48,
@@ -418,8 +421,8 @@ fn scenarios() -> Vec<Scenario> {
             region: "shoulder",
             intent: "medium",
             tool: rp::ToolMode::Blunt,
-            start: v(480.0, 270.0),
-            end: v(650.0, 285.0),
+            start: body(-0.340, 0.225),
+            end: body(-0.030, 0.245),
             windup_frames: 10,
             strike_frames: 30,
             settle_frames: 42,
@@ -447,8 +450,8 @@ fn scenarios() -> Vec<Scenario> {
             region: "arm",
             intent: "cut",
             tool: rp::ToolMode::Sharp,
-            start: v(592.0, 282.0),
-            end: v(528.0, 446.0),
+            start: body(-0.112, 0.250),
+            end: body(-0.168, 0.530),
             windup_frames: 8,
             strike_frames: 32,
             settle_frames: 42,
@@ -478,8 +481,8 @@ fn scenarios() -> Vec<Scenario> {
             region: "hip",
             intent: "high",
             tool: rp::ToolMode::Heavy,
-            start: v(500.0, 470.0),
-            end: v(690.0, 490.0),
+            start: body(-0.330, 0.505),
+            end: body(0.055, 0.535),
             windup_frames: 10,
             strike_frames: 30,
             settle_frames: 54,
@@ -512,8 +515,8 @@ fn scenarios() -> Vec<Scenario> {
             region: "leg",
             intent: "medium",
             tool: rp::ToolMode::Blunt,
-            start: v(545.0, 575.0),
-            end: v(660.0, 620.0),
+            start: body(-0.220, 0.765),
+            end: body(-0.012, 0.840),
             windup_frames: 10,
             strike_frames: 32,
             settle_frames: 42,
@@ -556,16 +559,16 @@ fn scenarios() -> Vec<Scenario> {
             region: "torso",
             intent: "rebleed",
             tool: rp::ToolMode::Sharp,
-            start: v(575.0, 300.0),
-            end: v(710.0, 410.0),
+            start: body(-0.100, 0.250),
+            end: body(0.070, 0.430),
             windup_frames: 8,
             strike_frames: 28,
             settle_frames: 190,
             power: 3.0,
             followup: Some(FollowupStrike {
                 tool: rp::ToolMode::Blunt,
-                start: v(710.0, 410.0),
-                end: v(575.0, 300.0),
+                start: body(0.070, 0.430),
+                end: body(-0.100, 0.250),
                 windup_frames: 8,
                 strike_frames: 24,
                 settle_frames: 48,
@@ -618,8 +621,8 @@ fn scenarios() -> Vec<Scenario> {
             region: "torso",
             intent: "settle",
             tool: rp::ToolMode::Heavy,
-            start: v(500.0, 365.0),
-            end: v(720.0, 365.0),
+            start: body(-0.330, 0.355),
+            end: body(0.095, 0.355),
             windup_frames: 12,
             strike_frames: 30,
             settle_frames: 260,
@@ -740,9 +743,7 @@ fn scenarios() -> Vec<Scenario> {
 }
 
 fn run_scenario(scenario: &Scenario, csv: &mut dyn Write) -> std::io::Result<ScenarioResult> {
-    let width = 1280.0;
-    let height = 720.0;
-    let mut world = rp::create_layered_body(width, height, rp::Materials::default());
+    let mut world = rp::create_layered_body(WIDTH, HEIGHT, rp::Materials::default());
     let mut result = ScenarioResult::default();
     let dt = world.materials().fixed_dt;
     let primary_frames = scenario.windup_frames + scenario.strike_frames + scenario.settle_frames;
@@ -767,7 +768,7 @@ fn run_scenario(scenario: &Scenario, csv: &mut dyn Write) -> std::io::Result<Sce
         } else {
             rp::InputState::default()
         };
-        world.step(dt, &input, width, height);
+        world.step(dt, &input, WIDTH, HEIGHT);
         accumulate_result(&world, &mut result);
         write_frame(csv, scenario, frame, &world)?;
     }
@@ -1676,6 +1677,8 @@ fn tool_name(tool: rp::ToolMode) -> &'static str {
     }
 }
 
-fn v(x: f64, y: f64) -> rp::Vec2 {
-    rp::Vec2 { x, y }
+/// World position of body coordinates (fractions of body height from the top of
+/// the head on the midline) for the 1280x720 scenario window.
+fn body(u: f64, v: f64) -> rp::Vec2 {
+    rp::body_frame(WIDTH, HEIGHT).point(u, v)
 }

@@ -1,16 +1,6 @@
 # Reference Assets
 
-This folder stores visual references used to tune the procedural body silhouette.
-
-## `pixel_human_silhouettes/front_adult_silhouette_41x96.mask`
-
-- Primary body-shape reference used by `src/simulation.rs`.
-- Custom original pixel mask based on the user-requested direction: slim adult silhouette, facing front, arms hanging down, long separated legs.
-- Format: `#` means occupied body pixel, `.` means transparent pixel.
-- Direction constraint: front-facing adult silhouette only. Do not use side, back, diagonal, or multi-direction sprite frames for the generated body silhouette.
-- The watermarked sample image from the thread is visual direction only and is not copied into this repository.
-
-The Rust body generator samples this mask for the outer skin layer and samples a horizontally inset version for the muscle layer. This keeps the sandbox body tied to a concrete 2D pixel-art front silhouette rather than a smooth vector outline.
+This folder stores the visual reference the procedural body is built from.
 
 ## `human_body_silhouette.svg`
 
@@ -20,4 +10,6 @@ The Rust body generator samples this mask for the outer skin layer and samples a
 - Author/derivative attribution on Commons: based on `Upper body front.png` by Mikael Haggstrom, transparent background by Frederic MICHEL, derivative work by RexxS.
 - License: public domain / PD-self as stated on the Wikimedia Commons file page.
 
-This SVG is retained as an auxiliary front-view anatomy/proportion reference. It is not the primary pixel silhouette source for body generation.
+This is the body-shape source used by the simulation. `src/silhouette.rs` embeds the file at build time, parses its single outline path, and rasterizes it into a signed distance field in body-height units. Below the wrists, gaps narrower than the tissue mesh can resolve are closed, so the spread fingers and toes become mitten hands and solid feet. `src/simulation/body.rs` meshes the skin and muscle sheets to follow that outline and places the skeleton, organs, and vessels at landmarks measured on it.
+
+Direction constraint: keep the generated body front-facing, adult, with arms hanging down and separated legs. If the outline file is replaced, keep a single closed path with absolute `M`/`C`/`L`/`Z` commands, and re-check the landmarks in `src/simulation/body.rs` with `.\tools\verify.ps1` (the anatomy diagnostic fails if bones leave the skin).

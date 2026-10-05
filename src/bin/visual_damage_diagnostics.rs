@@ -142,8 +142,8 @@ fn visual_scenarios() -> Vec<VisualScenario> {
             name: "torso_sharp_cut_visual",
             intent: "cut",
             tool: rp::ToolMode::Sharp,
-            start: v(575.0, 300.0),
-            end: v(710.0, 410.0),
+            start: body(-0.100, 0.250),
+            end: body(0.070, 0.430),
             windup_frames: 8,
             strike_frames: 28,
             settle_frames: 48,
@@ -171,8 +171,8 @@ fn visual_scenarios() -> Vec<VisualScenario> {
             name: "torso_heavy_settle_visual",
             intent: "settle",
             tool: rp::ToolMode::Heavy,
-            start: v(500.0, 365.0),
-            end: v(720.0, 365.0),
+            start: body(-0.330, 0.355),
+            end: body(0.095, 0.355),
             windup_frames: 12,
             strike_frames: 30,
             settle_frames: 260,
@@ -1245,8 +1245,10 @@ fn tool_name(tool: rp::ToolMode) -> &'static str {
     }
 }
 
-fn v(x: f64, y: f64) -> rp::Vec2 {
-    rp::Vec2 { x, y }
+/// World position of body coordinates (fractions of body height from the top of
+/// the head on the midline) for the 1280x720 scenario window.
+fn body(u: f64, v: f64) -> rp::Vec2 {
+    rp::body_frame(WIDTH, HEIGHT).point(u, v)
 }
 
 fn add(a: rp::Vec2, b: rp::Vec2) -> rp::Vec2 {

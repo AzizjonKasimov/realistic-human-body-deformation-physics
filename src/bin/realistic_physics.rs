@@ -74,16 +74,36 @@ struct AppState {
     ui_release: Option<(f32, f32)>,
     /// Set after the first touch so the control buttons grow to finger size.
     touch_ui: bool,
+    /// The skin's silhouette edge, rebuilt with each new body.
+    skin_rim: SkinRim,
+}
+
+/// A skin spring on the body's outline, with the third corner of its triangle
+/// so the inward side is known as the body deforms.
+#[derive(Clone, Copy)]
+struct OutlineEdge {
+    spring: usize,
+    inner_point: usize,
+}
+
+#[derive(Default)]
+struct SkinRim {
+    edges: Vec<OutlineEdge>,
+    /// Per point: rest distance across the body along the inward direction,
+    /// which caps the shading strip so it never spills past a thin limb.
+    reach: Vec<f32>,
 }
 
 impl AppState {
     fn new(width: f64, height: f64) -> Self {
+        let world = rp::create_layered_body(width, height, rp::Materials::default());
+        let skin_rim = skin_rim(&world);
         let initial_pointer = rp::Vec2 {
             x: width * 0.28,
             y: height * 0.46,
         };
         Self {
-            world: rp::create_layered_body(width, height, rp::Materials::default()),
+            world,
             running: true,
             pointer_down: false,
             debug_overlay: false,
@@ -98,6 +118,7 @@ impl AppState {
             ui_capture: false,
             ui_release: None,
             touch_ui: false,
+            skin_rim,
         }
     }
 }
@@ -109,6 +130,9 @@ struct RenderPalette {
     floor: Color,
     floor_edge: Color,
     skin_base: Color,
+    skin_light: Color,
+    skin_mid: Color,
+    skin_shade: Color,
     skin_heat: Color,
     skin_contusion: Color,
     skin_outline: Color,
@@ -249,6 +273,7 @@ fn apply_control(app: &mut AppState, action: ControlAction) {
                 screen_height() as f64,
                 rp::Materials::default(),
             );
+            app.skin_rim = skin_rim(&app.world);
             app.striker = app.pointer;
             app.striker_velocity = rp::Vec2 { x: 0.0, y: 0.0 };
             app.accumulator = 0.0;
@@ -360,6 +385,9 @@ fn render_palette() -> RenderPalette {
         floor: rgba(35, 29, 26, 255),
         floor_edge: rgba(92, 64, 55, 255),
         skin_base: rgba(152, 101, 83, 246),
+        skin_light: rgba(201, 146, 119, 250),
+        skin_mid: rgba(184, 130, 105, 250),
+        skin_shade: rgba(92, 54, 44, 255),
         skin_heat: rgba(223, 77, 55, 246),
         skin_contusion: rgba(55, 31, 86, 235),
         skin_outline: rgba(69, 40, 36, 220),
@@ -531,61 +559,264 @@ fn draw_muscle_layer(ctx: &RenderContext) {
 }
 
 fn draw_skin_layer(ctx: &RenderContext) {
+    if !ctx.anatomy {
+        draw_shaded_skin(ctx);
+        return;
+    }
+    // Anatomy view: a faint skin veil with its wireframe over the exposed layers.
     let world = &ctx.app.world;
     for triangle in world.triangles() {
         if triangle.layer != rp::TissueLayer::Skin || !world.triangle_alive(triangle) {
             continue;
         }
-
-        let (load, exposure) = triangle_point_metrics(world, triangle);
+        let (load, _) = triangle_point_metrics(world, triangle);
         let contusion = triangle_point_contusion(world, triangle);
-        let heat = (load / 1300.0).clamp(0.0, 1.0);
-        if ctx.anatomy {
-            let mut veil = mix(
-                ctx.palette.skin_base,
-                ctx.palette.skin_heat,
-                heat as f32 * 0.35,
-            );
-            veil = mix(
-                veil,
-                ctx.palette.skin_contusion,
-                (contusion * 0.42).clamp(0.0, 0.55) as f32,
-            );
-            veil.a = (0.08 + heat as f32 * 0.08).min(0.17);
-            fill_triangle(world, triangle, veil);
+        let heat = (load / 1300.0).clamp(0.0, 1.0) as f32;
+        let mut veil = mix(ctx.palette.skin_base, ctx.palette.skin_heat, heat * 0.35);
+        veil = mix(
+            veil,
+            ctx.palette.skin_contusion,
+            (contusion * 0.42).clamp(0.0, 0.55) as f32,
+        );
+        veil.a = (0.08 + heat * 0.08).min(0.17);
+        fill_triangle(world, triangle, veil);
+        let wire = mix(ctx.palette.skin_wire, ctx.palette.skin_heat, heat * 0.65);
+        outline_triangle(world, triangle, wire, 1.0);
+    }
+}
 
-            let wire = mix(
-                ctx.palette.skin_wire,
-                ctx.palette.skin_heat,
-                heat as f32 * 0.65,
+/// Intact skin as one mesh with per-point colors, so shading blends smoothly
+/// across triangles instead of showing the mesh: darker toward the outline for
+/// a rounded look, warmer under load, bruised where contused.
+fn draw_shaded_skin(ctx: &RenderContext) {
+    let world = &ctx.app.world;
+    let points = world.points();
+    let mut vertex_of = vec![u16::MAX; points.len()];
+    let mut mesh = Mesh {
+        vertices: Vec::new(),
+        indices: Vec::new(),
+        texture: None,
+    };
+    for triangle in world.triangles() {
+        if triangle.layer != rp::TissueLayer::Skin || !world.triangle_alive(triangle) {
+            continue;
+        }
+        for index in [triangle.a, triangle.b, triangle.c] {
+            if vertex_of[index] == u16::MAX {
+                let point = &points[index];
+                vertex_of[index] = mesh.vertices.len() as u16;
+                mesh.vertices.push(Vertex::new(
+                    point.position.x as f32,
+                    point.position.y as f32,
+                    0.0,
+                    0.0,
+                    0.0,
+                    skin_point_color(ctx, point),
+                ));
+            }
+            mesh.indices.push(vertex_of[index]);
+        }
+    }
+    draw_mesh(&mesh);
+    draw_skin_rim(ctx);
+}
+
+/// Soft shading strips just inside the silhouette plus a thin outline. Kept
+/// separate from the mesh colors because thin wrists and ankles are meshed only
+/// from outline points, so per-point shading alone would leave them dark.
+fn draw_skin_rim(ctx: &RenderContext) {
+    let world = &ctx.app.world;
+    let points = world.points();
+    let springs = world.springs();
+    let rim = &ctx.app.skin_rim;
+    let mut inward = vec![rp::Vec2 { x: 0.0, y: 0.0 }; points.len()];
+    for edge in &rim.edges {
+        let spring = springs[edge.spring];
+        if spring.broken {
+            continue;
+        }
+        let normal = inward_normal(points, spring, edge.inner_point, |p| p.position);
+        inward[spring.a] = add(inward[spring.a], normal);
+        inward[spring.b] = add(inward[spring.b], normal);
+    }
+
+    // A wide faint strip gives limbs volume; a narrow stronger one defines the edge.
+    for (width, alpha, reach_share) in [(24.0, 0.18, 0.5), (9.0, 0.45, 0.42)] {
+        let mut mesh = Mesh {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            texture: None,
+        };
+        for edge in &rim.edges {
+            let spring = springs[edge.spring];
+            if spring.broken {
+                continue;
+            }
+            let base = mesh.vertices.len() as u16;
+            for index in [spring.a, spring.b] {
+                let position = points[index].position;
+                let depth = (width as f64).min(rim.reach[index] as f64 * reach_share);
+                let direction = normalized(inward[index], rp::Vec2 { x: 0.0, y: 0.0 });
+                let inner = add(position, scale(direction, depth));
+                mesh.vertices.push(Vertex::new(
+                    position.x as f32,
+                    position.y as f32,
+                    0.0,
+                    0.0,
+                    0.0,
+                    with_alpha(ctx.palette.skin_shade, alpha),
+                ));
+                mesh.vertices.push(Vertex::new(
+                    inner.x as f32,
+                    inner.y as f32,
+                    0.0,
+                    0.0,
+                    0.0,
+                    with_alpha(ctx.palette.skin_shade, 0.0),
+                ));
+            }
+            mesh.indices.extend_from_slice(&[
+                base,
+                base + 2,
+                base + 1,
+                base + 1,
+                base + 2,
+                base + 3,
+            ]);
+        }
+        draw_mesh(&mesh);
+    }
+
+    let outline = with_alpha(ctx.palette.skin_outline, 0.78);
+    for edge in &rim.edges {
+        let spring = springs[edge.spring];
+        if !spring.broken {
+            draw_line_vec(
+                points[spring.a].position,
+                points[spring.b].position,
+                1.4,
+                outline,
             );
-            outline_triangle(world, triangle, wire, 1.0);
-        } else {
-            let mut fill = mix(ctx.palette.skin_base, ctx.palette.skin_heat, heat as f32);
-            fill = mix(
-                fill,
-                ctx.palette.skin_contusion,
-                (contusion * 0.56).clamp(0.0, 0.72) as f32,
-            );
-            fill.a = (0.96 - exposure as f32 * 0.22).clamp(0.68, 0.98);
-            fill_triangle(world, triangle, fill);
-            if heat > 0.08 || exposure > 0.10 || contusion > 0.08 {
-                outline_triangle(
-                    world,
-                    triangle,
-                    with_alpha(
-                        mix(
-                            ctx.palette.skin_outline,
-                            ctx.palette.skin_contusion,
-                            (contusion * 0.35).clamp(0.0, 0.5) as f32,
-                        ),
-                        (0.35 + heat as f32 * 0.30 + contusion as f32 * 0.16).min(0.78),
-                    ),
-                    1.0,
-                );
+        }
+    }
+}
+
+/// Unit normal of an outline spring pointing into the body.
+fn inward_normal(
+    points: &[rp::Point],
+    spring: rp::Spring,
+    inner_point: usize,
+    position: impl Fn(&rp::Point) -> rp::Vec2,
+) -> rp::Vec2 {
+    let a = position(&points[spring.a]);
+    let b = position(&points[spring.b]);
+    let along = normalized(sub(b, a), rp::Vec2 { x: 1.0, y: 0.0 });
+    let normal = rp::Vec2 {
+        x: -along.y,
+        y: along.x,
+    };
+    let toward_inside = sub(position(&points[inner_point]), a);
+    if normal.x * toward_inside.x + normal.y * toward_inside.y < 0.0 {
+        scale(normal, -1.0)
+    } else {
+        normal
+    }
+}
+
+fn skin_point_color(ctx: &RenderContext, point: &rp::Point) -> Color {
+    let depth = smoothstep(0.0, 22.0, point.surface_depth as f32);
+    let heat = (point.load / 1300.0).clamp(0.0, 1.0) as f32;
+    let mut color = mix(ctx.palette.skin_mid, ctx.palette.skin_light, depth);
+    color = mix(color, ctx.palette.skin_heat, heat * 0.85);
+    color = mix(
+        color,
+        ctx.palette.skin_contusion,
+        (point.contusion as f32 * 0.56).clamp(0.0, 0.72),
+    );
+    color.a = (0.98 - point.exposure as f32 * 0.24).clamp(0.68, 0.98);
+    color
+}
+
+/// The skin's outline: springs that border only one skin triangle, and how far
+/// across the body each outline point can see along its inward direction.
+fn skin_rim(world: &rp::World) -> SkinRim {
+    let points = world.points();
+    let springs = world.springs();
+    let mut owners: Vec<(u8, usize)> = vec![(0, 0); springs.len()];
+    for triangle in world.triangles() {
+        if triangle.layer != rp::TissueLayer::Skin {
+            continue;
+        }
+        for (edge, opposite) in [
+            (triangle.edge_ab, triangle.c),
+            (triangle.edge_bc, triangle.a),
+            (triangle.edge_ca, triangle.b),
+        ] {
+            if let Some(owner) = owners.get_mut(edge) {
+                *owner = (owner.0.saturating_add(1), opposite);
             }
         }
     }
+    let edges: Vec<OutlineEdge> = owners
+        .iter()
+        .enumerate()
+        .filter_map(|(spring, &(count, inner_point))| {
+            (count == 1).then_some(OutlineEdge {
+                spring,
+                inner_point,
+            })
+        })
+        .collect();
+
+    let mut reach = vec![0.0f32; points.len()];
+    for edge in &edges {
+        let spring = springs[edge.spring];
+        let normal = inward_normal(points, spring, edge.inner_point, |p| p.home);
+        for index in [spring.a, spring.b] {
+            let origin = points[index].home;
+            // Nearest crossing of the inward ray with another outline edge.
+            let mut nearest: f64 = 60.0;
+            for other in &edges {
+                let other_spring = springs[other.spring];
+                if other_spring.a == index || other_spring.b == index {
+                    continue;
+                }
+                if let Some(t) = ray_hits_segment(
+                    origin,
+                    normal,
+                    points[other_spring.a].home,
+                    points[other_spring.b].home,
+                ) {
+                    nearest = nearest.min(t);
+                }
+            }
+            reach[index] = reach[index].max(nearest as f32);
+        }
+    }
+    SkinRim { edges, reach }
+}
+
+/// Distance along the ray to segment `a`-`b`, if they cross.
+fn ray_hits_segment(
+    origin: rp::Vec2,
+    direction: rp::Vec2,
+    a: rp::Vec2,
+    b: rp::Vec2,
+) -> Option<f64> {
+    let segment = sub(b, a);
+    let denominator = direction.x * segment.y - direction.y * segment.x;
+    if denominator.abs() < 1.0e-9 {
+        return None;
+    }
+    let offset = sub(a, origin);
+    let t = (offset.x * segment.y - offset.y * segment.x) / denominator;
+    let s = (offset.x * direction.y - offset.y * direction.x) / denominator;
+    (t > 0.5 && (0.0..=1.0).contains(&s)).then_some(t)
+}
+
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn draw_exposed_tissue_detail(ctx: &RenderContext) {

@@ -18,8 +18,8 @@ See [docs/DESTRUCTION_ARCHITECTURE.md](docs/DESTRUCTION_ARCHITECTURE.md) for the
 - On-screen control buttons that work with mouse and touch, so the browser version is playable on phones and tablets.
 - Verlet/PBD-style soft body points, springs, area constraints, and attachments.
 - XPBD-style compliant spring and area-constraint projection is available behind material knobs, with focused tests covering compliant residual stretch/area behavior before production tuning raises those defaults.
-- Separate skin and muscle meshes generated from nested body masks so muscle stays inside the skin silhouette.
-- Dynamic segmented bones generated from the same body proportions, including a low-resolution rib-cage proxy, attached to nearby muscle points, and connected by breakable bone joints.
+- Realistic front-view human body: skin and muscle sheets are meshed to follow an outline traced from a public-domain anatomical silhouette (outline points plus an interior hexagonal lattice, Delaunay-triangulated), with mitten hands, separated legs, and the muscle sheet inset just inside the skin.
+- Dynamic segmented bones placed at landmarks measured on the same silhouette, including a low-resolution rib-cage proxy and hands and feet on wrist and ankle joints, attached to nearby muscle points, and connected by breakable bone joints.
 - Bone joints can subluxate under traumatic stretch/overextension before full breakage, adding limited slack, weaker correction, and first-time local ligament/capsule tissue damage so dislocation exists between intact articulation and total separation.
 - Post-fracture joint limits let broken or remapped limb joints sag and twist with slack instead of snapping rigidly or separating without bounds.
 - Mouse-controlled tool head with blunt, sharp, and heavy modes, a spring-driven handle/target, impact direction, mode-specific handling, and distinct tool silhouettes.
@@ -55,7 +55,7 @@ See [docs/DESTRUCTION_ARCHITECTURE.md](docs/DESTRUCTION_ARCHITECTURE.md) for the
 - Visual damage diagnostics replay deterministic sharp and heavy strikes, then write a damage-focused SVG and primitive-count CSV so wound-edge, exposed-muscle, lacerated-vessel, fluid, and fracture rendering can be inspected without launching the app.
 - Anatomy view for inspecting muscle, major vessels, and bones without waiting for skin exposure.
 - Rust diagnostics, strike scenario playback, and simulation tests.
-- Checked-in front-facing adult pixel silhouette mask under `docs/reference/pixel_human_silhouettes/` for tuning and generating the body shape.
+- Smoothly shaded skin: one mesh with per-point color for load and bruising, soft shading strips inside the silhouette for volume, and a thin outline.
 
 ## Realism Target
 
@@ -203,7 +203,7 @@ The visual diagnostic exits nonzero if the captures no longer include expected w
 ## Development Notes
 
 - `Cargo.toml` defines the Rust library, app, diagnostics, and strike scenario binaries.
-- `src/simulation.rs` contains the physics data model, body generation, integration, constraints, tearing, bone fracture, major vessels, wounds, and fluid particles.
+- `src/simulation.rs` contains the physics data model, integration, constraints, tearing, bone fracture, major vessels, wounds, and fluid particles; `src/simulation/body.rs` generates the layered body.
 - `src/bin/realistic_physics.rs` owns the `macroquad` app shell, input, timing, and rendering. It also runs in the browser, so the app and simulation must avoid file I/O, threads, and `std::time`, none of which work on `wasm32-unknown-unknown`.
 - `web/index.html` is the browser page: start screen with a content warning, loader, error messages, and the `?stats` frame-time overlay (also exposed as `window.__perf` for automated checks).
 - `tools/build_web.ps1` builds the browser version into `target\web`; `tools/serve_web.ps1` serves it locally with the `application/wasm` content type browsers require.
@@ -212,7 +212,7 @@ The visual diagnostic exits nonzero if the captures no longer include expected w
 - `src/bin/strike_scenarios.rs` writes deterministic strike telemetry and tuning summaries.
 - `src/bin/visual_damage_diagnostics.rs` writes deterministic SVG damage captures and visual primitive metrics.
 - `tests/simulation_tests.rs` contains focused Rust simulation checks.
-- `docs/reference/pixel_human_silhouettes/front_adult_silhouette_41x96.mask` is the front-facing-only adult pixel mask sampled by the body generator. The Commons SVG remains an auxiliary front-view proportion reference.
+- `src/silhouette.rs` turns `docs/reference/human_body_silhouette.svg` (public domain, see `docs/reference/README.md`) into a signed distance field; `src/simulation/body.rs` meshes the body from it and places the anatomy. `body_frame` maps body coordinates (fractions of body height) to the window, which the strike scenarios use to aim at anatomy.
 
 The next Rust simulation milestones are:
 
