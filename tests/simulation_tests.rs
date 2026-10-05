@@ -616,9 +616,10 @@ fn knife_rests_against_skin_until_pressed_hard_enough_to_cut() {
     if world.springs()[0].broken {
         fail("a gentle push should not cut skin");
     }
-    if gentle_tip > 176.0 || !world.tool_held() {
+    // The tip stays on its side of the fiber, but up against it.
+    if !(174.0..=176.0).contains(&gentle_tip) || !world.tool_held() {
         panic!(
-            "FAIL: the knife should rest against skin it cannot cut, not pass through it: tip={gentle_tip:.1} held={}",
+            "FAIL: the knife should rest against skin it cannot cut, not pass through it or stop short: tip={gentle_tip:.1} held={}",
             world.tool_held()
         );
     }

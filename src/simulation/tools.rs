@@ -531,7 +531,12 @@ impl World {
             // Fibers first: the skin over a bone has to be cut before the knife
             // can reach it.
             let mut stopped = None;
-            for (spring_index, _) in self.springs_reached(&candidates, &resting, &reached, &shape) {
+            // How far along this part of the stroke the tip got before a fiber
+            // held it, so the knife rests right against that fiber.
+            let mut stop_fraction = 0.0;
+            for (spring_index, along, by_tip) in
+                self.springs_reached(&candidates, &resting, &reached, &shape)
+            {
                 let spring = self.springs[spring_index];
                 if spring.broken {
                     continue;
@@ -547,6 +552,10 @@ impl World {
                     let a = self.points[spring.a].position;
                     let b = self.points[spring.b].position;
                     stopped = Some(subtract(b, a));
+                    if by_tip {
+                        let tip_travel = distance(reached.axis_end, shape.axis_end).max(EPSILON);
+                        stop_fraction = (along - 0.5 / tip_travel).max(0.0);
+                    }
                     break;
                 }
                 self.sever_with_blade(spring_index, pressure, shape.blade_normal, strike);
@@ -556,12 +565,14 @@ impl World {
                 let force = (strike.mass * speed).max(push);
                 stopped = self.blade_meets_bone(&reached, &shape, strike, force);
             }
+            let center = lerp(start_center, end_center, t);
             if stopped.is_some() {
                 stop_along = stopped;
+                reached_center = lerp(reached_center, center, stop_fraction);
                 break;
             }
             reached = shape;
-            reached_center = lerp(start_center, end_center, t);
+            reached_center = center;
             passed.push((shape, (strike.mass * speed).max(push)));
         }
 
@@ -624,7 +635,8 @@ impl World {
     }
 
     /// Fibers the tip passes through between two blade positions, or that newly
-    /// lie across the cutting edge, nearest along the tip's path first. The rest
+    /// lie across the cutting edge, nearest along the tip's path first, with
+    /// where along that path the tip met each one and whether the tip did. The rest
     /// of the blade follows the tip through the cut, so it neither cuts nor
     /// catches; letting it cut would scythe through tissue whenever the knife turns.
     fn springs_reached(
@@ -633,8 +645,8 @@ impl World {
         resting: &[usize],
         from: &ToolContactShape,
         to: &ToolContactShape,
-    ) -> Vec<(usize, f64)> {
-        let mut reached: Vec<(usize, f64)> = candidates
+    ) -> Vec<(usize, f64, bool)> {
+        let mut reached: Vec<(usize, f64, bool)> = candidates
             .iter()
             .filter_map(|&index| {
                 let spring = self.springs[index];
@@ -644,10 +656,10 @@ impl World {
                 let a = self.points[spring.a].position;
                 let b = self.points[spring.b].position;
                 if let Some((_, along)) = segment_crossing(a, b, from.axis_end, to.axis_end) {
-                    return Some((index, along));
+                    return Some((index, along, true));
                 }
                 (!resting.contains(&index) && self.spring_crosses_edge(index, to))
-                    .then_some((index, 1.0))
+                    .then_some((index, 1.0, false))
             })
             .collect();
         reached.sort_by(|a, b| a.1.total_cmp(&b.1));
