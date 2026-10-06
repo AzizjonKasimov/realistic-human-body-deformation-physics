@@ -10,6 +10,15 @@ pub use body::{
 pub use tools::{swing_power, tool_geometry, tool_pose, ToolGeometry, ToolPose};
 
 const EPSILON: f64 = 0.0001;
+/// How close to broken skin, in point spacings, blood has to be to get out.
+const OPEN_SKIN_REACH: f64 = 1.5;
+/// How far around blood trapped under the skin bruises it, in point spacings,
+/// how much each trapped particle darkens it, and the most one bleed adds.
+const INTERNAL_BLEED_REACH: f64 = 2.0;
+const INTERNAL_BLEED_BRUISE: f64 = 0.02;
+const INTERNAL_BLEED_MAX_BRUISE: f64 = 0.25;
+/// Fastest blood leaves a wound, in pixels per second.
+const MAX_BLOOD_SPEED: f64 = 560.0;
 const FRAGMENT_TISSUE_POINT_RADIUS_SCALE: f64 = 0.36;
 const FRAGMENT_TISSUE_RESISTANCE: f64 = 0.72;
 const FRAGMENT_TISSUE_NORMAL_DAMPING: f64 = 0.58;
@@ -246,7 +255,6 @@ pub struct Materials {
     pub post_fracture_joint_angle_slack: f64,
     pub bone_impact_transfer: f64,
     pub bone_direct_contact: f64,
-    pub bone_direct_pressure: f64,
     pub max_active_bone_fragments: usize,
     pub max_fragment_bone_checks: usize,
     pub max_fragment_pair_checks: usize,
@@ -257,6 +265,13 @@ pub struct Materials {
     pub fragment_sleep_frames: i32,
     pub fragment_wake_load: f64,
     pub max_fluid_particles: usize,
+    /// Most blood particles fresh tears, breaks, and ruptures may throw out on
+    /// one step; open wounds keep bleeding afterwards. A fresh injury wells up
+    /// and spatters a little rather than bursting into a cloud.
+    pub max_fresh_blood_per_step: i32,
+    /// Most blood particles all open wounds together leak on one step, so a
+    /// torn limb bleeds steadily instead of gushing.
+    pub max_wound_leak_per_step: i32,
     pub fluid_damping: f64,
     pub fluid_gravity_scale: f64,
     pub fluid_lifetime: f64,
@@ -331,7 +346,7 @@ impl Default for Materials {
             tool_inertia_scale: 4.0,
             tool_bone_mass_scale: 0.01,
             hand_press_force: 160_000.0,
-            open_fracture_overload: 0.9,
+            open_fracture_overload: 1.3,
             direct_muscle_contact: 0.18,
             skin_shape_stiffness: 0.012,
             muscle_shape_stiffness: 0.030,
@@ -446,7 +461,6 @@ impl Default for Materials {
             post_fracture_joint_angle_slack: 0.78,
             bone_impact_transfer: 0.62,
             bone_direct_contact: 0.86,
-            bone_direct_pressure: 780.0,
             max_active_bone_fragments: 48,
             max_fragment_bone_checks: 16_384,
             max_fragment_pair_checks: 8192,
@@ -457,11 +471,13 @@ impl Default for Materials {
             fragment_sleep_frames: 36,
             fragment_wake_load: 260.0,
             max_fluid_particles: 900,
+            max_fresh_blood_per_step: 60,
+            max_wound_leak_per_step: 8,
             fluid_damping: 0.982,
             fluid_gravity_scale: 0.42,
             fluid_lifetime: 4.8,
             fluid_floor_friction: 0.48,
-            fluid_impact_scale: 0.08,
+            fluid_impact_scale: 0.03,
             blood_volume_capacity: 1.0,
             blood_loss_per_wound_particle: 0.00016,
             blood_pressure_min_scale: 0.34,
@@ -945,6 +961,9 @@ pub struct Stats {
     pub fractured_ribs: i32,
     pub emitted_fluid_particles: i32,
     pub wound_fluid_particles: i32,
+    /// Blood that stayed under unbroken skin, in particles: it bruises
+    /// instead of leaving the body.
+    pub internal_bleeding: i32,
     pub blood_loss: f64,
     pub fracture_marrow_sources: i32,
     pub blood_stain_deposits: i32,
@@ -1298,6 +1317,10 @@ pub struct World {
     debug: ContactDebug,
     blood_volume: f64,
     fluid_write_cursor: usize,
+    /// Broken skin springs, where blood can leave the body.
+    open_skin: Vec<usize>,
+    /// Blood fresh injuries have thrown out this step.
+    fresh_blood_used: i32,
     blood_stain_write_cursor: usize,
     fluid_seed: u32,
     tool: tools::ToolBody,
@@ -1334,6 +1357,8 @@ impl World {
             debug: ContactDebug::default(),
             blood_volume: materials.blood_volume_capacity.max(0.0),
             fluid_write_cursor: 0,
+            open_skin: Vec::new(),
+            fresh_blood_used: 0,
             blood_stain_write_cursor: 0,
             fluid_seed: 0x9e3779b9,
             tool: tools::ToolBody::default(),
@@ -1700,6 +1725,8 @@ impl World {
     }
 
     pub fn step(&mut self, dt: f64, input: &InputState, width: f64, height: f64) {
+        self.refresh_open_skin();
+        self.fresh_blood_used = 0;
         let floor_y = height - 38.0;
         let profile = tool_profile(input.tool);
         let striker_radius = tool_geometry(input.tool).contact_radius;
@@ -2114,7 +2141,97 @@ impl World {
         f64::from((self.fluid_seed >> 8) & 0x00ff_ffff) / f64::from(0x0100_0000u32)
     }
 
+    /// Breaks a spring, keeping the open skin current so blood finds the
+    /// opening on the same step.
+    fn break_spring(&mut self, index: usize) {
+        let spring = &mut self.springs[index];
+        if spring.broken {
+            return;
+        }
+        spring.broken = true;
+        if spring.layer == TissueLayer::Skin {
+            self.open_skin.push(index);
+        }
+    }
+
+    fn refresh_open_skin(&mut self) {
+        self.open_skin.clear();
+        for (index, spring) in self.springs.iter().enumerate() {
+            if spring.broken && spring.layer == TissueLayer::Skin {
+                self.open_skin.push(index);
+            }
+        }
+    }
+
+    /// Unbroken skin covers `center`, so blood there cannot get out: there is
+    /// skin over it and none of it nearby is broken.
+    fn sealed_under_skin(&self, center: Vec2) -> bool {
+        let reach = self.materials.point_spacing * OPEN_SKIN_REACH;
+        let covered = self.points.iter().any(|point| {
+            point.layer == TissueLayer::Skin && distance(point.position, center) <= reach
+        });
+        covered
+            && !self.open_skin.iter().any(|&index| {
+                let spring = self.springs[index];
+                distance_to_segment(
+                    center,
+                    self.points[spring.a].position,
+                    self.points[spring.b].position,
+                ) <= reach
+            })
+    }
+
+    /// Blood that cannot get out pools in the tissue around `center` and
+    /// shows as a darker bruise in the skin over it.
+    fn bleed_under_skin(&mut self, center: Vec2, count: i32, intensity: f64) {
+        let reach = self.materials.point_spacing * INTERNAL_BLEED_REACH;
+        let amount = (f64::from(count) * INTERNAL_BLEED_BRUISE * intensity.clamp(0.35, 1.35))
+            .min(INTERNAL_BLEED_MAX_BRUISE);
+        let mut bruised = false;
+        let mut max_contusion: f64 = 0.0;
+        for point in &mut self.points {
+            if point.layer != TissueLayer::Skin || point.pinned {
+                continue;
+            }
+            let d = distance(point.position, center);
+            if d > reach {
+                continue;
+            }
+            let before = point.contusion;
+            point.contusion = (point.contusion + amount * (1.0 - d / reach)).min(1.35);
+            bruised |= point.contusion > before + 0.002;
+            max_contusion = max_contusion.max(point.contusion);
+        }
+        self.stats.internal_bleeding += count;
+        if bruised {
+            self.stats.contusion_events += 1;
+            self.debug.contusion_events += 1;
+            self.debug.max_contusion = self.debug.max_contusion.max(max_contusion);
+        }
+    }
+
+    /// Blood from a fresh tear, break, or rupture, up to what fresh injuries
+    /// may throw out this step.
     fn emit_fluid(
+        &mut self,
+        center: Vec2,
+        direction: Vec2,
+        count: i32,
+        speed: f64,
+        radius: f64,
+        intensity: f64,
+    ) {
+        let count = count.min(self.materials.max_fresh_blood_per_step - self.fresh_blood_used);
+        if count <= 0 {
+            return;
+        }
+        self.fresh_blood_used += count;
+        self.release_blood(center, direction, count, speed, radius, intensity);
+    }
+
+    /// Blood at `center`: out of the body as particles where the skin over it
+    /// is broken, and under unbroken skin into the tissue as a bruise.
+    fn release_blood(
         &mut self,
         center: Vec2,
         direction: Vec2,
@@ -2126,13 +2243,19 @@ impl World {
         if self.materials.max_fluid_particles == 0 || count <= 0 {
             return;
         }
+        if self.sealed_under_skin(center) {
+            self.bleed_under_skin(center, count, intensity);
+            return;
+        }
 
         let dir = normalized(direction, Vec2 { x: 0.0, y: -1.0 });
         let tangent = Vec2 {
             x: -dir.y,
             y: dir.x,
         };
-        let clamped_speed = speed.clamp(55.0, 980.0);
+        // Blood wells out and spatters; only a cut artery spurts far, and even
+        // that is far slower than the blow that opened it.
+        let clamped_speed = speed.clamp(55.0, MAX_BLOOD_SPEED);
         let clamped_radius = radius.clamp(1.35, 4.8);
         let clamped_intensity = intensity.clamp(0.35, 1.35);
         let dt = self.materials.fixed_dt;
@@ -2948,10 +3071,16 @@ impl World {
             }
         }
 
+        let mut leak_left = self.materials.max_wound_leak_per_step;
         for (position, direction, count, speed, radius, intensity) in emissions {
+            let count = count.min(leak_left);
+            if count <= 0 {
+                break;
+            }
+            leak_left -= count;
             self.drain_blood_volume(count, intensity);
             let before = self.stats.emitted_fluid_particles;
-            self.emit_fluid(position, direction, count, speed, radius, intensity);
+            self.release_blood(position, direction, count, speed, radius, intensity);
             let emitted = self.stats.emitted_fluid_particles - before;
             self.stats.wound_fluid_particles += emitted;
             self.debug.wound_leaks += emitted;
@@ -3894,7 +4023,7 @@ impl World {
                 spring.tear_impulse
             } * (1.0 - tear_weakening).clamp(0.48, 1.0);
             let tear_stretch =
-                spring.tear_stretch * (1.0 - contusion * 0.18 - fatigue * 0.10).clamp(0.76, 1.0);
+                spring.tear_stretch * (1.0 - contusion * 0.06 - fatigue * 0.10).clamp(0.76, 1.0);
             let load_tear_stretch = (1.12 - contusion * 0.055 - fatigue * 0.045).clamp(1.04, 1.12);
             let stiffness = spring.stiffness * (1.0 - stiffness_softening).clamp(0.52, 1.0);
             self.debug.max_tissue_softening = self
@@ -3912,7 +4041,7 @@ impl World {
                     x: -tangent.y,
                     y: tangent.x - 0.35,
                 };
-                self.springs[i].broken = true;
+                self.break_spring(i);
                 if spring.layer == TissueLayer::Skin {
                     self.stats.broken_skin += 1;
                     events.push((
@@ -4084,7 +4213,7 @@ impl World {
                 x: -tangent.y,
                 y: tangent.x - 0.24,
             };
-            self.springs[index].broken = true;
+            self.break_spring(index);
             self.springs[index].stress = 1.0;
             self.stats.broken_skin += 1;
             self.stats.tear_propagations += 1;
@@ -4219,7 +4348,7 @@ impl World {
                 .load
                 .max(b.load)
                 .max(spring.tear_impulse * (0.34 + spring.fatigue.clamp(0.0, 1.0) * 0.16));
-            self.springs[index].broken = true;
+            self.break_spring(index);
             self.springs[index].stress = 1.0;
             self.stats.broken_muscle += 1;
             self.stats.muscle_cut_transfers += 1;
@@ -5486,7 +5615,7 @@ impl World {
                 let puncture_threshold =
                     self.materials.fragment_skin_puncture_impulse * (1.0 - exposed * 0.18);
                 if puncture_drive > puncture_threshold {
-                    self.springs[i].broken = true;
+                    self.break_spring(i);
                     self.springs[i].stress = 1.0;
                     self.bump_point_exposure_load(spring.a, 1.0, puncture_drive * 0.42);
                     self.bump_point_exposure_load(spring.b, 1.0, puncture_drive * 0.42);
@@ -5517,7 +5646,7 @@ impl World {
             if impulse * contact <= threshold {
                 continue;
             }
-            self.springs[i].broken = true;
+            self.break_spring(i);
             self.bump_point_exposure_load(spring.a, 1.0, impulse * contact * 0.35);
             self.bump_point_exposure_load(spring.b, 1.0, impulse * contact * 0.35);
             if spring.layer == TissueLayer::Skin {
@@ -6260,7 +6389,7 @@ impl World {
             if distance_to_segment(center, a, b) > tear_radius {
                 continue;
             }
-            self.springs[i].broken = true;
+            self.break_spring(i);
             self.springs[i].stress = 1.0;
             self.stats.broken_muscle += 1;
             if spring.fiber {
@@ -6299,7 +6428,7 @@ impl World {
             let d = distance_to_segment(center, a.position, b.position);
             if spring.layer == TissueLayer::Muscle && d <= radius {
                 let mid = midpoint(a.position, b.position);
-                self.springs[i].broken = true;
+                self.break_spring(i);
                 self.springs[i].stress = 1.0;
                 self.bump_point_exposure_load(spring.a, 1.0, impulse * 0.30);
                 self.bump_point_exposure_load(spring.b, 1.0, impulse * 0.30);
@@ -6325,7 +6454,7 @@ impl World {
                 && impulse > self.materials.skin_tear_impulse * 1.18
             {
                 let mid = midpoint(a.position, b.position);
-                self.springs[i].broken = true;
+                self.break_spring(i);
                 self.springs[i].stress = 1.0;
                 self.bump_point_exposure_load(spring.a, 1.0, impulse * 0.18);
                 self.bump_point_exposure_load(spring.b, 1.0, impulse * 0.18);
@@ -7390,7 +7519,8 @@ mod tests {
                 .any(|wound| wound.layer == TissueLayer::Muscle),
             "cavity rupture should use the persistent muscle wound path"
         );
-        assert!(world.stats.emitted_fluid_particles > 0);
+        // Under whole skin the blood stays in the body as a bruise.
+        assert!(world.stats.emitted_fluid_particles + world.stats.internal_bleeding > 0);
     }
 
     #[test]
@@ -7504,7 +7634,8 @@ mod tests {
                 .any(|wound| wound.layer == TissueLayer::Muscle),
             "organ rupture should reuse persistent internal muscle wound sources"
         );
-        assert!(world.stats.emitted_fluid_particles > 0);
+        // Under whole skin the blood stays in the body as a bruise.
+        assert!(world.stats.emitted_fluid_particles + world.stats.internal_bleeding > 0);
     }
 
     #[test]
@@ -8661,7 +8792,8 @@ mod tests {
         assert!(world.triangles[0].failed);
         assert_eq!(world.stats.muscle_crush_ruptures, 1);
         assert_eq!(world.debug.muscle_crush_ruptures, 1);
-        assert!(world.stats.emitted_fluid_particles > 0);
+        // Under whole skin the blood stays in the body as a bruise.
+        assert!(world.stats.emitted_fluid_particles + world.stats.internal_bleeding > 0);
         assert_eq!(world.stats.opened_wounds, 1);
     }
 
@@ -9475,10 +9607,10 @@ fn tool_profile(tool: ToolMode) -> ToolProfile {
         ToolMode::Heavy => ToolProfile {
             mass_scale: 1.85,
             tissue_push_scale: 1.24,
-            tissue_load_scale: 0.75,
+            tissue_load_scale: 0.15,
             contusion_scale: 1.55,
             bone_push_scale: 1.46,
-            bone_load_scale: 3.0,
+            bone_load_scale: 1.0,
             fracture_scale: 1.0,
             cut_pressure_scale: 0.0,
             crush_tear_scale: 0.10,
@@ -9488,7 +9620,7 @@ fn tool_profile(tool: ToolMode) -> ToolProfile {
         },
         // A bat's broad barrel bruises far more than it tears.
         ToolMode::Blunt => ToolProfile {
-            tissue_load_scale: 0.45,
+            tissue_load_scale: 0.05,
             ..ToolProfile::default()
         },
     }

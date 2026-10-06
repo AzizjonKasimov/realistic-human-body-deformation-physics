@@ -634,15 +634,24 @@ fn direct_bone_strike_fractures_and_emits_fluid() {
 
 /// A knife creeping up to a lone skin fiber, pushed by a hand `lead` pixels
 /// ahead of it, for `frames` steps; returns the world and the tip's furthest x.
-fn press_knife_on_fiber(world: &mut rp::World, lead: f64, frames: i32) -> f64 {
+/// Moves the hand toward a spot `lead` pixels past where the knife's middle
+/// sits when its tip touches the fiber at x=176, by at most `ease` pixels a
+/// step, and holds it there, so the arm presses the blade in that hard.
+/// Returns the furthest the tip got.
+fn press_knife_on_fiber(world: &mut rp::World, lead: f64, ease: f64, frames: i32) -> f64 {
     let dt = world.materials().fixed_dt;
     let mut furthest_tip = f64::MIN;
+    let blade_front = world
+        .current_tool_pose()
+        .map_or(33.0, |pose| pose.contact_end.x - pose.center.x);
+    let target = 176.0 - blade_front + lead;
+    let mut hand_x = world.tool_position().x;
     for _ in 0..frames {
-        let center = world.tool_position();
+        hand_x += (target - hand_x).clamp(-ease, ease);
         let input = rp::InputState {
             active: true,
             down: true,
-            x: center.x + lead,
+            x: hand_x,
             y: 120.0,
             vx: 0.0,
             vy: 0.0,
@@ -676,7 +685,8 @@ fn knife_rests_against_skin_until_pressed_hard_enough_to_cut() {
     };
     world.step(world.materials().fixed_dt, &start, 640.0, 480.0);
 
-    let gentle_tip = press_knife_on_fiber(&mut world, 12.0, 90);
+    // The hand eases the blade onto the skin, about 60 px/s, and leans on it.
+    let gentle_tip = press_knife_on_fiber(&mut world, 12.0, 1.0, 90);
     if world.springs()[0].broken {
         fail("a gentle push should not cut skin");
     }
@@ -688,7 +698,7 @@ fn knife_rests_against_skin_until_pressed_hard_enough_to_cut() {
         );
     }
 
-    let firm_tip = press_knife_on_fiber(&mut world, 400.0, 30);
+    let firm_tip = press_knife_on_fiber(&mut world, 400.0, f64::INFINITY, 30);
     if !world.springs()[0].broken || world.stats().broken_skin != 1 {
         fail("pressing hard enough should cut the skin");
     }

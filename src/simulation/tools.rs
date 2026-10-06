@@ -49,55 +49,92 @@ const TOOL_REBOUND: f64 = 0.6;
 /// Bruising load per unit of momentum a blow gives a point of tissue, so a
 /// point knocked hard is bruised while one pressed slowly is not.
 const BRUISE_PER_IMPULSE: f64 = 2.0;
+/// How long after it last touched the body a held tool is still pressed
+/// rather than swung, in seconds, so one that bounces off is not flung
+/// straight back at the body.
+const TOUCH_GRACE: f64 = 0.1;
+/// Share of the newest pointer motion that goes into the hand's velocity each
+/// step; the rest smooths over uneven steps between pointer updates.
+const HAND_VELOCITY_UPDATE: f64 = 0.5;
+/// Speed of a firm swing, in pixels per second. A bat or hammer crushes and
+/// bruises flesh in proportion to the energy of its blow, so a blow at this
+/// speed loads tissue by its momentum, a slower one much less (half the speed,
+/// a quarter of the load), and a faster one more.
+const FIRM_SWING_SPEED: f64 = 1600.0;
+/// Share of a blunt tool's remaining speed spent breaking a bone it hits:
+/// snapping bone and driving the limb aside take much of a blow's energy, so a
+/// tool does not plow on at full speed through the limb it just broke.
+const FRACTURE_SPEED_LOSS: f64 = 0.45;
+/// How far around its face a bat or hammer bruises, as a multiple of the
+/// face's reach: a blow crushes the flesh around where it lands, too.
+const BRUISE_HALO: f64 = 2.2;
+/// Share of a blow's load that reaches the flesh around the face.
+const BRUISE_HALO_SHARE: f64 = 0.5;
+/// Share of the arm's full push a bat or hammer presses with; see
+/// `ToolHandling::press_share`.
+const PRESS_SHARE: f64 = 0.5;
 
-/// How a hand moves a tool: a spring toward the pointer, with damping.
+/// How a hand moves a tool. Carried or swung through the air, the hand grips
+/// it firmly: a stiff spring pulls it to where the hand will be and the grip
+/// damps any difference from the hand's own motion, so it moves with the
+/// pointer, only easing into sudden starts and stops. Touching the body, the
+/// arm presses it instead.
 #[derive(Clone, Copy, Debug)]
 struct ToolHandling {
-    /// Acceleration per pixel the pointer leads the tool, and velocity damping,
-    /// while the button is held.
+    /// Acceleration per pixel the tool would miss the hand by, and per unit of
+    /// velocity it differs from the hand's, while it moves free.
     drive: f64,
     damping: f64,
-    /// The same while the button is up and the tool only follows the pointer.
-    idle_drive: f64,
-    idle_damping: f64,
+    /// Acceleration per pixel the pointer is past a tool touching the body, up
+    /// to `press_share` of `hand_press_force`, and velocity damping, so a
+    /// light push rests against the body and a harder one presses in.
+    press_drive: f64,
+    press_damping: f64,
+    /// Share of the arm's full push a tool presses with. A broad bat or hammer
+    /// face spreads a push the arm can only half put behind it.
+    press_share: f64,
     max_speed: f64,
     /// Farthest lead the hand presses with: pulling the pointer farther from a
     /// tool stuck in the body does not press it any harder.
     max_reach: f64,
-    /// How far the hands on the handle are from a bat's or hammer's striking
-    /// part. The tool turns no faster than its striking part could swing round
-    /// them: its speed over this distance.
+    /// How far the hand on the handle is from the striking part or the middle
+    /// of the blade. A tool turns in the air no faster than that part could
+    /// swing round the hand: its speed over this distance.
     swing_radius: f64,
 }
 
 fn tool_handling(tool: ToolMode) -> ToolHandling {
     match tool {
+        // A knife is gripped a little more gently, so a light push rests its
+        // edge on the skin instead of snapping it into the cut.
         ToolMode::Sharp => ToolHandling {
-            drive: 132.0,
-            damping: 13.0,
-            idle_drive: 70.0,
-            idle_damping: 18.0,
+            drive: 400.0,
+            damping: 34.0,
+            press_drive: 132.0,
+            press_damping: 13.0,
+            press_share: 1.0,
             max_speed: 4600.0,
             max_reach: 150.0,
-            // A knife turns with its stroke instead; see `turn_blade`.
-            swing_radius: 0.0,
+            swing_radius: 60.0,
         },
         // A sledgehammer is slower to get going than a bat and tops out
         // lower, but carries far more momentum once it is swinging.
         ToolMode::Heavy => ToolHandling {
-            drive: 96.0,
-            damping: 14.0,
-            idle_drive: 50.0,
-            idle_damping: 22.0,
+            drive: 600.0,
+            damping: 42.0,
+            press_drive: 96.0,
+            press_damping: 14.0,
+            press_share: PRESS_SHARE,
             max_speed: 3400.0,
             max_reach: 150.0,
             swing_radius: 140.0,
         },
         ToolMode::Blunt => ToolHandling {
-            drive: 118.0,
-            damping: 15.0,
-            idle_drive: 62.0,
-            idle_damping: 20.0,
+            drive: 800.0,
+            damping: 48.0,
+            press_drive: 118.0,
+            press_damping: 15.0,
+            press_share: PRESS_SHARE,
             max_speed: 4200.0,
             max_reach: 150.0,
             swing_radius: 170.0,
@@ -109,8 +146,9 @@ fn tool_handling(tool: ToolMode) -> ToolHandling {
 /// plays with: a knife or a bat in one hand, a sledgehammer in both.
 pub fn swing_power(tool: ToolMode) -> f64 {
     match tool {
-        ToolMode::Sharp | ToolMode::Blunt => 3.0,
-        ToolMode::Heavy => 4.0,
+        ToolMode::Sharp => 3.0,
+        ToolMode::Blunt => 2.1,
+        ToolMode::Heavy => 2.6,
     }
 }
 
@@ -222,6 +260,12 @@ pub(super) struct ToolBody {
     held: bool,
     /// The button was down last step.
     was_down: bool,
+    /// Seconds left in which the tool counts as touching the body since it
+    /// last did; see `TOUCH_GRACE`.
+    touch_grace: f64,
+    /// Where the hand was last step, and how fast it moves.
+    last_hand: Option<Vec2>,
+    hand_velocity: Vec2,
     /// A bat or hammer gripped while inside the body passes through it until
     /// it is clear; it cannot appear in flesh and blast it apart.
     ghost: bool,
@@ -244,6 +288,9 @@ impl Default for ToolBody {
             embedded: false,
             held: false,
             was_down: false,
+            touch_grace: 0.0,
+            last_hand: None,
+            hand_velocity: Vec2::default(),
             ghost: false,
             contact: None,
             solver_shift: Vec2::default(),
@@ -387,17 +434,19 @@ impl World {
         }
     }
 
-    /// A knife turns at once to lead with its tip in the air. Tissue steers an
-    /// embedded knife to follow its stroke, like a scalpel, except that a knife
-    /// pulled backward keeps its line and withdraws rather than flipping around
-    /// inside the wound.
+    /// A knife turns in the air to lead with its tip, as fast as the hand can
+    /// swing the blade round, so it does not snap round when the hand turns
+    /// back. Tissue steers an embedded knife to follow its stroke, like a
+    /// scalpel, except that a knife pulled backward keeps its line and
+    /// withdraws rather than flipping around inside the wound.
     fn turn_blade(&mut self, dt: f64) {
         let velocity = self.tool.velocity;
         let speed = hypot(velocity.x, velocity.y);
         if speed > TOOL_TURN_SPEED {
             let target = scale(velocity, 1.0 / speed);
             if !self.tool.embedded {
-                self.tool.heading = target;
+                let radius = tool_handling(ToolMode::Sharp).swing_radius.max(1.0);
+                self.tool.heading = rotate_toward(self.tool.heading, target, speed / radius * dt);
             } else if dot(target, self.tool.heading) > -0.2 {
                 self.tool.heading =
                     rotate_toward(self.tool.heading, target, EMBEDDED_BLADE_TURN_RATE * dt);
@@ -461,6 +510,8 @@ impl World {
             self.tool.embedded = false;
             self.tool.held = false;
             self.tool.was_down = false;
+            self.tool.touch_grace = 0.0;
+            self.tool.last_hand = None;
             self.tool.ghost = false;
             return;
         }
@@ -468,6 +519,7 @@ impl World {
             self.tool.mode = input.tool;
             self.tool.embedded = false;
             self.tool.held = false;
+            self.tool.touch_grace = 0.0;
         }
         let target = Vec2 {
             x: input.x,
@@ -483,12 +535,32 @@ impl World {
             mass,
             inertia: mass * self.materials.tool_inertia_scale.max(EPSILON),
         };
-        // A hand swings any tool quickly, but presses one into the body no
-        // harder than an arm can push, whatever the tool weighs.
-        let pressing = input.down && (self.tool.embedded || self.tool.held);
+        // A hand carries and swings any tool closely, but presses one into the
+        // body no harder than an arm can push, whatever the tool weighs.
+        self.tool.touch_grace = if self.tool.embedded || self.tool.held {
+            TOUCH_GRACE
+        } else {
+            (self.tool.touch_grace - dt).max(0.0)
+        };
+        let pressing = input.down && self.tool.touch_grace > 0.0;
         let gripped = input.down && !self.tool.was_down && self.tool.present;
         self.tool.was_down = input.down;
-        let mut hand = Vec2::default();
+        // How hard the arm pushes the tool toward the pointer, which is what
+        // drives a knife through fibers.
+        let mut push = Vec2::default();
+        let moved = match self.tool.last_hand {
+            Some(last) => scale(subtract(target, last), 1.0 / dt.max(EPSILON)),
+            None => Vec2 {
+                x: input.vx,
+                y: input.vy,
+            },
+        };
+        self.tool.hand_velocity = if self.tool.last_hand.is_some() && self.tool.present {
+            lerp(self.tool.hand_velocity, moved, HAND_VELOCITY_UPDATE)
+        } else {
+            moved
+        };
+        self.tool.last_hand = Some(target);
         if !self.tool.present {
             // A tool appears at the hand already moving with it, so a scripted
             // strike can begin mid-swing.
@@ -502,18 +574,26 @@ impl World {
             self.tool.held = false;
             self.align_with_motion();
         } else {
-            let (drive, damping, reach) = if input.down {
-                (handling.drive, handling.damping, handling.max_reach)
+            let reach = if input.down {
+                handling.max_reach
             } else {
-                (handling.idle_drive, handling.idle_damping, f64::MAX)
+                f64::MAX
             };
             let lead = clamp_magnitude(subtract(target, self.tool.position), reach);
-            hand = scale(lead, drive);
-            if pressing {
-                hand = clamp_magnitude(hand, self.materials.hand_press_force / strike.inertia);
-            }
-            self.tool.velocity.x += (hand.x - self.tool.velocity.x * damping) * dt;
-            self.tool.velocity.y += (hand.y - self.tool.velocity.y * damping) * dt;
+            push = clamp_magnitude(
+                scale(lead, handling.press_drive),
+                self.materials.hand_press_force * handling.press_share / strike.inertia,
+            );
+            let accel = if pressing {
+                subtract(push, scale(self.tool.velocity, handling.press_damping))
+            } else {
+                // Where the tool would miss the hand after this step if it kept
+                // its velocity, and how its velocity differs from the hand's.
+                let miss = subtract(lead, scale(self.tool.velocity, dt));
+                let slip = subtract(self.tool.hand_velocity, self.tool.velocity);
+                add(scale(miss, handling.drive), scale(slip, handling.damping))
+            };
+            self.tool.velocity = add(self.tool.velocity, scale(accel, dt));
             self.tool.velocity = clamp_magnitude(self.tool.velocity, handling.max_speed);
         }
 
@@ -546,7 +626,7 @@ impl World {
             return;
         }
         if input.tool == ToolMode::Sharp {
-            self.move_blade(input, strike, &start, hand, dt);
+            self.move_blade(input, strike, &start, push, dt);
         } else {
             self.move_blunt(input, strike, &start, dt);
         }
@@ -812,7 +892,7 @@ impl World {
         strike: ToolStrike,
     ) {
         let spring = self.springs[spring_index];
-        self.springs[spring_index].broken = true;
+        self.break_spring(spring_index);
         let skin = spring.layer == TissueLayer::Skin;
         let exposure = if skin { 0.92 } else { 1.0 };
         self.bump_point_exposure_load(spring.a, exposure, pressure * 0.18);
@@ -943,7 +1023,7 @@ impl World {
         let mut velocity = initial_velocity;
         let mut center = self.tool.position;
         let mut shape = start;
-        let mut peak_impact: f64 = 0.0;
+        let mut peak_blow: f64 = 0.0;
         for step in 1..=steps {
             let t = step as f64 / steps as f64;
             center = add(center, scale(velocity, sub_dt));
@@ -952,15 +1032,23 @@ impl World {
             let side = normalized(lerp(start_pose.side, self.tool.side, t), self.tool.side);
             let heading = side_toward(side, self.tool.heading);
             shape = contact_shape(&tool_pose(strike.tool, center, heading, side));
-            let impact = strike.mass * hypot(velocity.x, velocity.y);
-            let tissue = self.shove_tissue(&shape, velocity, impact, strike, dt, sub_dt, &mut hits);
+            let speed = hypot(velocity.x, velocity.y);
+            // Bone breaks under the force of the blow, which grows with its
+            // momentum; flesh is crushed and bruised by its energy.
+            let impact = strike.mass * speed;
+            let blow = impact * speed / FIRM_SWING_SPEED;
+            let tissue = self.shove_tissue(&shape, velocity, blow, strike, dt, sub_dt, &mut hits);
+            let fractures_before = self.stats.fractured_bones;
             let bone = self.shove_bones(&shape, velocity, impact, strike, dt, sub_dt);
             let given = add(tissue, bone);
             if hypot(given.x, given.y) > EPSILON {
-                peak_impact = peak_impact.max(impact);
+                peak_blow = peak_blow.max(blow);
             }
-            self.lacerate_major_vessels_from_striker(input, &shape, impact);
+            self.lacerate_major_vessels_from_striker(input, &shape, blow);
             velocity = subtract(velocity, scale(given, 1.0 / strike.inertia));
+            if self.stats.fractured_bones > fractures_before {
+                velocity = scale(velocity, 1.0 - FRACTURE_SPEED_LOSS);
+            }
             if dot(velocity, initial_velocity) <= 0.0 {
                 // The body has taken all of the swing's momentum.
                 velocity = Vec2::default();
@@ -996,8 +1084,11 @@ impl World {
             self.debug.max_point_load = self.debug.max_point_load.max(point.load);
         }
         self.tool.embedded = touched > 0;
-        if strike.profile.crush_tear_scale > 0.0 && peak_impact > 0.0 {
-            self.crush_tear_under_tool(strike.profile, &shape, peak_impact);
+        if peak_blow > 0.0 {
+            self.bruise_around_blow(&shape, peak_blow, strike);
+        }
+        if strike.profile.crush_tear_scale > 0.0 && peak_blow > 0.0 {
+            self.crush_tear_under_tool(strike.profile, &shape, peak_blow);
         }
 
         let reach = shape.influence + self.materials.point_spacing;
@@ -1019,21 +1110,54 @@ impl World {
         }
     }
 
+    /// Bruises the flesh around where a blow of strength `blow` landed, fading
+    /// toward the edge of `BRUISE_HALO`; a slow touch is too weak to bruise.
+    fn bruise_around_blow(&mut self, shape: &ToolContactShape, blow: f64, strike: ToolStrike) {
+        let reach = shape.influence * BRUISE_HALO;
+        let load = blow * 0.58 * strike.profile.tissue_push_scale * BRUISE_HALO_SHARE;
+        for point in &mut self.points {
+            if point.pinned {
+                continue;
+            }
+            // The face itself bruised what it touched; this is the ring
+            // around it.
+            let distance = sample_point_contact(point.position, shape).distance;
+            if distance <= shape.influence || distance > reach {
+                continue;
+            }
+            let falloff = 1.0 - (distance - shape.influence) / (reach - shape.influence);
+            if apply_point_contusion(
+                point,
+                self.materials,
+                load * falloff,
+                strike.profile.contusion_scale,
+            ) {
+                self.stats.contusion_events += 1;
+                self.debug.contusion_events += 1;
+                self.debug.max_contusion = self.debug.max_contusion.max(point.contusion);
+            }
+        }
+    }
+
     /// Pushes tissue out of the tool at one point of its motion and drags it
-    /// along. Returns the momentum the tissue took. What happened to each point
-    /// gathers in `hits`, so load and bruising are recorded once per point.
+    /// along. Returns the momentum the tissue took. `blow` is how hard the
+    /// tool hits at this speed. What happened to each point gathers in `hits`,
+    /// so load and bruising are recorded once per point.
     #[allow(clippy::too_many_arguments)]
     fn shove_tissue(
         &mut self,
         shape: &ToolContactShape,
         velocity: Vec2,
-        impact: f64,
+        blow: f64,
         strike: ToolStrike,
         dt: f64,
         sub_dt: f64,
         hits: &mut [Option<PointHit>],
     ) -> Vec2 {
         let mut given = Vec2::default();
+        // Momentum knocked into a point bruises it in step with the blow's
+        // energy, so a tool pressed in slowly bruises far less than a blow.
+        let bruising_share = hypot(velocity.x, velocity.y) / FIRM_SWING_SPEED;
         let base_strength = 0.58 * strike.profile.tissue_push_scale * (0.85 + strike.power * 0.15);
         for (index, point) in self.points.iter_mut().enumerate() {
             if point.pinned {
@@ -1060,8 +1184,8 @@ impl World {
             hit.depth += depth;
             hit.load = hit
                 .load
-                .max(impact * (hit.depth / shape.influence).min(1.0) * strength);
-            hit.impulse += hypot(momentum.x, momentum.y);
+                .max(blow * (hit.depth / shape.influence).min(1.0) * strength);
+            hit.impulse += hypot(momentum.x, momentum.y) * bruising_share;
             if depth > self.debug.max_depth {
                 self.debug.max_depth = depth;
                 self.debug.strongest_contact = point.position;
@@ -1071,7 +1195,9 @@ impl World {
     }
 
     /// Pushes and loads bone the tool meets at one point of its motion, and
-    /// breaks it if the load is too much. Returns the momentum the bones took.
+    /// breaks it if the load is too much. `impact` is the tool's momentum, so
+    /// a tool merely resting on a bone does not load it. Returns the momentum
+    /// the bones took.
     fn shove_bones(
         &mut self,
         shape: &ToolContactShape,
@@ -1100,9 +1226,7 @@ impl World {
             }
             let depth = (shape.influence + bone.radius - dist).max(0.0);
             let contact = (1.0 - ((dist - bone.radius) / shape.influence).clamp(0.0, 1.0)).max(0.0);
-            let direct_load = (impact + self.materials.bone_direct_pressure * strike.power)
-                * contact
-                * strike.profile.bone_load_scale;
+            let direct_load = impact * contact * strike.profile.bone_load_scale;
             // The bone solver fractures any bone whose load exceeds its strength,
             // so the tool's fracture resistance is applied to the load itself.
             bone.load = bone
@@ -1223,13 +1347,9 @@ impl World {
         );
     }
 
-    /// A heavy head can split tissue it crushes against bone and itself.
-    fn crush_tear_under_tool(
-        &mut self,
-        profile: ToolProfile,
-        shape: &ToolContactShape,
-        impact: f64,
-    ) {
+    /// A heavy head can split tissue it crushes against bone and itself;
+    /// `blow` is how hard it hit.
+    fn crush_tear_under_tool(&mut self, profile: ToolProfile, shape: &ToolContactShape, blow: f64) {
         let influence = shape.influence;
         let mut events = Vec::new();
         for spring_index in 0..self.springs.len() {
@@ -1251,7 +1371,7 @@ impl World {
             } else {
                 0.78 + a.exposure.max(b.exposure) * 0.42
             };
-            let pressure = impact * profile.crush_tear_scale * contact * layer_scale;
+            let pressure = blow * profile.crush_tear_scale * contact * layer_scale;
             let threshold = spring.tear_impulse * self.materials.sharp_tool_tear_pressure;
             self.springs[spring_index].stress = self.springs[spring_index]
                 .stress
@@ -1259,7 +1379,7 @@ impl World {
             if pressure <= threshold {
                 continue;
             }
-            self.springs[spring_index].broken = true;
+            self.break_spring(spring_index);
             let exposure = if spring.layer == TissueLayer::Skin {
                 0.92
             } else {

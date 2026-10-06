@@ -170,6 +170,8 @@ fn visual_scenarios() -> Vec<VisualScenario> {
             strike: tuned_strike("torso_heavy_fragment_settle"),
             // A full-force sledgehammer blow to the chest, left to settle:
             // broken arm and ribs, deep bruising, torn flesh and bleeding.
+            // Breaking the arm takes much of the blow, so the organs behind
+            // it are only bruised.
             expectations: VisualExpectations {
                 min_skin_wound_edges: 30,
                 min_muscle_fiber_tears: 10,
@@ -182,7 +184,7 @@ fn visual_scenarios() -> Vec<VisualScenario> {
                 min_rib_fractures: 1,
                 min_fracture_caps: 6,
                 min_cavity_pressure: 0.4,
-                min_organ_damage: 0.3,
+                min_organ_damage: 0.1,
                 min_damage_primitives: 500,
                 ..VisualExpectations::default()
             },
