@@ -10,7 +10,7 @@ pub use body::{
     body_frame, body_frame_between, create_layered_body, create_layered_body_in, BodyFrame,
 };
 pub use motion::MotionSnapshot;
-pub use tools::{swing_power, tool_geometry, tool_pose, ToolGeometry, ToolPose};
+pub use tools::{swing_power, tool_geometry, tool_pose, ToolGeometry, ToolPose, ToolReach};
 
 const EPSILON: f64 = 0.0001;
 /// Share of a blunt blow's knock on a point that bears on a scab there.
@@ -1346,6 +1346,9 @@ pub struct World {
     /// How hard a bat or hammer knocked each point this step, before the
     /// broad face spreads it; a blow that lands on a scab knocks it open.
     blunt_knock: Vec<f64>,
+    /// Which points belonged to flesh at the start of this step (see
+    /// [`World::flesh_points`]); flesh torn away is not there to touch.
+    flesh: Vec<bool>,
 }
 
 impl Default for World {
@@ -1385,6 +1388,7 @@ impl World {
             outlines: Vec::new(),
             outline_pairs: Vec::new(),
             blunt_knock: Vec::new(),
+            flesh: Vec::new(),
         }
     }
 
@@ -1748,6 +1752,7 @@ impl World {
 
     pub fn step(&mut self, dt: f64, input: &InputState, width: f64, height: f64) {
         self.refresh_open_skin();
+        self.refresh_flesh();
         self.fresh_blood_used = 0;
         let floor_y = height - 38.0;
         let profile = tool_profile(input.tool);
@@ -1842,6 +1847,45 @@ impl World {
     pub fn triangle_alive(&self, triangle: &Triangle) -> bool {
         !triangle.failed
             && self.live_edge_count(triangle.edge_ab, triangle.edge_bc, triangle.edge_ca) >= 2
+    }
+
+    /// Which tissue points still belong to flesh. A point of the tissue
+    /// sheets all of whose triangles have failed or torn is part of flesh
+    /// torn away, which nothing draws, so tools, loose bone, and the body's
+    /// own outline pass through it. A point no triangle ever used, such as
+    /// the ends of a lone fiber, stays.
+    pub fn flesh_points(&self) -> Vec<bool> {
+        let mut flesh = Vec::new();
+        self.mark_flesh(&mut flesh);
+        flesh
+    }
+
+    fn mark_flesh(&self, flesh: &mut Vec<bool>) {
+        let mut meshed = vec![false; self.points.len()];
+        flesh.clear();
+        flesh.resize(self.points.len(), false);
+        for triangle in &self.triangles {
+            let alive = self.triangle_alive(triangle);
+            for index in [triangle.a, triangle.b, triangle.c] {
+                meshed[index] = true;
+                flesh[index] |= alive;
+            }
+        }
+        for (flesh, meshed) in flesh.iter_mut().zip(meshed) {
+            *flesh |= !meshed;
+        }
+    }
+
+    fn refresh_flesh(&mut self) {
+        let mut flesh = std::mem::take(&mut self.flesh);
+        self.mark_flesh(&mut flesh);
+        self.flesh = flesh;
+    }
+
+    /// Both ends of a spring belonged to flesh at the start of the step, so
+    /// a tool meets it.
+    fn spring_in_flesh(&self, spring: Spring) -> bool {
+        is_flesh(&self.flesh, spring.a) && is_flesh(&self.flesh, spring.b)
     }
 
     pub fn has_live_spring(&self, a: usize, b: usize, layer: TissueLayer) -> bool {
@@ -5029,7 +5073,8 @@ impl World {
                     continue;
                 }
                 let point = self.points[point_index];
-                if point.pinned {
+                // A loose piece of bone moves through flesh torn away.
+                if point.pinned || !is_flesh(&self.flesh, point_index) {
                     continue;
                 }
 
@@ -5542,8 +5587,8 @@ impl World {
         let mut torque_weight = 0.0;
         let mut emissions = Vec::new();
 
-        for point in &mut self.points {
-            if point.pinned {
+        for (index, point) in self.points.iter_mut().enumerate() {
+            if point.pinned || !is_flesh(&self.flesh, index) {
                 continue;
             }
             let delta = subtract(point.position, tip);
@@ -8595,6 +8640,131 @@ mod tests {
         assert!(world.debug.bone_contacts > 0);
     }
 
+    /// A patch of skin across a tool's path, held by its top and bottom rows;
+    /// with `torn_away` every triangle of it has failed, so it is no longer
+    /// drawn, though its points and fibers are all still there.
+    fn skin_patch_world(torn_away: bool) -> World {
+        let mut materials = Materials::default();
+        materials.gravity = 0.0;
+        let mut world = World::new(materials);
+        let (columns, rows, spacing) = (7, 9, 10.0);
+        for row in 0..rows {
+            for column in 0..columns {
+                let position = Vec2 {
+                    x: 200.0 + column as f64 * spacing,
+                    y: 80.0 + row as f64 * spacing,
+                };
+                world.add_point(position, TissueLayer::Skin, row == 0 || row == rows - 1);
+            }
+        }
+        let at = |column: usize, row: usize| row * columns + column;
+        let cells: Vec<(usize, usize, usize, usize)> = (0..rows - 1)
+            .flat_map(|row| {
+                (0..columns - 1).map(move |column| {
+                    (
+                        at(column, row),
+                        at(column + 1, row),
+                        at(column, row + 1),
+                        at(column + 1, row + 1),
+                    )
+                })
+            })
+            .collect();
+        let join = |world: &mut World, a: usize, b: usize| {
+            if !world.has_live_spring(a, b, TissueLayer::Skin) {
+                world.add_spring(a, b, TissueLayer::Skin, 1.0, 99.0, 9999.0, false);
+            }
+        };
+        for &(here, right, below, across) in &cells {
+            for (a, b) in [
+                (here, right),
+                (here, below),
+                (right, below),
+                (right, across),
+                (below, across),
+            ] {
+                join(&mut world, a, b);
+            }
+        }
+        for &(here, right, below, across) in &cells {
+            world.add_triangle(here, right, below, TissueLayer::Skin);
+            world.add_triangle(right, across, below, TissueLayer::Skin);
+        }
+        assert!(world
+            .triangles
+            .iter()
+            .all(|triangle| world.triangle_alive(triangle)));
+        if torn_away {
+            for triangle in &mut world.triangles {
+                triangle.failed = true;
+            }
+        }
+        world
+    }
+
+    /// Drags `tool` from left of the patch through it at 600 px/s with the
+    /// button down; returns the tissue contacts and how far the tool trailed
+    /// the hand at the end.
+    fn drag_through_patch(world: &mut World, tool: ToolMode) -> (i32, f64) {
+        let dt = world.materials.fixed_dt;
+        let mut contacts = 0;
+        let mut hand = 100.0;
+        for _ in 0..40 {
+            hand += 600.0 * dt;
+            let input = InputState {
+                active: true,
+                down: true,
+                x: hand,
+                y: 120.0,
+                vx: 0.0,
+                vy: 0.0,
+                power: swing_power(tool),
+                tool,
+            };
+            world.step(dt, &input, 640.0, 480.0);
+            contacts += world.debug.tissue_contacts;
+        }
+        (contacts, hand - world.tool.position.x)
+    }
+
+    #[test]
+    fn tools_pass_through_flesh_torn_away() {
+        for tool in [ToolMode::Heavy, ToolMode::Blunt, ToolMode::Sharp] {
+            let mut intact = skin_patch_world(false);
+            let (intact_contacts, intact_lag) = drag_through_patch(&mut intact, tool);
+            // A bat or hammer shoves the skin; the knife rests against fibers
+            // too tough to cut.
+            assert!(
+                intact_contacts > 0 || intact.tool_held(),
+                "{tool:?} should meet the skin across its path"
+            );
+
+            let mut torn = skin_patch_world(true);
+            let rest: Vec<Vec2> = torn.points.iter().map(|point| point.position).collect();
+            let (torn_contacts, torn_lag) = drag_through_patch(&mut torn, tool);
+            assert_eq!(
+                torn_contacts, 0,
+                "{tool:?} should pass through flesh torn away without touching it"
+            );
+            assert!(
+                torn_lag < 12.0 && torn_lag < intact_lag,
+                "{tool:?} should keep up with the hand through flesh torn away: lag {torn_lag:.1} px, {intact_lag:.1} px through skin"
+            );
+            assert!(!torn.tool_held(), "{tool:?} caught on flesh torn away");
+            assert_eq!(torn.stats.broken_skin, 0, "{tool:?} cut flesh torn away");
+            let moved = torn
+                .points
+                .iter()
+                .zip(&rest)
+                .map(|(point, rest)| distance(point.position, *rest))
+                .fold(0.0, f64::max);
+            assert!(
+                moved < 0.5,
+                "{tool:?} shoved flesh torn away by {moved:.1} px"
+            );
+        }
+    }
+
     #[test]
     fn blunt_tissue_contact_creates_contusion_without_tearing() {
         let mut materials = Materials::default();
@@ -9985,6 +10155,12 @@ fn fragment_endpoint_speed(bone: BoneSegment, dt: f64) -> f64 {
 
 fn bone_contact_mass(bone: BoneSegment, scale: f64) -> f64 {
     (bone.rest_length * bone.radius.max(1.0) * bone.radius.max(1.0) * scale.max(0.1)).max(1.0)
+}
+
+/// Point `index` belonged to flesh at the start of the step (see
+/// [`World::flesh_points`]); a point the mask does not cover yet counts.
+fn is_flesh(flesh: &[bool], index: usize) -> bool {
+    flesh.get(index).copied().unwrap_or(true)
 }
 
 fn distance_to_segment(point: Vec2, a: Vec2, b: Vec2) -> f64 {

@@ -13,6 +13,12 @@
 //! stops in the body instead of sweeping through it. A knife moves only through
 //! fibers it severs: it rests against skin it cannot cut until it moves fast
 //! enough or the hand presses hard enough, and bone stops it.
+//!
+//! Tools meet only what is drawn: flesh torn away (points of the tissue sheets
+//! left in no live triangle, and the fibers between them; see
+//! `World::flesh_points`) and the spine, which lies behind the trunk, are not
+//! there for them, so a tool moves through a wound as freely as through the
+//! air and meets only its edges and the bone left in it.
 
 use super::*;
 
@@ -245,6 +251,18 @@ pub fn tool_pose(tool: ToolMode, center: Vec2, heading: Vec2, side: Vec2) -> Too
     }
 }
 
+/// What the striking part of the tool in play reaches where it is, for
+/// diagnostics.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ToolReach {
+    /// Tissue points of flesh, and of flesh torn away, which nothing draws.
+    pub flesh: usize,
+    pub torn_away: usize,
+    /// Bones, and the spine apart, which is never drawn.
+    pub bones: usize,
+    pub spine: usize,
+}
+
 /// The tool in play: where it is, how it moves, and what it presses on.
 #[derive(Clone, Debug)]
 pub(super) struct ToolBody {
@@ -426,6 +444,40 @@ impl World {
                 self.tool.side,
             )
         })
+    }
+
+    /// What the tool's striking part reaches where it is now.
+    pub fn tool_reach(&self) -> ToolReach {
+        let Some(pose) = self.current_tool_pose() else {
+            return ToolReach::default();
+        };
+        let shape = contact_shape(&pose);
+        let flesh = self.flesh_points();
+        let mut reach = ToolReach::default();
+        for (index, point) in self.points.iter().enumerate() {
+            if point.pinned
+                || sample_point_contact(point.position, &shape).distance > shape.influence
+            {
+                continue;
+            }
+            if flesh[index] {
+                reach.flesh += 1;
+            } else {
+                reach.torn_away += 1;
+            }
+        }
+        for bone in &self.bones {
+            let gap = closest_segment_points(shape.axis_start, shape.axis_end, bone.a, bone.b);
+            if gap.distance > shape.influence + bone.radius {
+                continue;
+            }
+            if bone.kind == BoneKind::Spine {
+                reach.spine += 1;
+            } else {
+                reach.bones += 1;
+            }
+        }
+        reach
     }
 
     /// Turns the tool for this step's motion; `down` is whether the button is
@@ -662,8 +714,10 @@ impl World {
 
     fn blunt_overlaps_tissue(&self, pose: &ToolPose) -> bool {
         let shape = contact_shape(pose);
-        self.points.iter().any(|point| {
-            !point.pinned && sample_point_contact(point.position, &shape).distance < shape.radius
+        self.points.iter().enumerate().any(|(index, point)| {
+            !point.pinned
+                && is_flesh(&self.flesh, index)
+                && sample_point_contact(point.position, &shape).distance < shape.radius
         })
     }
 
@@ -794,7 +848,7 @@ impl World {
             .iter()
             .enumerate()
             .filter(|(_, spring)| {
-                if spring.broken {
+                if spring.broken || !self.spring_in_flesh(**spring) {
                     return false;
                 }
                 let a = self.points[spring.a].position;
@@ -981,8 +1035,8 @@ impl World {
         let along_reach = self.materials.point_spacing * 0.7;
         let velocity = self.tool.velocity;
         let mut alongside = 0;
-        for point in &mut self.points {
-            if point.pinned {
+        for (index, point) in self.points.iter_mut().enumerate() {
+            if point.pinned || !is_flesh(&self.flesh, index) {
                 continue;
             }
             let t = segment_t(point.position, shape.axis_start, shape.axis_end);
@@ -1125,8 +1179,10 @@ impl World {
             .points
             .iter()
             .enumerate()
-            .filter(|(_, point)| {
-                !point.pinned && sample_point_contact(point.position, &shape).distance <= reach
+            .filter(|&(index, point)| {
+                !point.pinned
+                    && is_flesh(&self.flesh, index)
+                    && sample_point_contact(point.position, &shape).distance <= reach
             })
             .map(|(index, _)| index)
             .collect();
@@ -1144,8 +1200,8 @@ impl World {
     fn bruise_around_blow(&mut self, shape: &ToolContactShape, blow: f64, strike: ToolStrike) {
         let reach = shape.influence * BRUISE_HALO;
         let load = blow * 0.58 * strike.profile.tissue_push_scale * BRUISE_HALO_SHARE;
-        for point in &mut self.points {
-            if point.pinned {
+        for (index, point) in self.points.iter_mut().enumerate() {
+            if point.pinned || !is_flesh(&self.flesh, index) {
                 continue;
             }
             // The face itself bruised what it touched; this is the ring
@@ -1189,7 +1245,7 @@ impl World {
         let bruising_share = hypot(velocity.x, velocity.y) / FIRM_SWING_SPEED;
         let base_strength = 0.58 * strike.profile.tissue_push_scale * (0.85 + strike.power * 0.15);
         for (index, point) in self.points.iter_mut().enumerate() {
-            if point.pinned {
+            if point.pinned || !is_flesh(&self.flesh, index) {
                 continue;
             }
             let point_contact = sample_point_contact(point.position, shape);
@@ -1241,6 +1297,11 @@ impl World {
         let initial_bone_count = self.bones.len();
         for i in 0..initial_bone_count {
             let mut bone = self.bones[i];
+            // The spine lies behind the trunk, out of reach of a blow to the
+            // front of the body, and is never drawn.
+            if bone.kind == BoneKind::Spine {
+                continue;
+            }
             let pair = closest_segment_points(shape.axis_start, shape.axis_end, bone.a, bone.b);
             let mut dist = pair.distance;
             if dist > shape.influence + bone.radius {
@@ -1383,7 +1444,7 @@ impl World {
         let mut events = Vec::new();
         for spring_index in 0..self.springs.len() {
             let spring = self.springs[spring_index];
-            if spring.broken {
+            if spring.broken || !self.spring_in_flesh(spring) {
                 continue;
             }
             let a = self.points[spring.a];

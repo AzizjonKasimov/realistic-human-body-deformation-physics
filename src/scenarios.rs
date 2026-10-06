@@ -541,6 +541,8 @@ pub struct ScenarioExpectations {
     /// Farthest the tool may trail the hand while it touches nothing, in
     /// pixels.
     pub free_lag: DoubleBand,
+    /// How far the tool may be from the hand at the end, in pixels.
+    pub final_lag: DoubleBand,
 }
 
 /// A tool whose axis turns more than this in one step has snapped round
@@ -803,6 +805,7 @@ impl Scenario {
             int("contact_toggles", r.contact_toggles, e.contact_toggles),
             real("max_point_speed", r.max_point_speed, e.point_speed),
             real("max_free_lag", r.max_free_lag, e.free_lag),
+            real("final_lag", r.final_lag, e.final_lag),
         ];
         checks
             .into_iter()
@@ -934,6 +937,9 @@ pub struct ScenarioResult {
     /// Farthest the tool trailed the hand while it touched nothing, in
     /// pixels: how tightly it follows the pointer.
     pub max_free_lag: f64,
+    /// How far the tool was from the hand on the last step, in pixels: one
+    /// held still where nothing is drawn should be in hand.
+    pub final_lag: f64,
     last_positions: Vec<Vec2>,
     last_tool_axis: Option<Vec2>,
     last_touching: bool,
@@ -1048,6 +1054,11 @@ impl ScenarioResult {
         if !touching && tool_axis(world).is_some() {
             self.max_free_lag = self.max_free_lag.max(tool_lag(world, input));
         }
+        self.final_lag = if tool_axis(world).is_some() {
+            tool_lag(world, input)
+        } else {
+            0.0
+        };
         self.last_touching = touching;
         self.max_point_speed = self
             .max_point_speed
@@ -1338,6 +1349,71 @@ const SWING_ACROSS_AND_BACK: &[GestureStep] = &[
     },
     GestureStep::Wait(10),
     GestureStep::Press(false),
+    GestureStep::Wait(20),
+];
+
+/// Four hard sledgehammer blows through the arm into the chest, which smash a
+/// wound open; then the hammer is pressed outside the arm, dragged into the
+/// wound at about 550 px/s, and held there.
+const DRAG_INTO_A_WOUND: &[GestureStep] = &[
+    GestureStep::Move {
+        to: (-0.75, 0.34),
+        frames: 0,
+    },
+    GestureStep::Wait(10),
+    GestureStep::Press(true),
+    GestureStep::Move {
+        to: (0.0, 0.34),
+        frames: 8,
+    },
+    GestureStep::Wait(15),
+    GestureStep::Press(false),
+    GestureStep::Move {
+        to: (-0.75, 0.34),
+        frames: 20,
+    },
+    GestureStep::Wait(5),
+    GestureStep::Press(true),
+    GestureStep::Move {
+        to: (0.0, 0.34),
+        frames: 8,
+    },
+    GestureStep::Wait(15),
+    GestureStep::Press(false),
+    GestureStep::Move {
+        to: (-0.75, 0.34),
+        frames: 20,
+    },
+    GestureStep::Wait(5),
+    GestureStep::Press(true),
+    GestureStep::Move {
+        to: (0.0, 0.34),
+        frames: 8,
+    },
+    GestureStep::Wait(15),
+    GestureStep::Press(false),
+    GestureStep::Move {
+        to: (-0.75, 0.34),
+        frames: 20,
+    },
+    GestureStep::Wait(5),
+    GestureStep::Press(true),
+    GestureStep::Move {
+        to: (0.0, 0.34),
+        frames: 8,
+    },
+    GestureStep::Wait(15),
+    GestureStep::Press(false),
+    GestureStep::Move {
+        to: (-0.75, 0.34),
+        frames: 20,
+    },
+    GestureStep::Wait(30),
+    GestureStep::Press(true),
+    GestureStep::Move {
+        to: (-0.08, 0.34),
+        frames: 40,
+    },
     GestureStep::Wait(20),
 ];
 
@@ -1753,6 +1829,20 @@ pub fn scenarios() -> Vec<Scenario> {
                 bone_fractures: IntBand::range(0, 0),
                 skin_tears: IntBand::range(0, 0),
                 contusion_events: IntBand::range(0, 0),
+                ..steady
+            },
+        },
+        Scenario {
+            name: "hammer_into_wound",
+            region: "torso",
+            intent: "wound",
+            play: gesture(ToolMode::Heavy, DRAG_INTO_A_WOUND),
+            // Dragged into a wound its own blows smashed open and held there,
+            // the sledgehammer comes to the hand: flesh torn away is not there
+            // to hold it back, as it used to, like a swamp.
+            expectations: ScenarioExpectations {
+                contacts: IntBand::at_least(1),
+                final_lag: DoubleBand::range(0.0, 10.0),
                 ..steady
             },
         },

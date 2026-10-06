@@ -84,20 +84,15 @@ impl World {
         let spacing = self.materials.point_spacing.max(1.0);
         let reach = spacing * OUTLINE_CONTACT_REACH;
         let cell = spacing * 2.0;
-        // A point torn loose from its sheet is a scrap of flesh, not surface.
-        let mut attached = vec![false; self.points.len()];
-        for spring in &self.springs {
-            if !spring.broken {
-                attached[spring.a] = true;
-                attached[spring.b] = true;
-            }
-        }
         for (outline_index, outline) in self.outlines.iter().enumerate() {
             let count = outline.points.len();
             let mut grid: HashMap<GridKey, Vec<usize>> = HashMap::new();
             for edge in 0..count {
-                let intact =
-                    outline.edge_springs[edge].is_some_and(|spring| !self.springs[spring].broken);
+                // A torn edge, or one of flesh torn away, is no longer a
+                // surface anything can press against.
+                let intact = outline.edge_springs[edge].is_some_and(|spring| {
+                    !self.springs[spring].broken && self.spring_in_flesh(self.springs[spring])
+                });
                 if !intact {
                     continue;
                 }
@@ -123,7 +118,8 @@ impl World {
                 );
             }
             for (position, &point) in outline.points.iter().enumerate() {
-                if !attached[point] {
+                // Flesh torn away is not surface.
+                if !is_flesh(&self.flesh, point) {
                     continue;
                 }
                 let p = self.points[point].position;
