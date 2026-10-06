@@ -624,16 +624,20 @@ fn direct_bone_strike_fractures_and_emits_fluid() {
     if world.stats().fractured_bones <= 0 || world.bones().len() <= initial_bones {
         fail("direct striker contact should fracture a bone");
     }
-    if world.stats().emitted_fluid_particles <= 0 || world.fluids().is_empty() {
-        fail("bone fracture should emit fluid particles from damaged tissue");
+    // A break bleeds from the tissue it tears: out of the body through broken
+    // skin, and into the flesh as a bruise under skin that held.
+    let stats = world.stats();
+    if stats.emitted_fluid_particles + stats.internal_bleeding <= 0 {
+        fail("bone fracture should bleed from the damaged tissue, inside or out");
+    }
+    if stats.broken_skin == 0 && !world.fluids().is_empty() {
+        fail("blood should not leave the body through unbroken skin");
     }
     if world.debug().bone_contacts <= 0 || world.debug().fractures <= 0 {
         fail("direct strike should expose contact debug metrics");
     }
 }
 
-/// A knife creeping up to a lone skin fiber, pushed by a hand `lead` pixels
-/// ahead of it, for `frames` steps; returns the world and the tip's furthest x.
 /// Moves the hand toward a spot `lead` pixels past where the knife's middle
 /// sits when its tip touches the fiber at x=176, by at most `ease` pixels a
 /// step, and holds it there, so the arm presses the blade in that hard.

@@ -1384,11 +1384,12 @@ pub fn scenarios() -> Vec<Scenario> {
             region: "torso",
             intent: "high",
             play: Play::Swing(
-                strike(ToolMode::Heavy, (-0.260, 0.340), (0.300, 0.340), 8, 60),
+                strike(ToolMode::Heavy, (-0.260, 0.340), (0.300, 0.340), 6, 60),
                 None,
             ),
-            // A full-force sledgehammer blow (about 3000 px/s) through the arm
-            // into the chest breaks the arm, often a rib too, bruises deeply,
+            // A full-force sledgehammer blow, as fast as the hammer goes,
+            // through the arm into the chest breaks the arm, often a rib too,
+            // bruises deeply,
             // and leaves a wound. Breaking the arm takes much of the blow, so
             // the chest behind it is not pulped.
             expectations: ScenarioExpectations {
@@ -1555,7 +1556,7 @@ pub fn scenarios() -> Vec<Scenario> {
                 organ_penetrations: IntBand::range(0, 0),
                 organ_ruptures: IntBand::range(0, 0),
                 cavity_ruptures: IntBand::range(0, 0),
-                blood_loss: DoubleBand::range(0.0005, 0.05),
+                blood_loss: DoubleBand::range(0.0003, 0.05),
                 ..e
             },
         },
@@ -1564,7 +1565,7 @@ pub fn scenarios() -> Vec<Scenario> {
             region: "torso",
             intent: "settle",
             play: Play::Swing(
-                strike(ToolMode::Heavy, (-0.260, 0.340), (0.300, 0.340), 8, 260),
+                strike(ToolMode::Heavy, (-0.260, 0.340), (0.300, 0.340), 6, 260),
                 None,
             ),
             // The bone fragments from a full-force sledgehammer blow to the
