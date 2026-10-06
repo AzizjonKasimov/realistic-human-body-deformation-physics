@@ -148,15 +148,39 @@ From the repository root in PowerShell:
 .\tools\verify.ps1
 ```
 
-The Rust verifier runs formatting checks, simulation tests, deterministic strike playback, anatomy diagnostics, and visual damage diagnostics. To also build the app executable:
+The Rust verifier runs formatting checks, simulation tests, deterministic strike playback and its offset sweep, anatomy diagnostics, and visual damage diagnostics, then prints how long each step took (about half a minute in all). The scenario and diagnostic programs run as release builds, which give the same results as debug builds several times faster. Options:
+
+- `-BuildApp` also rebuilds the root `realistic_physics.exe` (`-StopRunningApp` closes a running copy that blocks it).
+- `-Capture` also saves real app screenshots of the body at rest at 1280x720, 800x600, and 390x844 (see [Screenshots](#screenshots)).
+- `-SkipSweep` and `-SkipDiagnostics` leave out the sweep and the two diagnostics.
+
+## Compare A Change
+
+To see how a change moves the simulation, compare the working tree with a commit (by default `HEAD`, so it shows what uncommitted changes do):
 
 ```powershell
-.\tools\verify.ps1 -BuildApp
+.\tools\compare.ps1
+.\tools\compare.ps1 -Ref HEAD~3 -Sweep
+.\tools\compare.ps1 -Capture torso_heavy_high
 ```
+
+It plays the strike scenarios and the visual damage and anatomy diagnostics on both sides and lists every changed number per scenario, tuning warnings that appeared or went away, and changed mesh counts. The commit is built in a git worktree under `target\compare` and its results are cached by commit, so repeated comparisons only replay the working tree. `-Sweep` also compares how often each scenario stays in band when its swing moves slightly, and `-Capture NAME` puts app screenshots of that scenario from both sides into one contact sheet; both need a commit that already has those features. The full report is `output\compare\report.txt`, with each side's raw outputs in `output\compare\base` and `output\compare\current`. `-Clean` removes the cached worktrees and results.
+
+## Screenshots
+
+The app can play a scripted strike and save the screen without anyone at the keyboard:
+
+```powershell
+.\tools\capture.ps1
+.\tools\capture.ps1 -Scenario torso_heavy_high -Sizes 1280x720,800x600,390x844
+.\tools\capture.ps1 -Strike "hammer:-0.26,0.34:0.30,0.34:power=4" -NoUi
+```
+
+Each capture briefly opens the app window at the given size, plays the strike at fixed steps, saves the normal and anatomy views as PNG files in `output\captures`, and closes; several captures are also laid out in one contact sheet (`NAME-sheet.png`). `-View normal|anatomy|both` picks the views, `-Frames N` stops after N steps, and `-NoUi` leaves out the HUD and control buttons, for clean images. The script drives `realistic_physics.exe --capture OUT.png` (options `--size`, `--view`, `--scenario`, `--strike`, `--frames`, `--no-ui`, `--label`), and `contact_sheet.exe OUT.png [--height H] [--columns N] IN.png...` makes the sheet.
 
 ## Strike Scenarios
 
-`.\tools\verify.ps1` builds and runs deterministic strike playback across representative torso, shoulder, arm, hip, and leg strikes with blunt, sharp, and heavy tools. Each scripted swing moves the hand from outside the body and holds briefly at the end with the button down, so the tool, which trails the hand, lands as a real swing would. The scenario target writes frame-by-frame contact telemetry to:
+`.\tools\verify.ps1` builds and runs deterministic strike playback across representative torso, shoulder, arm, hip, and leg strikes with blunt, sharp, and heavy tools. The scenarios live in `src/scenarios.rs`, where the strike runner, the visual damage diagnostic, and the app's capture mode all play them from. Each scripted swing moves the hand from outside the body and holds briefly at the end with the button down, so the tool, which trails the hand, lands as a real swing would. The scenario target writes frame-by-frame contact telemetry to:
 
 ```text
 output\strike_scenarios.csv
@@ -175,6 +199,23 @@ output\strike_tuning_report.txt
 ```
 
 The CSV outputs include region, intent, tool mode, striker speed, impact, contact counts, contact depth, tissue/bone loads, sharp cut propagation counts, skin-to-muscle cut transfer counts, sharp skin-flap delamination counts, fiber-aligned muscle tear counts, muscle crush-rupture counts, torso cavity pressure/collapse/rupture counts, organ damage/direct-penetration/rib-puncture/rupture counts, direct and fragment-driven major vessel laceration counts, soft-tissue contusion counts, local tissue-softening maxima, spring-fatigue events and local fatigue maxima, plastic deformation events and local plasticity maxima, joint subluxation/breakage, ligament/capsule damage events, fracture events, rib-fracture counts, fracture marrow-source counts, post-fracture joint limit corrections, wound counts, wound reopen counts, wound pressure/clotting, blood loss, final blood reserve, final blood-turgor scale, blood stain/pool deposits, broken-end tissue contacts, inside-out skin puncture counts, fragment-bone contacts/damping/resting support, fragment-pair contacts/damping/resting support, fragment-floor contacts/resting support, overlap depth, fragment angular speed, free/spinning/sleeping fragment counts, runtime budget checks/skips/replacements, fluid emission, final fragment counts, and accumulated damage stats. The bands gate realistic injury for each tool: bat blows to the arm, shoulder, and leg must bruise widely while tearing little skin, cutting no major vessel, and breaking at most an arm; a full-force sledgehammer into the chest must break the arm and ribs, bruise deeply, and injure organs without pulping the chest, while the thigh's femur holds against it; knife cuts on the belly and arm must leave an incision through skin and muscle with skin flaps and deep cut transfer, reach a major vessel where staged, and break no bone at all, so the knife cannot regress into a club; `thigh_cut_rebleed` lets a knife cut down the thigh clot and then requires a bat blow to make it bleed again; and `torso_heavy_fragment_settle` waits after the sledgehammer blow so fragment contact, resting support, and sleep behavior are covered.
+
+A strike's outcome can swing a lot with a few pixels of aim, because a fast tool moves about one mesh spacing per step. So the verifier also replays every scenario with its swing moved by up to 0.01 body heights along its path and 0.005 across it (15 runs each, on all cores) and writes how often each one stays in band, with the spread of its main injuries, to:
+
+```text
+output\strike_sweep_report.txt
+output\strike_sweep.csv
+```
+
+The runner also takes options for quick experiments:
+
+```powershell
+cargo run --release --bin strike_scenarios -- --list
+cargo run --release --bin strike_scenarios -- --only torso_heavy_high --sweep
+cargo run --release --bin strike_scenarios -- --strike "knife:-0.08,0.38:0.07,0.48"
+```
+
+`--list` prints every scenario's swing, `--only` limits a run or sweep to some scenarios, and `--strike TOOL:U0,V0:U1,V1[:power=P][:frames=N][:windup=N][:settle=N]` plays one custom swing in body coordinates (fractions of body height from the top of the head on the midline) and prints its injuries, or their spread with `--sweep`. Tools are `bat`, `knife`, and `hammer`.
 
 ## Anatomy Diagnostics
 
@@ -204,16 +245,19 @@ The visual diagnostic exits nonzero if the captures no longer include expected w
 
 ## Development Notes
 
-- `Cargo.toml` defines the Rust library, app, diagnostics, and strike scenario binaries.
+- `Cargo.toml` defines the Rust library, app, diagnostics, strike scenario, and contact sheet binaries.
 - `src/simulation.rs` contains the physics data model, integration, constraints, tearing, bone fracture, major vessels, wounds, and fluid particles; `src/simulation/body.rs` generates the layered body; `src/simulation/tools.rs` holds the tools: their shapes, the hand that drives them, and their contact with tissue and bone.
-- `src/bin/realistic_physics.rs` owns the `macroquad` app shell, input, timing, and rendering. It also runs in the browser, so the app and simulation must avoid file I/O, threads, and `std::time`, none of which work on `wasm32-unknown-unknown`.
+- `src/bin/realistic_physics/main.rs` owns the `macroquad` app shell, input, timing, and rendering. It also runs in the browser, so the app and simulation must avoid file I/O, threads, and `std::time`, none of which work on `wasm32-unknown-unknown`. `src/bin/realistic_physics/capture.rs` is the native-only screenshot mode.
+- `src/scenarios.rs` holds the scripted strikes and the tuned strike scenarios with their injury bands, shared by the strike runner, the visual damage diagnostic, and the capture mode. It is native-only and not part of the browser build.
 - `web/index.html` is the browser page: start screen with a content warning, loader, error messages, and the `?stats` frame-time overlay (also exposed as `window.__perf` for automated checks).
 - `tools/build_web.ps1` builds the browser version into `target\web`; `tools/serve_web.ps1` serves it locally with the `application/wasm` content type browsers require.
 - `.cargo/config.toml` lets the wasm linker leave miniquad's WebGL functions as imports for `gl.js` to provide; recent Rust versions no longer do that by default.
 - `src/bin/anatomy_diagnostics.rs` writes a deterministic SVG anatomy snapshot and reports geometry validation metrics.
-- `src/bin/strike_scenarios.rs` writes deterministic strike telemetry and tuning summaries.
+- `src/bin/strike_scenarios.rs` writes deterministic strike telemetry and tuning summaries, sweeps scenarios over small swing offsets, and plays custom swings.
 - `src/bin/visual_damage_diagnostics.rs` writes deterministic SVG damage captures and visual primitive metrics.
-- `tests/simulation_tests.rs` contains focused Rust simulation checks.
+- `src/bin/contact_sheet.rs` lays PNG screenshots out in one image.
+- `tools/verify.ps1`, `tools/compare.ps1`, and `tools/capture.ps1` are the checking workflows described above.
+- `tests/simulation_tests.rs` contains focused Rust simulation checks, including mirror symmetry of the body and skin covering the muscle at rest in several window sizes.
 - `src/silhouette.rs` defines the mannequin figure (torso outline, limb joints and radii, head, hands, feet) for one side and mirrors it into a signed distance field; `src/simulation/body.rs` meshes the body from it, builds the limb bones on the same joints, and places the rest of the anatomy. `body_frame` maps body coordinates (fractions of body height) to the window, which the strike scenarios use to aim at anatomy.
 
 The next Rust simulation milestones are:
@@ -223,7 +267,7 @@ The next Rust simulation milestones are:
 3. Tighten strike tuning bands once material behavior has settled enough for intentional regression gates.
 4. Keep increasing fracture density in small measured steps, using the long-settle telemetry to catch fragment sleep, budget, and stability regressions.
 5. Verify the `macroquad` app on macOS and document any platform-specific packaging steps.
-6. Add a renderer screenshot or baseline-image comparison path once the headless SVG damage diagnostic has stabilized.
+6. Add a pixel-level comparison on top of the app captures, so rendering regressions against a baseline commit show up without looking at the images.
 
 ## Toolchain
 

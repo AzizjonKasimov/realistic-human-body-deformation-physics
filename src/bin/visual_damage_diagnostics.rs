@@ -1,25 +1,20 @@
 use realistic_physics as rp;
+use rp::scenarios::{scenario, Strike, SCENARIO_HEIGHT, SCENARIO_WIDTH};
 use std::env;
 use std::fmt::Write as FmtWrite;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write as IoWrite};
 use std::path::{Path, PathBuf};
 
-const WIDTH: f64 = 1280.0;
-const HEIGHT: f64 = 720.0;
+const WIDTH: f64 = SCENARIO_WIDTH;
+const HEIGHT: f64 = SCENARIO_HEIGHT;
 const PANEL_GAP: f64 = 24.0;
 
 #[derive(Clone, Copy)]
 struct VisualScenario {
     name: &'static str,
     intent: &'static str,
-    tool: rp::ToolMode,
-    start: rp::Vec2,
-    end: rp::Vec2,
-    windup_frames: i32,
-    strike_frames: i32,
-    settle_frames: i32,
-    power: f64,
+    strike: Strike,
     expectations: VisualExpectations,
 }
 
@@ -137,18 +132,20 @@ fn main() {
     }
 }
 
+/// The swing of the tuned strike scenario with this name, so the captures
+/// replay exactly what the strike scenarios check.
+fn tuned_strike(name: &str) -> Strike {
+    scenario(name)
+        .unwrap_or_else(|| panic!("no strike scenario named {name}"))
+        .strike
+}
+
 fn visual_scenarios() -> Vec<VisualScenario> {
     vec![
         VisualScenario {
             name: "torso_sharp_cut_visual",
             intent: "cut",
-            tool: rp::ToolMode::Sharp,
-            start: body(-0.075, 0.380),
-            end: body(0.065, 0.480),
-            windup_frames: 6,
-            strike_frames: 16,
-            settle_frames: 60,
-            power: 3.0,
+            strike: tuned_strike("torso_sharp_cut"),
             // A knife cut on the belly: an incision line through skin and
             // muscle that reaches a vessel and an organ, with no broken bone.
             expectations: VisualExpectations {
@@ -169,16 +166,9 @@ fn visual_scenarios() -> Vec<VisualScenario> {
         VisualScenario {
             name: "torso_heavy_settle_visual",
             intent: "settle",
-            tool: rp::ToolMode::Heavy,
-            start: body(-0.260, 0.340),
-            end: body(0.300, 0.340),
-            windup_frames: 6,
-            strike_frames: 16,
-            settle_frames: 260,
-            power: 4.0,
+            strike: tuned_strike("torso_heavy_fragment_settle"),
             // A full-force sledgehammer blow to the chest, left to settle:
-            // broken arm and ribs, deep bruising, torn flesh and bleeding. The
-            // swing starts close to the arm so the trailing hammer keeps its speed.
+            // broken arm and ribs, deep bruising, torn flesh and bleeding.
             expectations: VisualExpectations {
                 min_skin_wound_edges: 30,
                 min_muscle_fiber_tears: 10,
@@ -202,17 +192,11 @@ fn visual_scenarios() -> Vec<VisualScenario> {
 fn run_scenario(scenario: &VisualScenario) -> (rp::World, f64, f64, f64) {
     let mut world = rp::create_layered_body(WIDTH, HEIGHT, rp::Materials::default());
     let dt = world.materials().fixed_dt;
-    let total_frames = scenario.windup_frames + scenario.strike_frames + scenario.settle_frames;
     let mut peak_cavity_pressure: f64 = 0.0;
     let mut peak_cavity_collapse: f64 = 0.0;
     let mut peak_organ_damage: f64 = 0.0;
-    for frame in 0..total_frames {
-        let input =
-            if frame < scenario.windup_frames + scenario.strike_frames + FOLLOW_THROUGH_FRAMES {
-                make_strike_input(scenario, frame, dt)
-            } else {
-                rp::InputState::default()
-            };
+    for frame in 0..scenario.strike.frames() {
+        let input = scenario.strike.input(frame, dt, WIDTH, HEIGHT);
         world.step(dt, &input, WIDTH, HEIGHT);
         let debug = world.debug();
         peak_cavity_pressure = peak_cavity_pressure.max(debug.max_cavity_pressure);
@@ -225,37 +209,6 @@ fn run_scenario(scenario: &VisualScenario) -> (rp::World, f64, f64, f64) {
         peak_cavity_collapse,
         peak_organ_damage,
     )
-}
-
-/// Frames the hand holds at the end of a swing with the button down, since
-/// the tool trails the hand.
-const FOLLOW_THROUGH_FRAMES: i32 = 20;
-
-fn make_strike_input(scenario: &VisualScenario, frame: i32, dt: f64) -> rp::InputState {
-    let t0 =
-        (frame - scenario.windup_frames).max(0) as f64 / (scenario.strike_frames - 1).max(1) as f64;
-    let t = t0.clamp(0.0, 1.0);
-    let moving = t0 < 1.0;
-    let position = rp::Vec2 {
-        x: scenario.start.x + (scenario.end.x - scenario.start.x) * t,
-        y: scenario.start.y + (scenario.end.y - scenario.start.y) * t,
-    };
-    let velocity = rp::Vec2 {
-        x: (scenario.end.x - scenario.start.x) / ((scenario.strike_frames - 1).max(1) as f64 * dt),
-        y: (scenario.end.y - scenario.start.y) / ((scenario.strike_frames - 1).max(1) as f64 * dt),
-    };
-    let down = frame >= scenario.windup_frames
-        && frame < scenario.windup_frames + scenario.strike_frames + FOLLOW_THROUGH_FRAMES;
-    rp::InputState {
-        active: down,
-        down,
-        x: position.x,
-        y: position.y,
-        vx: if down && moving { velocity.x } else { 0.0 },
-        vy: if down && moving { velocity.y } else { 0.0 },
-        power: scenario.power,
-        tool: scenario.tool,
-    }
 }
 
 fn inspect_visual_damage(world: &rp::World) -> VisualMetrics {
@@ -964,7 +917,7 @@ fn draw_label(out: &mut String, capture: &VisualCapture) {
         "<text class=\"small\" x=\"34\" y=\"44\">{} ({}, {})</text>",
         capture.scenario.name,
         capture.scenario.intent,
-        tool_name(capture.scenario.tool)
+        tool_name(capture.scenario.strike.tool)
     )
     .expect("write label title");
     writeln!(
@@ -1031,7 +984,7 @@ fn write_summary(path: &Path, captures: &[VisualCapture]) -> std::io::Result<()>
         let fields = [
             capture.scenario.name.to_string(),
             capture.scenario.intent.to_string(),
-            tool_name(capture.scenario.tool).to_string(),
+            tool_name(capture.scenario.strike.tool).to_string(),
             metrics.skin_wound_edges.to_string(),
             metrics.incision_segments.to_string(),
             metrics.wound_rim_edges.to_string(),
@@ -1182,12 +1135,6 @@ fn tool_name(tool: rp::ToolMode) -> &'static str {
         rp::ToolMode::Sharp => "sharp",
         rp::ToolMode::Heavy => "heavy",
     }
-}
-
-/// World position of body coordinates (fractions of body height from the top of
-/// the head on the midline) for the 1280x720 scenario window.
-fn body(u: f64, v: f64) -> rp::Vec2 {
-    rp::body_frame(WIDTH, HEIGHT).point(u, v)
 }
 
 fn add(a: rp::Vec2, b: rp::Vec2) -> rp::Vec2 {

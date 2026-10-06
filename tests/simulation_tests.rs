@@ -195,6 +195,46 @@ fn generated_body_mirrors_across_its_midline() {
     }
 }
 
+/// The body is meshed for each window size, so check desktop, browser pane,
+/// and phone shapes: at rest no muscle may show past the skin anywhere.
+#[test]
+fn skin_covers_the_muscle_at_rest_in_any_window() {
+    let windows = [
+        (800.0, 600.0),
+        (1280.0, 720.0),
+        (1366.0, 768.0),
+        (1920.0, 1080.0),
+        (758.0, 914.0),
+        (390.0, 844.0),
+    ];
+    for (width, height) in windows {
+        let world = rp::create_layered_body(width, height, rp::Materials::default());
+        let points = world.points();
+        for triangle in world.triangles() {
+            if triangle.layer != rp::TissueLayer::Muscle {
+                continue;
+            }
+            let [a, b, c] = [triangle.a, triangle.b, triangle.c].map(|i| points[i].position);
+            let mid = |p: rp::Vec2, q: rp::Vec2| rp::Vec2 {
+                x: (p.x + q.x) * 0.5,
+                y: (p.y + q.y) * 0.5,
+            };
+            let centroid = rp::Vec2 {
+                x: (a.x + b.x + c.x) / 3.0,
+                y: (a.y + b.y + c.y) / 3.0,
+            };
+            for sample in [a, b, c, mid(a, b), mid(b, c), mid(c, a), centroid] {
+                if !rp::point_inside_layer(&world, sample, rp::TissueLayer::Skin) {
+                    let (u, v) = rp::body_frame(width, height).body_coords(sample);
+                    panic!(
+                        "FAIL: muscle shows past the skin at body ({u:.3}, {v:.3}) in a {width}x{height} window"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn generated_body_has_expected_layers_and_anatomy() {
     let world = rp::create_layered_body(1280.0, 720.0, rp::Materials::default());

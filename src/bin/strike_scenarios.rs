@@ -1,263 +1,176 @@
+//! Plays the tuned strike scenarios from `realistic_physics::scenarios` and
+//! checks the injuries against each scenario's bands.
+//!
+//! ```text
+//! strike_scenarios [CSV]              play every scenario once: per-frame CSV,
+//!                                     strike_summary.csv, strike_tuning_report.txt
+//!   --only NAME[,NAME...]             only these scenarios
+//!   --sweep                           replay each scenario with the swing moved a
+//!                                     little along and across its path, and report
+//!                                     how often it stays in band
+//!                                     (strike_sweep.csv, strike_sweep_report.txt)
+//!   --strike TOOL:U0,V0:U1,V1[:power=P][:frames=N][:settle=N]
+//!                                     play one custom swing (body coordinates) and
+//!                                     print its injuries; with --sweep, its spread
+//!   --list                            print the scenarios and their swings
+//! ```
+//!
+//! Outputs go next to the CSV path (default `output/strike_scenarios.csv`).
+
 use realistic_physics as rp;
+use rp::scenarios::{
+    active_fluid_count, free_fragment_count, run, scenarios, spinning_fragment_count, tool_name,
+    Scenario, ScenarioExpectations, ScenarioResult, Strike, SCENARIO_HEIGHT, SCENARIO_WIDTH,
+};
 use std::env;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::process;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::thread;
 
-const WIDTH: f64 = 1280.0;
-const HEIGHT: f64 = 720.0;
+/// How far a sweep moves each swing along its path and across it, in body
+/// heights: about one point spacing either way, as aim varies from swing to
+/// swing.
+const SWEEP_ALONG: [f64; 5] = [-0.010, -0.005, 0.0, 0.005, 0.010];
+const SWEEP_ACROSS: [f64; 3] = [-0.005, 0.0, 0.005];
 
-#[derive(Clone, Copy)]
-struct IntBand {
-    min: i32,
-    max: i32,
-}
-
-impl Default for IntBand {
-    fn default() -> Self {
-        Self {
-            min: 0,
-            max: i32::MAX,
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct DoubleBand {
-    min: f64,
-    max: f64,
-}
-
-impl Default for DoubleBand {
-    fn default() -> Self {
-        Self {
-            min: 0.0,
-            max: f64::INFINITY,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Default)]
-struct ScenarioExpectations {
-    contacts: IntBand,
-    bone_fractures: IntBand,
-    rib_fractures: IntBand,
-    skin_tears: IntBand,
-    muscle_tears: IntBand,
-    contusion_events: IntBand,
-    tissue_fatigue_events: IntBand,
-    tissue_plastic_events: IntBand,
-    tear_propagations: IntBand,
-    muscle_cut_transfers: IntBand,
-    muscle_fiber_tears: IntBand,
-    muscle_crush_ruptures: IntBand,
-    cavity_pressure_events: IntBand,
-    cavity_ruptures: IntBand,
-    organ_damage_events: IntBand,
-    organ_penetrations: IntBand,
-    rib_organ_punctures: IntBand,
-    organ_ruptures: IntBand,
-    skin_flap_detachments: IntBand,
-    vessel_lacerations: IntBand,
-    fragment_vessel_lacerations: IntBand,
-    wound_reopens: IntBand,
-    fluid_emitted: IntBand,
-    wound_fluid: IntBand,
-    blood_stain_deposits: IntBand,
-    fracture_marrow_sources: IntBand,
-    opened_wounds: IntBand,
-    final_free_fragments: IntBand,
-    fragment_bone_contacts: IntBand,
-    fragment_bone_damping_events: IntBand,
-    fragment_bone_resting_contacts: IntBand,
-    sleeping_fragments: IntBand,
-    sleep_events: IntBand,
-    final_sleeping_fragments: IntBand,
-    fragment_pair_damping_events: IntBand,
-    fragment_pair_resting_contacts: IntBand,
-    fragment_floor_contacts: IntBand,
-    fragment_floor_resting_contacts: IntBand,
-    fragment_pair_contacts: IntBand,
-    fragment_skin_punctures: IntBand,
-    bone_joint_subluxations: IntBand,
-    joint_ligament_damage_events: IntBand,
-    joint_corrections: IntBand,
-    fragment_overlap: DoubleBand,
-    bone_spin: DoubleBand,
-    bone_joint_subluxation: DoubleBand,
-    tissue_softening: DoubleBand,
-    tissue_fatigue: DoubleBand,
-    tissue_plasticity: DoubleBand,
-    cavity_pressure: DoubleBand,
-    cavity_collapse: DoubleBand,
-    organ_damage: DoubleBand,
-    blood_loss: DoubleBand,
-    final_blood_volume: DoubleBand,
-    final_blood_turgor: DoubleBand,
-}
-
-#[derive(Clone, Copy)]
-struct Scenario {
-    name: &'static str,
-    region: &'static str,
-    intent: &'static str,
-    tool: rp::ToolMode,
-    start: rp::Vec2,
-    end: rp::Vec2,
-    windup_frames: i32,
-    strike_frames: i32,
-    settle_frames: i32,
-    power: f64,
-    followup: Option<FollowupStrike>,
-    expectations: ScenarioExpectations,
-}
-
-#[derive(Clone, Copy)]
-struct FollowupStrike {
-    tool: rp::ToolMode,
-    start: rp::Vec2,
-    end: rp::Vec2,
-    windup_frames: i32,
-    strike_frames: i32,
-    settle_frames: i32,
-    power: f64,
-}
-
-#[derive(Default)]
-struct ScenarioResult {
-    tissue_contacts: i32,
-    bone_contacts: i32,
-    fractures: i32,
-    skin_tears: i32,
-    muscle_tears: i32,
-    muscle_fiber_tears: i32,
-    contusion_events: i32,
-    tissue_fatigue_events: i32,
-    tissue_plastic_events: i32,
-    tear_propagations: i32,
-    muscle_cut_transfers: i32,
-    muscle_crush_ruptures: i32,
-    cavity_pressure_events: i32,
-    cavity_ruptures: i32,
-    organ_damage_events: i32,
-    organ_penetrations: i32,
-    rib_organ_punctures: i32,
-    organ_ruptures: i32,
-    skin_flap_detachments: i32,
-    vessel_lacerations: i32,
-    fragment_vessel_lacerations: i32,
-    wound_reopens: i32,
-    max_active_contusions: i32,
-    detachments: i32,
-    bone_detachments: i32,
-    bone_joint_breaks: i32,
-    bone_joint_subluxations: i32,
-    joint_ligament_damage_events: i32,
-    bone_fractures: i32,
-    rib_fractures: i32,
-    final_bones: i32,
-    fluid_emitted: i32,
-    wound_fluid: i32,
-    blood_loss: f64,
-    final_blood_volume: f64,
-    final_blood_turgor: f64,
-    blood_stain_deposits: i32,
-    fracture_marrow_sources: i32,
-    opened_wounds: i32,
-    max_active_wounds: i32,
-    wound_leaks: i32,
-    max_active_fluids: i32,
-    max_active_blood_stains: i32,
-    fragment_hits: i32,
-    fragment_tears: i32,
-    fragment_skin_punctures: i32,
-    fragment_bone_contacts: i32,
-    fragment_bone_damping_events: i32,
-    fragment_bone_resting_contacts: i32,
-    fragment_pair_contacts: i32,
-    fragment_pair_damping_events: i32,
-    fragment_pair_resting_contacts: i32,
-    fragment_floor_contacts: i32,
-    fragment_floor_resting_contacts: i32,
-    post_fracture_joint_corrections: i32,
-    max_impact: f64,
-    max_bone_load: f64,
-    max_point_load: f64,
-    max_depth: f64,
-    max_fragment_depth: f64,
-    max_fragment_impulse: f64,
-    max_fragment_overlap: f64,
-    max_post_fracture_joint_stretch: f64,
-    max_post_fracture_joint_angle: f64,
-    max_bone_joint_subluxation: f64,
-    max_wound_pressure: f64,
-    max_wound_clot: f64,
-    max_cavity_pressure: f64,
-    max_cavity_collapse: f64,
-    max_organ_damage: f64,
-    max_contusion: f64,
-    max_tissue_softening: f64,
-    max_tissue_fatigue: f64,
-    max_tissue_plasticity: f64,
-    max_bone_angular_speed: f64,
-    final_free_fragments: i32,
-    final_spinning_fragments: i32,
-    final_sleeping_fragments: i32,
-    max_active_fragments: i32,
-    max_sleeping_fragments: i32,
-    fragment_sleep_events: i32,
-    fragment_wake_events: i32,
-    fragment_budget_skips: i32,
-    fracture_budget_blocks: i32,
-    fragment_bone_checks: i32,
-    fragment_bone_budget_skips: i32,
-    fragment_pair_checks: i32,
-    fragment_pair_budget_skips: i32,
-    fragment_tissue_checks: i32,
-    fragment_tissue_budget_skips: i32,
-    fluid_budget_replacements: i32,
-    blood_stain_budget_replacements: i32,
-    wound_budget_replacements: i32,
-    max_solver_iterations: i32,
+struct Options {
+    csv_path: PathBuf,
+    only: Vec<String>,
+    sweep: bool,
+    strike: Option<Strike>,
+    list: bool,
 }
 
 fn main() {
-    let csv_path = env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("output/strike_scenarios.csv"));
-    if let Some(parent) = csv_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).expect("create output directory");
+    let options = parse_options().unwrap_or_else(|message| {
+        eprintln!("{message}");
+        eprintln!(
+            "usage: strike_scenarios [CSV] [--only NAME,...] [--sweep] [--strike SPEC] [--list]"
+        );
+        process::exit(2);
+    });
+    let output_dir = options
+        .csv_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    fs::create_dir_all(&output_dir).expect("create output directory");
+
+    if options.list {
+        for scenario in scenarios() {
+            println!("{:<30} {}", scenario.name, scenario.strike);
+            if let Some(followup) = scenario.followup {
+                println!("{:<30} then {}", "", followup);
+            }
+        }
+        return;
+    }
+
+    let selected: Vec<Scenario> = match options.strike {
+        Some(strike) => vec![Scenario {
+            name: "custom",
+            region: "custom",
+            intent: "custom",
+            strike,
+            followup: None,
+            expectations: ScenarioExpectations::default(),
+        }],
+        None => {
+            let all = scenarios();
+            for name in &options.only {
+                if !all.iter().any(|scenario| scenario.name == name) {
+                    eprintln!("unknown scenario `{name}`; --list shows them");
+                    process::exit(2);
+                }
+            }
+            all.into_iter()
+                .filter(|scenario| {
+                    options.only.is_empty() || options.only.iter().any(|name| name == scenario.name)
+                })
+                .collect()
+        }
+    };
+
+    if options.sweep {
+        sweep(&selected, &output_dir, options.strike.is_some());
+    } else if options.strike.is_some() {
+        play_custom(&selected[0], &output_dir);
+    } else {
+        play_scenarios(&selected, &options.csv_path, &output_dir);
+    }
+}
+
+fn parse_options() -> Result<Options, String> {
+    let mut options = Options {
+        csv_path: PathBuf::from("output/strike_scenarios.csv"),
+        only: Vec::new(),
+        sweep: false,
+        strike: None,
+        list: false,
+    };
+    let mut args = env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--sweep" => options.sweep = true,
+            "--list" => options.list = true,
+            "--only" => {
+                let names = args.next().ok_or("--only needs scenario names")?;
+                options
+                    .only
+                    .extend(names.split(',').map(|name| name.trim().to_string()));
+            }
+            "--strike" => {
+                let spec = args.next().ok_or("--strike needs a swing")?;
+                options.strike = Some(Strike::parse(&spec)?);
+            }
+            flag if flag.starts_with("--") => return Err(format!("unknown option `{flag}`")),
+            path => options.csv_path = PathBuf::from(path),
         }
     }
+    Ok(options)
+}
 
-    let summary_path = csv_path
-        .parent()
-        .unwrap_or_else(|| Path::new("output"))
-        .join("strike_summary.csv");
-    let report_path = csv_path
-        .parent()
-        .unwrap_or_else(|| Path::new("output"))
-        .join("strike_tuning_report.txt");
-
-    let mut csv = BufWriter::new(File::create(&csv_path).expect("create strike CSV"));
+/// Plays each scenario once with the per-frame CSV, summary, and tuning report.
+fn play_scenarios(selected: &[Scenario], csv_path: &Path, output_dir: &Path) {
+    let summary_path = output_dir.join("strike_summary.csv");
+    let report_path = output_dir.join("strike_tuning_report.txt");
+    let mut csv = BufWriter::new(File::create(csv_path).expect("create strike CSV"));
     write_frame_header(&mut csv).expect("write frame header");
-    let mut summary_rows = Vec::new();
+    let mut summary = BufWriter::new(File::create(&summary_path).expect("create summary"));
+    writeln!(summary, "{SUMMARY_HEADER}").expect("write summary header");
     let mut warnings = Vec::new();
 
-    for scenario in scenarios() {
-        let result = run_scenario(&scenario, &mut csv).expect("run scenario");
-        validate_result(&scenario, &result, &mut warnings);
-        summary_rows.push((scenario, result));
+    for scenario in selected {
+        let mut write_error = None;
+        let (_, result) = run(scenario, SCENARIO_WIDTH, SCENARIO_HEIGHT, |frame, world| {
+            if write_error.is_none() {
+                write_error = write_frame(&mut csv, scenario, frame, world).err();
+            }
+        });
+        if let Some(error) = write_error {
+            panic!("write strike CSV: {error}");
+        }
+        writeln!(summary, "{}", summary_fields(scenario, &result).join(","))
+            .expect("write summary row");
+        warnings.extend(scenario.violations(&result));
     }
 
-    write_summary(&summary_path, &summary_rows).expect("write summary");
-    write_report(&report_path, &warnings).expect("write report");
+    let mut report = BufWriter::new(File::create(&report_path).expect("create report"));
+    if warnings.is_empty() {
+        writeln!(report, "All strike scenarios are inside expected bands.").expect("write report");
+    } else {
+        for warning in &warnings {
+            writeln!(report, "{warning}").expect("write report");
+        }
+    }
     println!("wrote {}", csv_path.display());
     println!("wrote {}", summary_path.display());
     println!("wrote {}", report_path.display());
-
     if warnings.is_empty() {
         println!("PASS: strike scenarios are inside expected bands");
     } else {
@@ -265,573 +178,298 @@ fn main() {
     }
 }
 
-fn scenarios() -> Vec<Scenario> {
-    let e = ScenarioExpectations {
-        contacts: IntBand {
-            min: 1,
-            max: i32::MAX,
-        },
-        contusion_events: IntBand {
-            min: 1,
-            max: i32::MAX,
-        },
-        fragment_overlap: DoubleBand {
-            min: 0.0,
-            max: 18.0,
-        },
-        bone_spin: DoubleBand {
-            min: 0.0,
-            max: 38.0,
-        },
-        ..ScenarioExpectations::default()
-    };
-    vec![
-        Scenario {
-            name: "torso_blunt_medium",
-            region: "torso",
-            intent: "medium",
-            tool: rp::ToolMode::Blunt,
-            start: body(-0.360, 0.330),
-            end: body(0.200, 0.330),
-            windup_frames: 6,
-            strike_frames: 14,
-            settle_frames: 60,
-            power: 3.0,
-            followup: None,
-            // A hard bat swing into the upper arm and chest: deep bruising
-            // and perhaps a broken arm, but the torso is not torn open.
-            expectations: ScenarioExpectations {
-                skin_tears: IntBand { min: 0, max: 30 },
-                muscle_tears: IntBand { min: 0, max: 60 },
-                muscle_fiber_tears: IntBand { min: 0, max: 40 },
-                contusion_events: IntBand {
-                    min: 40,
-                    max: i32::MAX,
-                },
-                bone_fractures: IntBand { min: 0, max: 2 },
-                rib_fractures: IntBand { min: 0, max: 1 },
-                vessel_lacerations: IntBand { min: 0, max: 0 },
-                fragment_vessel_lacerations: IntBand { min: 0, max: 0 },
-                organ_penetrations: IntBand { min: 0, max: 0 },
-                rib_organ_punctures: IntBand { min: 0, max: 0 },
-                organ_ruptures: IntBand { min: 0, max: 0 },
-                cavity_ruptures: IntBand { min: 0, max: 0 },
-                blood_loss: DoubleBand {
-                    min: 0.0,
-                    max: 0.02,
-                },
-                ..e
-            },
-        },
-        Scenario {
-            name: "torso_heavy_high",
-            region: "torso",
-            intent: "high",
-            tool: rp::ToolMode::Heavy,
-            start: body(-0.260, 0.340),
-            end: body(0.300, 0.340),
-            windup_frames: 6,
-            strike_frames: 16,
-            settle_frames: 60,
-            power: 4.0,
-            followup: None,
-            // A full-force sledgehammer blow through the arm into the chest
-            // breaks the arm and ribs, bruises deeply and injures organs,
-            // without pulping the chest. The swing starts close to the arm:
-            // the hammer trails the hand and loses speed on a long approach.
-            expectations: ScenarioExpectations {
-                bone_fractures: IntBand { min: 3, max: 12 },
-                rib_fractures: IntBand { min: 1, max: 8 },
-                skin_tears: IntBand { min: 20, max: 160 },
-                muscle_tears: IntBand { min: 40, max: 260 },
-                muscle_fiber_tears: IntBand { min: 10, max: 80 },
-                contusion_events: IntBand {
-                    min: 200,
-                    max: i32::MAX,
-                },
-                muscle_crush_ruptures: IntBand { min: 4, max: 40 },
-                cavity_pressure_events: IntBand { min: 4, max: 60 },
-                cavity_ruptures: IntBand { min: 0, max: 1 },
-                organ_damage_events: IntBand { min: 1, max: 60 },
-                organ_penetrations: IntBand { min: 0, max: 0 },
-                fracture_marrow_sources: IntBand { min: 0, max: 20 },
-                vessel_lacerations: IntBand { min: 0, max: 4 },
-                cavity_pressure: DoubleBand {
-                    min: 0.30,
-                    max: 1.20,
-                },
-                organ_damage: DoubleBand {
-                    min: 0.20,
-                    max: 1.81,
-                },
-                blood_loss: DoubleBand {
-                    min: 0.005,
-                    max: 0.08,
-                },
-                ..e
-            },
-        },
-        Scenario {
-            name: "torso_sharp_cut",
-            region: "torso",
-            intent: "cut",
-            tool: rp::ToolMode::Sharp,
-            start: body(-0.075, 0.380),
-            end: body(0.065, 0.480),
-            windup_frames: 6,
-            strike_frames: 16,
-            settle_frames: 60,
-            power: 3.0,
-            followup: None,
-            // A knife slashed across the belly cuts a line through skin and
-            // muscle and can reach a vessel or organ, but breaks no bone.
-            expectations: ScenarioExpectations {
-                bone_fractures: IntBand { min: 0, max: 0 },
-                rib_fractures: IntBand { min: 0, max: 0 },
-                skin_tears: IntBand { min: 6, max: 40 },
-                muscle_tears: IntBand { min: 15, max: 100 },
-                contusion_events: IntBand { min: 0, max: 40 },
-                tear_propagations: IntBand { min: 0, max: 20 },
-                muscle_cut_transfers: IntBand { min: 10, max: 80 },
-                skin_flap_detachments: IntBand { min: 8, max: 60 },
-                organ_penetrations: IntBand { min: 0, max: 2 },
-                organ_ruptures: IntBand { min: 0, max: 1 },
-                vessel_lacerations: IntBand { min: 0, max: 2 },
-                cavity_ruptures: IntBand { min: 0, max: 0 },
-                blood_loss: DoubleBand {
-                    min: 0.002,
-                    max: 0.05,
-                },
-                ..e
-            },
-        },
-        Scenario {
-            name: "shoulder_blunt",
-            region: "shoulder",
-            intent: "medium",
-            tool: rp::ToolMode::Blunt,
-            start: body(-0.100, 0.000),
-            end: body(-0.100, 0.320),
-            windup_frames: 6,
-            strike_frames: 12,
-            settle_frames: 60,
-            power: 3.2,
-            followup: None,
-            // A bat brought down on the shoulder bruises it.
-            expectations: ScenarioExpectations {
-                skin_tears: IntBand { min: 0, max: 12 },
-                muscle_tears: IntBand { min: 0, max: 20 },
-                contusion_events: IntBand {
-                    min: 30,
-                    max: i32::MAX,
-                },
-                bone_fractures: IntBand { min: 0, max: 1 },
-                vessel_lacerations: IntBand { min: 0, max: 0 },
-                organ_penetrations: IntBand { min: 0, max: 0 },
-                organ_ruptures: IntBand { min: 0, max: 0 },
-                cavity_ruptures: IntBand { min: 0, max: 0 },
-                ..e
-            },
-        },
-        Scenario {
-            name: "arm_sharp",
-            region: "arm",
-            intent: "cut",
-            tool: rp::ToolMode::Sharp,
-            start: body(-0.115, 0.260),
-            end: body(-0.165, 0.530),
-            windup_frames: 6,
-            strike_frames: 24,
-            settle_frames: 48,
-            power: 3.4,
-            followup: None,
-            // A knife drawn down the arm cuts along it, lifts skin flaps and
-            // reaches the brachial artery, but breaks no bone.
-            expectations: ScenarioExpectations {
-                bone_fractures: IntBand { min: 0, max: 0 },
-                rib_fractures: IntBand { min: 0, max: 0 },
-                skin_tears: IntBand { min: 10, max: 60 },
-                muscle_tears: IntBand { min: 20, max: 120 },
-                contusion_events: IntBand { min: 0, max: 60 },
-                tear_propagations: IntBand { min: 0, max: 20 },
-                muscle_cut_transfers: IntBand { min: 15, max: 100 },
-                skin_flap_detachments: IntBand { min: 15, max: 90 },
-                vessel_lacerations: IntBand { min: 1, max: 2 },
-                bone_joint_subluxations: IntBand { min: 0, max: 0 },
-                ..e
-            },
-        },
-        Scenario {
-            name: "hip_heavy",
-            region: "hip",
-            intent: "high",
-            tool: rp::ToolMode::Heavy,
-            start: body(-0.340, 0.620),
-            end: body(0.100, 0.620),
-            windup_frames: 6,
-            strike_frames: 16,
-            settle_frames: 60,
-            power: 4.0,
-            followup: None,
-            // A sledgehammer into the thigh bruises it deeply; the femur, the
-            // strongest bone, holds.
-            expectations: ScenarioExpectations {
-                contusion_events: IntBand {
-                    min: 15,
-                    max: i32::MAX,
-                },
-                skin_tears: IntBand { min: 0, max: 15 },
-                bone_fractures: IntBand { min: 0, max: 1 },
-                vessel_lacerations: IntBand { min: 0, max: 1 },
-                organ_penetrations: IntBand { min: 0, max: 0 },
-                organ_ruptures: IntBand { min: 0, max: 0 },
-                cavity_ruptures: IntBand { min: 0, max: 0 },
-                ..e
-            },
-        },
-        Scenario {
-            name: "leg_blunt",
-            region: "leg",
-            intent: "medium",
-            tool: rp::ToolMode::Blunt,
-            start: body(-0.300, 0.780),
-            end: body(0.050, 0.800),
-            windup_frames: 6,
-            strike_frames: 12,
-            settle_frames: 60,
-            power: 3.4,
-            followup: None,
-            // A bat swung into the shin bruises it.
-            expectations: ScenarioExpectations {
-                contusion_events: IntBand {
-                    min: 30,
-                    max: i32::MAX,
-                },
-                skin_tears: IntBand { min: 0, max: 10 },
-                bone_fractures: IntBand { min: 0, max: 1 },
-                vessel_lacerations: IntBand { min: 0, max: 0 },
-                organ_penetrations: IntBand { min: 0, max: 0 },
-                cavity_ruptures: IntBand { min: 0, max: 0 },
-                ..e
-            },
-        },
-        Scenario {
-            name: "thigh_cut_rebleed",
-            region: "leg",
-            intent: "rebleed",
-            tool: rp::ToolMode::Sharp,
-            start: body(-0.072, 0.585),
-            end: body(-0.072, 0.685),
-            windup_frames: 6,
-            strike_frames: 16,
-            settle_frames: 190,
-            power: 3.0,
-            // A knife cut down the outer thigh clots, then a bat swung into the
-            // thigh strikes the healed cut. The blade runs ahead of the hand, so
-            // the cut lies a little below the hand's path; the bat aims at its
-            // middle, below the hanging hand.
-            followup: Some(FollowupStrike {
-                tool: rp::ToolMode::Blunt,
-                start: body(-0.340, 0.680),
-                end: body(0.100, 0.680),
-                windup_frames: 6,
-                strike_frames: 14,
-                settle_frames: 60,
-                power: 3.0,
-            }),
-            expectations: ScenarioExpectations {
-                bone_fractures: IntBand { min: 0, max: 1 },
-                skin_tears: IntBand { min: 8, max: 50 },
-                muscle_tears: IntBand { min: 10, max: 80 },
-                muscle_cut_transfers: IntBand { min: 8, max: 60 },
-                skin_flap_detachments: IntBand { min: 0, max: 40 },
-                contusion_events: IntBand {
-                    min: 30,
-                    max: i32::MAX,
-                },
-                // The bat must make the clotted cut bleed again.
-                wound_reopens: IntBand { min: 1, max: 30 },
-                organ_penetrations: IntBand { min: 0, max: 0 },
-                organ_ruptures: IntBand { min: 0, max: 0 },
-                cavity_ruptures: IntBand { min: 0, max: 0 },
-                blood_loss: DoubleBand {
-                    min: 0.001,
-                    max: 0.05,
-                },
-                ..e
-            },
-        },
-        Scenario {
-            name: "torso_heavy_fragment_settle",
-            region: "torso",
-            intent: "settle",
-            tool: rp::ToolMode::Heavy,
-            start: body(-0.260, 0.340),
-            end: body(0.300, 0.340),
-            windup_frames: 6,
-            strike_frames: 16,
-            settle_frames: 260,
-            power: 4.0,
-            followup: None,
-            // The bone fragments from a full-force sledgehammer blow to the
-            // chest settle and come to rest.
-            expectations: ScenarioExpectations {
-                bone_fractures: IntBand { min: 3, max: 12 },
-                rib_fractures: IntBand { min: 1, max: 8 },
-                contusion_events: IntBand {
-                    min: 200,
-                    max: i32::MAX,
-                },
-                final_free_fragments: IntBand { min: 4, max: 40 },
-                sleeping_fragments: IntBand { min: 1, max: 40 },
-                sleep_events: IntBand { min: 1, max: 40 },
-                final_sleeping_fragments: IntBand { min: 1, max: 40 },
-                fragment_bone_contacts: IntBand {
-                    min: 1,
-                    max: i32::MAX,
-                },
-                fragment_pair_contacts: IntBand {
-                    min: 1,
-                    max: i32::MAX,
-                },
-                wound_reopens: IntBand { min: 0, max: 60 },
-                organ_penetrations: IntBand { min: 0, max: 0 },
-                blood_loss: DoubleBand {
-                    min: 0.01,
-                    max: 0.15,
-                },
-                ..e
-            },
-        },
-    ]
+/// Plays one custom swing and prints what it did.
+fn play_custom(scenario: &Scenario, output_dir: &Path) {
+    let (_, result) = run(scenario, SCENARIO_WIDTH, SCENARIO_HEIGHT, |_, _| {});
+    println!("{}", scenario.strike);
+    println!("  {}", headline(&result));
+    let path = output_dir.join("strike_custom.csv");
+    let mut out = BufWriter::new(File::create(&path).expect("create custom CSV"));
+    writeln!(out, "{SUMMARY_HEADER}").expect("write custom CSV");
+    writeln!(out, "{}", summary_fields(scenario, &result).join(",")).expect("write custom CSV");
+    println!("wrote {}", path.display());
 }
 
-fn run_scenario(scenario: &Scenario, csv: &mut dyn Write) -> std::io::Result<ScenarioResult> {
-    let mut world = rp::create_layered_body(WIDTH, HEIGHT, rp::Materials::default());
-    let mut result = ScenarioResult::default();
-    let dt = world.materials().fixed_dt;
-    let primary_frames = scenario.windup_frames + scenario.strike_frames + scenario.settle_frames;
-    let followup_frames = scenario
-        .followup
-        .map(|followup| followup.windup_frames + followup.strike_frames + followup.settle_frames)
-        .unwrap_or(0);
-    let total_frames = primary_frames + followup_frames;
+struct SweepRun {
+    scenario: usize,
+    along: f64,
+    across: f64,
+    result: ScenarioResult,
+    violations: Vec<String>,
+}
 
-    for frame in 0..total_frames {
-        let input =
-            if frame < scenario.windup_frames + scenario.strike_frames + FOLLOW_THROUGH_FRAMES {
-                make_strike_input(scenario, frame, dt)
-            } else if let Some(followup) = scenario.followup {
-                let followup_frame = frame - primary_frames;
-                if followup_frame >= 0
-                    && followup_frame
-                        < followup.windup_frames + followup.strike_frames + FOLLOW_THROUGH_FRAMES
-                {
-                    make_followup_input(followup, followup_frame, dt)
-                } else {
-                    rp::InputState::default()
-                }
+/// Replays each scenario with its swing moved by every combination of
+/// `SWEEP_ALONG` and `SWEEP_ACROSS`, on all cores, and reports the spread.
+fn sweep(selected: &[Scenario], output_dir: &Path, custom: bool) {
+    let jobs: Vec<(usize, f64, f64)> = (0..selected.len())
+        .flat_map(|index| {
+            SWEEP_ALONG.iter().flat_map(move |&along| {
+                SWEEP_ACROSS
+                    .iter()
+                    .map(move |&across| (index, along, across))
+            })
+        })
+        .collect();
+    let next = AtomicUsize::new(0);
+    let finished = Mutex::new(Vec::with_capacity(jobs.len()));
+    let workers = thread::available_parallelism().map_or(4, |count| count.get());
+    thread::scope(|scope| {
+        for _ in 0..workers.min(jobs.len()) {
+            scope.spawn(|| loop {
+                let job = next.fetch_add(1, Ordering::Relaxed);
+                let Some(&(index, along, across)) = jobs.get(job) else {
+                    break;
+                };
+                let scenario = selected[index].shifted(along, across);
+                let (_, result) = run(&scenario, SCENARIO_WIDTH, SCENARIO_HEIGHT, |_, _| {});
+                let violations = scenario.violations(&result);
+                finished.lock().expect("sweep results").push((
+                    job,
+                    SweepRun {
+                        scenario: index,
+                        along,
+                        across,
+                        result,
+                        violations,
+                    },
+                ));
+            });
+        }
+    });
+    let mut runs = finished.into_inner().expect("sweep results");
+    runs.sort_by_key(|(job, _)| *job);
+    let runs: Vec<SweepRun> = runs.into_iter().map(|(_, run)| run).collect();
+
+    let csv_path = output_dir.join("strike_sweep.csv");
+    let mut csv = BufWriter::new(File::create(&csv_path).expect("create sweep CSV"));
+    writeln!(csv, "along,across,in_band,violations,{SUMMARY_HEADER}").expect("write sweep CSV");
+    for run in &runs {
+        let scenario = &selected[run.scenario];
+        let failed: Vec<&str> = run
+            .violations
+            .iter()
+            .map(|violation| violated_metric(violation))
+            .collect();
+        writeln!(
+            csv,
+            "{:.4},{:.4},{},{},{}",
+            run.along,
+            run.across,
+            u8::from(run.violations.is_empty()),
+            failed.join(";"),
+            summary_fields(scenario, &run.result).join(",")
+        )
+        .expect("write sweep CSV");
+    }
+
+    let mut report = String::new();
+    for (index, scenario) in selected.iter().enumerate() {
+        let mine: Vec<&SweepRun> = runs.iter().filter(|run| run.scenario == index).collect();
+        report.push_str(&sweep_summary(scenario, &mine, custom));
+    }
+    let report_path = output_dir.join("strike_sweep_report.txt");
+    fs::write(&report_path, &report).expect("write sweep report");
+    print!("{report}");
+    println!("wrote {}", csv_path.display());
+    println!("wrote {}", report_path.display());
+}
+
+fn sweep_summary(scenario: &Scenario, runs: &[&SweepRun], custom: bool) -> String {
+    let mut text = String::new();
+    let in_band = runs.iter().filter(|run| run.violations.is_empty()).count();
+    let unmoved = runs
+        .iter()
+        .find(|run| run.along == 0.0 && run.across == 0.0)
+        .map_or("missing", |run| {
+            if run.violations.is_empty() {
+                "in band"
             } else {
-                rp::InputState::default()
-            };
-        world.step(dt, &input, WIDTH, HEIGHT);
-        accumulate_result(&world, &mut result);
-        write_frame(csv, scenario, frame, &world)?;
+                "out of band"
+            }
+        });
+    if custom {
+        text.push_str(&format!("{} ({} runs)\n", scenario.strike, runs.len()));
+    } else {
+        text.push_str(&format!(
+            "{}: in band {}/{} runs (unmoved swing {})\n",
+            scenario.name,
+            in_band,
+            runs.len(),
+            unmoved
+        ));
     }
-
-    let stats = world.stats();
-    result.skin_tears = stats.broken_skin;
-    result.muscle_tears = stats.broken_muscle;
-    result.muscle_fiber_tears = stats.muscle_fiber_tears;
-    result.contusion_events = stats.contusion_events;
-    result.tissue_fatigue_events = stats.tissue_fatigue_events;
-    result.tissue_plastic_events = stats.tissue_plastic_events;
-    result.tear_propagations = stats.tear_propagations;
-    result.muscle_cut_transfers = stats.muscle_cut_transfers;
-    result.muscle_crush_ruptures = stats.muscle_crush_ruptures;
-    result.cavity_pressure_events = stats.cavity_pressure_events;
-    result.cavity_ruptures = stats.cavity_ruptures;
-    result.organ_damage_events = stats.organ_damage_events;
-    result.organ_penetrations = stats.organ_penetrations;
-    result.rib_organ_punctures = stats.rib_organ_punctures;
-    result.organ_ruptures = stats.organ_ruptures;
-    result.skin_flap_detachments = stats.skin_flap_detachments;
-    result.vessel_lacerations = stats.vessel_lacerations;
-    result.fragment_vessel_lacerations = stats.fragment_vessel_lacerations;
-    result.wound_reopens = stats.wound_reopens;
-    result.detachments = stats.broken_attachments;
-    result.bone_detachments = stats.broken_bone_attachments;
-    result.bone_joint_breaks = stats.broken_bone_joints;
-    result.bone_joint_subluxations = stats.bone_joint_subluxations;
-    result.joint_ligament_damage_events = stats.joint_ligament_damage_events;
-    result.bone_fractures = stats.fractured_bones;
-    result.rib_fractures = stats.fractured_ribs;
-    result.final_bones = world.bones().len() as i32;
-    result.fluid_emitted = stats.emitted_fluid_particles;
-    result.wound_fluid = stats.wound_fluid_particles;
-    result.blood_loss = stats.blood_loss;
-    result.final_blood_volume = world.blood_volume_fraction();
-    result.final_blood_turgor = world.blood_turgor_scale();
-    result.blood_stain_deposits = stats.blood_stain_deposits;
-    result.fracture_marrow_sources = stats.fracture_marrow_sources;
-    result.opened_wounds = stats.opened_wounds;
-    result.fragment_hits = stats.fragment_tissue_hits;
-    result.fragment_tears = stats.fragment_tissue_tears;
-    result.fragment_skin_punctures = stats.fragment_skin_punctures;
-    result.final_free_fragments = free_fragment_count(&world);
-    result.final_spinning_fragments = spinning_fragment_count(&world);
-    result.final_sleeping_fragments = sleeping_fragment_count(&world);
-    Ok(result)
+    let spread = |name: &str, value: &dyn Fn(&ScenarioResult) -> f64, decimals: usize| {
+        let mut values: Vec<f64> = runs.iter().map(|run| value(&run.result)).collect();
+        values.sort_by(|a, b| a.total_cmp(b));
+        let median = values[values.len() / 2];
+        format!(
+            "{name} {:.*}..{:.*} (median {:.*})",
+            decimals,
+            values[0],
+            decimals,
+            values[values.len() - 1],
+            decimals,
+            median
+        )
+    };
+    let lines = [
+        spread("bones", &|r| r.bone_fractures as f64, 0),
+        spread("ribs", &|r| r.rib_fractures as f64, 0),
+        spread("skin", &|r| r.skin_tears as f64, 0),
+        spread("muscle", &|r| r.muscle_tears as f64, 0),
+        spread("bruises", &|r| r.contusion_events as f64, 0),
+        spread("vessels", &|r| r.vessel_lacerations as f64, 0),
+        spread("organ damage", &|r| r.max_organ_damage, 2),
+        spread("reopens", &|r| r.wound_reopens as f64, 0),
+        spread("blood loss", &|r| r.blood_loss, 3),
+    ];
+    text.push_str(&format!("  {}\n", lines[..5].join(", ")));
+    text.push_str(&format!("  {}\n", lines[5..].join(", ")));
+    let mut misses: Vec<(&str, usize)> = Vec::new();
+    for run in runs {
+        for violation in &run.violations {
+            let metric = violated_metric(violation);
+            match misses.iter_mut().find(|(name, _)| *name == metric) {
+                Some((_, count)) => *count += 1,
+                None => misses.push((metric, 1)),
+            }
+        }
+    }
+    if !misses.is_empty() {
+        let listed: Vec<String> = misses
+            .iter()
+            .map(|(metric, count)| format!("{metric} in {count}"))
+            .collect();
+        text.push_str(&format!("  out of band: {}\n", listed.join(", ")));
+    }
+    text
 }
 
-/// Frames the hand holds at the end of a swing with the button down.
-const FOLLOW_THROUGH_FRAMES: i32 = 20;
+/// The metric named in a `scenario: metric=value outside a..b` violation.
+fn violated_metric(violation: &str) -> &str {
+    let after_name = violation
+        .split_once(": ")
+        .map_or(violation, |(_, rest)| rest);
+    after_name.split('=').next().unwrap_or(after_name)
+}
 
-fn make_strike_input(scenario: &Scenario, frame: i32, dt: f64) -> rp::InputState {
-    make_pass_input(
-        scenario.tool,
-        scenario.start,
-        scenario.end,
-        scenario.windup_frames,
-        scenario.strike_frames,
-        scenario.power,
-        frame,
-        dt,
+fn headline(result: &ScenarioResult) -> String {
+    format!(
+        "bones {} (ribs {}), skin {}, muscle {}, bruises {}, vessels {}, organ damage {:.2}, reopens {}, blood loss {:.3}",
+        result.bone_fractures,
+        result.rib_fractures,
+        result.skin_tears,
+        result.muscle_tears,
+        result.contusion_events,
+        result.vessel_lacerations,
+        result.max_organ_damage,
+        result.wound_reopens,
+        result.blood_loss
     )
 }
 
-fn make_followup_input(followup: FollowupStrike, frame: i32, dt: f64) -> rp::InputState {
-    make_pass_input(
-        followup.tool,
-        followup.start,
-        followup.end,
-        followup.windup_frames,
-        followup.strike_frames,
-        followup.power,
-        frame,
-        dt,
-    )
-}
+/// Columns of a summary row: the scenario, then its result.
+const SUMMARY_HEADER: &str = "scenario,region,intent,tool,tissue_contacts,bone_contacts,skin_tears,muscle_tears,muscle_fiber_tears,contusion_events,tissue_fatigue_events,tissue_plastic_events,tear_propagations,muscle_cut_transfers,muscle_crush_ruptures,cavity_pressure_events,cavity_ruptures,organ_damage_events,organ_penetrations,rib_organ_punctures,organ_ruptures,skin_flap_detachments,vessel_lacerations,fragment_vessel_lacerations,wound_reopens,max_active_contusions,detachments,bone_detachments,bone_joint_breaks,bone_joint_subluxations,joint_ligament_damage_events,bone_fractures,rib_fractures,fracture_marrow_sources,final_bones,fluid_emitted,wound_fluid,blood_loss,final_blood_volume,final_blood_turgor,blood_stain_deposits,max_active_blood_stains,opened_wounds,max_active_wounds,wound_leaks,fragment_hits,fragment_tears,fragment_skin_punctures,fragment_bone_contacts,fragment_bone_damping_events,fragment_bone_resting_contacts,fragment_pair_contacts,fragment_pair_damping_events,fragment_pair_resting_contacts,fragment_floor_contacts,fragment_floor_resting_contacts,post_fracture_joint_corrections,max_impact,max_bone_load,max_point_load,max_depth,max_fragment_depth,max_fragment_impulse,max_fragment_overlap,max_post_fracture_joint_stretch,max_post_fracture_joint_angle,max_bone_joint_subluxation,max_wound_pressure,max_wound_clot,max_cavity_pressure,max_cavity_collapse,max_organ_damage,max_contusion,max_tissue_softening,max_tissue_fatigue,max_tissue_plasticity,max_bone_angular_speed,final_free_fragments,final_spinning_fragments,final_sleeping_fragments,max_active_fragments,max_sleeping_fragments,fragment_sleep_events,fragment_wake_events,fragment_budget_skips,fracture_budget_blocks,fragment_bone_checks,fragment_bone_budget_skips,fragment_pair_checks,fragment_pair_budget_skips,fragment_tissue_checks,fragment_tissue_budget_skips,fluid_budget_replacements,blood_stain_budget_replacements,wound_budget_replacements,max_solver_iterations";
 
-fn make_pass_input(
-    tool: rp::ToolMode,
-    start: rp::Vec2,
-    end: rp::Vec2,
-    windup_frames: i32,
-    strike_frames: i32,
-    power: f64,
-    frame: i32,
-    dt: f64,
-) -> rp::InputState {
-    let t0 = (frame - windup_frames).max(0) as f64 / (strike_frames - 1).max(1) as f64;
-    let t = t0.clamp(0.0, 1.0);
-    let moving = t0 < 1.0;
-    let position = rp::Vec2 {
-        x: start.x + (end.x - start.x) * t,
-        y: start.y + (end.y - start.y) * t,
-    };
-    let velocity = rp::Vec2 {
-        x: (end.x - start.x) / ((strike_frames - 1).max(1) as f64 * dt),
-        y: (end.y - start.y) / ((strike_frames - 1).max(1) as f64 * dt),
-    };
-    // The tool trails the hand, so the hand holds at the end of its path for
-    // a moment with the button still down, as a person follows through.
-    let down =
-        frame >= windup_frames && frame < windup_frames + strike_frames + FOLLOW_THROUGH_FRAMES;
-    rp::InputState {
-        active: down,
-        down,
-        x: position.x,
-        y: position.y,
-        vx: if down && moving { velocity.x } else { 0.0 },
-        vy: if down && moving { velocity.y } else { 0.0 },
-        power,
-        tool,
-    }
-}
-
-fn accumulate_result(world: &rp::World, result: &mut ScenarioResult) {
-    let debug = world.debug();
-    result.tissue_contacts += debug.tissue_contacts;
-    result.bone_contacts += debug.bone_contacts;
-    result.fractures += debug.fractures;
-    result.max_impact = result.max_impact.max(debug.impact);
-    result.max_bone_load = result.max_bone_load.max(debug.max_bone_load);
-    result.max_point_load = result.max_point_load.max(debug.max_point_load);
-    result.max_depth = result.max_depth.max(debug.max_depth);
-    result.max_fragment_depth = result.max_fragment_depth.max(debug.max_fragment_depth);
-    result.max_fragment_impulse = result.max_fragment_impulse.max(debug.max_fragment_impulse);
-    result.max_fragment_overlap = result.max_fragment_overlap.max(debug.max_fragment_overlap);
-    result.max_post_fracture_joint_stretch = result
-        .max_post_fracture_joint_stretch
-        .max(debug.max_post_fracture_joint_stretch);
-    result.max_post_fracture_joint_angle = result
-        .max_post_fracture_joint_angle
-        .max(debug.max_post_fracture_joint_angle);
-    result.max_bone_joint_subluxation = result
-        .max_bone_joint_subluxation
-        .max(debug.max_bone_joint_subluxation);
-    result.max_wound_pressure = result.max_wound_pressure.max(debug.max_wound_pressure);
-    result.max_wound_clot = result.max_wound_clot.max(debug.max_wound_clot);
-    result.max_cavity_pressure = result.max_cavity_pressure.max(debug.max_cavity_pressure);
-    result.max_cavity_collapse = result.max_cavity_collapse.max(debug.max_cavity_collapse);
-    result.max_organ_damage = result.max_organ_damage.max(debug.max_organ_damage);
-    result.max_contusion = result.max_contusion.max(debug.max_contusion);
-    result.max_tissue_softening = result.max_tissue_softening.max(debug.max_tissue_softening);
-    result.max_tissue_fatigue = result.max_tissue_fatigue.max(debug.max_tissue_fatigue);
-    result.max_tissue_plasticity = result
-        .max_tissue_plasticity
-        .max(debug.max_tissue_plasticity);
-    result.max_bone_angular_speed = result
-        .max_bone_angular_speed
-        .max(debug.max_bone_angular_speed);
-    result.max_active_wounds = result.max_active_wounds.max(debug.active_wounds);
-    result.max_active_contusions = result.max_active_contusions.max(debug.active_contusions);
-    result.wound_leaks += debug.wound_leaks;
-    result.muscle_fiber_tears += debug.muscle_fiber_tears;
-    result.muscle_crush_ruptures += debug.muscle_crush_ruptures;
-    result.cavity_pressure_events += debug.cavity_pressure_events;
-    result.cavity_ruptures += debug.cavity_ruptures;
-    result.organ_damage_events += debug.organ_damage_events;
-    result.organ_penetrations += debug.organ_penetrations;
-    result.rib_organ_punctures += debug.rib_organ_punctures;
-    result.organ_ruptures += debug.organ_ruptures;
-    result.skin_flap_detachments += debug.skin_flap_detachments;
-    result.vessel_lacerations += debug.vessel_lacerations;
-    result.fragment_vessel_lacerations += debug.fragment_vessel_lacerations;
-    result.wound_reopens += debug.wound_reopens;
-    result.max_active_blood_stains = result
-        .max_active_blood_stains
-        .max(debug.active_blood_stains);
-    result.fragment_bone_contacts += debug.fragment_bone_contacts;
-    result.fragment_bone_damping_events += debug.fragment_bone_damping_events;
-    result.fragment_bone_resting_contacts += debug.fragment_bone_resting_contacts;
-    result.fragment_pair_contacts += debug.fragment_pair_contacts;
-    result.fragment_pair_damping_events += debug.fragment_pair_damping_events;
-    result.fragment_pair_resting_contacts += debug.fragment_pair_resting_contacts;
-    result.fragment_floor_contacts += debug.fragment_floor_contacts;
-    result.fragment_floor_resting_contacts += debug.fragment_floor_resting_contacts;
-    result.post_fracture_joint_corrections += debug.post_fracture_joint_corrections;
-    result.max_active_fluids = result.max_active_fluids.max(active_fluid_count(world));
-    result.max_active_fragments = result.max_active_fragments.max(debug.active_fragments);
-    result.max_sleeping_fragments = result.max_sleeping_fragments.max(debug.sleeping_fragments);
-    result.fragment_sleep_events += debug.fragment_sleep_events;
-    result.fragment_wake_events += debug.fragment_wake_events;
-    result.bone_joint_subluxations += debug.bone_joint_subluxations;
-    result.joint_ligament_damage_events += debug.joint_ligament_damage_events;
-    result.fragment_budget_skips += debug.fragment_budget_skips;
-    result.fracture_budget_blocks += debug.fracture_budget_blocks;
-    result.fragment_bone_checks += debug.fragment_bone_checks;
-    result.fragment_bone_budget_skips += debug.fragment_bone_budget_skips;
-    result.fragment_pair_checks += debug.fragment_pair_checks;
-    result.fragment_pair_budget_skips += debug.fragment_pair_budget_skips;
-    result.fragment_tissue_checks += debug.fragment_tissue_checks;
-    result.fragment_tissue_budget_skips += debug.fragment_tissue_budget_skips;
-    result.fragment_skin_punctures += debug.fragment_skin_punctures;
-    result.fluid_budget_replacements += debug.fluid_budget_replacements;
-    result.blood_stain_budget_replacements += debug.blood_stain_budget_replacements;
-    result.wound_budget_replacements += debug.wound_budget_replacements;
-    result.max_solver_iterations = result.max_solver_iterations.max(debug.solver_iterations);
+fn summary_fields(scenario: &Scenario, result: &ScenarioResult) -> Vec<String> {
+    vec![
+        scenario.name.to_string(),
+        scenario.region.to_string(),
+        scenario.intent.to_string(),
+        tool_name(scenario.strike.tool).to_string(),
+        result.tissue_contacts.to_string(),
+        result.bone_contacts.to_string(),
+        result.skin_tears.to_string(),
+        result.muscle_tears.to_string(),
+        result.muscle_fiber_tears.to_string(),
+        result.contusion_events.to_string(),
+        result.tissue_fatigue_events.to_string(),
+        result.tissue_plastic_events.to_string(),
+        result.tear_propagations.to_string(),
+        result.muscle_cut_transfers.to_string(),
+        result.muscle_crush_ruptures.to_string(),
+        result.cavity_pressure_events.to_string(),
+        result.cavity_ruptures.to_string(),
+        result.organ_damage_events.to_string(),
+        result.organ_penetrations.to_string(),
+        result.rib_organ_punctures.to_string(),
+        result.organ_ruptures.to_string(),
+        result.skin_flap_detachments.to_string(),
+        result.vessel_lacerations.to_string(),
+        result.fragment_vessel_lacerations.to_string(),
+        result.wound_reopens.to_string(),
+        result.max_active_contusions.to_string(),
+        result.detachments.to_string(),
+        result.bone_detachments.to_string(),
+        result.bone_joint_breaks.to_string(),
+        result.bone_joint_subluxations.to_string(),
+        result.joint_ligament_damage_events.to_string(),
+        result.bone_fractures.to_string(),
+        result.rib_fractures.to_string(),
+        result.fracture_marrow_sources.to_string(),
+        result.final_bones.to_string(),
+        result.fluid_emitted.to_string(),
+        result.wound_fluid.to_string(),
+        format!("{:.5}", result.blood_loss),
+        format!("{:.5}", result.final_blood_volume),
+        format!("{:.5}", result.final_blood_turgor),
+        result.blood_stain_deposits.to_string(),
+        result.max_active_blood_stains.to_string(),
+        result.opened_wounds.to_string(),
+        result.max_active_wounds.to_string(),
+        result.wound_leaks.to_string(),
+        result.fragment_hits.to_string(),
+        result.fragment_tears.to_string(),
+        result.fragment_skin_punctures.to_string(),
+        result.fragment_bone_contacts.to_string(),
+        result.fragment_bone_damping_events.to_string(),
+        result.fragment_bone_resting_contacts.to_string(),
+        result.fragment_pair_contacts.to_string(),
+        result.fragment_pair_damping_events.to_string(),
+        result.fragment_pair_resting_contacts.to_string(),
+        result.fragment_floor_contacts.to_string(),
+        result.fragment_floor_resting_contacts.to_string(),
+        result.post_fracture_joint_corrections.to_string(),
+        format!("{:.3}", result.max_impact),
+        format!("{:.3}", result.max_bone_load),
+        format!("{:.3}", result.max_point_load),
+        format!("{:.3}", result.max_depth),
+        format!("{:.3}", result.max_fragment_depth),
+        format!("{:.3}", result.max_fragment_impulse),
+        format!("{:.3}", result.max_fragment_overlap),
+        format!("{:.3}", result.max_post_fracture_joint_stretch),
+        format!("{:.3}", result.max_post_fracture_joint_angle),
+        format!("{:.3}", result.max_bone_joint_subluxation),
+        format!("{:.3}", result.max_wound_pressure),
+        format!("{:.3}", result.max_wound_clot),
+        format!("{:.3}", result.max_cavity_pressure),
+        format!("{:.3}", result.max_cavity_collapse),
+        format!("{:.3}", result.max_organ_damage),
+        format!("{:.3}", result.max_contusion),
+        format!("{:.3}", result.max_tissue_softening),
+        format!("{:.3}", result.max_tissue_fatigue),
+        format!("{:.3}", result.max_tissue_plasticity),
+        format!("{:.3}", result.max_bone_angular_speed),
+        result.final_free_fragments.to_string(),
+        result.final_spinning_fragments.to_string(),
+        result.final_sleeping_fragments.to_string(),
+        result.max_active_fragments.to_string(),
+        result.max_sleeping_fragments.to_string(),
+        result.fragment_sleep_events.to_string(),
+        result.fragment_wake_events.to_string(),
+        result.fragment_budget_skips.to_string(),
+        result.fracture_budget_blocks.to_string(),
+        result.fragment_bone_checks.to_string(),
+        result.fragment_bone_budget_skips.to_string(),
+        result.fragment_pair_checks.to_string(),
+        result.fragment_pair_budget_skips.to_string(),
+        result.fragment_tissue_checks.to_string(),
+        result.fragment_tissue_budget_skips.to_string(),
+        result.fluid_budget_replacements.to_string(),
+        result.blood_stain_budget_replacements.to_string(),
+        result.wound_budget_replacements.to_string(),
+        result.max_solver_iterations.to_string(),
+    ]
 }
 
 fn write_frame_header(csv: &mut dyn Write) -> std::io::Result<()> {
@@ -974,591 +612,4 @@ fn write_frame(
         debug.solver_iterations.to_string(),
     ];
     writeln!(csv, "{}", fields.join(","))
-}
-
-fn write_summary(path: &Path, rows: &[(Scenario, ScenarioResult)]) -> std::io::Result<()> {
-    let mut out = BufWriter::new(File::create(path)?);
-    writeln!(out, "scenario,region,intent,tool,tissue_contacts,bone_contacts,skin_tears,muscle_tears,muscle_fiber_tears,contusion_events,tissue_fatigue_events,tissue_plastic_events,tear_propagations,muscle_cut_transfers,muscle_crush_ruptures,cavity_pressure_events,cavity_ruptures,organ_damage_events,organ_penetrations,rib_organ_punctures,organ_ruptures,skin_flap_detachments,vessel_lacerations,fragment_vessel_lacerations,wound_reopens,max_active_contusions,detachments,bone_detachments,bone_joint_breaks,bone_joint_subluxations,joint_ligament_damage_events,bone_fractures,rib_fractures,fracture_marrow_sources,final_bones,fluid_emitted,wound_fluid,blood_loss,final_blood_volume,final_blood_turgor,blood_stain_deposits,max_active_blood_stains,opened_wounds,max_active_wounds,wound_leaks,fragment_hits,fragment_tears,fragment_skin_punctures,fragment_bone_contacts,fragment_bone_damping_events,fragment_bone_resting_contacts,fragment_pair_contacts,fragment_pair_damping_events,fragment_pair_resting_contacts,fragment_floor_contacts,fragment_floor_resting_contacts,post_fracture_joint_corrections,max_impact,max_bone_load,max_point_load,max_depth,max_fragment_depth,max_fragment_impulse,max_fragment_overlap,max_post_fracture_joint_stretch,max_post_fracture_joint_angle,max_bone_joint_subluxation,max_wound_pressure,max_wound_clot,max_cavity_pressure,max_cavity_collapse,max_organ_damage,max_contusion,max_tissue_softening,max_tissue_fatigue,max_tissue_plasticity,max_bone_angular_speed,final_free_fragments,final_spinning_fragments,final_sleeping_fragments,max_active_fragments,max_sleeping_fragments,fragment_sleep_events,fragment_wake_events,fragment_budget_skips,fracture_budget_blocks,fragment_bone_checks,fragment_bone_budget_skips,fragment_pair_checks,fragment_pair_budget_skips,fragment_tissue_checks,fragment_tissue_budget_skips,fluid_budget_replacements,blood_stain_budget_replacements,wound_budget_replacements,max_solver_iterations")?;
-    for (scenario, result) in rows {
-        let fields = [
-            scenario.name.to_string(),
-            scenario.region.to_string(),
-            scenario.intent.to_string(),
-            tool_name(scenario.tool).to_string(),
-            result.tissue_contacts.to_string(),
-            result.bone_contacts.to_string(),
-            result.skin_tears.to_string(),
-            result.muscle_tears.to_string(),
-            result.muscle_fiber_tears.to_string(),
-            result.contusion_events.to_string(),
-            result.tissue_fatigue_events.to_string(),
-            result.tissue_plastic_events.to_string(),
-            result.tear_propagations.to_string(),
-            result.muscle_cut_transfers.to_string(),
-            result.muscle_crush_ruptures.to_string(),
-            result.cavity_pressure_events.to_string(),
-            result.cavity_ruptures.to_string(),
-            result.organ_damage_events.to_string(),
-            result.organ_penetrations.to_string(),
-            result.rib_organ_punctures.to_string(),
-            result.organ_ruptures.to_string(),
-            result.skin_flap_detachments.to_string(),
-            result.vessel_lacerations.to_string(),
-            result.fragment_vessel_lacerations.to_string(),
-            result.wound_reopens.to_string(),
-            result.max_active_contusions.to_string(),
-            result.detachments.to_string(),
-            result.bone_detachments.to_string(),
-            result.bone_joint_breaks.to_string(),
-            result.bone_joint_subluxations.to_string(),
-            result.joint_ligament_damage_events.to_string(),
-            result.bone_fractures.to_string(),
-            result.rib_fractures.to_string(),
-            result.fracture_marrow_sources.to_string(),
-            result.final_bones.to_string(),
-            result.fluid_emitted.to_string(),
-            result.wound_fluid.to_string(),
-            format!("{:.5}", result.blood_loss),
-            format!("{:.5}", result.final_blood_volume),
-            format!("{:.5}", result.final_blood_turgor),
-            result.blood_stain_deposits.to_string(),
-            result.max_active_blood_stains.to_string(),
-            result.opened_wounds.to_string(),
-            result.max_active_wounds.to_string(),
-            result.wound_leaks.to_string(),
-            result.fragment_hits.to_string(),
-            result.fragment_tears.to_string(),
-            result.fragment_skin_punctures.to_string(),
-            result.fragment_bone_contacts.to_string(),
-            result.fragment_bone_damping_events.to_string(),
-            result.fragment_bone_resting_contacts.to_string(),
-            result.fragment_pair_contacts.to_string(),
-            result.fragment_pair_damping_events.to_string(),
-            result.fragment_pair_resting_contacts.to_string(),
-            result.fragment_floor_contacts.to_string(),
-            result.fragment_floor_resting_contacts.to_string(),
-            result.post_fracture_joint_corrections.to_string(),
-            format!("{:.3}", result.max_impact),
-            format!("{:.3}", result.max_bone_load),
-            format!("{:.3}", result.max_point_load),
-            format!("{:.3}", result.max_depth),
-            format!("{:.3}", result.max_fragment_depth),
-            format!("{:.3}", result.max_fragment_impulse),
-            format!("{:.3}", result.max_fragment_overlap),
-            format!("{:.3}", result.max_post_fracture_joint_stretch),
-            format!("{:.3}", result.max_post_fracture_joint_angle),
-            format!("{:.3}", result.max_bone_joint_subluxation),
-            format!("{:.3}", result.max_wound_pressure),
-            format!("{:.3}", result.max_wound_clot),
-            format!("{:.3}", result.max_cavity_pressure),
-            format!("{:.3}", result.max_cavity_collapse),
-            format!("{:.3}", result.max_organ_damage),
-            format!("{:.3}", result.max_contusion),
-            format!("{:.3}", result.max_tissue_softening),
-            format!("{:.3}", result.max_tissue_fatigue),
-            format!("{:.3}", result.max_tissue_plasticity),
-            format!("{:.3}", result.max_bone_angular_speed),
-            result.final_free_fragments.to_string(),
-            result.final_spinning_fragments.to_string(),
-            result.final_sleeping_fragments.to_string(),
-            result.max_active_fragments.to_string(),
-            result.max_sleeping_fragments.to_string(),
-            result.fragment_sleep_events.to_string(),
-            result.fragment_wake_events.to_string(),
-            result.fragment_budget_skips.to_string(),
-            result.fracture_budget_blocks.to_string(),
-            result.fragment_bone_checks.to_string(),
-            result.fragment_bone_budget_skips.to_string(),
-            result.fragment_pair_checks.to_string(),
-            result.fragment_pair_budget_skips.to_string(),
-            result.fragment_tissue_checks.to_string(),
-            result.fragment_tissue_budget_skips.to_string(),
-            result.fluid_budget_replacements.to_string(),
-            result.blood_stain_budget_replacements.to_string(),
-            result.wound_budget_replacements.to_string(),
-            result.max_solver_iterations.to_string(),
-        ];
-        writeln!(out, "{}", fields.join(","))?;
-    }
-    Ok(())
-}
-
-fn write_report(path: &Path, warnings: &[String]) -> std::io::Result<()> {
-    let mut out = BufWriter::new(File::create(path)?);
-    if warnings.is_empty() {
-        writeln!(out, "All strike scenarios are inside expected bands.")?;
-    } else {
-        for warning in warnings {
-            writeln!(out, "{warning}")?;
-        }
-    }
-    Ok(())
-}
-
-fn validate_result(scenario: &Scenario, result: &ScenarioResult, warnings: &mut Vec<String>) {
-    check_int(
-        scenario,
-        "contacts",
-        result.tissue_contacts + result.bone_contacts,
-        scenario.expectations.contacts,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "bone_fractures",
-        result.bone_fractures,
-        scenario.expectations.bone_fractures,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "rib_fractures",
-        result.rib_fractures,
-        scenario.expectations.rib_fractures,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "skin_tears",
-        result.skin_tears,
-        scenario.expectations.skin_tears,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "muscle_tears",
-        result.muscle_tears,
-        scenario.expectations.muscle_tears,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "contusion_events",
-        result.contusion_events,
-        scenario.expectations.contusion_events,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "tissue_fatigue_events",
-        result.tissue_fatigue_events,
-        scenario.expectations.tissue_fatigue_events,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "tissue_plastic_events",
-        result.tissue_plastic_events,
-        scenario.expectations.tissue_plastic_events,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "tear_propagations",
-        result.tear_propagations,
-        scenario.expectations.tear_propagations,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "muscle_cut_transfers",
-        result.muscle_cut_transfers,
-        scenario.expectations.muscle_cut_transfers,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "muscle_fiber_tears",
-        result.muscle_fiber_tears,
-        scenario.expectations.muscle_fiber_tears,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "muscle_crush_ruptures",
-        result.muscle_crush_ruptures,
-        scenario.expectations.muscle_crush_ruptures,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "cavity_pressure_events",
-        result.cavity_pressure_events,
-        scenario.expectations.cavity_pressure_events,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "cavity_ruptures",
-        result.cavity_ruptures,
-        scenario.expectations.cavity_ruptures,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "organ_damage_events",
-        result.organ_damage_events,
-        scenario.expectations.organ_damage_events,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "organ_penetrations",
-        result.organ_penetrations,
-        scenario.expectations.organ_penetrations,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "rib_organ_punctures",
-        result.rib_organ_punctures,
-        scenario.expectations.rib_organ_punctures,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "organ_ruptures",
-        result.organ_ruptures,
-        scenario.expectations.organ_ruptures,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "skin_flap_detachments",
-        result.skin_flap_detachments,
-        scenario.expectations.skin_flap_detachments,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "vessel_lacerations",
-        result.vessel_lacerations,
-        scenario.expectations.vessel_lacerations,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "fragment_vessel_lacerations",
-        result.fragment_vessel_lacerations,
-        scenario.expectations.fragment_vessel_lacerations,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "wound_reopens",
-        result.wound_reopens,
-        scenario.expectations.wound_reopens,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "fluid_emitted",
-        result.fluid_emitted,
-        scenario.expectations.fluid_emitted,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "wound_fluid",
-        result.wound_fluid,
-        scenario.expectations.wound_fluid,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "blood_stain_deposits",
-        result.blood_stain_deposits,
-        scenario.expectations.blood_stain_deposits,
-        warnings,
-    );
-    check_double(
-        scenario,
-        "blood_loss",
-        result.blood_loss,
-        scenario.expectations.blood_loss,
-        warnings,
-    );
-    check_double(
-        scenario,
-        "final_blood_volume",
-        result.final_blood_volume,
-        scenario.expectations.final_blood_volume,
-        warnings,
-    );
-    check_double(
-        scenario,
-        "final_blood_turgor",
-        result.final_blood_turgor,
-        scenario.expectations.final_blood_turgor,
-        warnings,
-    );
-    check_double(
-        scenario,
-        "max_cavity_pressure",
-        result.max_cavity_pressure,
-        scenario.expectations.cavity_pressure,
-        warnings,
-    );
-    check_double(
-        scenario,
-        "max_cavity_collapse",
-        result.max_cavity_collapse,
-        scenario.expectations.cavity_collapse,
-        warnings,
-    );
-    check_double(
-        scenario,
-        "max_organ_damage",
-        result.max_organ_damage,
-        scenario.expectations.organ_damage,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "fracture_marrow_sources",
-        result.fracture_marrow_sources,
-        scenario.expectations.fracture_marrow_sources,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "opened_wounds",
-        result.opened_wounds,
-        scenario.expectations.opened_wounds,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "final_free_fragments",
-        result.final_free_fragments,
-        scenario.expectations.final_free_fragments,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "fragment_bone_contacts",
-        result.fragment_bone_contacts,
-        scenario.expectations.fragment_bone_contacts,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "fragment_bone_damping_events",
-        result.fragment_bone_damping_events,
-        scenario.expectations.fragment_bone_damping_events,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "fragment_bone_resting_contacts",
-        result.fragment_bone_resting_contacts,
-        scenario.expectations.fragment_bone_resting_contacts,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "sleeping_fragments",
-        result.max_sleeping_fragments,
-        scenario.expectations.sleeping_fragments,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "sleep_events",
-        result.fragment_sleep_events,
-        scenario.expectations.sleep_events,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "final_sleeping_fragments",
-        result.final_sleeping_fragments,
-        scenario.expectations.final_sleeping_fragments,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "fragment_pair_damping_events",
-        result.fragment_pair_damping_events,
-        scenario.expectations.fragment_pair_damping_events,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "fragment_pair_resting_contacts",
-        result.fragment_pair_resting_contacts,
-        scenario.expectations.fragment_pair_resting_contacts,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "fragment_floor_contacts",
-        result.fragment_floor_contacts,
-        scenario.expectations.fragment_floor_contacts,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "fragment_floor_resting_contacts",
-        result.fragment_floor_resting_contacts,
-        scenario.expectations.fragment_floor_resting_contacts,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "fragment_pair_contacts",
-        result.fragment_pair_contacts,
-        scenario.expectations.fragment_pair_contacts,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "fragment_skin_punctures",
-        result.fragment_skin_punctures,
-        scenario.expectations.fragment_skin_punctures,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "bone_joint_subluxations",
-        result.bone_joint_subluxations,
-        scenario.expectations.bone_joint_subluxations,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "joint_ligament_damage_events",
-        result.joint_ligament_damage_events,
-        scenario.expectations.joint_ligament_damage_events,
-        warnings,
-    );
-    check_int(
-        scenario,
-        "joint_corrections",
-        result.post_fracture_joint_corrections,
-        scenario.expectations.joint_corrections,
-        warnings,
-    );
-    check_double(
-        scenario,
-        "fragment_overlap",
-        result.max_fragment_overlap,
-        scenario.expectations.fragment_overlap,
-        warnings,
-    );
-    check_double(
-        scenario,
-        "bone_spin",
-        result.max_bone_angular_speed,
-        scenario.expectations.bone_spin,
-        warnings,
-    );
-    check_double(
-        scenario,
-        "bone_joint_subluxation",
-        result.max_bone_joint_subluxation,
-        scenario.expectations.bone_joint_subluxation,
-        warnings,
-    );
-    check_double(
-        scenario,
-        "tissue_softening",
-        result.max_tissue_softening,
-        scenario.expectations.tissue_softening,
-        warnings,
-    );
-    check_double(
-        scenario,
-        "tissue_fatigue",
-        result.max_tissue_fatigue,
-        scenario.expectations.tissue_fatigue,
-        warnings,
-    );
-    check_double(
-        scenario,
-        "tissue_plasticity",
-        result.max_tissue_plasticity,
-        scenario.expectations.tissue_plasticity,
-        warnings,
-    );
-}
-
-fn check_int(
-    scenario: &Scenario,
-    name: &str,
-    value: i32,
-    band: IntBand,
-    warnings: &mut Vec<String>,
-) {
-    if value < band.min || value > band.max {
-        warnings.push(format!(
-            "{}: {}={} outside {}..{}",
-            scenario.name, name, value, band.min, band.max
-        ));
-    }
-}
-
-fn check_double(
-    scenario: &Scenario,
-    name: &str,
-    value: f64,
-    band: DoubleBand,
-    warnings: &mut Vec<String>,
-) {
-    if value < band.min || value > band.max {
-        warnings.push(format!(
-            "{}: {}={:.3} outside {:.3}..{:.3}",
-            scenario.name, name, value, band.min, band.max
-        ));
-    }
-}
-
-fn active_fluid_count(world: &rp::World) -> i32 {
-    world
-        .fluids()
-        .iter()
-        .filter(|fluid| fluid.life > 0.0)
-        .count() as i32
-}
-
-fn free_fragment_count(world: &rp::World) -> i32 {
-    world
-        .bones()
-        .iter()
-        .filter(|bone| free_fragment(bone))
-        .count() as i32
-}
-
-fn spinning_fragment_count(world: &rp::World) -> i32 {
-    world
-        .bones()
-        .iter()
-        .filter(|bone| free_fragment(bone) && bone.angular_velocity.abs() > 0.08)
-        .count() as i32
-}
-
-fn sleeping_fragment_count(world: &rp::World) -> i32 {
-    world
-        .bones()
-        .iter()
-        .filter(|bone| free_fragment(bone) && bone.sleeping)
-        .count() as i32
-}
-
-fn free_fragment(bone: &rp::BoneSegment) -> bool {
-    !bone.pinned && (bone.fractured || bone.splinter)
-}
-
-fn tool_name(tool: rp::ToolMode) -> &'static str {
-    match tool {
-        rp::ToolMode::Blunt => "blunt",
-        rp::ToolMode::Sharp => "sharp",
-        rp::ToolMode::Heavy => "heavy",
-    }
-}
-
-/// World position of body coordinates (fractions of body height from the top of
-/// the head on the midline) for the 1280x720 scenario window.
-fn body(u: f64, v: f64) -> rp::Vec2 {
-    rp::body_frame(WIDTH, HEIGHT).point(u, v)
 }

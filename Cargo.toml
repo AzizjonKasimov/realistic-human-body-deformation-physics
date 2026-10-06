@@ -10,7 +10,7 @@ path = "src/lib.rs"
 
 [[bin]]
 name = "realistic_physics"
-path = "src/bin/realistic_physics.rs"
+path = "src/bin/realistic_physics/main.rs"
 
 [[bin]]
 name = "anatomy_diagnostics"
@@ -23,6 +23,10 @@ path = "src/bin/strike_scenarios.rs"
 [[bin]]
 name = "visual_damage_diagnostics"
 path = "src/bin/visual_damage_diagnostics.rs"
+
+[[bin]]
+name = "contact_sheet"
+path = "src/bin/contact_sheet.rs"
 
 [dependencies]
 macroquad = "0.4"

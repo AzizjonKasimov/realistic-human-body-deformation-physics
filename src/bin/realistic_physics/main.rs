@@ -1,6 +1,9 @@
 use macroquad::prelude::*;
 use realistic_physics as rp;
 
+#[cfg(not(target_arch = "wasm32"))]
+mod capture;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ViewMode {
     Normal,
@@ -59,6 +62,8 @@ struct AppState {
     tool_blood: f32,
     /// Fluid particles emitted so far, to see how much new blood each step adds.
     seen_fluid: i32,
+    /// Draw only the scene, without the HUD, control buttons, and pointer ring.
+    hide_ui: bool,
 }
 
 /// A skin spring on the body's outline, with the third corner of its triangle
@@ -107,6 +112,7 @@ impl AppState {
             skin_rim,
             tool_blood: 0.0,
             seen_fluid: 0,
+            hide_ui: false,
         }
     }
 }
@@ -159,10 +165,14 @@ struct RenderContext<'a> {
 }
 
 fn window_conf() -> Conf {
+    #[cfg(not(target_arch = "wasm32"))]
+    let (window_width, window_height) = capture::window_size().unwrap_or((1280, 720));
+    #[cfg(target_arch = "wasm32")]
+    let (window_width, window_height) = (1280, 720);
     Conf {
         window_title: "Realistic Physics Rust".to_owned(),
-        window_width: 1280,
-        window_height: 720,
+        window_width,
+        window_height,
         high_dpi: true,
         sample_count: 4,
         ..Conf::default()
@@ -171,6 +181,11 @@ fn window_conf() -> Conf {
 
 #[macroquad::main(window_conf)]
 async fn main() {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(request) = capture::request() {
+        capture::run(request).await;
+        return;
+    }
     let mut app = AppState::new(screen_width() as f64, screen_height() as f64);
 
     loop {
@@ -289,21 +304,22 @@ fn step_simulation(app: &mut AppState, frame_dt: f64) {
             power: app.impact_power,
             tool: app.tool,
         };
-        app.world.step(
-            fixed_dt,
-            &input,
-            screen_width() as f64,
-            screen_height() as f64,
-        );
-        let emitted = app.world.stats().emitted_fluid_particles;
-        if app.pointer_down {
-            let fresh = (emitted - app.seen_fluid).max(0) as f32;
-            app.tool_blood = (app.tool_blood + fresh * 0.012).min(1.0);
-        }
-        app.seen_fluid = emitted;
-        app.tool_blood *= 0.9985;
+        step_world(app, &input, screen_width() as f64, screen_height() as f64);
         app.accumulator -= fixed_dt;
     }
+}
+
+/// One fixed simulation step with this input, plus the blood the tool picks up.
+fn step_world(app: &mut AppState, input: &rp::InputState, width: f64, height: f64) {
+    let fixed_dt = app.world.materials().fixed_dt;
+    app.world.step(fixed_dt, input, width, height);
+    let emitted = app.world.stats().emitted_fluid_particles;
+    if input.down {
+        let fresh = (emitted - app.seen_fluid).max(0) as f32;
+        app.tool_blood = (app.tool_blood + fresh * 0.012).min(1.0);
+    }
+    app.seen_fluid = emitted;
+    app.tool_blood *= 0.9985;
 }
 
 fn draw_app(app: &AppState) {
@@ -320,6 +336,9 @@ fn draw_app(app: &AppState) {
     draw_body_layers(&ctx);
     draw_effects(&ctx);
     draw_striker(&ctx);
+    if app.hide_ui {
+        return;
+    }
     draw_hud(&ctx);
     draw_controls_hint(&ctx);
     if app.debug_overlay {
@@ -1307,6 +1326,9 @@ fn draw_striker(ctx: &RenderContext) {
         }
     }
 
+    if app.hide_ui {
+        return;
+    }
     let pointer = app.pointer;
     let ring = if app.pointer_down { 6.0 } else { 5.0 };
     draw_circle_lines(
