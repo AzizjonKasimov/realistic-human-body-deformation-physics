@@ -111,8 +111,24 @@ pub fn body_frame(width: f64, height: f64) -> BodyFrame {
     }
 }
 
+/// The body with its crown at `top`, as large as fits above `bottom` and in the
+/// window's width; the app uses it to keep the body clear of its controls.
+pub fn body_frame_between(width: f64, top: f64, bottom: f64) -> BodyFrame {
+    BodyFrame {
+        origin: Vec2 {
+            x: width * 0.52,
+            y: top,
+        },
+        height: (bottom - top).min(width * 1.45).min(720.0).max(1.0),
+    }
+}
+
 pub fn create_layered_body(width: f64, height: f64, materials: Materials) -> World {
-    let frame = body_frame(width, height);
+    create_layered_body_in(body_frame(width, height), materials)
+}
+
+/// The layered body placed at `frame`.
+pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
     let field = human_silhouette();
     let mut world = World::new(materials);
     let spacing = materials.point_spacing;
@@ -224,11 +240,19 @@ pub fn create_layered_body(width: f64, height: f64, materials: Materials) -> Wor
             3.0,
             1.22,
         );
+        // The brachial artery runs down the inside of the upper arm between the
+        // bone and the skin, and on down the inside of the forearm.
         world.add_vessel_segment(
-            frame.point(side * 0.086, 0.235),
-            frame.point(side * 0.149, 0.505),
+            frame.point(side * 0.088, 0.240),
+            frame.point(side * 0.110, 0.380),
             2.5,
             1.05,
+        );
+        world.add_vessel_segment(
+            frame.point(side * 0.110, 0.380),
+            frame.point(side * 0.133, 0.480),
+            2.0,
+            0.95,
         );
         world.add_vessel_segment(
             frame.point(side * 0.016, 0.125),

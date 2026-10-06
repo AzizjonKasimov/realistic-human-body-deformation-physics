@@ -49,12 +49,20 @@ try {
                 $response.ContentType = $type
                 $response.Headers["Cache-Control"] = "no-store"
                 $response.ContentLength64 = $bytes.Length
-                $response.OutputStream.Write($bytes, 0, $bytes.Length)
+                # A HEAD request, such as a check that the server is up, gets
+                # the headers only; writing a body to it throws.
+                if ($context.Request.HttpMethod -ne "HEAD") {
+                    $response.OutputStream.Write($bytes, 0, $bytes.Length)
+                }
             } else {
                 $response.StatusCode = 404
             }
+        } catch {
+            # One failed request, such as a client that went away mid-download,
+            # must not stop the server.
+            Write-Warning "$($context.Request.HttpMethod) $($context.Request.Url.AbsolutePath): $($_.Exception.Message)"
         } finally {
-            $response.Close()
+            try { $response.Close() } catch { }
         }
     }
 } finally {

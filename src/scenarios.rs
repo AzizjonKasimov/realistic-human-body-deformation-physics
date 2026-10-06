@@ -6,7 +6,10 @@
 
 use std::fmt;
 
-use crate::{body_frame, create_layered_body, BoneSegment, InputState, Materials, ToolMode, World};
+use crate::{
+    body_frame, create_layered_body, swing_power, BodyFrame, BoneSegment, InputState, Materials,
+    ToolMode, World,
+};
 
 /// Window size the tuned scenarios are played in.
 pub const SCENARIO_WIDTH: f64 = 1280.0;
@@ -19,7 +22,8 @@ pub const FOLLOW_THROUGH_FRAMES: i32 = 20;
 /// A scripted swing. After `windup_frames` the hand moves in a straight line
 /// from `start` to `end` (body coordinates) over `strike_frames`, holds there
 /// with the button down for the follow-through, then lets go while the body
-/// settles until `settle_frames` after the swing.
+/// settles until `settle_frames` after the swing. `power` is the tool's
+/// [`swing_power`] unless an experiment overrides it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Strike {
     pub tool: ToolMode,
@@ -36,13 +40,12 @@ impl Strike {
         self.windup_frames + self.strike_frames + self.settle_frames
     }
 
-    /// Pointer input on `frame` of this strike in a window of the given size.
-    pub fn input(&self, frame: i32, dt: f64, width: f64, height: f64) -> InputState {
+    /// Pointer input on `frame` of this strike against a body placed at `body`.
+    pub fn input(&self, frame: i32, dt: f64, body: BodyFrame) -> InputState {
         let held_until = self.windup_frames + self.strike_frames + FOLLOW_THROUGH_FRAMES;
         if frame >= held_until {
             return InputState::default();
         }
-        let body = body_frame(width, height);
         let start = body.point(self.start.0, self.start.1);
         let end = body.point(self.end.0, self.end.1);
         let duration = (self.strike_frames - 1).max(1) as f64;
@@ -86,9 +89,10 @@ impl Strike {
         }
     }
 
-    /// Parses `tool:u0,v0:u1,v1`, optionally followed by `:power=4`,
-    /// `:frames=16` (strike frames), `:windup=6`, and `:settle=60`. Tools are
-    /// `bat`, `knife`, or `hammer` (or `blunt`, `sharp`, `heavy`).
+    /// Parses `tool:u0,v0:u1,v1`, optionally followed by `:frames=16` (strike
+    /// frames), `:windup=6`, `:settle=60`, and `:power=P` to try a strength
+    /// other than the tool's swing power. Tools are `bat`, `knife`, or `hammer`
+    /// (or `blunt`, `sharp`, `heavy`).
     pub fn parse(spec: &str) -> Result<Strike, String> {
         let mut parts = spec.split(':');
         let tool = match parts.next().unwrap_or("").trim() {
@@ -116,7 +120,7 @@ impl Strike {
             windup_frames: 6,
             strike_frames: 16,
             settle_frames: 60,
-            power: 3.0,
+            power: swing_power(tool),
         };
         for option in parts {
             let (key, value) = option
@@ -286,12 +290,12 @@ impl Scenario {
         self.strike.frames() + self.followup.map_or(0, |followup| followup.frames())
     }
 
-    /// Pointer input on `frame` of the scenario in a window of the given size.
-    pub fn input(&self, frame: i32, dt: f64, width: f64, height: f64) -> InputState {
+    /// Pointer input on `frame` of the scenario against a body placed at `body`.
+    pub fn input(&self, frame: i32, dt: f64, body: BodyFrame) -> InputState {
         let first = self.strike.frames();
         match self.followup {
-            Some(followup) if frame >= first => followup.input(frame - first, dt, width, height),
-            _ => self.strike.input(frame, dt, width, height),
+            Some(followup) if frame >= first => followup.input(frame - first, dt, body),
+            _ => self.strike.input(frame, dt, body),
         }
     }
 
@@ -776,8 +780,9 @@ pub fn run(
     let mut world = create_layered_body(width, height, Materials::default());
     let mut result = ScenarioResult::default();
     let dt = world.materials().fixed_dt;
+    let body = body_frame(width, height);
     for frame in 0..scenario.frames() {
-        let input = scenario.input(frame, dt, width, height);
+        let input = scenario.input(frame, dt, body);
         world.step(dt, &input, width, height);
         result.accumulate(&world);
         observe(frame, &world);
@@ -847,28 +852,21 @@ pub fn scenarios() -> Vec<Scenario> {
         bone_spin: DoubleBand::range(0.0, 38.0),
         ..ScenarioExpectations::default()
     };
-    let strike = |tool, start, end, strike_frames, settle_frames, power| Strike {
+    let strike = |tool, start, end, strike_frames, settle_frames| Strike {
         tool,
         start,
         end,
         windup_frames: 6,
         strike_frames,
         settle_frames,
-        power,
+        power: swing_power(tool),
     };
     vec![
         Scenario {
             name: "torso_blunt_medium",
             region: "torso",
             intent: "medium",
-            strike: strike(
-                ToolMode::Blunt,
-                (-0.360, 0.330),
-                (0.200, 0.330),
-                14,
-                60,
-                3.0,
-            ),
+            strike: strike(ToolMode::Blunt, (-0.360, 0.330), (0.200, 0.330), 14, 60),
             followup: None,
             // A hard bat swing into the upper arm and chest: deep bruising
             // and perhaps a broken arm, but the torso is not torn open.
@@ -893,14 +891,7 @@ pub fn scenarios() -> Vec<Scenario> {
             name: "torso_heavy_high",
             region: "torso",
             intent: "high",
-            strike: strike(
-                ToolMode::Heavy,
-                (-0.260, 0.340),
-                (0.300, 0.340),
-                16,
-                60,
-                4.0,
-            ),
+            strike: strike(ToolMode::Heavy, (-0.260, 0.340), (0.300, 0.340), 14, 60),
             followup: None,
             // A full-force sledgehammer blow through the arm into the chest
             // breaks the arm and ribs, bruises deeply and injures organs,
@@ -930,14 +921,7 @@ pub fn scenarios() -> Vec<Scenario> {
             name: "torso_sharp_cut",
             region: "torso",
             intent: "cut",
-            strike: strike(
-                ToolMode::Sharp,
-                (-0.075, 0.380),
-                (0.065, 0.480),
-                16,
-                60,
-                3.0,
-            ),
+            strike: strike(ToolMode::Sharp, (-0.075, 0.380), (0.065, 0.480), 16, 60),
             followup: None,
             // A knife slashed across the belly cuts a line through skin and
             // muscle and can reach a vessel or organ, but breaks no bone.
@@ -962,14 +946,7 @@ pub fn scenarios() -> Vec<Scenario> {
             name: "shoulder_blunt",
             region: "shoulder",
             intent: "medium",
-            strike: strike(
-                ToolMode::Blunt,
-                (-0.100, 0.000),
-                (-0.100, 0.320),
-                12,
-                60,
-                3.2,
-            ),
+            strike: strike(ToolMode::Blunt, (-0.100, 0.000), (-0.100, 0.320), 12, 60),
             followup: None,
             // A bat brought down on the shoulder bruises it.
             expectations: ScenarioExpectations {
@@ -988,17 +965,10 @@ pub fn scenarios() -> Vec<Scenario> {
             name: "arm_sharp",
             region: "arm",
             intent: "cut",
-            strike: strike(
-                ToolMode::Sharp,
-                (-0.115, 0.260),
-                (-0.165, 0.530),
-                24,
-                48,
-                3.4,
-            ),
+            strike: strike(ToolMode::Sharp, (-0.086, 0.230), (-0.128, 0.450), 24, 48),
             followup: None,
-            // A knife drawn down the arm cuts along it, lifts skin flaps and
-            // reaches the brachial artery, but breaks no bone.
+            // A knife drawn from the armpit down the inside of the arm cuts
+            // along it and opens the arteries there, but breaks no bone.
             expectations: ScenarioExpectations {
                 bone_fractures: IntBand::range(0, 0),
                 rib_fractures: IntBand::range(0, 0),
@@ -1007,8 +977,7 @@ pub fn scenarios() -> Vec<Scenario> {
                 contusion_events: IntBand::range(0, 60),
                 tear_propagations: IntBand::range(0, 20),
                 muscle_cut_transfers: IntBand::range(15, 100),
-                skin_flap_detachments: IntBand::range(15, 90),
-                vessel_lacerations: IntBand::range(1, 2),
+                vessel_lacerations: IntBand::range(1, 3),
                 bone_joint_subluxations: IntBand::range(0, 0),
                 ..e
             },
@@ -1017,14 +986,7 @@ pub fn scenarios() -> Vec<Scenario> {
             name: "hip_heavy",
             region: "hip",
             intent: "high",
-            strike: strike(
-                ToolMode::Heavy,
-                (-0.340, 0.620),
-                (0.100, 0.620),
-                16,
-                60,
-                4.0,
-            ),
+            strike: strike(ToolMode::Heavy, (-0.340, 0.620), (0.100, 0.620), 16, 60),
             followup: None,
             // A sledgehammer into the thigh bruises it deeply; the femur, the
             // strongest bone, holds.
@@ -1043,14 +1005,7 @@ pub fn scenarios() -> Vec<Scenario> {
             name: "leg_blunt",
             region: "leg",
             intent: "medium",
-            strike: strike(
-                ToolMode::Blunt,
-                (-0.300, 0.780),
-                (0.050, 0.800),
-                12,
-                60,
-                3.4,
-            ),
+            strike: strike(ToolMode::Blunt, (-0.300, 0.780), (0.050, 0.800), 12, 60),
             followup: None,
             // A bat swung into the shin bruises it.
             expectations: ScenarioExpectations {
@@ -1067,25 +1022,17 @@ pub fn scenarios() -> Vec<Scenario> {
             name: "thigh_cut_rebleed",
             region: "leg",
             intent: "rebleed",
-            strike: strike(
-                ToolMode::Sharp,
-                (-0.072, 0.585),
-                (-0.072, 0.685),
-                16,
-                190,
-                3.0,
-            ),
+            strike: strike(ToolMode::Sharp, (-0.075, 0.585), (-0.075, 0.685), 16, 190),
             // A knife cut down the outer thigh clots, then a bat swung into the
             // thigh strikes the healed cut. The blade runs ahead of the hand, so
             // the cut lies a little below the hand's path; the bat aims at its
-            // middle, below the hanging hand.
+            // lower half, below the hanging hand.
             followup: Some(strike(
                 ToolMode::Blunt,
-                (-0.340, 0.680),
-                (0.100, 0.680),
+                (-0.340, 0.700),
+                (0.100, 0.700),
                 14,
                 60,
-                3.0,
             )),
             expectations: ScenarioExpectations {
                 bone_fractures: IntBand::range(0, 1),
@@ -1107,14 +1054,7 @@ pub fn scenarios() -> Vec<Scenario> {
             name: "torso_heavy_fragment_settle",
             region: "torso",
             intent: "settle",
-            strike: strike(
-                ToolMode::Heavy,
-                (-0.260, 0.340),
-                (0.300, 0.340),
-                16,
-                260,
-                4.0,
-            ),
+            strike: strike(ToolMode::Heavy, (-0.260, 0.340), (0.300, 0.340), 14, 260),
             followup: None,
             // The bone fragments from a full-force sledgehammer blow to the
             // chest settle and come to rest.
@@ -1143,12 +1083,13 @@ mod tests {
 
     #[test]
     fn strike_spec_parses_tool_path_and_options() {
-        let strike = Strike::parse("hammer:-0.26,0.34:0.3,0.34:power=4:settle=90").unwrap();
+        let strike = Strike::parse("hammer:-0.26,0.34:0.3,0.34:settle=90").unwrap();
         assert_eq!(strike.tool, ToolMode::Heavy);
         assert_eq!(strike.start, (-0.26, 0.34));
         assert_eq!(strike.end, (0.3, 0.34));
-        assert_eq!(strike.power, 4.0);
+        assert_eq!(strike.power, swing_power(ToolMode::Heavy));
         assert_eq!(strike.settle_frames, 90);
+        assert_eq!(Strike::parse("knife:0,0:1,1:power=5").unwrap().power, 5.0);
         assert!(Strike::parse("spoon:0,0:1,1").is_err());
         assert!(Strike::parse("bat:0,0").is_err());
     }
@@ -1174,16 +1115,16 @@ mod tests {
     fn scenario_input_holds_through_then_lets_go_and_plays_the_followup() {
         let scenario = scenario("thigh_cut_rebleed").unwrap();
         let dt = 1.0 / 60.0;
-        let (w, h) = (SCENARIO_WIDTH, SCENARIO_HEIGHT);
+        let body = body_frame(SCENARIO_WIDTH, SCENARIO_HEIGHT);
         let first = scenario.strike;
-        assert!(!scenario.input(first.windup_frames - 1, dt, w, h).down);
-        assert!(scenario.input(first.windup_frames, dt, w, h).down);
+        assert!(!scenario.input(first.windup_frames - 1, dt, body).down);
+        assert!(scenario.input(first.windup_frames, dt, body).down);
         let released = first.windup_frames + first.strike_frames + FOLLOW_THROUGH_FRAMES;
-        assert!(scenario.input(released - 1, dt, w, h).down);
-        assert!(!scenario.input(released, dt, w, h).down);
+        assert!(scenario.input(released - 1, dt, body).down);
+        assert!(!scenario.input(released, dt, body).down);
         let followup = scenario.followup.unwrap();
         let swing = first.frames() + followup.windup_frames;
-        let input = scenario.input(swing, dt, w, h);
+        let input = scenario.input(swing, dt, body);
         assert!(input.down);
         assert_eq!(input.tool, ToolMode::Blunt);
     }

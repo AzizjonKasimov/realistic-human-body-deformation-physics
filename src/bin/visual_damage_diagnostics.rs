@@ -195,8 +195,9 @@ fn run_scenario(scenario: &VisualScenario) -> (rp::World, f64, f64, f64) {
     let mut peak_cavity_pressure: f64 = 0.0;
     let mut peak_cavity_collapse: f64 = 0.0;
     let mut peak_organ_damage: f64 = 0.0;
+    let body = rp::body_frame(WIDTH, HEIGHT);
     for frame in 0..scenario.strike.frames() {
-        let input = scenario.strike.input(frame, dt, WIDTH, HEIGHT);
+        let input = scenario.strike.input(frame, dt, body);
         world.step(dt, &input, WIDTH, HEIGHT);
         let debug = world.debug();
         peak_cavity_pressure = peak_cavity_pressure.max(debug.max_cavity_pressure);

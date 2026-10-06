@@ -1,8 +1,6 @@
 .playwright-cli/
 output/
 .idea/
-build/
 target/
 realistic_physics.exe
-realistic_physics.pdb
 AGENTS.md

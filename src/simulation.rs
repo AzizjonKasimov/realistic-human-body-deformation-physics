@@ -4,8 +4,10 @@ use std::f64::consts::PI;
 mod body;
 mod tools;
 
-pub use body::{body_frame, create_layered_body, BodyFrame};
-pub use tools::{tool_geometry, tool_pose, ToolGeometry, ToolPose};
+pub use body::{
+    body_frame, body_frame_between, create_layered_body, create_layered_body_in, BodyFrame,
+};
+pub use tools::{swing_power, tool_geometry, tool_pose, ToolGeometry, ToolPose};
 
 const EPSILON: f64 = 0.0001;
 const FRAGMENT_TISSUE_POINT_RADIUS_SCALE: f64 = 0.36;
@@ -9476,7 +9478,7 @@ fn tool_profile(tool: ToolMode) -> ToolProfile {
             tissue_load_scale: 0.75,
             contusion_scale: 1.55,
             bone_push_scale: 1.46,
-            bone_load_scale: 1.72,
+            bone_load_scale: 3.0,
             fracture_scale: 1.0,
             cut_pressure_scale: 0.0,
             crush_tear_scale: 0.10,

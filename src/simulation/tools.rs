@@ -90,6 +90,15 @@ fn tool_handling(tool: ToolMode) -> ToolHandling {
     }
 }
 
+/// How hard a person swings each tool, as the strike power the app always
+/// plays with: a knife or a bat in one hand, a sledgehammer in both.
+pub fn swing_power(tool: ToolMode) -> f64 {
+    match tool {
+        ToolMode::Sharp | ToolMode::Blunt => 3.0,
+        ToolMode::Heavy => 4.0,
+    }
+}
+
 /// Dimensions of a tool in world pixels, measured from the point the hand drives.
 #[derive(Clone, Copy, Debug)]
 pub struct ToolGeometry {
@@ -242,6 +251,9 @@ struct PointHit {
     load: f64,
     /// Momentum the tool gave the point.
     impulse: f64,
+    /// How far the tool pressed into the point over the step's sub-steps, so
+    /// the load does not depend on how finely the motion is divided.
+    depth: f64,
 }
 
 /// One step's physical values for the tool in hand.
@@ -857,7 +869,7 @@ impl World {
         ));
         let travel =
             distance(start.axis_start, end.axis_start).max(distance(start.axis_end, end.axis_end));
-        let spacing = (end.radius * 0.8).max(self.materials.point_spacing * 0.45);
+        let spacing = (self.materials.point_spacing * 0.25).max(1.0);
         let steps = ((travel / spacing).ceil() as usize).clamp(1, MAX_TOOL_SUBSTEPS);
         let sub_dt = dt / steps as f64;
 
@@ -980,7 +992,10 @@ impl World {
             let momentum = scale(moved, point.mass / dt);
             given = add(given, momentum);
             let hit = hits[index].get_or_insert_with(PointHit::default);
-            hit.load = hit.load.max(impact * (depth / shape.influence) * strength);
+            hit.depth += depth;
+            hit.load = hit
+                .load
+                .max(impact * (hit.depth / shape.influence).min(1.0) * strength);
             hit.impulse += hypot(momentum.x, momentum.y);
             if depth > self.debug.max_depth {
                 self.debug.max_depth = depth;

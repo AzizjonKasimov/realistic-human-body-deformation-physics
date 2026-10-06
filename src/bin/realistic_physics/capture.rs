@@ -7,7 +7,9 @@
 //! ```text
 //! --size WXH                 window size (default 1280x720)
 //! --view normal|anatomy|both which view to save; `both` writes OUT-normal.png
-//!                            and OUT-anatomy.png (default normal)
+//!                            and OUT-anatomy.png (default normal). The anatomy
+//!                            view shows muscle and bones through see-through
+//!                            skin, for checking; players only get the normal view.
 //! --scenario NAME            play a tuned strike scenario first
 //! --strike SPEC              play a custom swing first (strike_scenarios --strike syntax)
 //! --frames N                 stop after N steps (default: the whole strike, or
@@ -133,12 +135,11 @@ pub async fn run(request: CaptureRequest) {
         .unwrap_or_else(|| request.play.map_or(IDLE_FRAMES, |play| play.frames()));
     for frame in 0..frames {
         let input = match &request.play {
-            Some(play) => play.input(frame, dt, width, height),
+            Some(play) => play.input(frame, dt, app.frame),
             None => rp::InputState::default(),
         };
         if input.active {
             app.tool = input.tool;
-            app.impact_power = input.power;
             app.pointer = rp::Vec2 {
                 x: input.x,
                 y: input.y,

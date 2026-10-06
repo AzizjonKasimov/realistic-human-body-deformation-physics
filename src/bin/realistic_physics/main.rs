@@ -7,6 +7,9 @@ mod capture;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ViewMode {
     Normal,
+    /// See-through skin with the muscle and bones showing. Players only get
+    /// the normal view; screenshots use this one to check the anatomy.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     Anatomy,
 }
 
@@ -14,31 +17,32 @@ enum ViewMode {
 #[derive(Clone, Copy)]
 enum ControlAction {
     Tool(rp::ToolMode),
-    ToggleView,
     ToggleDebug,
     TogglePause,
-    SetMass(f64),
-    CycleMass,
     Reset,
 }
 
-const KEY_CONTROLS: [(KeyCode, ControlAction); 10] = [
+const KEY_CONTROLS: [(KeyCode, ControlAction); 6] = [
     (KeyCode::B, ControlAction::Tool(rp::ToolMode::Blunt)),
     (KeyCode::S, ControlAction::Tool(rp::ToolMode::Sharp)),
     (KeyCode::H, ControlAction::Tool(rp::ToolMode::Heavy)),
     (KeyCode::D, ControlAction::ToggleDebug),
-    (KeyCode::Tab, ControlAction::ToggleView),
     (KeyCode::Space, ControlAction::TogglePause),
-    (KeyCode::Key1, ControlAction::SetMass(1.0)),
-    (KeyCode::Key2, ControlAction::SetMass(2.0)),
-    (KeyCode::Key4, ControlAction::SetMass(4.0)),
     (KeyCode::R, ControlAction::Reset),
 ];
 
 const FLOOR_HEIGHT: f32 = 38.0;
+/// Height of a HUD chip.
+const CHIP_HEIGHT: f32 = 25.0;
+/// Gap kept between the body and the HUD or the control buttons.
+const BODY_UI_GAP: f32 = 4.0;
 
 struct AppState {
     world: rp::World,
+    /// Where the body was placed in the window.
+    frame: rp::BodyFrame,
+    /// Window size and button size the body was fitted to.
+    built_for: (f32, f32, bool),
     running: bool,
     pointer_down: bool,
     debug_overlay: bool,
@@ -46,7 +50,6 @@ struct AppState {
     pointer_initialized: bool,
     /// Where the hand is; the simulation pulls the tool toward it.
     pointer: rp::Vec2,
-    impact_power: f64,
     tool: rp::ToolMode,
     view_mode: ViewMode,
     /// The current press started on the control panel, so it must not strike.
@@ -89,31 +92,77 @@ const NO_TRIANGLE: usize = usize::MAX;
 
 impl AppState {
     fn new(width: f64, height: f64) -> Self {
-        let world = rp::create_layered_body(width, height, rp::Materials::default());
-        let skin_rim = skin_rim(&world);
         let initial_pointer = rp::Vec2 {
             x: width * 0.28,
             y: height * 0.46,
         };
-        Self {
-            world,
+        let mut app = Self {
+            world: rp::World::new(rp::Materials::default()),
+            frame: rp::body_frame(width, height),
+            built_for: (0.0, 0.0, false),
             running: true,
             pointer_down: false,
             debug_overlay: false,
             accumulator: 0.0,
             pointer_initialized: false,
             pointer: initial_pointer,
-            impact_power: 2.0,
             tool: rp::ToolMode::Blunt,
-            view_mode: ViewMode::Anatomy,
+            view_mode: ViewMode::Normal,
             ui_capture: false,
             ui_release: None,
             touch_ui: false,
-            skin_rim,
+            skin_rim: SkinRim::default(),
             tool_blood: 0.0,
             seen_fluid: 0,
             hide_ui: false,
-        }
+        };
+        app.rebuild_body(width as f32, height as f32);
+        app
+    }
+
+    /// A fresh body fitted to the window and to the controls as drawn now.
+    fn rebuild_body(&mut self, width: f32, height: f32) {
+        self.frame = body_frame_for(self, width, height);
+        self.world = rp::create_layered_body_in(self.frame, rp::Materials::default());
+        self.skin_rim = skin_rim(&self.world);
+        self.built_for = (width, height, self.touch_ui);
+        self.tool_blood = 0.0;
+        self.seen_fluid = 0;
+        self.accumulator = 0.0;
+    }
+}
+
+/// Where the body goes: the default placement when it clears the HUD at the
+/// top and the control buttons at the bottom, which wrap into more rows in
+/// narrow windows, or else as large as fits between them.
+fn body_frame_for(app: &AppState, width: f32, height: f32) -> rp::BodyFrame {
+    let default = rp::body_frame(width as f64, height as f64);
+    let top = (hud_bottom(width) + BODY_UI_GAP) as f64;
+    let hints = control_hints(app, &render_palette());
+    let panel = layout_control_hints(&hints, width, height - FLOOR_HEIGHT, app.touch_ui).panel;
+    let bottom = (panel.y - BODY_UI_GAP) as f64;
+    if default.origin.y >= top && default.origin.y + default.height <= bottom {
+        default
+    } else {
+        rp::body_frame_between(width as f64, top.max(default.origin.y), bottom)
+    }
+}
+
+/// Refits the body when the window or the button size has changed, as long as
+/// nothing has hurt it yet; a hurt body stays put until reset.
+fn refit_body(app: &mut AppState) {
+    let now = (screen_width(), screen_height(), app.touch_ui);
+    if now == app.built_for {
+        return;
+    }
+    let stats = app.world.stats();
+    let untouched = stats.contusion_events == 0
+        && stats.broken_skin == 0
+        && stats.broken_muscle == 0
+        && stats.fractured_bones == 0
+        && stats.emitted_fluid_particles == 0;
+    if untouched {
+        app.rebuild_body(now.0, now.1);
     }
 }
 
@@ -191,6 +240,7 @@ async fn main() {
     loop {
         let dt = get_frame_time().min(0.05) as f64;
         handle_input(&mut app);
+        refit_body(&mut app);
         step_simulation(&mut app, dt);
         draw_app(&app);
         next_frame().await;
@@ -253,36 +303,9 @@ fn apply_control(app: &mut AppState, action: ControlAction) {
                 app.tool_blood = 0.0;
             }
         }
-        ControlAction::ToggleView => {
-            app.view_mode = if app.view_mode == ViewMode::Anatomy {
-                ViewMode::Normal
-            } else {
-                ViewMode::Anatomy
-            };
-        }
         ControlAction::ToggleDebug => app.debug_overlay = !app.debug_overlay,
         ControlAction::TogglePause => app.running = !app.running,
-        ControlAction::SetMass(power) => app.impact_power = power,
-        ControlAction::CycleMass => {
-            app.impact_power = if app.impact_power < 2.0 {
-                2.0
-            } else if app.impact_power < 4.0 {
-                4.0
-            } else {
-                1.0
-            };
-        }
-        ControlAction::Reset => {
-            app.world = rp::create_layered_body(
-                screen_width() as f64,
-                screen_height() as f64,
-                rp::Materials::default(),
-            );
-            app.skin_rim = skin_rim(&app.world);
-            app.tool_blood = 0.0;
-            app.seen_fluid = 0;
-            app.accumulator = 0.0;
-        }
+        ControlAction::Reset => app.rebuild_body(screen_width(), screen_height()),
     }
 }
 
@@ -301,7 +324,7 @@ fn step_simulation(app: &mut AppState, frame_dt: f64) {
             y: app.pointer.y,
             vx: 0.0,
             vy: 0.0,
-            power: app.impact_power,
+            power: rp::swing_power(app.tool),
             tool: app.tool,
         };
         step_world(app, &input, screen_width() as f64, screen_height() as f64);
@@ -1633,46 +1656,27 @@ fn draw_bat(ctx: &RenderContext, pose: &rp::ToolPose, geometry: &rp::ToolGeometr
 
 fn draw_hud(ctx: &RenderContext) {
     let stats = ctx.app.world.stats();
-    let view = if ctx.anatomy { "ANATOMY" } else { "NORMAL" };
-    let running = if ctx.app.running { "LIVE" } else { "PAUSED" };
-    let items = [
-        format!("{view}"),
-        format!("{}", tool_name(ctx.app.tool).to_uppercase()),
-        format!("MASS {:.0}X", ctx.app.impact_power),
-        format!("{running}"),
-        format!("SKIN {}", stats.broken_skin),
-        format!("MUSCLE {}", stats.broken_muscle),
-        format!("BONE {}", stats.fractured_bones),
-        format!("FLUID {}", stats.emitted_fluid_particles),
-    ];
-
-    let margin = 14.0;
-    let mut x = margin;
-    let mut y = margin;
-    for (index, item) in items.iter().enumerate() {
-        let width = chip_width(item);
-        if x > margin && x + width > ctx.width - margin {
-            x = margin;
-            y += 31.0;
-        }
+    let items = hud_items(
+        ctx.app.tool,
+        ctx.app.running,
+        [
+            stats.broken_skin,
+            stats.broken_muscle,
+            stats.fractured_bones,
+            stats.emitted_fluid_particles,
+        ],
+    );
+    for (index, (item, (x, y))) in items.iter().zip(hud_layout(&items, ctx.width)).enumerate() {
         let accent = match index {
-            0 => {
-                if ctx.anatomy {
-                    ctx.palette.tool_accent
-                } else {
-                    ctx.palette.hud_muted
-                }
-            }
-            1 => tool_color(ctx.app.tool),
-            3 => {
+            0 => tool_color(ctx.app.tool),
+            1 => {
                 if ctx.app.running {
                     rgba(94, 176, 108, 230)
                 } else {
                     rgba(211, 93, 70, 230)
                 }
             }
-            4 | 5 | 6 | 7 => ctx.palette.blood_fresh,
-            _ => ctx.palette.hud_border,
+            _ => ctx.palette.blood_fresh,
         };
         draw_chip(
             x,
@@ -1682,8 +1686,45 @@ fn draw_hud(ctx: &RenderContext) {
             ctx.palette.hud_text,
             ctx.palette.hud_back,
         );
-        x += width + 7.0;
     }
+}
+
+/// HUD chip labels: the tool, whether the simulation runs, and the damage
+/// counts (skin, muscle, bone, fluid).
+fn hud_items(tool: rp::ToolMode, running: bool, counts: [i32; 4]) -> [String; 6] {
+    [
+        tool_name(tool).to_uppercase(),
+        (if running { "LIVE" } else { "PAUSED" }).to_string(),
+        format!("SKIN {}", counts[0]),
+        format!("MUSCLE {}", counts[1]),
+        format!("BONE {}", counts[2]),
+        format!("FLUID {}", counts[3]),
+    ]
+}
+
+/// Top-left corners of the HUD chips, wrapped into rows across the top.
+fn hud_layout(items: &[String], width: f32) -> Vec<(f32, f32)> {
+    let margin = 14.0;
+    let (mut x, mut y) = (margin, margin);
+    let mut corners = Vec::with_capacity(items.len());
+    for item in items {
+        let chip = chip_width(item);
+        if x > margin && x + chip > width - margin {
+            x = margin;
+            y += 31.0;
+        }
+        corners.push((x, y));
+        x += chip + 7.0;
+    }
+    corners
+}
+
+/// Lowest edge the HUD can reach in this window, with room for large counts.
+fn hud_bottom(width: f32) -> f32 {
+    let widest = hud_items(rp::ToolMode::Heavy, false, [9999, 9999, 99, 99999]);
+    hud_layout(&widest, width)
+        .last()
+        .map_or(0.0, |&(_, y)| y + CHIP_HEIGHT)
 }
 
 #[derive(Clone, Copy)]
@@ -1715,7 +1756,7 @@ impl ControlLayout {
     }
 }
 
-fn control_hints(app: &AppState, palette: &RenderPalette) -> [ControlHint; 9] {
+fn control_hints(app: &AppState, palette: &RenderPalette) -> [ControlHint; 7] {
     [
         ControlHint {
             key: "DRAG",
@@ -1746,13 +1787,6 @@ fn control_hints(app: &AppState, palette: &RenderPalette) -> [ControlHint; 9] {
             action: Some(ControlAction::Tool(rp::ToolMode::Heavy)),
         },
         ControlHint {
-            key: "TAB",
-            label: "view",
-            accent: palette.tool_accent,
-            active: app.view_mode == ViewMode::Anatomy,
-            action: Some(ControlAction::ToggleView),
-        },
-        ControlHint {
             key: "D",
             label: "debug",
             accent: rgba(94, 176, 108, 230),
@@ -1773,24 +1807,7 @@ fn control_hints(app: &AppState, palette: &RenderPalette) -> [ControlHint; 9] {
             active: false,
             action: Some(ControlAction::Reset),
         },
-        ControlHint {
-            key: "1 2 4",
-            label: mass_label(app.impact_power),
-            accent: palette.hud_border,
-            active: false,
-            action: Some(ControlAction::CycleMass),
-        },
     ]
-}
-
-fn mass_label(power: f64) -> &'static str {
-    if power >= 4.0 {
-        "mass 4x"
-    } else if power >= 2.0 {
-        "mass 2x"
-    } else {
-        "mass 1x"
-    }
 }
 
 /// Places the control hints above the floor, wrapping rows on narrow screens.
@@ -2091,9 +2108,9 @@ fn chip_width(label: &str) -> f32 {
 
 fn draw_chip(x: f32, y: f32, label: &str, accent: Color, text: Color, back: Color) {
     let width = chip_width(label);
-    draw_rectangle(x, y, width, 25.0, back);
-    draw_rectangle_lines(x, y, width, 25.0, 1.0, with_alpha(accent, 0.58));
-    draw_rectangle(x, y, 4.0, 25.0, accent);
+    draw_rectangle(x, y, width, CHIP_HEIGHT, back);
+    draw_rectangle_lines(x, y, width, CHIP_HEIGHT, 1.0, with_alpha(accent, 0.58));
+    draw_rectangle(x, y, 4.0, CHIP_HEIGHT, accent);
     draw_text(label, x + 10.0, y + 17.0, 17.0, text);
 }
 
