@@ -40,6 +40,8 @@ param(
     [int]$Every = 0,
     # Leave out the HUD, control buttons, and pointer ring.
     [switch]$NoUi,
+    # Leave out the name and step label, for images to publish.
+    [switch]$NoLabel,
     [string]$Out = "",
     # File name stem; defaults to the scenario name, "strike", "gesture", or "rest".
     [string]$Name = "",
@@ -80,6 +82,7 @@ foreach ($size in ($Sizes -split "," | ForEach-Object { $_.Trim() } | Where-Obje
     if ($Frames -gt 0) { $arguments += @("--frames", "$Frames") }
     if ($Every -gt 0) { $arguments += @("--every", "$Every") }
     if ($NoUi) { $arguments += "--no-ui" }
+    if ($NoLabel) { $arguments += "--no-label" }
     Invoke-Checked -Label "Capture $Name at $size" -Command { & $Exe @arguments }
     if ($Every -gt 0) {
         $images += Get-ChildItem -LiteralPath $Out -File |

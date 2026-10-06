@@ -132,7 +132,13 @@ impl AppState {
 
     /// A fresh body fitted to the window and to the controls as drawn now.
     fn rebuild_body(&mut self, width: f32, height: f32) {
-        self.frame = body_frame_for(self, width, height);
+        let frame = body_frame_for(self, width, height);
+        self.place_body(frame, width, height);
+    }
+
+    /// A fresh body at `frame` in a window of this size.
+    fn place_body(&mut self, frame: rp::BodyFrame, width: f32, height: f32) {
+        self.frame = frame;
         self.world = rp::create_layered_body_in(self.frame, rp::Materials::default());
         self.world.capture_motion(&mut self.earlier);
         self.skin_rim = skin_rim(&self.world);

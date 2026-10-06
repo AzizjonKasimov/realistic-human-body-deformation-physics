@@ -18,7 +18,14 @@
 //! --every N                  also save the screen every N steps, as OUT-STEP.png,
 //!                            to see how things move
 //! --no-ui                    leave out the HUD, control buttons, and pointer ring
-//! --label TEXT               write TEXT in the top right corner
+//! --label TEXT               write TEXT in the bottom right corner
+//! --no-label                 write no label or step number, for frames that
+//!                            become a video (`--every 1` saves every step)
+//! --body-frame X,Y,H         put the top of the head at X,Y and make the body
+//!                            H pixels tall instead of fitting it to the window.
+//!                            Injuries depend on the body's size in pixels, and
+//!                            the tuned scenarios use 561.6, its height in a
+//!                            1280x720 window, so a tall video keeps that size.
 //! ```
 
 use std::env;
@@ -40,6 +47,8 @@ pub struct CaptureRequest {
     every: Option<i32>,
     hide_ui: bool,
     label: Option<String>,
+    show_label: bool,
+    body_frame: Option<rp::BodyFrame>,
 }
 
 /// The window size asked for with `--size`, when capturing.
@@ -72,6 +81,8 @@ pub fn request() -> Option<CaptureRequest> {
         every: None,
         hide_ui: false,
         label: None,
+        show_label: true,
+        body_frame: None,
     };
     while let Some(arg) = args.next() {
         let mut value = |name: &str| {
@@ -110,6 +121,11 @@ pub fn request() -> Option<CaptureRequest> {
             "--every" => request.every = Some(steps(&value("--every")).max(1)),
             "--no-ui" => request.hide_ui = true,
             "--label" => request.label = Some(value("--label")),
+            "--no-label" => request.show_label = false,
+            "--body-frame" => {
+                request.body_frame =
+                    Some(parse_body_frame(&value("--body-frame")).unwrap_or_else(|e| fail(&e)));
+            }
             other => fail(&format!("unknown option `{other}`")),
         }
     }
@@ -127,6 +143,9 @@ pub async fn run(request: CaptureRequest) {
     warm_glyphs().await;
     let (width, height) = (screen_width() as f64, screen_height() as f64);
     let mut app = AppState::new(width, height);
+    if let Some(frame) = request.body_frame {
+        app.place_body(frame, width as f32, height as f32);
+    }
     app.hide_ui = request.hide_ui;
     let dt = app.world.materials().fixed_dt;
     let frames = request
@@ -201,6 +220,9 @@ async fn save_views(app: &mut AppState, request: &CaptureRequest, step: Option<i
 
 fn draw_view(app: &AppState, request: &CaptureRequest, step: Option<i32>) {
     draw_app(app);
+    if !request.show_label {
+        return;
+    }
     match (&request.label, step) {
         (Some(label), Some(step)) => draw_label(&format!("{label} step {step}")),
         (Some(label), None) => draw_label(label),
@@ -268,6 +290,23 @@ fn parse_size(text: &str) -> Result<(i32, i32), String> {
             .ok_or_else(|| format!("`{n}` is not a window size"))
     };
     Ok((number(width)?, number(height)?))
+}
+
+fn parse_body_frame(text: &str) -> Result<rp::BodyFrame, String> {
+    let numbers: Vec<f64> = text
+        .split(',')
+        .map(|n| n.trim().parse::<f64>().ok().filter(|n| n.is_finite()))
+        .collect::<Option<_>>()
+        .ok_or_else(|| format!("`{text}` should look like 288,240,561.6"))?;
+    match numbers[..] {
+        [x, y, height] if height >= 64.0 => Ok(rp::BodyFrame {
+            origin: rp::Vec2 { x, y },
+            height,
+        }),
+        _ => Err(format!(
+            "`{text}` should be X,Y,HEIGHT with HEIGHT at least 64"
+        )),
+    }
 }
 
 fn fail(message: &str) -> ! {
