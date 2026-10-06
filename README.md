@@ -130,7 +130,7 @@ Open <http://localhost:8080>, or <http://localhost:8080/?stats> to show the fram
 ## Controls
 
 - Left-drag to swing the selected tool into the body. The tool trails your pointer like a real tool in hand: swing from outside the body for a hard hit, or hold the tool against the body and keep dragging past it to press harder. The ring marks where your hand is. Damage comes from the tool's shape and weight, its speed when it lands, and how hard you press.
-- `B`, `S`, and `H` select the bat (blunt), knife (sharp), and sledgehammer (heavy).
+- `H`, `B`, and `S` select the sledgehammer (heavy), bat (blunt), and knife (sharp). The sledgehammer is in hand when the app starts.
 - `D` toggles the contact debug overlay.
 - `R` resets the body.
 - `Space` pauses or resumes.

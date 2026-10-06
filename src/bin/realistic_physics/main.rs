@@ -23,9 +23,9 @@ enum ControlAction {
 }
 
 const KEY_CONTROLS: [(KeyCode, ControlAction); 6] = [
+    (KeyCode::H, ControlAction::Tool(rp::ToolMode::Heavy)),
     (KeyCode::B, ControlAction::Tool(rp::ToolMode::Blunt)),
     (KeyCode::S, ControlAction::Tool(rp::ToolMode::Sharp)),
-    (KeyCode::H, ControlAction::Tool(rp::ToolMode::Heavy)),
     (KeyCode::D, ControlAction::ToggleDebug),
     (KeyCode::Space, ControlAction::TogglePause),
     (KeyCode::R, ControlAction::Reset),
@@ -106,7 +106,7 @@ impl AppState {
             accumulator: 0.0,
             pointer_initialized: false,
             pointer: initial_pointer,
-            tool: rp::ToolMode::Blunt,
+            tool: rp::ToolMode::Heavy,
             view_mode: ViewMode::Normal,
             ui_capture: false,
             ui_release: None,
@@ -1766,6 +1766,13 @@ fn control_hints(app: &AppState, palette: &RenderPalette) -> [ControlHint; 7] {
             action: None,
         },
         ControlHint {
+            key: "H",
+            label: "hammer",
+            accent: tool_color(rp::ToolMode::Heavy),
+            active: app.tool == rp::ToolMode::Heavy,
+            action: Some(ControlAction::Tool(rp::ToolMode::Heavy)),
+        },
+        ControlHint {
             key: "B",
             label: "bat",
             accent: tool_color(rp::ToolMode::Blunt),
@@ -1778,13 +1785,6 @@ fn control_hints(app: &AppState, palette: &RenderPalette) -> [ControlHint; 7] {
             accent: tool_color(rp::ToolMode::Sharp),
             active: app.tool == rp::ToolMode::Sharp,
             action: Some(ControlAction::Tool(rp::ToolMode::Sharp)),
-        },
-        ControlHint {
-            key: "H",
-            label: "hammer",
-            accent: tool_color(rp::ToolMode::Heavy),
-            active: app.tool == rp::ToolMode::Heavy,
-            action: Some(ControlAction::Tool(rp::ToolMode::Heavy)),
         },
         ControlHint {
             key: "D",
