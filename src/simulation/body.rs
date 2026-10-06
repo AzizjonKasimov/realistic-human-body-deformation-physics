@@ -151,6 +151,9 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
     add_long_fiber_springs(&mut world, &muscle, &muscle_edges, &fiber_guides);
     add_layer_triangles(&mut world, &skin, &skin_edges, TissueLayer::Skin);
     add_layer_triangles(&mut world, &muscle, &muscle_edges, TissueLayer::Muscle);
+    for outline in skin.outlines.iter().chain(&muscle.outlines) {
+        world.add_outline_loop(outline.clone());
+    }
 
     let cavity_areas = world
         .areas
@@ -417,6 +420,8 @@ fn add_skeleton(world: &mut World, frame: BodyFrame, materials: Materials) {
 struct LayerMesh {
     points: Vec<usize>,
     triangles: Vec<[usize; 3]>,
+    /// The sheet's outline loops, as world point indices in order.
+    outlines: Vec<Vec<usize>>,
 }
 
 /// Meshes one tissue sheet: evenly spaced points along its outline plus a
@@ -440,6 +445,7 @@ fn build_layer_mesh(
     let mut candidates: Vec<P2> = Vec::new();
     // For each outline point, the next point along its outline loop.
     let mut next_on_outline: Vec<usize> = Vec::new();
+    let mut outline_ranges = Vec::new();
     for outline in field.contours(-inset / frame.height) {
         let world_outline: Vec<P2> = outline
             .iter()
@@ -453,6 +459,7 @@ fn build_layer_mesh(
         let count = resampled.len();
         candidates.extend(resampled);
         next_on_outline.extend((0..count).map(|k| first + (k + 1) % count));
+        outline_ranges.push(first..first + count);
     }
     let follows_outline = |a: usize, b: usize| {
         (a < next_on_outline.len() && next_on_outline[a] == b)
@@ -513,6 +520,15 @@ fn build_layer_mesh(
         triangles: kept
             .iter()
             .map(|t| [index_of[t[0]], index_of[t[1]], index_of[t[2]]])
+            .collect(),
+        outlines: outline_ranges
+            .into_iter()
+            .map(|range| {
+                range
+                    .map(|candidate| index_of[candidate])
+                    .filter(|&index| index != usize::MAX)
+                    .collect()
+            })
             .collect(),
     }
 }

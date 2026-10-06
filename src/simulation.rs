@@ -2,14 +2,19 @@ use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
 
 mod body;
+mod motion;
+mod outline;
 mod tools;
 
 pub use body::{
     body_frame, body_frame_between, create_layered_body, create_layered_body_in, BodyFrame,
 };
+pub use motion::MotionSnapshot;
 pub use tools::{swing_power, tool_geometry, tool_pose, ToolGeometry, ToolPose};
 
 const EPSILON: f64 = 0.0001;
+/// Share of a blunt blow's knock on a point that bears on a scab there.
+const BLOW_REOPEN_SHARE: f64 = 0.25;
 /// How close to broken skin, in point spacings, blood has to be to get out.
 const OPEN_SKIN_REACH: f64 = 1.5;
 /// How far around blood trapped under the skin bruises it, in point spacings,
@@ -1050,6 +1055,11 @@ pub struct ContactDebug {
     pub active_fragments: i32,
     pub sleeping_fragments: i32,
     pub solver_iterations: i32,
+    /// Times this step an outline point was pushed out from behind another
+    /// part of the outline, as an arm pressed against the chest is, and the
+    /// deepest such overlap in pixels.
+    pub outline_contacts: i32,
+    pub max_outline_overlap: f64,
     pub fragment_sleep_events: i32,
     pub fragment_wake_events: i32,
     pub fragment_budget_skips: i32,
@@ -1147,6 +1157,8 @@ impl Default for ContactDebug {
             active_fragments: 0,
             sleeping_fragments: 0,
             solver_iterations: 0,
+            outline_contacts: 0,
+            max_outline_overlap: 0.0,
             fragment_sleep_events: 0,
             fragment_wake_events: 0,
             fragment_budget_skips: 0,
@@ -1327,6 +1339,13 @@ pub struct World {
     /// Skin springs a blade severed this step; cuts deepen into the muscle
     /// right under them.
     fresh_skin_cuts: Vec<usize>,
+    /// The tissue sheets' outlines, and the points and stretches of them that
+    /// may touch this step.
+    outlines: Vec<outline::OutlineLoop>,
+    outline_pairs: Vec<outline::OutlinePair>,
+    /// How hard a bat or hammer knocked each point this step, before the
+    /// broad face spreads it; a blow that lands on a scab knocks it open.
+    blunt_knock: Vec<f64>,
 }
 
 impl Default for World {
@@ -1363,6 +1382,9 @@ impl World {
             fluid_seed: 0x9e3779b9,
             tool: tools::ToolBody::default(),
             fresh_skin_cuts: Vec::new(),
+            outlines: Vec::new(),
+            outline_pairs: Vec::new(),
+            blunt_knock: Vec::new(),
         }
     }
 
@@ -1769,6 +1791,7 @@ impl World {
         self.update_organs(dt);
         self.disturb_wounds_from_loaded_tissue();
         self.reset_constraint_lambdas();
+        self.gather_outline_pairs();
 
         for _ in 0..self.materials.solver_iterations {
             self.solve_springs();
@@ -1782,6 +1805,7 @@ impl World {
             self.solve_bone_fragment_tissue_contacts();
             self.solve_bone_fragment_repulsion();
             self.solve_areas();
+            self.solve_outline_contacts();
             self.constrain_to_world(width, floor_y);
         }
         self.finish_tool_step(dt);
@@ -2773,9 +2797,12 @@ impl World {
                 let contusion_load =
                     point.contusion * self.materials.contusion_load_threshold * 0.30;
                 let strain_load = strain[point_index] * self.materials.wound_reopen_strain_load;
-                let local_load = (point.load + motion_load + contusion_load + strain_load)
-                    * layer_scale
-                    * falloff;
+                let knock_load =
+                    self.blunt_knock.get(point_index).copied().unwrap_or(0.0) * BLOW_REOPEN_SHARE;
+                let local_load =
+                    (point.load + motion_load + contusion_load + strain_load + knock_load)
+                        * layer_scale
+                        * falloff;
                 if local_load > best_load {
                     best_load = local_load;
                     best_direction =
@@ -4577,19 +4604,11 @@ impl World {
                     self.points[attachment.skin_point].position,
                     scale(correction, skin_amount),
                 );
-                self.points[attachment.skin_point].previous = add(
-                    self.points[attachment.skin_point].previous,
-                    scale(correction, skin_amount * 0.18),
-                );
             }
             if !self.points[attachment.muscle_point].pinned {
                 self.points[attachment.muscle_point].position = subtract(
                     self.points[attachment.muscle_point].position,
                     scale(correction, muscle_amount),
-                );
-                self.points[attachment.muscle_point].previous = subtract(
-                    self.points[attachment.muscle_point].previous,
-                    scale(correction, muscle_amount * 0.10),
                 );
             }
         }

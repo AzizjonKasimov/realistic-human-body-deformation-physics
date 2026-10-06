@@ -56,6 +56,10 @@ const TOUCH_GRACE: f64 = 0.1;
 /// Share of the newest pointer motion that goes into the hand's velocity each
 /// step; the rest smooths over uneven steps between pointer updates.
 const HAND_VELOCITY_UPDATE: f64 = 0.5;
+/// A press that lands further from the hand than this many steps of the
+/// tool's top speed, as a finger put down somewhere new does, takes the tool
+/// up there afresh instead of flinging it across the screen.
+const REGRIP_JUMP_STEPS: f64 = 2.0;
 /// Speed of a firm swing, in pixels per second. A bat or hammer crushes and
 /// bruises flesh in proportion to the energy of its blow, so a blow at this
 /// speed loads tissue by its momentum, a slower one much less (half the speed,
@@ -246,14 +250,14 @@ pub fn tool_pose(tool: ToolMode, center: Vec2, heading: Vec2, side: Vec2) -> Too
 pub(super) struct ToolBody {
     mode: ToolMode,
     /// A tool is in play. It appears at the hand when input becomes active.
-    present: bool,
+    pub(super) present: bool,
     /// The point the hand drives, in the middle of the striking part.
-    position: Vec2,
+    pub(super) position: Vec2,
     velocity: Vec2,
     /// Direction the tool faces; it follows the motion when free.
-    heading: Vec2,
+    pub(super) heading: Vec2,
     /// Perpendicular to the heading, toward the hand on the hammer and bat.
-    side: Vec2,
+    pub(super) side: Vec2,
     /// The tool was in tissue last step, so it resists turning.
     embedded: bool,
     /// The knife rests against a fiber or bone it could not get through.
@@ -505,6 +509,8 @@ impl World {
     pub(super) fn move_tool(&mut self, input: &InputState, dt: f64) {
         self.tool.contact = None;
         self.tool.solver_shift = Vec2::default();
+        self.blunt_knock.clear();
+        self.blunt_knock.resize(self.points.len(), 0.0);
         if !input.active {
             self.tool.present = false;
             self.tool.embedded = false;
@@ -542,8 +548,30 @@ impl World {
         } else {
             (self.tool.touch_grace - dt).max(0.0)
         };
+        // A press that lands far from where the hand was, as a finger put
+        // down somewhere new does, takes the tool up there afresh instead of
+        // flinging it across the screen.
+        let pressed = input.down && !self.tool.was_down;
+        let regrip = pressed
+            && self.tool.present
+            && self.tool.last_hand.is_some_and(|last| {
+                distance(target, last) > handling.max_speed * dt * REGRIP_JUMP_STEPS
+            });
+        if regrip {
+            self.tool.present = false;
+            self.tool.last_hand = None;
+            self.tool.embedded = false;
+            self.tool.held = false;
+            self.tool.touch_grace = 0.0;
+        }
         let pressing = input.down && self.tool.touch_grace > 0.0;
-        let gripped = input.down && !self.tool.was_down && self.tool.present;
+        // Pressing the button grips the tool in hand, and so does taking a tool
+        // up at rest with the button down, as a finger put down on a fresh body
+        // does; a bat or hammer gripped inside the body passes through until it
+        // is clear. A tool that appears already swinging, as a scripted
+        // strike's does, is mid-swing instead.
+        let appears_at_rest = !self.tool.present && input.vx == 0.0 && input.vy == 0.0;
+        let gripped = pressed && (self.tool.present || regrip || appears_at_rest);
         self.tool.was_down = input.down;
         // How hard the arm pushes the tool toward the pointer, which is what
         // drives a knife through fibers.
@@ -1065,6 +1093,7 @@ impl World {
                 continue;
             };
             touched += 1;
+            self.blunt_knock[index] = hit.load;
             let point = &mut self.points[index];
             // A blow bruises what it knocks hard, but a broad face spreads its
             // force, so it loads the tissue toward tearing far less.

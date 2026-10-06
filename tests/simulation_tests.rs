@@ -796,3 +796,49 @@ fn bat_swing_stops_in_a_leg_and_bruises_without_tearing() {
         );
     }
 }
+
+#[test]
+fn resting_body_carries_no_hidden_motion() {
+    let (width, height) = (1280.0, 720.0);
+    let mut world = rp::create_layered_body(width, height, rp::Materials::default());
+    let dt = world.materials().fixed_dt;
+    for _ in 0..300 {
+        world.step(dt, &rp::InputState::default(), width, height);
+    }
+    // A point's previous position is where it was a step ago, so at rest the
+    // speed it carries into the next step is nearly zero.
+    let carried = world
+        .points()
+        .iter()
+        .filter(|point| !point.pinned)
+        .map(|point| {
+            (point.position.x - point.previous.x).hypot(point.position.y - point.previous.y) / dt
+        })
+        .fold(0.0, f64::max);
+    if carried > 5.0 {
+        panic!("FAIL: a body at rest should carry no hidden motion, but a point carries {carried:.1} px/s");
+    }
+}
+
+#[test]
+fn arm_pressed_against_the_chest_stays_outside_it() {
+    let (width, height) = (1280.0, 720.0);
+    let mut world = rp::create_layered_body(width, height, rp::Materials::default());
+    let dt = world.materials().fixed_dt;
+    let body = rp::body_frame(width, height);
+    // A firm hammer swing into the outside of the arm, leaning on it after.
+    let gesture =
+        rp::scenarios::Gesture::parse("hammer:-0.35,0.34:wait=10:down:0.0,0.34/8:wait=60").unwrap();
+    let (mut contacts, mut deepest) = (0, 0.0f64);
+    for frame in 0..gesture.frames() {
+        world.step(dt, &gesture.input(frame, body), width, height);
+        contacts += world.debug().outline_contacts;
+        deepest = deepest.max(world.debug().max_outline_overlap);
+    }
+    if contacts == 0 {
+        fail("the arm should be driven against the chest and meet it");
+    }
+    if deepest > world.materials().point_spacing {
+        panic!("FAIL: the arm should press against the chest, not pass into it: it got {deepest:.1} px in");
+    }
+}

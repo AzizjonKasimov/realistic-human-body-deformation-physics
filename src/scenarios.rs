@@ -1289,6 +1289,37 @@ const fn push_into_chest(frames: i32) -> [GestureStep; 7] {
     ]
 }
 
+/// The tool rests beside the body, then a finger is put down on the chest:
+/// the hand is there at once, with the button down.
+const FINGER_LANDS_ON_CHEST: &[GestureStep] = &[
+    GestureStep::Move {
+        to: (-0.45, 0.34),
+        frames: 0,
+    },
+    GestureStep::Wait(10),
+    GestureStep::Move {
+        to: (0.0, 0.34),
+        frames: 0,
+    },
+    GestureStep::Press(true),
+    GestureStep::Wait(20),
+    GestureStep::Press(false),
+    GestureStep::Wait(20),
+];
+
+/// A finger put down on the chest of a body nothing has touched yet, so the
+/// tool is taken up there for the first time with the button down.
+const FIRST_TOUCH_ON_CHEST: &[GestureStep] = &[
+    GestureStep::Move {
+        to: (0.0, 0.34),
+        frames: 0,
+    },
+    GestureStep::Press(true),
+    GestureStep::Wait(30),
+    GestureStep::Press(false),
+    GestureStep::Wait(20),
+];
+
 /// Swung across the chest and straight back.
 const SWING_ACROSS_AND_BACK: &[GestureStep] = &[
     GestureStep::Move {
@@ -1690,6 +1721,39 @@ pub fn scenarios() -> Vec<Scenario> {
                 fracture_marrow_sources: IntBand::range(0, 0),
                 fluid_emitted: IntBand::range(0, 1600),
                 ..held
+            },
+        },
+        Scenario {
+            name: "hammer_finger_lands",
+            region: "torso",
+            intent: "touch",
+            play: gesture(ToolMode::Heavy, FINGER_LANDS_ON_CHEST),
+            // A finger put down on the chest, far from where the hammer
+            // rested, takes the hammer up there; it is not flung across
+            // through the arm, and gripped inside the body it passes through.
+            expectations: ScenarioExpectations {
+                contacts: IntBand::range(0, 0),
+                bone_fractures: IntBand::range(0, 0),
+                skin_tears: IntBand::range(0, 0),
+                contusion_events: IntBand::range(0, 0),
+                ..steady
+            },
+        },
+        Scenario {
+            name: "hammer_first_touch",
+            region: "torso",
+            intent: "touch",
+            play: gesture(ToolMode::Heavy, FIRST_TOUCH_ON_CHEST),
+            // A tool first taken up inside the body passes through it rather
+            // than appearing in the flesh and blasting it apart, as the first
+            // touch on a phone, which also rebuilds the body for finger-sized
+            // buttons, used to.
+            expectations: ScenarioExpectations {
+                contacts: IntBand::range(0, 0),
+                bone_fractures: IntBand::range(0, 0),
+                skin_tears: IntBand::range(0, 0),
+                contusion_events: IntBand::range(0, 0),
+                ..steady
             },
         },
         Scenario {

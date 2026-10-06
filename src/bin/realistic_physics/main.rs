@@ -51,6 +51,12 @@ struct AppState {
     pointer_initialized: bool,
     /// Where the hand is; the simulation pulls the tool toward it.
     pointer: rp::Vec2,
+    /// Where the hand was on the last simulation step.
+    stepped_pointer: rp::Vec2,
+    /// Where everything was before the last simulation step, and where it
+    /// really is while the frame draws it between the two.
+    earlier: rp::MotionSnapshot,
+    actual: rp::MotionSnapshot,
     tool: rp::ToolMode,
     view_mode: ViewMode,
     /// The current press started on the control panel, so it must not strike.
@@ -107,6 +113,9 @@ impl AppState {
             accumulator: 0.0,
             pointer_initialized: false,
             pointer: initial_pointer,
+            stepped_pointer: initial_pointer,
+            earlier: rp::MotionSnapshot::default(),
+            actual: rp::MotionSnapshot::default(),
             tool: rp::ToolMode::Heavy,
             view_mode: ViewMode::Normal,
             ui_capture: false,
@@ -125,6 +134,7 @@ impl AppState {
     fn rebuild_body(&mut self, width: f32, height: f32) {
         self.frame = body_frame_for(self, width, height);
         self.world = rp::create_layered_body_in(self.frame, rp::Materials::default());
+        self.world.capture_motion(&mut self.earlier);
         self.skin_rim = skin_rim(&self.world);
         self.built_for = (width, height, self.touch_ui);
         self.tool_blood = 0.0;
@@ -247,7 +257,12 @@ async fn main() {
         handle_input(&mut app);
         refit_body(&mut app);
         step_simulation(&mut app, dt);
+        // Draw the body between the last two simulation steps, so it moves
+        // as smoothly as the screen refreshes.
+        let alpha = app.accumulator / app.world.materials().fixed_dt;
+        app.world.blend_motion(&app.earlier, alpha, &mut app.actual);
         draw_app(&app);
+        app.world.restore_motion(&app.actual);
         next_frame().await;
     }
 }
@@ -321,19 +336,28 @@ fn step_simulation(app: &mut AppState, frame_dt: f64) {
 
     app.accumulator += frame_dt;
     let fixed_dt = app.world.materials().fixed_dt;
-    while app.accumulator >= fixed_dt {
+    let steps = (app.accumulator / fixed_dt).floor() as usize;
+    // The pointer moved over the time these steps cover, so the hand moves
+    // through them evenly instead of jumping on the first and resting after.
+    let (from, to) = (app.stepped_pointer, app.pointer);
+    for step in 0..steps {
+        let t = (step + 1) as f64 / steps as f64;
         let input = rp::InputState {
             active: true,
             down: app.pointer_down,
-            x: app.pointer.x,
-            y: app.pointer.y,
+            x: from.x + (to.x - from.x) * t,
+            y: from.y + (to.y - from.y) * t,
             vx: 0.0,
             vy: 0.0,
             power: rp::swing_power(app.tool),
             tool: app.tool,
         };
+        app.world.capture_motion(&mut app.earlier);
         step_world(app, &input, screen_width() as f64, screen_height() as f64);
         app.accumulator -= fixed_dt;
+    }
+    if steps > 0 {
+        app.stepped_pointer = to;
     }
 }
 
