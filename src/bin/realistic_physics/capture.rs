@@ -1,6 +1,6 @@
 //! Screenshot mode, so the real rendering can be checked without a person at
 //! the keyboard. `realistic_physics --capture OUT.png [options]` opens the
-//! window, plays an optional scripted strike from
+//! window, plays an optional scripted strike or gesture from
 //! `realistic_physics::scenarios`, saves the screen as a PNG, and exits.
 //! Native only.
 //!
@@ -12,8 +12,11 @@
 //!                            skin, for checking; players only get the normal view.
 //! --scenario NAME            play a tuned strike scenario first
 //! --strike SPEC              play a custom swing first (strike_scenarios --strike syntax)
+//! --gesture SPEC             play a gesture first (strike_scenarios --gesture syntax)
 //! --frames N                 stop after N steps (default: the whole strike, or
 //!                            120 steps of the body settling)
+//! --every N                  also save the screen every N steps, as OUT-STEP.png,
+//!                            to see how things move
 //! --no-ui                    leave out the HUD, control buttons, and pointer ring
 //! --label TEXT               write TEXT in the top right corner
 //! ```
@@ -22,7 +25,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 use std::process;
 
-use rp::scenarios::{scenario, Scenario, ScenarioExpectations, Strike};
+use rp::scenarios::{scenario, Gesture, Play, Scenario, Strike};
 
 use super::*;
 
@@ -34,6 +37,7 @@ pub struct CaptureRequest {
     views: Vec<ViewMode>,
     play: Option<Scenario>,
     frames: Option<i32>,
+    every: Option<i32>,
     hide_ui: bool,
     label: Option<String>,
 }
@@ -65,6 +69,7 @@ pub fn request() -> Option<CaptureRequest> {
         views: vec![ViewMode::Normal],
         play: None,
         frames: None,
+        every: None,
         hide_ui: false,
         label: None,
     };
@@ -94,23 +99,15 @@ pub fn request() -> Option<CaptureRequest> {
             }
             "--strike" => {
                 let strike = Strike::parse(&value("--strike")).unwrap_or_else(|error| fail(&error));
-                request.play = Some(Scenario {
-                    name: "custom",
-                    region: "custom",
-                    intent: "custom",
-                    strike,
-                    followup: None,
-                    expectations: ScenarioExpectations::default(),
-                });
+                request.play = Some(Scenario::custom(Play::Swing(strike, None)));
             }
-            "--frames" => {
-                let frames = value("--frames");
-                request.frames = Some(
-                    frames
-                        .parse()
-                        .unwrap_or_else(|_| fail(&format!("`{frames}` is not a frame count"))),
-                );
+            "--gesture" => {
+                let gesture =
+                    Gesture::parse(&value("--gesture")).unwrap_or_else(|error| fail(&error));
+                request.play = Some(Scenario::custom(Play::Gesture(gesture)));
             }
+            "--frames" => request.frames = Some(steps(&value("--frames"))),
+            "--every" => request.every = Some(steps(&value("--every")).max(1)),
             "--no-ui" => request.hide_ui = true,
             "--label" => request.label = Some(value("--label")),
             other => fail(&format!("unknown option `{other}`")),
@@ -119,13 +116,15 @@ pub fn request() -> Option<CaptureRequest> {
     Some(request)
 }
 
-/// Plays the requested strike at fixed steps, then saves each view.
+/// Plays the requested strike or gesture at fixed steps, then saves each view;
+/// with `--every`, also on the way.
 pub async fn run(request: CaptureRequest) {
     // The window settles at its final size over the first frames.
     for _ in 0..4 {
         clear_background(BLACK);
         next_frame().await;
     }
+    warm_glyphs().await;
     let (width, height) = (screen_width() as f64, screen_height() as f64);
     let mut app = AppState::new(width, height);
     app.hide_ui = request.hide_ui;
@@ -147,20 +146,45 @@ pub async fn run(request: CaptureRequest) {
         }
         app.pointer_down = input.down;
         step_world(&mut app, &input, width, height);
+        let step = frame + 1;
+        if request
+            .every
+            .is_some_and(|every| step % every == 0 && step < frames)
+        {
+            save_views(&mut app, &request, Some(step)).await;
+        }
     }
+    save_views(&mut app, &request, request.every.map(|_| frames)).await;
+}
 
-    // Draw every view once before saving any: a frame that draws new text
-    // grows the glyph atlas partway through and garbles that frame's text, and
-    // glyphs uploaded after a screen grab land in the grab's texture instead.
+/// Draws every character the app and the label use at their text sizes once,
+/// before any screen grab: a frame that draws new text grows the glyph atlas
+/// partway through and garbles that frame's text, and glyphs uploaded after a
+/// screen grab land in the grab's texture instead.
+async fn warm_glyphs() {
+    let characters: String = (' '..='~').collect();
+    for size in [15.0, 17.0, 20.0] {
+        draw_text(&characters, 0.0, size, size, WHITE);
+    }
+    next_frame().await;
+    clear_background(BLACK);
+    next_frame().await;
+}
+
+/// Saves each requested view of the app as it is now; `step` names the files
+/// of a capture taken on the way.
+async fn save_views(app: &mut AppState, request: &CaptureRequest, step: Option<i32>) {
+    // Draw every view once before saving any, so text drawn for the first
+    // time does not garble the saved frame.
     for &view in &request.views {
         app.view_mode = view;
-        draw_view(&app, &request);
+        draw_view(app, request, step);
         next_frame().await;
     }
     for &view in &request.views {
         app.view_mode = view;
-        draw_view(&app, &request);
-        let path = view_path(&request.path, view, request.views.len() > 1);
+        draw_view(app, request, step);
+        let path = view_path(&request.path, view, request.views.len() > 1, step);
         if let Some(parent) = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -171,13 +195,17 @@ pub async fn run(request: CaptureRequest) {
         }
         get_screen_data().export_png(&path.to_string_lossy());
         println!("wrote {}", path.display());
+        next_frame().await;
     }
 }
 
-fn draw_view(app: &AppState, request: &CaptureRequest) {
+fn draw_view(app: &AppState, request: &CaptureRequest, step: Option<i32>) {
     draw_app(app);
-    if let Some(label) = &request.label {
-        draw_label(label);
+    match (&request.label, step) {
+        (Some(label), Some(step)) => draw_label(&format!("{label} step {step}")),
+        (Some(label), None) => draw_label(label),
+        (None, Some(step)) => draw_label(&format!("step {step}")),
+        (None, None) => {}
     }
 }
 
@@ -198,20 +226,34 @@ fn draw_label(text: &str) {
     draw_text(text, x, baseline, size, rgba(232, 226, 212, 255));
 }
 
-/// OUT.png for a single view, OUT-normal.png and OUT-anatomy.png for both.
-fn view_path(path: &Path, view: ViewMode, several: bool) -> PathBuf {
-    if !several {
+/// OUT.png for a single view, OUT-normal.png and OUT-anatomy.png for both,
+/// with the step number after the name for captures taken on the way
+/// (OUT-0012.png).
+fn view_path(path: &Path, view: ViewMode, several: bool, step: Option<i32>) -> PathBuf {
+    if !several && step.is_none() {
         return path.to_path_buf();
     }
-    let stem = path.file_stem().map_or_else(
+    let mut name = path.file_stem().map_or_else(
         || "capture".to_string(),
         |stem| stem.to_string_lossy().into_owned(),
     );
-    let suffix = match view {
-        ViewMode::Normal => "normal",
-        ViewMode::Anatomy => "anatomy",
-    };
-    path.with_file_name(format!("{stem}-{suffix}.png"))
+    if let Some(step) = step {
+        name.push_str(&format!("-{step:04}"));
+    }
+    if several {
+        name.push_str(match view {
+            ViewMode::Normal => "-normal",
+            ViewMode::Anatomy => "-anatomy",
+        });
+    }
+    path.with_file_name(format!("{name}.png"))
+}
+
+fn steps(text: &str) -> i32 {
+    text.parse()
+        .ok()
+        .filter(|&steps: &i32| steps >= 0)
+        .unwrap_or_else(|| fail(&format!("`{text}` is not a step count")))
 }
 
 fn parse_size(text: &str) -> Result<(i32, i32), String> {

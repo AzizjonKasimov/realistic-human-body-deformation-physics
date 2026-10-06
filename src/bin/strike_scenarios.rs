@@ -11,16 +11,21 @@
 //!                                     (strike_sweep.csv, strike_sweep_report.txt)
 //!   --strike TOOL:U0,V0:U1,V1[:power=P][:frames=N][:settle=N]
 //!                                     play one custom swing (body coordinates) and
-//!                                     print its injuries; with --sweep, its spread
-//!   --list                            print the scenarios and their swings
+//!                                     print its injuries and how steady the tool
+//!                                     was; with --sweep, their spread
+//!   --gesture TOOL:U,V[:STEP...]      the same for a gesture played the way the
+//!                                     app is (steps: U,V/N, down, up, wait=N);
+//!                                     writes strike_custom_frames.csv too
+//!   --list                            print the scenarios and their plays
 //! ```
 //!
 //! Outputs go next to the CSV path (default `output/strike_scenarios.csv`).
 
 use realistic_physics as rp;
 use rp::scenarios::{
-    active_fluid_count, free_fragment_count, run, scenarios, spinning_fragment_count, tool_name,
-    Scenario, ScenarioExpectations, ScenarioResult, Strike, SCENARIO_HEIGHT, SCENARIO_WIDTH,
+    active_fluid_count, fastest_point_speed, free_fragment_count, run, scenarios,
+    spinning_fragment_count, tool_axis, tool_name, tool_touching, Gesture, Play, Scenario,
+    ScenarioResult, Strike, SCENARIO_HEIGHT, SCENARIO_WIDTH,
 };
 use std::env;
 use std::fs::{self, File};
@@ -41,7 +46,8 @@ struct Options {
     csv_path: PathBuf,
     only: Vec<String>,
     sweep: bool,
-    strike: Option<Strike>,
+    /// A custom swing or gesture to play instead of the scenarios.
+    custom: Option<Play>,
     list: bool,
 }
 
@@ -49,7 +55,7 @@ fn main() {
     let options = parse_options().unwrap_or_else(|message| {
         eprintln!("{message}");
         eprintln!(
-            "usage: strike_scenarios [CSV] [--only NAME,...] [--sweep] [--strike SPEC] [--list]"
+            "usage: strike_scenarios [CSV] [--only NAME,...] [--sweep] [--strike SPEC | --gesture SPEC] [--list]"
         );
         process::exit(2);
     });
@@ -63,23 +69,13 @@ fn main() {
 
     if options.list {
         for scenario in scenarios() {
-            println!("{:<30} {}", scenario.name, scenario.strike);
-            if let Some(followup) = scenario.followup {
-                println!("{:<30} then {}", "", followup);
-            }
+            println!("{:<30} {}", scenario.name, scenario.play);
         }
         return;
     }
 
-    let selected: Vec<Scenario> = match options.strike {
-        Some(strike) => vec![Scenario {
-            name: "custom",
-            region: "custom",
-            intent: "custom",
-            strike,
-            followup: None,
-            expectations: ScenarioExpectations::default(),
-        }],
+    let selected: Vec<Scenario> = match options.custom {
+        Some(play) => vec![Scenario::custom(play)],
         None => {
             let all = scenarios();
             for name in &options.only {
@@ -97,8 +93,8 @@ fn main() {
     };
 
     if options.sweep {
-        sweep(&selected, &output_dir, options.strike.is_some());
-    } else if options.strike.is_some() {
+        sweep(&selected, &output_dir, options.custom.is_some());
+    } else if options.custom.is_some() {
         play_custom(&selected[0], &output_dir);
     } else {
         play_scenarios(&selected, &options.csv_path, &output_dir);
@@ -110,7 +106,7 @@ fn parse_options() -> Result<Options, String> {
         csv_path: PathBuf::from("output/strike_scenarios.csv"),
         only: Vec::new(),
         sweep: false,
-        strike: None,
+        custom: None,
         list: false,
     };
     let mut args = env::args().skip(1);
@@ -126,7 +122,11 @@ fn parse_options() -> Result<Options, String> {
             }
             "--strike" => {
                 let spec = args.next().ok_or("--strike needs a swing")?;
-                options.strike = Some(Strike::parse(&spec)?);
+                options.custom = Some(Play::Swing(Strike::parse(&spec)?, None));
+            }
+            "--gesture" => {
+                let spec = args.next().ok_or("--gesture needs a gesture")?;
+                options.custom = Some(Play::Gesture(Gesture::parse(&spec)?));
             }
             flag if flag.starts_with("--") => return Err(format!("unknown option `{flag}`")),
             path => options.csv_path = PathBuf::from(path),
@@ -147,11 +147,19 @@ fn play_scenarios(selected: &[Scenario], csv_path: &Path, output_dir: &Path) {
 
     for scenario in selected {
         let mut write_error = None;
-        let (_, result) = run(scenario, SCENARIO_WIDTH, SCENARIO_HEIGHT, |frame, world| {
-            if write_error.is_none() {
-                write_error = write_frame(&mut csv, scenario, frame, world).err();
-            }
-        });
+        let mut last_positions = Vec::new();
+        let (_, result) = run(
+            scenario,
+            SCENARIO_WIDTH,
+            SCENARIO_HEIGHT,
+            |frame, input, world| {
+                if write_error.is_none() {
+                    write_error =
+                        write_frame(&mut csv, scenario, frame, input, world, &mut last_positions)
+                            .err();
+                }
+            },
+        );
         if let Some(error) = write_error {
             panic!("write strike CSV: {error}");
         }
@@ -178,16 +186,44 @@ fn play_scenarios(selected: &[Scenario], csv_path: &Path, output_dir: &Path) {
     }
 }
 
-/// Plays one custom swing and prints what it did.
+/// Plays one custom swing or gesture and prints what it did, with its
+/// frame-by-frame telemetry in `strike_custom_frames.csv`.
 fn play_custom(scenario: &Scenario, output_dir: &Path) {
-    let (_, result) = run(scenario, SCENARIO_WIDTH, SCENARIO_HEIGHT, |_, _| {});
-    println!("{}", scenario.strike);
+    let frames_path = output_dir.join("strike_custom_frames.csv");
+    let mut frames = BufWriter::new(File::create(&frames_path).expect("create custom frames"));
+    write_frame_header(&mut frames).expect("write frame header");
+    let mut write_error = None;
+    let mut last_positions = Vec::new();
+    let (_, result) = run(
+        scenario,
+        SCENARIO_WIDTH,
+        SCENARIO_HEIGHT,
+        |frame, input, world| {
+            if write_error.is_none() {
+                write_error = write_frame(
+                    &mut frames,
+                    scenario,
+                    frame,
+                    input,
+                    world,
+                    &mut last_positions,
+                )
+                .err();
+            }
+        },
+    );
+    if let Some(error) = write_error {
+        panic!("write custom frames: {error}");
+    }
+    println!("{}", scenario.play);
     println!("  {}", headline(&result));
+    println!("  {}", steadiness(&result));
     let path = output_dir.join("strike_custom.csv");
     let mut out = BufWriter::new(File::create(&path).expect("create custom CSV"));
     writeln!(out, "{SUMMARY_HEADER}").expect("write custom CSV");
     writeln!(out, "{}", summary_fields(scenario, &result).join(",")).expect("write custom CSV");
     println!("wrote {}", path.display());
+    println!("wrote {}", frames_path.display());
 }
 
 struct SweepRun {
@@ -221,7 +257,7 @@ fn sweep(selected: &[Scenario], output_dir: &Path, custom: bool) {
                     break;
                 };
                 let scenario = selected[index].shifted(along, across);
-                let (_, result) = run(&scenario, SCENARIO_WIDTH, SCENARIO_HEIGHT, |_, _| {});
+                let (_, result) = run(&scenario, SCENARIO_WIDTH, SCENARIO_HEIGHT, |_, _, _| {});
                 let violations = scenario.violations(&result);
                 finished.lock().expect("sweep results").push((
                     job,
@@ -288,7 +324,7 @@ fn sweep_summary(scenario: &Scenario, runs: &[&SweepRun], custom: bool) -> Strin
             }
         });
     if custom {
-        text.push_str(&format!("{} ({} runs)\n", scenario.strike, runs.len()));
+        text.push_str(&format!("{} ({} runs)\n", scenario.play, runs.len()));
     } else {
         text.push_str(&format!(
             "{}: in band {}/{} runs (unmoved swing {})\n",
@@ -322,9 +358,14 @@ fn sweep_summary(scenario: &Scenario, runs: &[&SweepRun], custom: bool) -> Strin
         spread("organ damage", &|r| r.max_organ_damage, 2),
         spread("reopens", &|r| r.wound_reopens as f64, 0),
         spread("blood loss", &|r| r.blood_loss, 3),
+        spread("tool turn", &|r| r.max_tool_turn, 0),
+        spread("snaps", &|r| r.tool_snaps as f64, 0),
+        spread("contact toggles", &|r| r.contact_toggles as f64, 0),
+        spread("point speed", &|r| r.max_point_speed, 0),
     ];
     text.push_str(&format!("  {}\n", lines[..5].join(", ")));
-    text.push_str(&format!("  {}\n", lines[5..].join(", ")));
+    text.push_str(&format!("  {}\n", lines[5..9].join(", ")));
+    text.push_str(&format!("  {}\n", lines[9..].join(", ")));
     let mut misses: Vec<(&str, usize)> = Vec::new();
     for run in runs {
         for violation in &run.violations {
@@ -353,6 +394,18 @@ fn violated_metric(violation: &str) -> &str {
     after_name.split('=').next().unwrap_or(after_name)
 }
 
+/// How steady the tool was, in one line.
+fn steadiness(result: &ScenarioResult) -> String {
+    format!(
+        "tool turn max {:.0} deg/step ({:.0} deg in all), snaps {}, contact toggles {}, fastest tissue {:.0} px/s",
+        result.max_tool_turn,
+        result.tool_turning,
+        result.tool_snaps,
+        result.contact_toggles,
+        result.max_point_speed
+    )
+}
+
 fn headline(result: &ScenarioResult) -> String {
     format!(
         "bones {} (ribs {}), skin {}, muscle {}, bruises {}, vessels {}, organ damage {:.2}, reopens {}, blood loss {:.3}",
@@ -369,14 +422,14 @@ fn headline(result: &ScenarioResult) -> String {
 }
 
 /// Columns of a summary row: the scenario, then its result.
-const SUMMARY_HEADER: &str = "scenario,region,intent,tool,tissue_contacts,bone_contacts,skin_tears,muscle_tears,muscle_fiber_tears,contusion_events,tissue_fatigue_events,tissue_plastic_events,tear_propagations,muscle_cut_transfers,muscle_crush_ruptures,cavity_pressure_events,cavity_ruptures,organ_damage_events,organ_penetrations,rib_organ_punctures,organ_ruptures,skin_flap_detachments,vessel_lacerations,fragment_vessel_lacerations,wound_reopens,max_active_contusions,detachments,bone_detachments,bone_joint_breaks,bone_joint_subluxations,joint_ligament_damage_events,bone_fractures,rib_fractures,fracture_marrow_sources,final_bones,fluid_emitted,wound_fluid,blood_loss,final_blood_volume,final_blood_turgor,blood_stain_deposits,max_active_blood_stains,opened_wounds,max_active_wounds,wound_leaks,fragment_hits,fragment_tears,fragment_skin_punctures,fragment_bone_contacts,fragment_bone_damping_events,fragment_bone_resting_contacts,fragment_pair_contacts,fragment_pair_damping_events,fragment_pair_resting_contacts,fragment_floor_contacts,fragment_floor_resting_contacts,post_fracture_joint_corrections,max_impact,max_bone_load,max_point_load,max_depth,max_fragment_depth,max_fragment_impulse,max_fragment_overlap,max_post_fracture_joint_stretch,max_post_fracture_joint_angle,max_bone_joint_subluxation,max_wound_pressure,max_wound_clot,max_cavity_pressure,max_cavity_collapse,max_organ_damage,max_contusion,max_tissue_softening,max_tissue_fatigue,max_tissue_plasticity,max_bone_angular_speed,final_free_fragments,final_spinning_fragments,final_sleeping_fragments,max_active_fragments,max_sleeping_fragments,fragment_sleep_events,fragment_wake_events,fragment_budget_skips,fracture_budget_blocks,fragment_bone_checks,fragment_bone_budget_skips,fragment_pair_checks,fragment_pair_budget_skips,fragment_tissue_checks,fragment_tissue_budget_skips,fluid_budget_replacements,blood_stain_budget_replacements,wound_budget_replacements,max_solver_iterations";
+const SUMMARY_HEADER: &str = "scenario,region,intent,tool,tissue_contacts,bone_contacts,skin_tears,muscle_tears,muscle_fiber_tears,contusion_events,tissue_fatigue_events,tissue_plastic_events,tear_propagations,muscle_cut_transfers,muscle_crush_ruptures,cavity_pressure_events,cavity_ruptures,organ_damage_events,organ_penetrations,rib_organ_punctures,organ_ruptures,skin_flap_detachments,vessel_lacerations,fragment_vessel_lacerations,wound_reopens,max_active_contusions,detachments,bone_detachments,bone_joint_breaks,bone_joint_subluxations,joint_ligament_damage_events,bone_fractures,rib_fractures,fracture_marrow_sources,final_bones,fluid_emitted,wound_fluid,blood_loss,final_blood_volume,final_blood_turgor,blood_stain_deposits,max_active_blood_stains,opened_wounds,max_active_wounds,wound_leaks,fragment_hits,fragment_tears,fragment_skin_punctures,fragment_bone_contacts,fragment_bone_damping_events,fragment_bone_resting_contacts,fragment_pair_contacts,fragment_pair_damping_events,fragment_pair_resting_contacts,fragment_floor_contacts,fragment_floor_resting_contacts,post_fracture_joint_corrections,max_impact,max_bone_load,max_point_load,max_depth,max_fragment_depth,max_fragment_impulse,max_fragment_overlap,max_post_fracture_joint_stretch,max_post_fracture_joint_angle,max_bone_joint_subluxation,max_wound_pressure,max_wound_clot,max_cavity_pressure,max_cavity_collapse,max_organ_damage,max_contusion,max_tissue_softening,max_tissue_fatigue,max_tissue_plasticity,max_bone_angular_speed,final_free_fragments,final_spinning_fragments,final_sleeping_fragments,max_active_fragments,max_sleeping_fragments,fragment_sleep_events,fragment_wake_events,fragment_budget_skips,fracture_budget_blocks,fragment_bone_checks,fragment_bone_budget_skips,fragment_pair_checks,fragment_pair_budget_skips,fragment_tissue_checks,fragment_tissue_budget_skips,fluid_budget_replacements,blood_stain_budget_replacements,wound_budget_replacements,max_solver_iterations,max_tool_turn,tool_snaps,tool_turning,contact_toggles,max_point_speed";
 
 fn summary_fields(scenario: &Scenario, result: &ScenarioResult) -> Vec<String> {
     vec![
         scenario.name.to_string(),
         scenario.region.to_string(),
         scenario.intent.to_string(),
-        tool_name(scenario.strike.tool).to_string(),
+        tool_name(scenario.play.tool()).to_string(),
         result.tissue_contacts.to_string(),
         result.bone_contacts.to_string(),
         result.skin_tears.to_string(),
@@ -469,19 +522,29 @@ fn summary_fields(scenario: &Scenario, result: &ScenarioResult) -> Vec<String> {
         result.blood_stain_budget_replacements.to_string(),
         result.wound_budget_replacements.to_string(),
         result.max_solver_iterations.to_string(),
+        format!("{:.3}", result.max_tool_turn),
+        result.tool_snaps.to_string(),
+        format!("{:.3}", result.tool_turning),
+        result.contact_toggles.to_string(),
+        format!("{:.3}", result.max_point_speed),
     ]
 }
 
 fn write_frame_header(csv: &mut dyn Write) -> std::io::Result<()> {
-    writeln!(csv, "scenario,region,intent,tool,frame,striker_x,striker_y,striker_speed,impact,tissue_contacts,bone_contacts,max_depth,max_point_load,max_bone_load,fractures,skin_tears,muscle_tears,muscle_fiber_tears_frame,total_muscle_fiber_tears,contusion_events_frame,active_contusions,total_contusion_events,max_contusion,max_tissue_softening,tissue_fatigue_events_frame,total_tissue_fatigue_events,max_tissue_fatigue,tissue_plastic_events_frame,total_tissue_plastic_events,max_tissue_plasticity,tear_propagations_frame,total_tear_propagations,muscle_cut_transfers_frame,total_muscle_cut_transfers,muscle_crush_ruptures_frame,total_muscle_crush_ruptures,cavity_pressure_events_frame,total_cavity_pressure_events,cavity_ruptures_frame,total_cavity_ruptures,organ_damage_events_frame,total_organ_damage_events,organ_penetrations_frame,total_organ_penetrations,rib_organ_punctures_frame,total_rib_organ_punctures,organ_ruptures_frame,total_organ_ruptures,skin_flap_detachments_frame,total_skin_flap_detachments,vessel_lacerations_frame,total_vessel_lacerations,fragment_vessel_lacerations_frame,total_fragment_vessel_lacerations,wound_reopens_frame,total_wound_reopens,detachments,bone_detachments,bone_joint_breaks,bone_joint_subluxations_frame,total_bone_joint_subluxations,joint_ligament_damage_frame,total_joint_ligament_damage,max_bone_joint_subluxation,bone_fractures,rib_fractures_frame,total_rib_fractures,fracture_marrow_sources,fluid_emitted_frame,active_fluids,total_fluid,blood_stain_deposits_frame,active_blood_stains,total_blood_stain_deposits,opened_wounds,active_wounds,wound_leaks,wound_fluid,blood_loss,blood_volume,blood_turgor,max_wound_pressure,max_wound_clot,max_cavity_pressure,max_cavity_collapse,max_organ_damage,fragment_contacts,fragment_tears,fragment_skin_punctures_frame,total_fragment_skin_punctures,fragment_bone_contacts,fragment_bone_damping_events,fragment_bone_resting_contacts,fragment_pair_contacts,fragment_pair_damping_events,fragment_pair_resting_contacts,fragment_floor_contacts,fragment_floor_resting_contacts,max_fragment_depth,max_fragment_impulse,max_fragment_overlap,post_fracture_joint_corrections,max_post_fracture_joint_stretch,max_post_fracture_joint_angle,fragment_hits,fragment_tissue_tears,max_bone_angular_speed,free_fragments,spinning_fragments,active_fragments,sleeping_fragments,fragment_sleep_events,fragment_wake_events,fragment_budget_skips,fracture_budget_blocks,fragment_bone_checks,fragment_bone_budget_skips,fragment_pair_checks,fragment_pair_budget_skips,fragment_tissue_checks,fragment_tissue_budget_skips,fluid_budget_replacements,blood_stain_budget_replacements,wound_budget_replacements,solver_iterations")
+    writeln!(csv, "scenario,region,intent,tool,frame,striker_x,striker_y,striker_speed,impact,tissue_contacts,bone_contacts,max_depth,max_point_load,max_bone_load,fractures,skin_tears,muscle_tears,muscle_fiber_tears_frame,total_muscle_fiber_tears,contusion_events_frame,active_contusions,total_contusion_events,max_contusion,max_tissue_softening,tissue_fatigue_events_frame,total_tissue_fatigue_events,max_tissue_fatigue,tissue_plastic_events_frame,total_tissue_plastic_events,max_tissue_plasticity,tear_propagations_frame,total_tear_propagations,muscle_cut_transfers_frame,total_muscle_cut_transfers,muscle_crush_ruptures_frame,total_muscle_crush_ruptures,cavity_pressure_events_frame,total_cavity_pressure_events,cavity_ruptures_frame,total_cavity_ruptures,organ_damage_events_frame,total_organ_damage_events,organ_penetrations_frame,total_organ_penetrations,rib_organ_punctures_frame,total_rib_organ_punctures,organ_ruptures_frame,total_organ_ruptures,skin_flap_detachments_frame,total_skin_flap_detachments,vessel_lacerations_frame,total_vessel_lacerations,fragment_vessel_lacerations_frame,total_fragment_vessel_lacerations,wound_reopens_frame,total_wound_reopens,detachments,bone_detachments,bone_joint_breaks,bone_joint_subluxations_frame,total_bone_joint_subluxations,joint_ligament_damage_frame,total_joint_ligament_damage,max_bone_joint_subluxation,bone_fractures,rib_fractures_frame,total_rib_fractures,fracture_marrow_sources,fluid_emitted_frame,active_fluids,total_fluid,blood_stain_deposits_frame,active_blood_stains,total_blood_stain_deposits,opened_wounds,active_wounds,wound_leaks,wound_fluid,blood_loss,blood_volume,blood_turgor,max_wound_pressure,max_wound_clot,max_cavity_pressure,max_cavity_collapse,max_organ_damage,fragment_contacts,fragment_tears,fragment_skin_punctures_frame,total_fragment_skin_punctures,fragment_bone_contacts,fragment_bone_damping_events,fragment_bone_resting_contacts,fragment_pair_contacts,fragment_pair_damping_events,fragment_pair_resting_contacts,fragment_floor_contacts,fragment_floor_resting_contacts,max_fragment_depth,max_fragment_impulse,max_fragment_overlap,post_fracture_joint_corrections,max_post_fracture_joint_stretch,max_post_fracture_joint_angle,fragment_hits,fragment_tissue_tears,max_bone_angular_speed,free_fragments,spinning_fragments,active_fragments,sleeping_fragments,fragment_sleep_events,fragment_wake_events,fragment_budget_skips,fracture_budget_blocks,fragment_bone_checks,fragment_bone_budget_skips,fragment_pair_checks,fragment_pair_budget_skips,fragment_tissue_checks,fragment_tissue_budget_skips,fluid_budget_replacements,blood_stain_budget_replacements,wound_budget_replacements,solver_iterations,tool_down,tool_touching,tool_axis_deg,tool_x,tool_y,max_point_speed")
 }
 
 fn write_frame(
     csv: &mut dyn Write,
     scenario: &Scenario,
     frame: i32,
+    input: &rp::InputState,
     world: &rp::World,
+    last_positions: &mut Vec<rp::Vec2>,
 ) -> std::io::Result<()> {
+    let point_speed = fastest_point_speed(world, last_positions);
+    last_positions.clear();
+    last_positions.extend(world.points().iter().map(|point| point.position));
     let debug = world.debug();
     let stats = world.stats();
     let fields = [
@@ -610,6 +673,14 @@ fn write_frame(
         debug.blood_stain_budget_replacements.to_string(),
         debug.wound_budget_replacements.to_string(),
         debug.solver_iterations.to_string(),
+        u8::from(input.down).to_string(),
+        u8::from(tool_touching(world)).to_string(),
+        tool_axis(world).map_or(String::new(), |axis| {
+            format!("{:.2}", axis.y.atan2(axis.x).to_degrees())
+        }),
+        format!("{:.3}", world.tool_position().x),
+        format!("{:.3}", world.tool_position().y),
+        format!("{:.1}", point_speed),
     ];
     writeln!(csv, "{}", fields.join(","))
 }

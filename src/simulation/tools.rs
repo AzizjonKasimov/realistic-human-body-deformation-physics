@@ -19,8 +19,15 @@ use super::*;
 /// Below this speed a tool keeps its orientation instead of turning to follow
 /// its motion.
 const TOOL_TURN_SPEED: f64 = 40.0;
-/// How fast a blunt tool pressed into tissue can turn, in radians per second.
-const EMBEDDED_TURN_RATE: f64 = 2.5;
+/// Which way the handle of a bat or hammer points when it is carried with the
+/// button up: down from the hand, with the barrel or head standing up.
+const CARRIED_HANDLE: Vec2 = Vec2 { x: 0.0, y: 1.0 };
+/// How fast a carried bat or hammer settles back to `CARRIED_HANDLE`, in
+/// radians per second.
+const CARRY_TURN_RATE: f64 = 3.0;
+/// Share of its free turning a bat or hammer pressed into tissue keeps; the
+/// flesh around it holds it in line.
+const EMBEDDED_TURN_SHARE: f64 = 0.2;
 /// How fast tissue steers an embedded knife to follow its stroke.
 const EMBEDDED_BLADE_TURN_RATE: f64 = 18.0;
 /// The front part of the blade, as a fraction of its length, that cuts what it
@@ -57,6 +64,10 @@ struct ToolHandling {
     /// Farthest lead the hand presses with: pulling the pointer farther from a
     /// tool stuck in the body does not press it any harder.
     max_reach: f64,
+    /// How far the hands on the handle are from a bat's or hammer's striking
+    /// part. The tool turns no faster than its striking part could swing round
+    /// them: its speed over this distance.
+    swing_radius: f64,
 }
 
 fn tool_handling(tool: ToolMode) -> ToolHandling {
@@ -68,6 +79,8 @@ fn tool_handling(tool: ToolMode) -> ToolHandling {
             idle_damping: 18.0,
             max_speed: 4600.0,
             max_reach: 150.0,
+            // A knife turns with its stroke instead; see `turn_blade`.
+            swing_radius: 0.0,
         },
         // A sledgehammer is slower to get going than a bat and tops out
         // lower, but carries far more momentum once it is swinging.
@@ -78,6 +91,7 @@ fn tool_handling(tool: ToolMode) -> ToolHandling {
             idle_damping: 22.0,
             max_speed: 3400.0,
             max_reach: 150.0,
+            swing_radius: 140.0,
         },
         ToolMode::Blunt => ToolHandling {
             drive: 118.0,
@@ -86,6 +100,7 @@ fn tool_handling(tool: ToolMode) -> ToolHandling {
             idle_damping: 20.0,
             max_speed: 4200.0,
             max_reach: 150.0,
+            swing_radius: 170.0,
         },
     }
 }
@@ -362,26 +377,77 @@ impl World {
         })
     }
 
-    /// Turns the tool to follow its motion. A blunt tool pressed into tissue
-    /// turns slowly. Tissue steers an embedded knife to follow its stroke, like
-    /// a scalpel, except that a knife pulled backward keeps its line and
-    /// withdraws rather than flipping around inside the wound.
-    fn turn_tool(&mut self, dt: f64) {
+    /// Turns the tool for this step's motion; `down` is whether the button is
+    /// held.
+    fn turn_tool(&mut self, down: bool, dt: f64) {
+        if self.tool.mode == ToolMode::Sharp {
+            self.turn_blade(dt);
+        } else {
+            self.turn_held_tool(down, dt);
+        }
+    }
+
+    /// A knife turns at once to lead with its tip in the air. Tissue steers an
+    /// embedded knife to follow its stroke, like a scalpel, except that a knife
+    /// pulled backward keeps its line and withdraws rather than flipping around
+    /// inside the wound.
+    fn turn_blade(&mut self, dt: f64) {
         let velocity = self.tool.velocity;
         let speed = hypot(velocity.x, velocity.y);
         if speed > TOOL_TURN_SPEED {
             let target = scale(velocity, 1.0 / speed);
             if !self.tool.embedded {
                 self.tool.heading = target;
-            } else if self.tool.mode != ToolMode::Sharp {
-                self.tool.heading =
-                    rotate_toward(self.tool.heading, target, EMBEDDED_TURN_RATE * dt);
             } else if dot(target, self.tool.heading) > -0.2 {
                 self.tool.heading =
                     rotate_toward(self.tool.heading, target, EMBEDDED_BLADE_TURN_RATE * dt);
             }
         }
         self.tool.side = side_toward(self.tool.heading, self.tool.side);
+    }
+
+    /// A bat or hammer is held by its handle. Swung, it turns until its
+    /// striking part leads with the handle across the path, on the side the
+    /// handle already is, but no faster than the striking part could swing
+    /// round the hands on the handle, and only a little while flesh holds it.
+    /// Carried with the button up, it settles back upright instead of turning
+    /// with every move of the hand.
+    fn turn_held_tool(&mut self, down: bool, dt: f64) {
+        let velocity = self.tool.velocity;
+        let speed = hypot(velocity.x, velocity.y);
+        let side = self.tool.side;
+        if !down {
+            self.tool.side = rotate_toward(side, CARRIED_HANDLE, CARRY_TURN_RATE * dt);
+        } else if speed > TOOL_TURN_SPEED {
+            let across = side_toward(scale(velocity, 1.0 / speed), side);
+            let share = if self.tool.embedded {
+                EMBEDDED_TURN_SHARE
+            } else {
+                1.0
+            };
+            let radius = tool_handling(self.tool.mode).swing_radius.max(1.0);
+            self.tool.side = rotate_toward(side, across, speed / radius * share * dt);
+        }
+        self.tool.side = normalized(self.tool.side, CARRIED_HANDLE);
+        // The striking face is across the handle, facing the way the tool
+        // moves, or the way it faced when it is nearly still.
+        let toward = if speed > TOOL_TURN_SPEED {
+            velocity
+        } else {
+            self.tool.heading
+        };
+        self.tool.heading = side_toward(self.tool.side, toward);
+    }
+
+    /// A tool that appears mid-swing already faces along its motion, as one
+    /// being swung would.
+    fn align_with_motion(&mut self) {
+        let velocity = self.tool.velocity;
+        let speed = hypot(velocity.x, velocity.y);
+        if speed > TOOL_TURN_SPEED {
+            self.tool.heading = scale(velocity, 1.0 / speed);
+            self.tool.side = side_toward(self.tool.heading, self.tool.side);
+        }
     }
 
     /// Moves the tool one step: the hand pulls it toward the pointer and the
@@ -434,7 +500,7 @@ impl World {
             self.tool.position = subtract(target, scale(self.tool.velocity, dt));
             self.tool.embedded = false;
             self.tool.held = false;
-            self.turn_tool(dt);
+            self.align_with_motion();
         } else {
             let (drive, damping, reach) = if input.down {
                 (handling.drive, handling.damping, handling.max_reach)
@@ -467,7 +533,7 @@ impl World {
             self.tool.heading,
             self.tool.side,
         );
-        self.turn_tool(dt);
+        self.turn_tool(input.down, dt);
         if input.tool == ToolMode::Sharp || !input.down {
             self.tool.ghost = false;
         } else if gripped || self.tool.ghost {
@@ -881,11 +947,10 @@ impl World {
         for step in 1..=steps {
             let t = step as f64 / steps as f64;
             center = add(center, scale(velocity, sub_dt));
-            let heading = normalized(
-                lerp(start_pose.heading, self.tool.heading, t),
-                self.tool.heading,
-            );
-            let side = side_toward(heading, self.tool.side);
+            // The handle turns smoothly through the step, and the face stays
+            // across it.
+            let side = normalized(lerp(start_pose.side, self.tool.side, t), self.tool.side);
+            let heading = side_toward(side, self.tool.heading);
             shape = contact_shape(&tool_pose(strike.tool, center, heading, side));
             let impact = strike.mass * hypot(velocity.x, velocity.y);
             let tissue = self.shove_tissue(&shape, velocity, impact, strike, dt, sub_dt, &mut hits);
@@ -1241,7 +1306,8 @@ impl World {
 }
 
 /// The perpendicular to `heading` on the same side as `previous`, so the
-/// handle stays on one side as the tool turns.
+/// handle stays on one side as the tool turns. Given a handle direction, it
+/// likewise gives the face across the handle nearest a direction.
 fn side_toward(heading: Vec2, previous: Vec2) -> Vec2 {
     let perpendicular = Vec2 {
         x: -heading.y,

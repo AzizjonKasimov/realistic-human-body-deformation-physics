@@ -1,5 +1,5 @@
 use realistic_physics as rp;
-use rp::scenarios::{scenario, Strike, SCENARIO_HEIGHT, SCENARIO_WIDTH};
+use rp::scenarios::{scenario, Play, Strike, SCENARIO_HEIGHT, SCENARIO_WIDTH};
 use std::env;
 use std::fmt::Write as FmtWrite;
 use std::fs::{self, File};
@@ -135,9 +135,10 @@ fn main() {
 /// The swing of the tuned strike scenario with this name, so the captures
 /// replay exactly what the strike scenarios check.
 fn tuned_strike(name: &str) -> Strike {
-    scenario(name)
-        .unwrap_or_else(|| panic!("no strike scenario named {name}"))
-        .strike
+    match scenario(name).map(|scenario| scenario.play) {
+        Some(Play::Swing(strike, _)) => strike,
+        _ => panic!("no strike scenario named {name}"),
+    }
 }
 
 fn visual_scenarios() -> Vec<VisualScenario> {

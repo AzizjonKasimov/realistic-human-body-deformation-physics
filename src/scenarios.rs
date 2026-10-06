@@ -1,14 +1,15 @@
-//! Scripted strikes: hand paths in body coordinates and the pointer input that
-//! plays them, plus the tuned strike scenarios with the injury bands each one
-//! should land in. The strike scenario runner, the visual damage diagnostic,
-//! and the app's capture mode all play strikes from here, so a scenario plays
-//! the same everywhere. Native only; none of this ships in the browser build.
+//! Scripted strikes and gestures: hand paths in body coordinates and the
+//! pointer input that plays them, plus the tuned scenarios with the injury and
+//! steadiness bands each one should land in. The strike scenario runner, the
+//! visual damage diagnostic, and the app's capture mode all play them from
+//! here, so a scenario plays the same everywhere. Native only; none of this
+//! ships in the browser build.
 
 use std::fmt;
 
 use crate::{
     body_frame, create_layered_body, swing_power, BodyFrame, BoneSegment, InputState, Materials,
-    ToolMode, World,
+    ToolMode, Vec2, World,
 };
 
 /// Window size the tuned scenarios are played in.
@@ -95,12 +96,7 @@ impl Strike {
     /// (or `blunt`, `sharp`, `heavy`).
     pub fn parse(spec: &str) -> Result<Strike, String> {
         let mut parts = spec.split(':');
-        let tool = match parts.next().unwrap_or("").trim() {
-            "bat" | "blunt" => ToolMode::Blunt,
-            "knife" | "sharp" => ToolMode::Sharp,
-            "hammer" | "heavy" | "sledgehammer" => ToolMode::Heavy,
-            other => return Err(format!("unknown tool `{other}`; use bat, knife, or hammer")),
-        };
+        let tool = parse_tool(parts.next().unwrap_or(""))?;
         let point = |text: Option<&str>| -> Result<(f64, f64), String> {
             let text = text.ok_or("expected tool:u0,v0:u1,v1")?;
             let (u, v) = text
@@ -145,14 +141,10 @@ impl Strike {
 /// Writes the swing in the syntax [`Strike::parse`] reads.
 impl fmt::Display for Strike {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let tool = match self.tool {
-            ToolMode::Blunt => "bat",
-            ToolMode::Sharp => "knife",
-            ToolMode::Heavy => "hammer",
-        };
         write!(
             f,
-            "{tool}:{:.3},{:.3}:{:.3},{:.3}:power={}:frames={}:windup={}:settle={}",
+            "{}:{:.3},{:.3}:{:.3},{:.3}:power={}:frames={}:windup={}:settle={}",
+            tool_spec_name(self.tool),
             self.start.0,
             self.start.1,
             self.end.0,
@@ -162,6 +154,269 @@ impl fmt::Display for Strike {
             self.windup_frames,
             self.settle_frames
         )
+    }
+}
+
+/// One part of a [`Gesture`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GestureStep {
+    /// The hand moves in a straight line to `to` (body coordinates) over
+    /// `frames` steps, or jumps there when `frames` is zero.
+    Move { to: (f64, f64), frames: i32 },
+    /// The button goes down (`true`) or comes up.
+    Press(bool),
+    /// The hand stays still for this many steps.
+    Wait(i32),
+}
+
+/// A tool used the way a person plays the app: the tool is in hand from the
+/// first step and follows the pointer, and the button goes down and up
+/// between moves of the hand. Unlike a [`Strike`], the tool starts at rest
+/// where the hand first is, so the hand has to get it moving, and it hovers
+/// over the body while the button is up, as in the app.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Gesture {
+    pub tool: ToolMode,
+    pub power: f64,
+    pub steps: &'static [GestureStep],
+}
+
+impl Gesture {
+    pub fn frames(&self) -> i32 {
+        self.steps
+            .iter()
+            .map(|step| match *step {
+                GestureStep::Move { frames, .. } | GestureStep::Wait(frames) => frames.max(0),
+                GestureStep::Press(_) => 0,
+            })
+            .sum()
+    }
+
+    /// Where the hand is (body coordinates) and whether the button is down on
+    /// `frame`.
+    pub fn hand(&self, frame: i32) -> ((f64, f64), bool) {
+        let mut position = match self.steps.first() {
+            Some(GestureStep::Move { to, .. }) => *to,
+            _ => (0.0, 0.0),
+        };
+        let mut down = false;
+        let mut elapsed = 0;
+        for step in self.steps {
+            match *step {
+                GestureStep::Press(state) => down = state,
+                GestureStep::Wait(frames) => {
+                    if frame < elapsed + frames {
+                        return (position, down);
+                    }
+                    elapsed += frames.max(0);
+                }
+                GestureStep::Move { to, frames } => {
+                    if frames > 0 && frame < elapsed + frames {
+                        let t = (frame - elapsed + 1) as f64 / frames as f64;
+                        let along = (
+                            position.0 + (to.0 - position.0) * t,
+                            position.1 + (to.1 - position.1) * t,
+                        );
+                        return (along, down);
+                    }
+                    elapsed += frames.max(0);
+                    position = to;
+                }
+            }
+        }
+        (position, down)
+    }
+
+    /// Pointer input on `frame` against a body placed at `body`. The tool is
+    /// in play on every frame, as it is in the app.
+    pub fn input(&self, frame: i32, body: BodyFrame) -> InputState {
+        let ((u, v), down) = self.hand(frame);
+        let hand = body.point(u, v);
+        InputState {
+            active: true,
+            down,
+            x: hand.x,
+            y: hand.y,
+            vx: 0.0,
+            vy: 0.0,
+            power: self.power,
+            tool: self.tool,
+        }
+    }
+
+    /// The same gesture with every point moved `du` across and `dv` down the
+    /// body, in body heights. Its steps are leaked to keep `Gesture` `Copy`,
+    /// which suits the short-lived programs that shift and parse gestures.
+    pub fn shifted(&self, du: f64, dv: f64) -> Gesture {
+        let steps: Vec<GestureStep> = self
+            .steps
+            .iter()
+            .map(|step| match *step {
+                GestureStep::Move { to, frames } => GestureStep::Move {
+                    to: (to.0 + du, to.1 + dv),
+                    frames,
+                },
+                other => other,
+            })
+            .collect();
+        Gesture {
+            steps: Vec::leak(steps),
+            ..*self
+        }
+    }
+
+    /// Parses `tool:` followed by steps separated by `:`: `u,v` puts the hand
+    /// there at once, `u,v/N` moves it there over N steps, `down` and `up`
+    /// press and release the button, and `wait=N` holds still for N steps.
+    /// `power=P` tries a strength other than the tool's swing power. For
+    /// example `bat:-0.3,0.4:wait=10:down:0.05,0.4/12:wait=40:up:wait=30`
+    /// hovers, presses, swings into the chest, leans there, and lets go.
+    pub fn parse(spec: &str) -> Result<Gesture, String> {
+        let mut parts = spec.split(':');
+        let tool = parse_tool(parts.next().unwrap_or(""))?;
+        let mut power = swing_power(tool);
+        let mut steps = Vec::new();
+        for part in parts {
+            let part = part.trim();
+            let number = |text: &str| {
+                text.trim()
+                    .parse::<f64>()
+                    .map_err(|_| format!("`{text}` is not a number"))
+            };
+            match part {
+                "down" => steps.push(GestureStep::Press(true)),
+                "up" => steps.push(GestureStep::Press(false)),
+                _ => {
+                    if let Some(frames) = part.strip_prefix("wait=") {
+                        steps.push(GestureStep::Wait(number(frames)? as i32));
+                    } else if let Some(value) = part.strip_prefix("power=") {
+                        power = number(value)?;
+                    } else {
+                        let (point, frames) = match part.split_once('/') {
+                            Some((point, frames)) => (point, number(frames)? as i32),
+                            None => (part, 0),
+                        };
+                        let (u, v) = point
+                            .split_once(',')
+                            .ok_or_else(|| format!("`{part}` should be u,v or u,v/N"))?;
+                        steps.push(GestureStep::Move {
+                            to: (number(u)?, number(v)?),
+                            frames,
+                        });
+                    }
+                }
+            }
+        }
+        if !matches!(steps.first(), Some(GestureStep::Move { .. })) {
+            return Err("a gesture starts with the point where the hand is".to_string());
+        }
+        Ok(Gesture {
+            tool,
+            power,
+            steps: Vec::leak(steps),
+        })
+    }
+}
+
+/// Writes the gesture in the syntax [`Gesture::parse`] reads.
+impl fmt::Display for Gesture {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", tool_spec_name(self.tool))?;
+        for step in self.steps {
+            match *step {
+                GestureStep::Move { to, frames } if frames > 0 => {
+                    write!(f, ":{:.3},{:.3}/{frames}", to.0, to.1)?
+                }
+                GestureStep::Move { to, .. } => write!(f, ":{:.3},{:.3}", to.0, to.1)?,
+                GestureStep::Press(true) => write!(f, ":down")?,
+                GestureStep::Press(false) => write!(f, ":up")?,
+                GestureStep::Wait(frames) => write!(f, ":wait={frames}")?,
+            }
+        }
+        write!(f, ":power={}", self.power)
+    }
+}
+
+/// What a scenario plays.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Play {
+    /// A scripted swing, then maybe a second one after the first one's settle
+    /// frames.
+    Swing(Strike, Option<Strike>),
+    /// A tool used the way a person plays the app.
+    Gesture(Gesture),
+}
+
+impl Play {
+    /// The tool the play starts with.
+    pub fn tool(&self) -> ToolMode {
+        match self {
+            Play::Swing(strike, _) => strike.tool,
+            Play::Gesture(gesture) => gesture.tool,
+        }
+    }
+
+    pub fn frames(&self) -> i32 {
+        match self {
+            Play::Swing(strike, followup) => {
+                strike.frames() + followup.map_or(0, |followup| followup.frames())
+            }
+            Play::Gesture(gesture) => gesture.frames(),
+        }
+    }
+
+    /// Pointer input on `frame` against a body placed at `body`.
+    pub fn input(&self, frame: i32, dt: f64, body: BodyFrame) -> InputState {
+        match self {
+            Play::Swing(strike, followup) => {
+                let first = strike.frames();
+                match followup {
+                    Some(followup) if frame >= first => followup.input(frame - first, dt, body),
+                    _ => strike.input(frame, dt, body),
+                }
+            }
+            Play::Gesture(gesture) => gesture.input(frame, body),
+        }
+    }
+
+    /// The play aimed a little differently: swings move `along` and `across`
+    /// their own paths ([`Strike::shifted`]), and gestures move `along` across
+    /// the body and `across` down it, all in body heights.
+    pub fn shifted(&self, along: f64, across: f64) -> Play {
+        match self {
+            Play::Swing(strike, followup) => Play::Swing(
+                strike.shifted(along, across),
+                followup.map(|followup| followup.shifted(along, across)),
+            ),
+            Play::Gesture(gesture) => Play::Gesture(gesture.shifted(along, across)),
+        }
+    }
+}
+
+impl fmt::Display for Play {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Play::Swing(strike, None) => write!(f, "{strike}"),
+            Play::Swing(strike, Some(followup)) => write!(f, "{strike} then {followup}"),
+            Play::Gesture(gesture) => write!(f, "{gesture}"),
+        }
+    }
+}
+
+fn parse_tool(name: &str) -> Result<ToolMode, String> {
+    match name.trim() {
+        "bat" | "blunt" => Ok(ToolMode::Blunt),
+        "knife" | "sharp" => Ok(ToolMode::Sharp),
+        "hammer" | "heavy" | "sledgehammer" => Ok(ToolMode::Heavy),
+        other => Err(format!("unknown tool `{other}`; use bat, knife, or hammer")),
+    }
+}
+
+fn tool_spec_name(tool: ToolMode) -> &'static str {
+    match tool {
+        ToolMode::Blunt => "bat",
+        ToolMode::Sharp => "knife",
+        ToolMode::Heavy => "hammer",
     }
 }
 
@@ -272,40 +527,57 @@ pub struct ScenarioExpectations {
     pub blood_loss: DoubleBand,
     pub final_blood_volume: DoubleBand,
     pub final_blood_turgor: DoubleBand,
+    /// How steady the tool is: the most its long axis may turn in one step
+    /// (degrees), how many steps it may snap round by more than
+    /// [`TOOL_SNAP_DEGREES`], and how often a held tool may lose touch with
+    /// the body and find it again.
+    pub tool_turn: DoubleBand,
+    pub tool_snaps: IntBand,
+    /// All the tool's turning over the run, in degrees.
+    pub tool_turning: DoubleBand,
+    pub contact_toggles: IntBand,
+    /// Fastest a tissue point may move, in pixels per second.
+    pub point_speed: DoubleBand,
 }
+
+/// A tool whose axis turns more than this in one step has snapped round
+/// rather than turned.
+pub const TOOL_SNAP_DEGREES: f64 = 45.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Scenario {
     pub name: &'static str,
     pub region: &'static str,
     pub intent: &'static str,
-    pub strike: Strike,
-    /// A second swing after the first one's settle frames.
-    pub followup: Option<Strike>,
+    pub play: Play,
     pub expectations: ScenarioExpectations,
 }
 
 impl Scenario {
+    /// One custom swing or gesture, with no bands to check.
+    pub fn custom(play: Play) -> Scenario {
+        Scenario {
+            name: "custom",
+            region: "custom",
+            intent: "custom",
+            play,
+            expectations: ScenarioExpectations::default(),
+        }
+    }
+
     pub fn frames(&self) -> i32 {
-        self.strike.frames() + self.followup.map_or(0, |followup| followup.frames())
+        self.play.frames()
     }
 
     /// Pointer input on `frame` of the scenario against a body placed at `body`.
     pub fn input(&self, frame: i32, dt: f64, body: BodyFrame) -> InputState {
-        let first = self.strike.frames();
-        match self.followup {
-            Some(followup) if frame >= first => followup.input(frame - first, dt, body),
-            _ => self.strike.input(frame, dt, body),
-        }
+        self.play.input(frame, dt, body)
     }
 
-    /// The scenario with both swings moved by [`Strike::shifted`].
+    /// The scenario aimed a little differently ([`Play::shifted`]).
     pub fn shifted(&self, along: f64, across: f64) -> Scenario {
         Scenario {
-            strike: self.strike.shifted(along, across),
-            followup: self
-                .followup
-                .map(|followup| followup.shifted(along, across)),
+            play: self.play.shifted(along, across),
             ..*self
         }
     }
@@ -522,6 +794,11 @@ impl Scenario {
                 r.max_tissue_plasticity,
                 e.tissue_plasticity,
             ),
+            real("max_tool_turn", r.max_tool_turn, e.tool_turn),
+            int("tool_snaps", r.tool_snaps, e.tool_snaps),
+            real("tool_turning", r.tool_turning, e.tool_turning),
+            int("contact_toggles", r.contact_toggles, e.contact_toggles),
+            real("max_point_speed", r.max_point_speed, e.point_speed),
         ];
         checks
             .into_iter()
@@ -638,11 +915,27 @@ pub struct ScenarioResult {
     pub blood_stain_budget_replacements: i32,
     pub wound_budget_replacements: i32,
     pub max_solver_iterations: i32,
+    /// Largest turn of the tool's long axis from one step to the next, in
+    /// degrees; the steps it snapped round by more than [`TOOL_SNAP_DEGREES`];
+    /// and all of its turning over the run.
+    pub max_tool_turn: f64,
+    pub tool_snaps: i32,
+    pub tool_turning: f64,
+    /// Times a held tool lost touch with the body and found it again.
+    pub contact_toggles: i32,
+    /// Fastest any tissue point moved, in pixels per second.
+    pub max_point_speed: f64,
+    last_positions: Vec<Vec2>,
+    last_tool_axis: Option<Vec2>,
+    last_touching: bool,
+    touched_this_press: bool,
 }
 
 impl ScenarioResult {
-    /// Adds one step's events and peaks.
-    pub fn accumulate(&mut self, world: &World) {
+    /// Adds one step's events and peaks; `input` is what the step was played
+    /// with.
+    pub fn accumulate(&mut self, world: &World, input: &InputState) {
+        self.accumulate_steadiness(world, input);
         let debug = world.debug();
         self.tissue_contacts += debug.tissue_contacts;
         self.bone_contacts += debug.bone_contacts;
@@ -722,6 +1015,36 @@ impl ScenarioResult {
         self.max_solver_iterations = self.max_solver_iterations.max(debug.solver_iterations);
     }
 
+    fn accumulate_steadiness(&mut self, world: &World, input: &InputState) {
+        let axis = tool_axis(world);
+        if let (Some(last), Some(axis)) = (self.last_tool_axis, axis) {
+            let turn = turn_degrees(last, axis);
+            self.max_tool_turn = self.max_tool_turn.max(turn);
+            self.tool_turning += turn;
+            if turn > TOOL_SNAP_DEGREES {
+                self.tool_snaps += 1;
+            }
+        }
+        self.last_tool_axis = axis;
+
+        let touching = tool_touching(world);
+        if input.down {
+            if touching && !self.last_touching && self.touched_this_press {
+                self.contact_toggles += 1;
+            }
+            self.touched_this_press |= touching;
+        } else {
+            self.touched_this_press = false;
+        }
+        self.last_touching = touching;
+        self.max_point_speed = self
+            .max_point_speed
+            .max(fastest_point_speed(world, &self.last_positions));
+        self.last_positions.clear();
+        self.last_positions
+            .extend(world.points().iter().map(|point| point.position));
+    }
+
     /// Takes the running totals and final state from the world at the end.
     pub fn finish(&mut self, world: &World) {
         let stats = world.stats();
@@ -775,7 +1098,7 @@ pub fn run(
     scenario: &Scenario,
     width: f64,
     height: f64,
-    mut observe: impl FnMut(i32, &World),
+    mut observe: impl FnMut(i32, &InputState, &World),
 ) -> (World, ScenarioResult) {
     let mut world = create_layered_body(width, height, Materials::default());
     let mut result = ScenarioResult::default();
@@ -784,11 +1107,49 @@ pub fn run(
     for frame in 0..scenario.frames() {
         let input = scenario.input(frame, dt, body);
         world.step(dt, &input, width, height);
-        result.accumulate(&world);
-        observe(frame, &world);
+        result.accumulate(&world, &input);
+        observe(frame, &input, &world);
     }
     result.finish(&world);
     (world, result)
+}
+
+/// The direction the handle points from the bat's barrel or the hammer's
+/// head, or the knife's blade points, while a tool is in play.
+pub fn tool_axis(world: &World) -> Option<Vec2> {
+    let pose = world.current_tool_pose()?;
+    Some(match pose.tool {
+        ToolMode::Sharp => pose.heading,
+        ToolMode::Blunt | ToolMode::Heavy => pose.side,
+    })
+}
+
+/// Angle between two directions, in degrees.
+pub fn turn_degrees(from: Vec2, to: Vec2) -> f64 {
+    let cross = from.x * to.y - from.y * to.x;
+    let dot = from.x * to.x + from.y * to.y;
+    cross.atan2(dot).abs().to_degrees()
+}
+
+/// The tool touched tissue or bone on the last step.
+pub fn tool_touching(world: &World) -> bool {
+    let debug = world.debug();
+    debug.tissue_contacts > 0 || debug.bone_contacts > 0
+}
+
+/// Fastest any free tissue point moved since it was at `last_positions` one
+/// step ago, in pixels per second. (A point's `previous` is not always where
+/// it was a step ago, so it cannot stand in for this.)
+pub fn fastest_point_speed(world: &World, last_positions: &[Vec2]) -> f64 {
+    let dt = world.materials().fixed_dt.max(1.0e-9);
+    world
+        .points()
+        .iter()
+        .zip(last_positions)
+        .filter(|(point, _)| !point.pinned)
+        .map(|(point, last)| (point.position.x - last.x).hypot(point.position.y - last.y))
+        .fold(0.0, f64::max)
+        / dt
 }
 
 pub fn tool_name(tool: ToolMode) -> &'static str {
@@ -843,14 +1204,97 @@ pub fn scenario(name: &str) -> Option<Scenario> {
         .find(|scenario| scenario.name == name)
 }
 
-/// The tuned strike scenarios, played in a 1280x720 window.
+/// A bat or hammer carried across the body and back with the button up.
+const CARRY_ACROSS: &[GestureStep] = &[
+    GestureStep::Move {
+        to: (-0.40, 0.30),
+        frames: 0,
+    },
+    GestureStep::Wait(5),
+    GestureStep::Move {
+        to: (0.40, 0.35),
+        frames: 30,
+    },
+    GestureStep::Move {
+        to: (-0.40, 0.50),
+        frames: 30,
+    },
+    GestureStep::Wait(10),
+];
+
+/// Pressed into the side of the chest from outside the arm, then dragged down
+/// the body to the hip and let go.
+const DRAG_DOWN_THE_SIDE: &[GestureStep] = &[
+    GestureStep::Move {
+        to: (-0.30, 0.30),
+        frames: 0,
+    },
+    GestureStep::Wait(10),
+    GestureStep::Press(true),
+    GestureStep::Move {
+        to: (-0.08, 0.30),
+        frames: 15,
+    },
+    GestureStep::Move {
+        to: (-0.08, 0.60),
+        frames: 60,
+    },
+    GestureStep::Wait(20),
+    GestureStep::Press(false),
+    GestureStep::Wait(30),
+];
+
+/// Swung across the chest and straight back.
+const SWING_ACROSS_AND_BACK: &[GestureStep] = &[
+    GestureStep::Move {
+        to: (-0.40, 0.35),
+        frames: 0,
+    },
+    GestureStep::Wait(10),
+    GestureStep::Press(true),
+    GestureStep::Move {
+        to: (0.30, 0.35),
+        frames: 10,
+    },
+    GestureStep::Move {
+        to: (-0.40, 0.35),
+        frames: 10,
+    },
+    GestureStep::Wait(10),
+    GestureStep::Press(false),
+    GestureStep::Wait(20),
+];
+
+/// The tuned scenarios, played in a 1280x720 window: scripted strikes with the
+/// injuries they should cause, and gestures played the way the app is, which
+/// check that a bat or hammer moves steadily in hand.
 pub fn scenarios() -> Vec<Scenario> {
+    // Every scenario: the tool never snaps round, and no tissue flies off.
+    let steady = ScenarioExpectations {
+        tool_turn: DoubleBand::range(0.0, 30.0),
+        tool_snaps: IntBand::range(0, 0),
+        point_speed: DoubleBand::range(0.0, 4000.0),
+        ..ScenarioExpectations::default()
+    };
     let e = ScenarioExpectations {
         contacts: IntBand::at_least(1),
         contusion_events: IntBand::at_least(1),
         fragment_overlap: DoubleBand::range(0.0, 18.0),
         bone_spin: DoubleBand::range(0.0, 38.0),
-        ..ScenarioExpectations::default()
+        ..steady
+    };
+    // A bat or hammer in hand turns smoothly about its handle.
+    let held = ScenarioExpectations {
+        tool_turn: DoubleBand::range(0.0, 6.0),
+        tool_turning: DoubleBand::range(0.0, 45.0),
+        ..e
+    };
+    let gesture = |tool, steps| {
+        Play::Gesture(Gesture {
+            tool,
+            power: swing_power(tool),
+            steps,
+        })
     };
     let strike = |tool, start, end, strike_frames, settle_frames| Strike {
         tool,
@@ -866,8 +1310,10 @@ pub fn scenarios() -> Vec<Scenario> {
             name: "torso_blunt_medium",
             region: "torso",
             intent: "medium",
-            strike: strike(ToolMode::Blunt, (-0.360, 0.330), (0.200, 0.330), 14, 60),
-            followup: None,
+            play: Play::Swing(
+                strike(ToolMode::Blunt, (-0.360, 0.330), (0.200, 0.330), 14, 60),
+                None,
+            ),
             // A hard bat swing into the upper arm and chest: deep bruising
             // and perhaps a broken arm, but the torso is not torn open.
             expectations: ScenarioExpectations {
@@ -891,8 +1337,10 @@ pub fn scenarios() -> Vec<Scenario> {
             name: "torso_heavy_high",
             region: "torso",
             intent: "high",
-            strike: strike(ToolMode::Heavy, (-0.260, 0.340), (0.300, 0.340), 14, 60),
-            followup: None,
+            play: Play::Swing(
+                strike(ToolMode::Heavy, (-0.260, 0.340), (0.300, 0.340), 14, 60),
+                None,
+            ),
             // A full-force sledgehammer blow through the arm into the chest
             // breaks the arm and ribs, bruises deeply and injures organs,
             // without pulping the chest. The swing starts close to the arm:
@@ -921,8 +1369,10 @@ pub fn scenarios() -> Vec<Scenario> {
             name: "torso_sharp_cut",
             region: "torso",
             intent: "cut",
-            strike: strike(ToolMode::Sharp, (-0.075, 0.380), (0.065, 0.480), 16, 60),
-            followup: None,
+            play: Play::Swing(
+                strike(ToolMode::Sharp, (-0.075, 0.380), (0.065, 0.480), 16, 60),
+                None,
+            ),
             // A knife slashed across the belly cuts a line through skin and
             // muscle and can reach a vessel or organ, but breaks no bone.
             expectations: ScenarioExpectations {
@@ -946,8 +1396,10 @@ pub fn scenarios() -> Vec<Scenario> {
             name: "shoulder_blunt",
             region: "shoulder",
             intent: "medium",
-            strike: strike(ToolMode::Blunt, (-0.100, 0.000), (-0.100, 0.320), 12, 60),
-            followup: None,
+            play: Play::Swing(
+                strike(ToolMode::Blunt, (-0.100, 0.000), (-0.100, 0.320), 12, 60),
+                None,
+            ),
             // A bat brought down on the shoulder bruises it.
             expectations: ScenarioExpectations {
                 skin_tears: IntBand::range(0, 12),
@@ -965,8 +1417,10 @@ pub fn scenarios() -> Vec<Scenario> {
             name: "arm_sharp",
             region: "arm",
             intent: "cut",
-            strike: strike(ToolMode::Sharp, (-0.086, 0.230), (-0.128, 0.450), 24, 48),
-            followup: None,
+            play: Play::Swing(
+                strike(ToolMode::Sharp, (-0.086, 0.230), (-0.128, 0.450), 24, 48),
+                None,
+            ),
             // A knife drawn from the armpit down the inside of the arm cuts
             // along it and opens the arteries there, but breaks no bone.
             expectations: ScenarioExpectations {
@@ -986,8 +1440,10 @@ pub fn scenarios() -> Vec<Scenario> {
             name: "hip_heavy",
             region: "hip",
             intent: "high",
-            strike: strike(ToolMode::Heavy, (-0.340, 0.620), (0.100, 0.620), 16, 60),
-            followup: None,
+            play: Play::Swing(
+                strike(ToolMode::Heavy, (-0.340, 0.620), (0.100, 0.620), 16, 60),
+                None,
+            ),
             // A sledgehammer into the thigh bruises it deeply; the femur, the
             // strongest bone, holds.
             expectations: ScenarioExpectations {
@@ -1005,8 +1461,10 @@ pub fn scenarios() -> Vec<Scenario> {
             name: "leg_blunt",
             region: "leg",
             intent: "medium",
-            strike: strike(ToolMode::Blunt, (-0.300, 0.780), (0.050, 0.800), 12, 60),
-            followup: None,
+            play: Play::Swing(
+                strike(ToolMode::Blunt, (-0.300, 0.780), (0.050, 0.800), 12, 60),
+                None,
+            ),
             // A bat swung into the shin bruises it.
             expectations: ScenarioExpectations {
                 contusion_events: IntBand::at_least(30),
@@ -1022,18 +1480,20 @@ pub fn scenarios() -> Vec<Scenario> {
             name: "thigh_cut_rebleed",
             region: "leg",
             intent: "rebleed",
-            strike: strike(ToolMode::Sharp, (-0.075, 0.585), (-0.075, 0.685), 16, 190),
             // A knife cut down the outer thigh clots, then a bat swung into the
             // thigh strikes the healed cut. The blade runs ahead of the hand, so
             // the cut lies a little below the hand's path; the bat aims at its
             // lower half, below the hanging hand.
-            followup: Some(strike(
-                ToolMode::Blunt,
-                (-0.340, 0.700),
-                (0.100, 0.700),
-                14,
-                60,
-            )),
+            play: Play::Swing(
+                strike(ToolMode::Sharp, (-0.075, 0.585), (-0.075, 0.685), 16, 190),
+                Some(strike(
+                    ToolMode::Blunt,
+                    (-0.340, 0.700),
+                    (0.100, 0.700),
+                    14,
+                    60,
+                )),
+            ),
             expectations: ScenarioExpectations {
                 bone_fractures: IntBand::range(0, 1),
                 skin_tears: IntBand::range(8, 50),
@@ -1054,8 +1514,10 @@ pub fn scenarios() -> Vec<Scenario> {
             name: "torso_heavy_fragment_settle",
             region: "torso",
             intent: "settle",
-            strike: strike(ToolMode::Heavy, (-0.260, 0.340), (0.300, 0.340), 14, 260),
-            followup: None,
+            play: Play::Swing(
+                strike(ToolMode::Heavy, (-0.260, 0.340), (0.300, 0.340), 14, 260),
+                None,
+            ),
             // The bone fragments from a full-force sledgehammer blow to the
             // chest settle and come to rest.
             expectations: ScenarioExpectations {
@@ -1072,6 +1534,61 @@ pub fn scenarios() -> Vec<Scenario> {
                 organ_penetrations: IntBand::range(0, 0),
                 blood_loss: DoubleBand::range(0.01, 0.15),
                 ..e
+            },
+        },
+        Scenario {
+            name: "bat_carried_steady",
+            region: "air",
+            intent: "steady",
+            play: gesture(ToolMode::Blunt, CARRY_ACROSS),
+            // A bat carried over the body with the button up stays upright in
+            // the hand instead of turning with every move, and touches nothing.
+            expectations: ScenarioExpectations {
+                contacts: IntBand::range(0, 0),
+                tool_turn: DoubleBand::range(0.0, 1.0),
+                tool_turning: DoubleBand::range(0.0, 1.0),
+                ..steady
+            },
+        },
+        Scenario {
+            name: "bat_drag_steady",
+            region: "torso",
+            intent: "steady",
+            play: gesture(ToolMode::Blunt, DRAG_DOWN_THE_SIDE),
+            // A bat pressed against the side and dragged down the body slides
+            // along it nearly upright, bruising without breaking anything; it
+            // does not swing round into the body like a spear.
+            expectations: ScenarioExpectations {
+                contusion_events: IntBand::at_least(50),
+                skin_tears: IntBand::range(0, 10),
+                bone_fractures: IntBand::range(0, 0),
+                ..held
+            },
+        },
+        Scenario {
+            name: "bat_swing_back_steady",
+            region: "torso",
+            intent: "steady",
+            play: gesture(ToolMode::Blunt, SWING_ACROSS_AND_BACK),
+            // A bat swung across the chest and back keeps its barrel across
+            // the swing both ways instead of spinning round at the turn.
+            expectations: ScenarioExpectations {
+                contusion_events: IntBand::at_least(10),
+                bone_fractures: IntBand::range(0, 2),
+                ..held
+            },
+        },
+        Scenario {
+            name: "hammer_drag_steady",
+            region: "torso",
+            intent: "steady",
+            play: gesture(ToolMode::Heavy, DRAG_DOWN_THE_SIDE),
+            // The sledgehammer dragged down the side stays as steady, and its
+            // weight breaks at most a bone or two on the way.
+            expectations: ScenarioExpectations {
+                contusion_events: IntBand::at_least(50),
+                bone_fractures: IntBand::range(0, 3),
+                ..held
             },
         },
     ]
@@ -1097,9 +1614,40 @@ mod tests {
     #[test]
     fn strike_spec_round_trips() {
         for scenario in scenarios() {
-            let spec = scenario.strike.to_string();
-            assert_eq!(Strike::parse(&spec), Ok(scenario.strike), "{spec}");
+            let strikes = match scenario.play {
+                Play::Swing(strike, followup) => [Some(strike), followup],
+                Play::Gesture(_) => continue,
+            };
+            for strike in strikes.into_iter().flatten() {
+                let spec = strike.to_string();
+                assert_eq!(Strike::parse(&spec), Ok(strike), "{spec}");
+            }
         }
+    }
+
+    #[test]
+    fn gesture_spec_parses_and_round_trips() {
+        let gesture =
+            Gesture::parse("bat:-0.3,0.4:wait=10:down:0.05,0.4/12:wait=40:up:wait=30").unwrap();
+        assert_eq!(gesture.tool, ToolMode::Blunt);
+        assert_eq!(gesture.power, swing_power(ToolMode::Blunt));
+        assert_eq!(gesture.frames(), 92);
+        assert_eq!(Gesture::parse(&gesture.to_string()), Ok(gesture));
+        assert!(Gesture::parse("bat:down:0,0.4/4").is_err());
+        assert!(Gesture::parse("bat:0,0.4:sideways").is_err());
+    }
+
+    #[test]
+    fn gesture_hand_hovers_presses_moves_and_lets_go() {
+        let gesture = Gesture::parse("hammer:0,0.5:wait=2:down:0.4,0.5/4:up:wait=1").unwrap();
+        assert_eq!(gesture.hand(0), ((0.0, 0.5), false));
+        assert_eq!(gesture.hand(1), ((0.0, 0.5), false));
+        let ((u, _), down) = gesture.hand(2);
+        assert!(down && (u - 0.1).abs() < 1.0e-12);
+        assert_eq!(gesture.hand(5), ((0.4, 0.5), true));
+        assert_eq!(gesture.hand(6), ((0.4, 0.5), false));
+        let body = body_frame(SCENARIO_WIDTH, SCENARIO_HEIGHT);
+        assert!(gesture.input(0, body).active);
     }
 
     #[test]
@@ -1116,13 +1664,14 @@ mod tests {
         let scenario = scenario("thigh_cut_rebleed").unwrap();
         let dt = 1.0 / 60.0;
         let body = body_frame(SCENARIO_WIDTH, SCENARIO_HEIGHT);
-        let first = scenario.strike;
+        let Play::Swing(first, Some(followup)) = scenario.play else {
+            panic!("thigh_cut_rebleed plays two swings");
+        };
         assert!(!scenario.input(first.windup_frames - 1, dt, body).down);
         assert!(scenario.input(first.windup_frames, dt, body).down);
         let released = first.windup_frames + first.strike_frames + FOLLOW_THROUGH_FRAMES;
         assert!(scenario.input(released - 1, dt, body).down);
         assert!(!scenario.input(released, dt, body).down);
-        let followup = scenario.followup.unwrap();
         let swing = first.frames() + followup.windup_frames;
         let input = scenario.input(swing, dt, body);
         assert!(input.down);
