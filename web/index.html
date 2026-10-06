@@ -188,6 +188,37 @@
       installPerfOverlay();
     }
 
+    // Open the page with ?selftest to play every tuned strike scenario inside
+    // the simulation at fixed steps and check its injuries. It does not depend
+    // on the frame rate, so it also works while the browser throttles the tab.
+    // The report lands in window.__selftest and the status line.
+    const selftest = new URLSearchParams(location.search).has("selftest");
+    miniquad_add_plugin({
+      name: "rp",
+      version: 1,
+      register_plugin: function (importObject) {
+        importObject.env.rp_selftest_requested = function () {
+          return selftest ? 1 : 0;
+        };
+        importObject.env.rp_now_ms = function () {
+          return performance.now();
+        };
+        importObject.env.rp_selftest_report = function (ptr, len) {
+          const report = JSON.parse(UTF8ToString(ptr, len));
+          window.__selftest = report;
+          const failed = report.scenarios.filter(function (scenario) { return !scenario.in_band; });
+          showStatus(
+            (report.passed ? "Self-test passed: " : "Self-test FAILED: ") +
+              (report.scenarios.length - failed.length) + "/" + report.scenarios.length +
+              " scenarios in band, " + report.avg_step_ms.toFixed(2) + " ms per step (max " +
+              report.max_step_ms.toFixed(2) + ")" +
+              (failed.length ? " · out of band: " + failed.map(function (s) { return s.name; }).join(", ") : ""),
+            !report.passed
+          );
+        };
+      }
+    });
+
     startButton.addEventListener("click", function () {
       if (started) {
         return;
@@ -204,11 +235,19 @@
       const poll = setInterval(function () {
         if (window.wasm_exports) {
           clearInterval(poll);
-          status.hidden = true;
+          if (selftest) {
+            showStatus("Self-test running…");
+          } else {
+            status.hidden = true;
+          }
           glCanvas.focus();
         }
       }, 100);
     });
+
+    if (selftest) {
+      startButton.click();
+    }
 
     function installPerfOverlay() {
       const perf = document.getElementById("perf");

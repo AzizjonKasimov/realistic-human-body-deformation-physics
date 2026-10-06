@@ -1,9 +1,9 @@
 //! Scripted strikes and gestures: hand paths in body coordinates and the
 //! pointer input that plays them, plus the tuned scenarios with the injury and
 //! steadiness bands each one should land in. The strike scenario runner, the
-//! visual damage diagnostic, and the app's capture mode all play them from
-//! here, so a scenario plays the same everywhere. Native only; none of this
-//! ships in the browser build.
+//! visual damage diagnostic, and the app's capture and self-test modes all
+//! play them from here, so a scenario plays the same everywhere, in the
+//! browser build too.
 
 use std::fmt;
 

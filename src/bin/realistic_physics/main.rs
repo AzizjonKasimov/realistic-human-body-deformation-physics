@@ -3,6 +3,7 @@ use realistic_physics as rp;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod capture;
+mod selftest;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ViewMode {
@@ -233,6 +234,10 @@ async fn main() {
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(request) = capture::request() {
         capture::run(request).await;
+        return;
+    }
+    if selftest::requested() {
+        selftest::run_all().await;
         return;
     }
     let mut app = AppState::new(screen_width() as f64, screen_height() as f64);

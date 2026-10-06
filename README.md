@@ -125,7 +125,7 @@ Then build and serve it:
 .\tools\build_web.ps1 -Serve
 ```
 
-Open <http://localhost:8080>, or <http://localhost:8080/?stats> to show the frame rate and how long each frame takes. `.\tools\serve_web.ps1` serves the last build again without rebuilding. The site is assembled in `target\web`: the page from `web\index.html`, the wasm module, and the `gl.js` loader copied from the miniquad version in `Cargo.lock`.
+Open <http://localhost:8080>, or <http://localhost:8080/?stats> to show the frame rate and how long each frame takes. <http://localhost:8080/?selftest> runs a self-test instead: the browser build plays every tuned strike scenario at fixed simulation steps, checks each against its injury bands, and reports how long a simulation step takes in WebAssembly, on screen, in the status line, and as `window.__selftest`. It does not depend on the frame rate, so it also works while the browser throttles a hidden or covered tab; it takes about 15 seconds. `realistic_physics.exe --selftest` runs the same natively and prints the report as JSON, so the two can be compared (they give the same injuries). `.\tools\serve_web.ps1` serves the last build again without rebuilding. The site is assembled in `target\web`: the page from `web\index.html`, the wasm module, and the `gl.js` loader copied from the miniquad version in `Cargo.lock`.
 
 ## Controls
 
@@ -246,8 +246,8 @@ The visual diagnostic exits nonzero if the captures no longer include expected w
 
 - `Cargo.toml` defines the Rust library, app, diagnostics, strike scenario, and contact sheet binaries.
 - `src/simulation.rs` contains the physics data model, integration, constraints, tearing, bone fracture, major vessels, wounds, and fluid particles; `src/simulation/body.rs` generates the layered body; `src/simulation/tools.rs` holds the tools: their shapes, the hand that drives them, and their contact with tissue and bone.
-- `src/bin/realistic_physics/main.rs` owns the `macroquad` app shell, input, timing, and rendering. It also runs in the browser, so the app and simulation must avoid file I/O, threads, and `std::time`, none of which work on `wasm32-unknown-unknown`. `src/bin/realistic_physics/capture.rs` is the native-only screenshot mode.
-- `src/scenarios.rs` holds the scripted strikes and gestures and the tuned scenarios with their injury and steadiness bands, shared by the strike runner, the visual damage diagnostic, and the capture mode. It is native-only and not part of the browser build.
+- `src/bin/realistic_physics/main.rs` owns the `macroquad` app shell, input, timing, and rendering. It also runs in the browser, so the app and simulation must avoid file I/O, threads, and `std::time`, none of which work on `wasm32-unknown-unknown`. `src/bin/realistic_physics/capture.rs` is the native-only screenshot mode, and `src/bin/realistic_physics/selftest.rs` the self-test mode, which runs in both builds (the page hands it a clock and takes its report through a small gl.js plugin).
+- `src/scenarios.rs` holds the scripted strikes and gestures and the tuned scenarios with their injury and steadiness bands, shared by the strike runner, the visual damage diagnostic, the capture mode, and the self-test, which also ships in the browser build.
 - `web/index.html` is the browser page: start screen with a content warning, loader, error messages, and the `?stats` frame-time overlay (also exposed as `window.__perf` for automated checks).
 - `tools/build_web.ps1` builds the browser version into `target\web`; `tools/serve_web.ps1` serves it locally with the `application/wasm` content type browsers require.
 - `.cargo/config.toml` lets the wasm linker leave miniquad's WebGL functions as imports for `gl.js` to provide; recent Rust versions no longer do that by default.
