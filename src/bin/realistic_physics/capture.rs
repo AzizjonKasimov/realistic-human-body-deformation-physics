@@ -26,13 +26,20 @@
 //!                            Injuries depend on the body's size in pixels, and
 //!                            the tuned scenarios use 561.6, its height in a
 //!                            1280x720 window, so a tall video keeps that size.
+//! --events FILE              write what happens at each step as CSV: the tool,
+//!                            its speed and impact, whether it touches the body,
+//!                            and running counts of broken bones, torn skin and
+//!                            muscle, bruises, and blood drops (a video's sound
+//!                            is made from them)
 //! ```
 
 use std::env;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 
-use rp::scenarios::{scenario, Gesture, Play, Scenario, Strike};
+use rp::scenarios::{scenario, tool_name, tool_touching, Gesture, Play, Scenario, Strike};
 
 use super::*;
 
@@ -49,6 +56,7 @@ pub struct CaptureRequest {
     label: Option<String>,
     show_label: bool,
     body_frame: Option<rp::BodyFrame>,
+    events: Option<PathBuf>,
 }
 
 /// The window size asked for with `--size`, when capturing.
@@ -83,6 +91,7 @@ pub fn request() -> Option<CaptureRequest> {
         label: None,
         show_label: true,
         body_frame: None,
+        events: None,
     };
     while let Some(arg) = args.next() {
         let mut value = |name: &str| {
@@ -126,6 +135,7 @@ pub fn request() -> Option<CaptureRequest> {
                 request.body_frame =
                     Some(parse_body_frame(&value("--body-frame")).unwrap_or_else(|e| fail(&e)));
             }
+            "--events" => request.events = Some(PathBuf::from(value("--events"))),
             other => fail(&format!("unknown option `{other}`")),
         }
     }
@@ -151,6 +161,13 @@ pub async fn run(request: CaptureRequest) {
     let frames = request
         .frames
         .unwrap_or_else(|| request.play.map_or(IDLE_FRAMES, |play| play.frames()));
+    let mut events = request.events.as_ref().map(|path| {
+        let file = File::create(path)
+            .unwrap_or_else(|error| fail(&format!("cannot write {}: {error}", path.display())));
+        let mut out = BufWriter::new(file);
+        writeln!(out, "{EVENT_HEADER}").unwrap_or_else(|error| fail(&error.to_string()));
+        out
+    });
     for frame in 0..frames {
         let input = match &request.play {
             Some(play) => play.input(frame, dt, app.frame),
@@ -166,6 +183,10 @@ pub async fn run(request: CaptureRequest) {
         app.pointer_down = input.down;
         step_world(&mut app, &input, width, height);
         let step = frame + 1;
+        if let Some(out) = events.as_mut() {
+            write_event(out, step, &input, &app.world)
+                .unwrap_or_else(|error| fail(&error.to_string()));
+        }
         if request
             .every
             .is_some_and(|every| step % every == 0 && step < frames)
@@ -174,6 +195,40 @@ pub async fn run(request: CaptureRequest) {
         }
     }
     save_views(&mut app, &request, request.every.map(|_| frames)).await;
+    if let Some(mut out) = events {
+        out.flush().unwrap_or_else(|error| fail(&error.to_string()));
+    }
+}
+
+const EVENT_HEADER: &str = "step,tool,down,touching,tool_speed,impact,tissue_contacts,\
+                            bone_contacts,fractures,skin,muscle,bruises,fluid";
+
+/// One `--events` row: the tool after this step, and running counts of the
+/// injuries so far, from which a video's sound is made.
+fn write_event(
+    out: &mut impl Write,
+    step: i32,
+    input: &rp::InputState,
+    world: &rp::World,
+) -> std::io::Result<()> {
+    let debug = world.debug();
+    let stats = world.stats();
+    writeln!(
+        out,
+        "{step},{},{},{},{:.1},{:.3},{},{},{},{},{},{},{}",
+        tool_name(debug.tool),
+        u8::from(input.down),
+        u8::from(tool_touching(world)),
+        debug.striker_speed,
+        debug.impact,
+        debug.tissue_contacts,
+        debug.bone_contacts,
+        stats.fractured_bones,
+        stats.broken_skin,
+        stats.broken_muscle,
+        stats.contusion_events,
+        stats.emitted_fluid_particles,
+    )
 }
 
 /// Draws every character the app and the label use at their text sizes once,
