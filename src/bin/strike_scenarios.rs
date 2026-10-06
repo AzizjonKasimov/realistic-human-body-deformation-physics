@@ -328,8 +328,8 @@ fn scenarios() -> Vec<Scenario> {
             region: "torso",
             intent: "high",
             tool: rp::ToolMode::Heavy,
-            start: body(-0.360, 0.340),
-            end: body(0.200, 0.340),
+            start: body(-0.260, 0.340),
+            end: body(0.300, 0.340),
             windup_frames: 6,
             strike_frames: 16,
             settle_frames: 60,
@@ -337,7 +337,8 @@ fn scenarios() -> Vec<Scenario> {
             followup: None,
             // A full-force sledgehammer blow through the arm into the chest
             // breaks the arm and ribs, bruises deeply and injures organs,
-            // without pulping the chest.
+            // without pulping the chest. The swing starts close to the arm:
+            // the hammer trails the hand and loses speed on a long approach.
             expectations: ScenarioExpectations {
                 bone_fractures: IntBand { min: 3, max: 12 },
                 rib_fractures: IntBand { min: 1, max: 8 },
@@ -375,8 +376,8 @@ fn scenarios() -> Vec<Scenario> {
             region: "torso",
             intent: "cut",
             tool: rp::ToolMode::Sharp,
-            start: body(-0.075, 0.385),
-            end: body(0.065, 0.485),
+            start: body(-0.075, 0.380),
+            end: body(0.065, 0.480),
             windup_frames: 6,
             strike_frames: 16,
             settle_frames: 60,
@@ -526,11 +527,13 @@ fn scenarios() -> Vec<Scenario> {
             settle_frames: 190,
             power: 3.0,
             // A knife cut down the outer thigh clots, then a bat swung into the
-            // thigh strikes the healed cut.
+            // thigh strikes the healed cut. The blade runs ahead of the hand, so
+            // the cut lies a little below the hand's path; the bat aims at its
+            // middle, below the hanging hand.
             followup: Some(FollowupStrike {
                 tool: rp::ToolMode::Blunt,
-                start: body(-0.340, 0.640),
-                end: body(0.100, 0.640),
+                start: body(-0.340, 0.680),
+                end: body(0.100, 0.680),
                 windup_frames: 6,
                 strike_frames: 14,
                 settle_frames: 60,
@@ -563,8 +566,8 @@ fn scenarios() -> Vec<Scenario> {
             region: "torso",
             intent: "settle",
             tool: rp::ToolMode::Heavy,
-            start: body(-0.360, 0.340),
-            end: body(0.200, 0.340),
+            start: body(-0.260, 0.340),
+            end: body(0.300, 0.340),
             windup_frames: 6,
             strike_frames: 16,
             settle_frames: 260,

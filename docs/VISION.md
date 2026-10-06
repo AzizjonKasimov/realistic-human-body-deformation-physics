@@ -22,4 +22,5 @@ The end product is a free standalone download that someone can install, play wit
 - Prioritize real simulation behavior over scripted decals or canned animations.
 - Aim as close as practical to real-life body destruction physics.
 - Treat graphic injury detail as part of the simulation target: gore, exposed tissue, blood, tearing, fracture, and body deformation should be shown when the physics state supports them.
+- Keep the figure itself presentable: a neutral, mirror-symmetric, front-facing mannequin without anatomical surface detail. The realism lives in the layered tissue and the damage, not in the body's outline.
 - Do not ask whether the app should be less gory by default; assume a darker, more realistic destruction model unless a later product decision explicitly says otherwise.

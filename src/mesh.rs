@@ -36,20 +36,20 @@ pub(crate) fn resample_loop(outline: &[P2], spacing: f64) -> Vec<P2> {
 }
 
 /// Hexagonal lattice covering the box, with vertical edges so muscle fibers
-/// along limbs and the torso find well-aligned springs.
+/// along limbs and the torso find well-aligned springs. A column runs down the
+/// box's center line, so the lattice mirrors across it.
 pub(crate) fn hex_lattice(min: P2, max: P2, edge: f64) -> Vec<P2> {
     let column_step = edge * 3.0_f64.sqrt() * 0.5;
+    let center = (min.0 + max.0) * 0.5;
+    let side_columns = ((max.0 - center) / column_step).floor() as i64;
     let mut points = Vec::new();
-    let mut column = 0;
-    let mut x = min.0;
-    while x <= max.0 {
-        let mut y = min.1 + if column % 2 == 1 { edge * 0.5 } else { 0.0 };
+    for column in -side_columns..=side_columns {
+        let x = center + column as f64 * column_step;
+        let mut y = min.1 + if column % 2 != 0 { edge * 0.5 } else { 0.0 };
         while y <= max.1 {
             points.push((x, y));
             y += edge;
         }
-        x += column_step;
-        column += 1;
     }
     points
 }

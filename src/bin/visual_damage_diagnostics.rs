@@ -143,8 +143,8 @@ fn visual_scenarios() -> Vec<VisualScenario> {
             name: "torso_sharp_cut_visual",
             intent: "cut",
             tool: rp::ToolMode::Sharp,
-            start: body(-0.075, 0.385),
-            end: body(0.065, 0.485),
+            start: body(-0.075, 0.380),
+            end: body(0.065, 0.480),
             windup_frames: 6,
             strike_frames: 16,
             settle_frames: 60,
@@ -170,14 +170,15 @@ fn visual_scenarios() -> Vec<VisualScenario> {
             name: "torso_heavy_settle_visual",
             intent: "settle",
             tool: rp::ToolMode::Heavy,
-            start: body(-0.360, 0.340),
-            end: body(0.200, 0.340),
+            start: body(-0.260, 0.340),
+            end: body(0.300, 0.340),
             windup_frames: 6,
             strike_frames: 16,
             settle_frames: 260,
             power: 4.0,
             // A full-force sledgehammer blow to the chest, left to settle:
-            // broken arm and ribs, deep bruising, torn flesh and bleeding.
+            // broken arm and ribs, deep bruising, torn flesh and bleeding. The
+            // swing starts close to the arm so the trailing hammer keeps its speed.
             expectations: VisualExpectations {
                 min_skin_wound_edges: 30,
                 min_muscle_fiber_tears: 10,

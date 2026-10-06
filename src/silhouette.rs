@@ -1,33 +1,114 @@
-//! Front-facing human silhouette used to generate the body mesh.
+//! Front-facing mannequin figure that the body mesh is built from.
 //!
-//! The outline is the public-domain reference drawing in
-//! `docs/reference/human_body_silhouette.svg`. It is rasterized once into a
-//! signed distance field measured in body heights, with the spread fingers and
-//! toes merged into mitten shapes that the tissue mesh can resolve.
+//! The figure is defined in code rather than traced from a drawing, so it is
+//! exactly mirror-symmetric, faces straight ahead, and stays a neutral
+//! mannequin without anatomical detail: an egg-shaped head, a smooth neck and
+//! torso outline, and limbs shaped as tapered capsules around the skeleton's
+//! joints, ending in mitten hands and simple feet. The parts are blended into
+//! one signed distance field. `simulation::body` builds the limb bones on the
+//! same joints, so every bone runs down the middle of its limb.
 //!
 //! Coordinates: `u` is horizontal from the body midline (positive toward the
 //! viewer's right), `v` runs down from the top of the head; both are in body
-//! heights, so the figure spans `v` from 0 to 1.
+//! heights, so the figure spans `v` from 0 to 1. Every part is described for
+//! the viewer's right side and mirrored onto the left.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
-const REFERENCE_SVG: &str = include_str!("../docs/reference/human_body_silhouette.svg");
+/// A position in body coordinates (`u`, `v`).
+pub(crate) type Landmark = (f64, f64);
+
+/// A circle in body coordinates: center and radius.
+type Circle = (Landmark, f64);
+
+// Joints of the viewer's right limbs; the left limbs mirror them.
+pub(crate) const SHOULDER: Landmark = (0.106, 0.215);
+pub(crate) const ELBOW: Landmark = (0.126, 0.378);
+pub(crate) const WRIST: Landmark = (0.152, 0.508);
+/// End of the hand bone, most of the way from the wrist to the fingertips.
+pub(crate) const KNUCKLES: Landmark = lerp(WRIST, FINGERTIPS, 0.6);
+pub(crate) const HIP: Landmark = (0.050, 0.505);
+pub(crate) const KNEE: Landmark = (0.055, 0.718);
+pub(crate) const ANKLE: Landmark = (0.058, 0.942);
+/// End of the foot bone. Seen from the front the foot points at the viewer,
+/// so it shows as a short block below the ankle, turned out slightly.
+pub(crate) const TOES: Landmark = (0.062, 0.984);
+
+const FINGERTIPS: Landmark = (0.166, 0.612);
+
+/// Limb radii at the joint each limb starts from and at the joint it ends at.
+const UPPER_ARM_RADII: (f64, f64) = (0.030, 0.023);
+const FOREARM_RADII: (f64, f64) = (0.024, 0.016);
+const THIGH_RADII: (f64, f64) = (0.042, 0.030);
+const SHIN_RADII: (f64, f64) = (0.031, 0.018);
+/// The mitten hand widens from the wrist to the palm, then tapers to the fingertips.
+const PALM: Circle = (lerp(WRIST, FINGERTIPS, 0.42), 0.019);
+const FINGERTIP_RADIUS: f64 = 0.015;
+/// The foot: a block centered under `TOES` from just above the ankle down to
+/// the sole, a little wider at the sole, with rounded corners.
+const FOOT_TOP: f64 = 0.928;
+const FOOT_HALF_WIDTHS: (f64, f64) = (0.019, 0.027);
+const FOOT_ROUNDING: f64 = 0.010;
+/// The egg-shaped head: a crown circle tapering to a smaller chin circle.
+const CROWN: Circle = ((0.0, 0.047), 0.047);
+const CHIN: Circle = ((0.0, 0.094), 0.034);
+
+/// Right half of the neck and torso outline, from under the chin down the
+/// side of the body to the crotch. It is smoothed by a Catmull-Rom spline and
+/// mirrored; under the upper arm it runs inside the arm.
+const TORSO_OUTLINE: [Landmark; 22] = [
+    (0.000, 0.100), // under the chin, inside the head
+    (0.031, 0.106),
+    (0.032, 0.130),
+    (0.035, 0.150), // base of the neck
+    (0.052, 0.165),
+    (0.075, 0.175),
+    (0.095, 0.184),
+    (0.106, 0.195), // top of the shoulder
+    (0.108, 0.215),
+    (0.100, 0.250),
+    (0.094, 0.285), // armpit
+    (0.088, 0.325),
+    (0.084, 0.365),
+    (0.083, 0.400), // waist
+    (0.085, 0.430),
+    (0.089, 0.462),
+    (0.093, 0.492),
+    (0.094, 0.522), // hip
+    (0.088, 0.548),
+    (0.045, 0.551),
+    (0.015, 0.542),
+    (0.000, 0.539), // crotch
+];
+const SPLINE_STEPS: usize = 4;
+/// Beyond this distance from the torso outline's bounding box the distance to
+/// the box stands in for the exact one; it is wider than any blend.
+const TORSO_EXACT_MARGIN: f64 = 0.05;
+
+/// Widths of the smooth blends between parts. The neck and the joints get
+/// wide, rounded blends; the armpits and the crotch narrow ones, so the limbs
+/// separate cleanly from the torso.
+const NECK_BLEND: f64 = 0.030;
+const JOINT_BLEND: f64 = 0.012;
+const PALM_BLEND: f64 = 0.006;
+const ANKLE_BLEND: f64 = 0.020;
+const ARM_BLEND: f64 = 0.010;
+const LEG_BLEND: f64 = 0.012;
 
 /// Field samples per body height; under a pixel at the default 560 px body.
 const FIELD_RESOLUTION: f64 = 640.0;
-const FIELD_U_RANGE: (f64, f64) = (-0.27, 0.27);
+/// The field reaches at least this far either side of the midline.
+const FIELD_HALF_WIDTH: f64 = 0.27;
 const FIELD_V_RANGE: (f64, f64) = (-0.02, 1.02);
-const BEZIER_STEPS: usize = 8;
-/// Below this height (the wrists), gaps narrower than twice the closing radius
-/// are filled so fingers and toes merge into mittens instead of slivers.
-const EXTREMITY_START_V: f64 = 0.525;
-const EXTREMITY_CLOSING_RADIUS: f64 = 0.007;
 
 pub(crate) struct SilhouetteField {
     cols: usize,
     rows: usize,
     cell: f64,
+    /// `u` of the first column. One column lies on the midline, so the samples
+    /// mirror exactly.
+    left: f64,
     /// Signed distance to the outline in body heights, negative inside.
     sdf: Vec<f64>,
 }
@@ -35,7 +116,7 @@ pub(crate) struct SilhouetteField {
 impl SilhouetteField {
     /// Signed distance to the outline at (u, v) in body heights; negative inside.
     pub(crate) fn distance(&self, u: f64, v: f64) -> f64 {
-        let gx = (u - FIELD_U_RANGE.0) / self.cell;
+        let gx = (u - self.left) / self.cell;
         let gy = (v - FIELD_V_RANGE.0) / self.cell;
         let max_x = (self.cols - 1) as f64;
         let max_y = (self.rows - 1) as f64;
@@ -57,7 +138,10 @@ impl SilhouetteField {
         top * (1.0 - fy) + bottom * fy
     }
 
-    /// Closed outlines where the signed distance equals `level`, as (u, v) loops.
+    /// Closed outlines where the signed distance equals `level`, as (u, v)
+    /// loops. Each loop starts at its topmost point, which on the figure is the
+    /// crown of the head on the midline, so points spaced evenly along a loop
+    /// from its start mirror from one side to the other.
     pub(crate) fn contours(&self, level: f64) -> Vec<Vec<(f64, f64)>> {
         let cols = self.cols;
         let value = |x: usize, y: usize| self.sdf[y * cols + x] - level;
@@ -132,10 +216,7 @@ impl SilhouetteField {
             };
             let gx = x as f64 + (x1 as f64 - x as f64) * t;
             let gy = y as f64 + (y1 as f64 - y as f64) * t;
-            (
-                FIELD_U_RANGE.0 + gx * self.cell,
-                FIELD_V_RANGE.0 + gy * self.cell,
-            )
+            (self.left + gx * self.cell, FIELD_V_RANGE.0 + gy * self.cell)
         };
 
         let mut keys: Vec<usize> = links.keys().copied().collect();
@@ -165,6 +246,10 @@ impl SilhouetteField {
                 }
             }
             if outline.len() >= 3 {
+                let top = (0..outline.len())
+                    .min_by(|&a, &b| outline[a].1.total_cmp(&outline[b].1))
+                    .unwrap_or(0);
+                outline.rotate_left(top);
                 loops.push(outline);
             }
         }
@@ -172,257 +257,205 @@ impl SilhouetteField {
     }
 }
 
-/// The reference human silhouette, built on first use.
+/// The mannequin figure, built on first use.
 pub(crate) fn human_silhouette() -> &'static SilhouetteField {
     static FIELD: OnceLock<SilhouetteField> = OnceLock::new();
     FIELD.get_or_init(build_field)
 }
 
 fn build_field() -> SilhouetteField {
-    let outline = reference_outline();
     let cell = 1.0 / FIELD_RESOLUTION;
-    let cols = ((FIELD_U_RANGE.1 - FIELD_U_RANGE.0) / cell).ceil() as usize + 1;
+    let half_cols = (FIELD_HALF_WIDTH / cell).ceil() as usize;
+    let cols = 2 * half_cols + 1;
     let rows = ((FIELD_V_RANGE.1 - FIELD_V_RANGE.0) / cell).ceil() as usize + 1;
-
-    let mut inside = rasterize(&outline, cols, rows, cell);
-    close_extremities(&mut inside, cols, rows, cell);
-
-    let to_inside = squared_distance_transform(&inside, cols, rows);
-    let outside: Vec<bool> = inside.iter().map(|&filled| !filled).collect();
-    let to_outside = squared_distance_transform(&outside, cols, rows);
-    // The outline lies halfway between neighboring inside and outside samples.
-    let raw: Vec<f64> = (0..inside.len())
-        .map(|i| {
-            if inside[i] {
-                -(to_outside[i].sqrt() - 0.5) * cell
-            } else {
-                (to_inside[i].sqrt() - 0.5) * cell
-            }
-        })
-        .collect();
+    let torso = TorsoOutline::new();
+    let mut sdf = Vec::with_capacity(cols * rows);
+    let mut right_half = vec![0.0; half_cols + 1];
+    for row in 0..rows {
+        let v = FIELD_V_RANGE.0 + row as f64 * cell;
+        for (k, value) in right_half.iter_mut().enumerate() {
+            *value = figure_distance((k as f64 * cell, v), &torso);
+        }
+        sdf.extend((0..cols).map(|col| right_half[col.abs_diff(half_cols)]));
+    }
     SilhouetteField {
         cols,
         rows,
         cell,
-        sdf: smooth(&raw, cols, rows),
+        left: -(half_cols as f64) * cell,
+        sdf,
     }
 }
 
-/// Parses the reference SVG path (absolute M/C/L/Z commands) into a closed
-/// polygon normalized to body heights.
-fn reference_outline() -> Vec<(f64, f64)> {
-    let data_start = REFERENCE_SVG
-        .find(" d=\"")
-        .expect("reference silhouette SVG has a path")
-        + 4;
-    let data_len = REFERENCE_SVG[data_start..]
-        .find('"')
-        .expect("reference silhouette path data is closed");
-    let data = &REFERENCE_SVG[data_start..data_start + data_len];
+/// Signed distance from a point on the right half (`u` >= 0) to the figure's
+/// outline; negative inside.
+fn figure_distance(p: Landmark, torso: &TorsoOutline) -> f64 {
+    let head = capsule(p, CROWN, CHIN);
+    let trunk = smooth_union(head, torso.distance(p), NECK_BLEND);
+    let arm = smooth_union(
+        smooth_union(
+            capsule(p, (SHOULDER, UPPER_ARM_RADII.0), (ELBOW, UPPER_ARM_RADII.1)),
+            capsule(p, (ELBOW, FOREARM_RADII.0), (WRIST, FOREARM_RADII.1)),
+            JOINT_BLEND,
+        ),
+        hand(p),
+        JOINT_BLEND,
+    );
+    let leg = smooth_union(
+        smooth_union(
+            capsule(p, (HIP, THIGH_RADII.0), (KNEE, THIGH_RADII.1)),
+            capsule(p, (KNEE, SHIN_RADII.0), (ANKLE, SHIN_RADII.1)),
+            JOINT_BLEND,
+        ),
+        foot(p),
+        ANKLE_BLEND,
+    );
+    smooth_union(smooth_union(trunk, arm, ARM_BLEND), leg, LEG_BLEND)
+}
 
-    let mut points: Vec<(f64, f64)> = Vec::new();
-    let mut numbers: Vec<f64> = Vec::new();
-    let mut command = ' ';
-    let mut current = (0.0, 0.0);
-    let flush = |command: char,
-                 numbers: &mut Vec<f64>,
-                 points: &mut Vec<(f64, f64)>,
-                 current: &mut (f64, f64)| {
-        match command {
-            'M' | 'L' => {
-                for pair in numbers.chunks_exact(2) {
-                    *current = (pair[0], pair[1]);
-                    points.push(*current);
-                }
+fn hand(p: Landmark) -> f64 {
+    let (along_u, along_v) = (FINGERTIPS.0 - WRIST.0, FINGERTIPS.1 - WRIST.1);
+    let length = along_u.hypot(along_v);
+    let tip = (
+        FINGERTIPS.0 - along_u / length * FINGERTIP_RADIUS,
+        FINGERTIPS.1 - along_v / length * FINGERTIP_RADIUS,
+    );
+    smooth_union(
+        capsule(p, (WRIST, FOREARM_RADII.1), PALM),
+        capsule(p, PALM, (tip, FINGERTIP_RADIUS)),
+        PALM_BLEND,
+    )
+}
+
+/// Inigo Quilez's isosceles trapezoid distance, grown by the rounding radius.
+fn foot(p: Landmark) -> f64 {
+    let half_height = (1.0 - FOOT_TOP) * 0.5 - FOOT_ROUNDING;
+    let top = FOOT_HALF_WIDTHS.0 - FOOT_ROUNDING;
+    let bottom = FOOT_HALF_WIDTHS.1 - FOOT_ROUNDING;
+    // Centered on the foot with y pointing up.
+    let x = (p.0 - TOES.0).abs();
+    let y = (FOOT_TOP + 1.0) * 0.5 - p.1;
+    let ca = (
+        x - x.min(if y < 0.0 { bottom } else { top }),
+        y.abs() - half_height,
+    );
+    let side = (top - bottom, 2.0 * half_height);
+    let t = (((top - x) * side.0 + (half_height - y) * side.1)
+        / (side.0 * side.0 + side.1 * side.1))
+        .clamp(0.0, 1.0);
+    let cb = (x - top + side.0 * t, y - half_height + side.1 * t);
+    let sign = if cb.0 < 0.0 && ca.1 < 0.0 { -1.0 } else { 1.0 };
+    sign * (ca.0 * ca.0 + ca.1 * ca.1)
+        .min(cb.0 * cb.0 + cb.1 * cb.1)
+        .sqrt()
+        - FOOT_ROUNDING
+}
+
+/// Distance to the tapered capsule wrapped around two circles (Inigo Quilez's
+/// uneven capsule).
+fn capsule(p: Landmark, (a, radius_a): Circle, (b, radius_b): Circle) -> f64 {
+    let (px, py) = (p.0 - a.0, p.1 - a.1);
+    let (bx, by) = (b.0 - a.0, b.1 - a.1);
+    let h = bx * bx + by * by;
+    // Across and along the axis, in units of the squared axis length.
+    let across = ((px * by - py * bx) / h).abs();
+    let along = (px * bx + py * by) / h;
+    let taper = radius_a - radius_b;
+    let side = (h - taper * taper).sqrt();
+    let k = side * along - taper * across;
+    if k < 0.0 {
+        (h * (across * across + along * along)).sqrt() - radius_a
+    } else if k > side {
+        (h * (across * across + (along - 1.0) * (along - 1.0))).sqrt() - radius_b
+    } else {
+        side * across + taper * along - radius_a
+    }
+}
+
+/// Union of two distances that rounds the crease where they meet over about `width`.
+fn smooth_union(a: f64, b: f64, width: f64) -> f64 {
+    let h = (width - (a - b).abs()).max(0.0) / width;
+    a.min(b) - h * h * width * 0.25
+}
+
+const fn lerp(a: Landmark, b: Landmark, t: f64) -> Landmark {
+    (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
+}
+
+/// The smoothed right half of the torso outline, from the midline under the
+/// chin to the midline at the crotch.
+struct TorsoOutline {
+    points: Vec<Landmark>,
+    max_u: f64,
+    v_range: (f64, f64),
+}
+
+impl TorsoOutline {
+    fn new() -> Self {
+        let points = catmull_rom(&TORSO_OUTLINE, SPLINE_STEPS);
+        let max_u = points.iter().map(|p| p.0).fold(f64::MIN, f64::max);
+        let v_range = points.iter().fold((f64::MAX, f64::MIN), |(low, high), p| {
+            (low.min(p.1), high.max(p.1))
+        });
+        Self {
+            points,
+            max_u,
+            v_range,
+        }
+    }
+
+    /// Signed distance for a point on the right half; the midline is a mirror
+    /// line, not an edge.
+    fn distance(&self, p: Landmark) -> f64 {
+        let past_u = (p.0 - self.max_u).max(0.0);
+        let past_v = (self.v_range.0 - p.1).max(p.1 - self.v_range.1).max(0.0);
+        let box_distance = past_u.hypot(past_v);
+        if box_distance > TORSO_EXACT_MARGIN {
+            return box_distance;
+        }
+        let mut nearest_sq = f64::INFINITY;
+        let mut inside = false;
+        for pair in self.points.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            let (eu, ev) = (b.0 - a.0, b.1 - a.1);
+            let (wu, wv) = (p.0 - a.0, p.1 - a.1);
+            let t = ((wu * eu + wv * ev) / (eu * eu + ev * ev)).clamp(0.0, 1.0);
+            nearest_sq = nearest_sq.min((wu - eu * t).powi(2) + (wv - ev * t).powi(2));
+            // Even-odd crossings of a ray toward +u. The half outline closes
+            // along the midline, which never lies to the right of the point.
+            if (a.1 <= p.1) != (b.1 <= p.1) && p.0 < a.0 + (p.1 - a.1) / ev * eu {
+                inside = !inside;
             }
-            'C' => {
-                for curve in numbers.chunks_exact(6) {
-                    let p0 = *current;
-                    let (c1, c2, p3) = (
-                        (curve[0], curve[1]),
-                        (curve[2], curve[3]),
-                        (curve[4], curve[5]),
-                    );
-                    for step in 1..=BEZIER_STEPS {
-                        let t = step as f64 / BEZIER_STEPS as f64;
-                        let s = 1.0 - t;
-                        let a = s * s * s;
-                        let b = 3.0 * s * s * t;
-                        let c = 3.0 * s * t * t;
-                        let d = t * t * t;
-                        points.push((
-                            a * p0.0 + b * c1.0 + c * c2.0 + d * p3.0,
-                            a * p0.1 + b * c1.1 + c * c2.1 + d * p3.1,
-                        ));
-                    }
-                    *current = p3;
-                }
-            }
-            _ => {}
         }
-        numbers.clear();
-    };
+        let distance = nearest_sq.sqrt();
+        if inside {
+            -distance
+        } else {
+            distance
+        }
+    }
+}
 
-    let mut token = String::new();
-    for ch in data.chars() {
-        if ch.is_ascii_digit() || ch == '.' || ch == '-' || ch == 'e' {
-            token.push(ch);
-            continue;
-        }
-        if !token.is_empty() {
-            numbers.push(token.parse().expect("reference silhouette number"));
-            token.clear();
-        }
-        if ch.is_ascii_alphabetic() {
-            flush(command, &mut numbers, &mut points, &mut current);
-            command = ch.to_ascii_uppercase();
+/// Points on the Catmull-Rom spline through `controls`, `steps` per span.
+fn catmull_rom(controls: &[Landmark], steps: usize) -> Vec<Landmark> {
+    let last = controls.len() - 1;
+    let mut points = Vec::with_capacity(last * steps + 1);
+    for i in 0..last {
+        let (p0, p1) = (controls[i.saturating_sub(1)], controls[i]);
+        let (p2, p3) = (controls[i + 1], controls[(i + 2).min(last)]);
+        for step in 0..steps {
+            let t = step as f64 / steps as f64;
+            let blend = |a: f64, b: f64, c: f64, d: f64| {
+                0.5 * (2.0 * b
+                    + (c - a) * t
+                    + (2.0 * a - 5.0 * b + 4.0 * c - d) * t * t
+                    + (3.0 * b - a - 3.0 * c + d) * t * t * t)
+            };
+            points.push((blend(p0.0, p1.0, p2.0, p3.0), blend(p0.1, p1.1, p2.1, p3.1)));
         }
     }
-    if !token.is_empty() {
-        numbers.push(token.parse().expect("reference silhouette number"));
-    }
-    flush(command, &mut numbers, &mut points, &mut current);
-
-    let (mut min_x, mut max_x, mut min_y, mut max_y) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
-    for &(x, y) in &points {
-        min_x = min_x.min(x);
-        max_x = max_x.max(x);
-        min_y = min_y.min(y);
-        max_y = max_y.max(y);
-    }
-    let height = max_y - min_y;
-    let center_x = (min_x + max_x) * 0.5;
+    points.push(controls[last]);
     points
-        .into_iter()
-        .map(|(x, y)| ((x - center_x) / height, (y - min_y) / height))
-        .collect()
-}
-
-/// Even-odd fill of the polygon, sampled at the field nodes.
-fn rasterize(outline: &[(f64, f64)], cols: usize, rows: usize, cell: f64) -> Vec<bool> {
-    let mut inside = vec![false; cols * rows];
-    let mut crossings = Vec::new();
-    for row in 0..rows {
-        let v = FIELD_V_RANGE.0 + row as f64 * cell;
-        crossings.clear();
-        for i in 0..outline.len() {
-            let a = outline[i];
-            let b = outline[(i + 1) % outline.len()];
-            if (a.1 <= v) != (b.1 <= v) {
-                let t = (v - a.1) / (b.1 - a.1);
-                crossings.push(a.0 + t * (b.0 - a.0));
-            }
-        }
-        crossings.sort_by(|a, b| a.partial_cmp(b).expect("finite crossing"));
-        for span in crossings.chunks_exact(2) {
-            let first = ((span[0] - FIELD_U_RANGE.0) / cell).ceil().max(0.0) as usize;
-            let last = ((span[1] - FIELD_U_RANGE.0) / cell).floor();
-            if last < 0.0 {
-                continue;
-            }
-            for col in first..=(last as usize).min(cols - 1) {
-                inside[row * cols + col] = true;
-            }
-        }
-    }
-    inside
-}
-
-/// Morphological closing limited to the hands and feet.
-fn close_extremities(inside: &mut [bool], cols: usize, rows: usize, cell: f64) {
-    let radius_sq = (EXTREMITY_CLOSING_RADIUS / cell).powi(2);
-    let to_inside = squared_distance_transform(inside, cols, rows);
-    let dilated_out: Vec<bool> = to_inside.iter().map(|&d| d > radius_sq).collect();
-    let to_dilated_out = squared_distance_transform(&dilated_out, cols, rows);
-    let first_row = ((EXTREMITY_START_V - FIELD_V_RANGE.0) / cell).ceil() as usize;
-    for row in first_row.min(rows)..rows {
-        for col in 0..cols {
-            let i = row * cols + col;
-            if to_dilated_out[i] > radius_sq {
-                inside[i] = true;
-            }
-        }
-    }
-}
-
-/// One pass of a [1 2 1] blur in each direction, which removes the raster
-/// staircase from the outline without moving it.
-fn smooth(values: &[f64], cols: usize, rows: usize) -> Vec<f64> {
-    let mut horizontal = values.to_vec();
-    for row in 0..rows {
-        for col in 1..cols - 1 {
-            let i = row * cols + col;
-            horizontal[i] = (values[i - 1] + 2.0 * values[i] + values[i + 1]) * 0.25;
-        }
-    }
-    let mut result = horizontal.clone();
-    for row in 1..rows - 1 {
-        for col in 0..cols {
-            let i = row * cols + col;
-            result[i] = (horizontal[i - cols] + 2.0 * horizontal[i] + horizontal[i + cols]) * 0.25;
-        }
-    }
-    result
-}
-
-/// Squared Euclidean distance, in cells, from every node to the nearest node
-/// where `feature` is set (Felzenszwalb and Huttenlocher's separable transform).
-fn squared_distance_transform(feature: &[bool], cols: usize, rows: usize) -> Vec<f64> {
-    const FAR: f64 = 1.0e20;
-    let mut grid: Vec<f64> = feature
-        .iter()
-        .map(|&set| if set { 0.0 } else { FAR })
-        .collect();
-    let n = cols.max(rows);
-    let mut input = vec![0.0; n];
-    let mut output = vec![0.0; n];
-    let mut hull = vec![0usize; n];
-    let mut bounds = vec![0.0; n + 1];
-    for col in 0..cols {
-        for row in 0..rows {
-            input[row] = grid[row * cols + col];
-        }
-        distance_transform_1d(&input[..rows], &mut output, &mut hull, &mut bounds);
-        for row in 0..rows {
-            grid[row * cols + col] = output[row];
-        }
-    }
-    for row in 0..rows {
-        input[..cols].copy_from_slice(&grid[row * cols..(row + 1) * cols]);
-        distance_transform_1d(&input[..cols], &mut output, &mut hull, &mut bounds);
-        grid[row * cols..(row + 1) * cols].copy_from_slice(&output[..cols]);
-    }
-    grid
-}
-
-fn distance_transform_1d(f: &[f64], d: &mut [f64], hull: &mut [usize], bounds: &mut [f64]) {
-    let n = f.len();
-    let intersection = |q: usize, p: usize| {
-        ((f[q] + (q * q) as f64) - (f[p] + (p * p) as f64)) / (2.0 * (q as f64 - p as f64))
-    };
-    let mut k = 0;
-    hull[0] = 0;
-    bounds[0] = f64::NEG_INFINITY;
-    bounds[1] = f64::INFINITY;
-    for q in 1..n {
-        let mut s = intersection(q, hull[k]);
-        while s <= bounds[k] {
-            k -= 1;
-            s = intersection(q, hull[k]);
-        }
-        k += 1;
-        hull[k] = q;
-        bounds[k] = s;
-        bounds[k + 1] = f64::INFINITY;
-    }
-    k = 0;
-    for (q, value) in d.iter_mut().enumerate().take(n) {
-        while bounds[k + 1] < q as f64 {
-            k += 1;
-        }
-        let p = hull[k];
-        *value = (q as f64 - p as f64).powi(2) + f[p];
-    }
 }
 
 #[cfg(test)]
@@ -457,6 +490,7 @@ mod tests {
             field.distance(0.0, -0.01) > 0.0,
             "space above the head is outside"
         );
+        assert!(field.distance(TOES.0, 1.01) > 0.0, "feet end at the sole");
         assert_eq!(spans_at(field, 0.06), 1, "one head");
         assert_eq!(
             spans_at(field, 0.42),
@@ -464,23 +498,55 @@ mod tests {
             "two arms beside the torso at elbow height"
         );
         assert_eq!(spans_at(field, 0.78), 2, "two separated legs");
-        assert_eq!(
-            spans_at(field, 0.585),
-            4,
-            "mitten hands beside the thighs, no fingers"
-        );
+        assert_eq!(spans_at(field, 0.585), 4, "mitten hands beside the thighs");
+    }
+
+    #[test]
+    fn silhouette_is_mirror_symmetric() {
+        let field = human_silhouette();
+        for row in 0..=100 {
+            let v = row as f64 * 0.01;
+            for col in 0..=50 {
+                let u = col as f64 * 0.0051;
+                let (right, left) = (field.distance(u, v), field.distance(-u, v));
+                assert!(
+                    (right - left).abs() < 1.0e-9,
+                    "outline differs between sides at u={u:.3} v={v:.2}: {right} vs {left}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn limb_bones_run_inside_their_limbs() {
+        let field = human_silhouette();
+        let limbs = [
+            (SHOULDER, ELBOW),
+            (ELBOW, WRIST),
+            (WRIST, KNUCKLES),
+            (HIP, KNEE),
+            (KNEE, ANKLE),
+            (ANKLE, TOES),
+        ];
+        for (a, b) in limbs {
+            for step in 0..=8 {
+                let (u, v) = lerp(a, b, step as f64 / 8.0);
+                assert!(
+                    field.distance(u, v) < -0.012,
+                    "bone at ({u:.3}, {v:.3}) should be well inside its limb"
+                );
+            }
+        }
     }
 
     #[test]
     fn outline_contour_is_one_closed_loop() {
         let field = human_silhouette();
         let loops = field.contours(0.0);
-        let longest = loops.iter().map(Vec::len).max().unwrap_or(0);
-        assert!(longest > 1000, "main outline should be a long smooth loop");
-        let total: usize = loops.iter().map(Vec::len).sum();
+        assert_eq!(loops.len(), 1, "the figure is one piece without islands");
         assert!(
-            total < longest + 40,
-            "stray islands should be negligible next to the main outline"
+            loops[0].len() > 1000,
+            "outline should be a long smooth loop"
         );
     }
 }

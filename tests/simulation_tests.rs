@@ -160,14 +160,38 @@ fn skin_band_clusters(world: &rp::World, min_t: f64, max_t: f64) -> usize {
 }
 
 #[test]
-fn body_silhouette_comes_from_the_checked_in_front_view_reference() {
-    let svg = include_str!("../docs/reference/human_body_silhouette.svg");
-    if svg.matches("<path").count() != 1 || !svg.contains(" d=\"M ") {
-        fail("front-view silhouette reference should keep its single outline path");
+fn generated_body_mirrors_across_its_midline() {
+    let (width, height) = (1280.0, 720.0);
+    let midline = rp::body_frame(width, height).origin.x;
+    let world = rp::create_layered_body(width, height, rp::Materials::default());
+    let mirrored = |p: rp::Vec2| rp::Vec2 {
+        x: 2.0 * midline - p.x,
+        y: p.y,
+    };
+    let near = |a: rp::Vec2, b: rp::Vec2| (a.x - b.x).abs() < 0.01 && (a.y - b.y).abs() < 0.01;
+    for point in world.points() {
+        let image = mirrored(point.home);
+        if !world
+            .points()
+            .iter()
+            .any(|other| other.layer == point.layer && near(other.home, image))
+        {
+            panic!(
+                "FAIL: tissue point at ({:.1}, {:.1}) has no mirror image across the midline",
+                point.home.x, point.home.y
+            );
+        }
     }
-    let notes = include_str!("../docs/reference/README.md");
-    if !notes.contains("human_body_silhouette.svg") || !notes.contains("public domain") {
-        fail("silhouette reference should keep its source and license notes");
+    for bone in world.bones() {
+        let (a, b) = (mirrored(bone.a), mirrored(bone.b));
+        if !world.bones().iter().any(|other| {
+            (near(other.a, a) && near(other.b, b)) || (near(other.a, b) && near(other.b, a))
+        }) {
+            panic!(
+                "FAIL: bone from ({:.1}, {:.1}) to ({:.1}, {:.1}) has no mirror image",
+                bone.a.x, bone.a.y, bone.b.x, bone.b.y
+            );
+        }
     }
 }
 
@@ -242,12 +266,12 @@ fn generated_body_has_expected_layers_and_anatomy() {
         fail("every generated skin point should have at least one muscle attachment");
     }
     // Bands are fractions of the skin's height, so they line up with the body's
-    // landmark heights: chin ~0.135, shoulders ~0.20, armpits ~0.32, waist ~0.36,
-    // wrists ~0.52, crotch ~0.57, knees ~0.70.
+    // landmark heights: chin ~0.13, shoulders ~0.20, armpits ~0.30, waist ~0.40,
+    // wrists ~0.51, crotch ~0.54, knees ~0.72.
     let head_width = skin_band_width(&world, 0.03, 0.11);
     let neck_width = central_skin_band_width(&world, 0.125, 0.150);
     let shoulder_width = skin_band_width(&world, 0.20, 0.24);
-    let waist_width = skin_band_width_with_filter(&world, 0.35, 0.39, 0.088);
+    let waist_width = skin_band_width_with_filter(&world, 0.38, 0.42, 0.088);
     let hip_width = skin_band_width_with_filter(&world, 0.48, 0.53, 0.12);
     let (left_leg_points, lower_leg_gap_points, right_leg_points) =
         skin_band_region_counts(&world, 0.74, 0.86, 0.018);

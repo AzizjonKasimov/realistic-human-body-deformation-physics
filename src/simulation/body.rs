@@ -1,6 +1,6 @@
 //! Procedural layered body: skin and muscle sheets meshed to follow the
-//! reference human silhouette, plus the skeleton, organs, and vessels placed at
-//! landmarks measured on that silhouette.
+//! mannequin figure in `crate::silhouette`, a skeleton built on that figure's
+//! limb joints, and organs and vessels placed at landmarks inside it.
 //!
 //! Body coordinates are fractions of the body height: `u` runs from the midline
 //! toward the viewer's right and `v` runs down from the top of the head. "Left"
@@ -11,7 +11,10 @@ use std::collections::HashMap;
 
 use super::*;
 use crate::mesh::{delaunay, hex_lattice, resample_loop, P2};
-use crate::silhouette::{human_silhouette, SilhouetteField};
+use crate::silhouette::{
+    human_silhouette, Landmark, SilhouetteField, ANKLE, ELBOW, HIP, KNEE, KNUCKLES, SHOULDER, TOES,
+    WRIST,
+};
 
 /// Outline points are spaced this many point spacings apart.
 const BOUNDARY_SPACING_SCALE: f64 = 0.92;
@@ -28,28 +31,29 @@ const FIBER_ALIGNMENT: f64 = 0.80;
 /// Muscle edges further than this from the bone direction act as cross fibers.
 const CROSS_ALIGNMENT: f64 = 0.45;
 
-type Landmark = (f64, f64);
-
 const SKULL: [Landmark; 2] = [(0.0, 0.030), (0.0, 0.118)];
-const SPINE: [Landmark; 2] = [(0.0, 0.150), (0.0, 0.530)];
-const SHOULDER_GIRDLE: [Landmark; 2] = [(-0.105, 0.215), (0.105, 0.215)];
-const PELVIS: [Landmark; 2] = [(-0.072, 0.522), (0.072, 0.522)];
-const LEFT_SHOULDER: Landmark = (-0.108, 0.228);
-const LEFT_ELBOW: Landmark = (-0.122, 0.385);
-const LEFT_WRIST: Landmark = (-0.160, 0.515);
-const LEFT_KNUCKLES: Landmark = (-0.174, 0.578);
-const RIGHT_SHOULDER: Landmark = (0.110, 0.228);
-const RIGHT_ELBOW: Landmark = (0.124, 0.385);
-const RIGHT_WRIST: Landmark = (0.165, 0.515);
-const RIGHT_KNUCKLES: Landmark = (0.178, 0.578);
-const LEFT_HIP: Landmark = (-0.050, 0.540);
-const LEFT_KNEE: Landmark = (-0.047, 0.700);
-const LEFT_ANKLE: Landmark = (-0.056, 0.872);
-const LEFT_TOES: Landmark = (-0.073, 0.952);
-const RIGHT_HIP: Landmark = (0.052, 0.540);
-const RIGHT_KNEE: Landmark = (0.057, 0.700);
-const RIGHT_ANKLE: Landmark = (0.076, 0.872);
-const RIGHT_TOES: Landmark = (0.094, 0.952);
+const SPINE: [Landmark; 2] = [(0.0, 0.150), (0.0, 0.495)];
+// The girdle and pelvis stop short of the shoulder and hip joints by about the
+// gap a bone joint holds at rest (0.7 point spacings); a joint whose bone ends
+// start together shoves them apart as soon as the body moves.
+const SHOULDER_GIRDLE: [Landmark; 2] = [(-0.103, 0.203), (0.103, 0.203)];
+const PELVIS: [Landmark; 2] = [(-0.072, 0.487), (0.072, 0.487)];
+const LEFT_SHOULDER: Landmark = mirrored(SHOULDER);
+const LEFT_ELBOW: Landmark = mirrored(ELBOW);
+const LEFT_WRIST: Landmark = mirrored(WRIST);
+const LEFT_KNUCKLES: Landmark = mirrored(KNUCKLES);
+const RIGHT_SHOULDER: Landmark = SHOULDER;
+const RIGHT_ELBOW: Landmark = ELBOW;
+const RIGHT_WRIST: Landmark = WRIST;
+const RIGHT_KNUCKLES: Landmark = KNUCKLES;
+const LEFT_HIP: Landmark = mirrored(HIP);
+const LEFT_KNEE: Landmark = mirrored(KNEE);
+const LEFT_ANKLE: Landmark = mirrored(ANKLE);
+const LEFT_TOES: Landmark = mirrored(TOES);
+const RIGHT_HIP: Landmark = HIP;
+const RIGHT_KNEE: Landmark = KNEE;
+const RIGHT_ANKLE: Landmark = ANKLE;
+const RIGHT_TOES: Landmark = TOES;
 /// (root height, lateral reach, strength scale) for each rib pair.
 const RIBS: [(f64, f64, f64); 4] = [
     (0.240, 0.062, 0.62),
@@ -63,6 +67,11 @@ const AORTA_DEPTH_SCALE: f64 = 2.4;
 /// Torso muscle inside this box forms the pressurized cavity.
 const CAVITY_U: f64 = 0.078;
 const CAVITY_V: (f64, f64) = (0.215, 0.505);
+
+/// The landmark on the viewer's left matching one on the right.
+const fn mirrored((u, v): Landmark) -> Landmark {
+    (-u, v)
+}
 
 /// Placement of the body in the world.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -206,25 +215,24 @@ pub fn create_layered_body(width: f64, height: f64, materials: Materials) -> Wor
     // The aorta runs deep behind the sternum and ribs: a surface slash should not
     // reach it, only a deep stab or crushing trauma.
     let aorta =
-        world.add_vessel_segment(frame.point(0.0, 0.155), frame.point(0.0, 0.525), 4.1, 1.65);
+        world.add_vessel_segment(frame.point(0.0, 0.155), frame.point(0.0, 0.490), 4.1, 1.65);
     world.vessels[aorta].laceration_impulse *= AORTA_DEPTH_SCALE;
     for side in [-1.0, 1.0] {
-        let shift = |base: f64, right: f64| if side < 0.0 { base } else { right };
         world.add_vessel_segment(
             frame.point(side * 0.030, 0.515),
-            frame.point(shift(-0.052, 0.066), 0.860),
+            frame.point(side * 0.056, 0.860),
             3.0,
             1.22,
         );
         world.add_vessel_segment(
-            frame.point(shift(-0.085, 0.087), 0.235),
-            frame.point(shift(-0.158, 0.163), 0.512),
+            frame.point(side * 0.086, 0.235),
+            frame.point(side * 0.149, 0.505),
             2.5,
             1.05,
         );
         world.add_vessel_segment(
             frame.point(side * 0.016, 0.125),
-            frame.point(shift(-0.088, 0.090), 0.228),
+            frame.point(side * 0.089, 0.228),
             2.6,
             1.10,
         );
@@ -290,20 +298,12 @@ fn add_skeleton(world: &mut World, frame: BodyFrame, materials: Materials) {
             ribs.push((rib, root_v));
         }
     }
-    let left_upper_arm = bone(world, LEFT_SHOULDER, LEFT_ELBOW, 5.7, 0.82);
-    let left_forearm = bone(world, LEFT_ELBOW, LEFT_WRIST, 4.8, 0.72);
-    let right_upper_arm = bone(world, RIGHT_SHOULDER, RIGHT_ELBOW, 5.7, 0.82);
-    let right_forearm = bone(world, RIGHT_ELBOW, RIGHT_WRIST, 4.8, 0.72);
-    let left_thigh = bone(world, LEFT_HIP, LEFT_KNEE, 6.4, 0.9);
-    let left_shin = bone(world, LEFT_KNEE, LEFT_ANKLE, 5.3, 0.78);
-    let right_thigh = bone(world, RIGHT_HIP, RIGHT_KNEE, 6.4, 0.9);
-    let right_shin = bone(world, RIGHT_KNEE, RIGHT_ANKLE, 5.3, 0.78);
-    // Joints never rest closer than 0.7 point spacings, so the short, light hand
-    // and foot bones start that far past the wrist and ankle. Starting them flush
-    // makes the joint shove them apart on the first frame and overshoot into a
-    // subluxation while the body is still at rest.
+    // Joints never rest closer than 0.7 point spacings, so a bone hanging from an
+    // elbow, wrist, knee, or ankle starts that far past the joint. Starting it
+    // flush makes the joint shove it away as soon as the body settles and
+    // overshoot into a subluxation while the body is still at rest.
     let joint_gap = materials.point_spacing * 0.70;
-    let extremity =
+    let below_joint =
         |world: &mut World, joint: Landmark, tip: Landmark, radius: f64, strength_scale: f64| {
             let start = at(joint);
             let end = at(tip);
@@ -319,10 +319,18 @@ fn add_skeleton(world: &mut World, frame: BodyFrame, materials: Materials) {
                 false,
             )
         };
-    let left_hand = extremity(world, LEFT_WRIST, LEFT_KNUCKLES, 3.6, 0.6);
-    let right_hand = extremity(world, RIGHT_WRIST, RIGHT_KNUCKLES, 3.6, 0.6);
-    let left_foot = extremity(world, LEFT_ANKLE, LEFT_TOES, 4.0, 0.65);
-    let right_foot = extremity(world, RIGHT_ANKLE, RIGHT_TOES, 4.0, 0.65);
+    let left_upper_arm = bone(world, LEFT_SHOULDER, LEFT_ELBOW, 5.7, 0.82);
+    let left_forearm = below_joint(world, LEFT_ELBOW, LEFT_WRIST, 4.8, 0.72);
+    let right_upper_arm = bone(world, RIGHT_SHOULDER, RIGHT_ELBOW, 5.7, 0.82);
+    let right_forearm = below_joint(world, RIGHT_ELBOW, RIGHT_WRIST, 4.8, 0.72);
+    let left_thigh = bone(world, LEFT_HIP, LEFT_KNEE, 6.4, 0.9);
+    let left_shin = below_joint(world, LEFT_KNEE, LEFT_ANKLE, 5.3, 0.78);
+    let right_thigh = bone(world, RIGHT_HIP, RIGHT_KNEE, 6.4, 0.9);
+    let right_shin = below_joint(world, RIGHT_KNEE, RIGHT_ANKLE, 5.3, 0.78);
+    let left_hand = below_joint(world, LEFT_WRIST, LEFT_KNUCKLES, 3.6, 0.6);
+    let right_hand = below_joint(world, RIGHT_WRIST, RIGHT_KNUCKLES, 3.6, 0.6);
+    let left_foot = below_joint(world, LEFT_ANKLE, LEFT_TOES, 4.0, 0.65);
+    let right_foot = below_joint(world, RIGHT_ANKLE, RIGHT_TOES, 4.0, 0.65);
 
     world.add_bone_joint(head, 1.0, spine, 0.0, -0.45, 0.45);
     world.add_bone_joint(
@@ -406,6 +414,8 @@ fn build_layer_mesh(
     };
 
     let mut candidates: Vec<P2> = Vec::new();
+    // For each outline point, the next point along its outline loop.
+    let mut next_on_outline: Vec<usize> = Vec::new();
     for outline in field.contours(-inset / frame.height) {
         let world_outline: Vec<P2> = outline
             .iter()
@@ -414,11 +424,16 @@ fn build_layer_mesh(
                 (p.x, p.y)
             })
             .collect();
-        candidates.extend(resample_loop(
-            &world_outline,
-            spacing * BOUNDARY_SPACING_SCALE,
-        ));
+        let first = candidates.len();
+        let resampled = resample_loop(&world_outline, spacing * BOUNDARY_SPACING_SCALE);
+        let count = resampled.len();
+        candidates.extend(resampled);
+        next_on_outline.extend((0..count).map(|k| first + (k + 1) % count));
     }
+    let follows_outline = |a: usize, b: usize| {
+        (a < next_on_outline.len() && next_on_outline[a] == b)
+            || (b < next_on_outline.len() && next_on_outline[b] == a)
+    };
     let min = frame.point(-0.27, -0.01);
     let max = frame.point(0.27, 1.01);
     candidates.extend(
@@ -435,14 +450,19 @@ fn build_layer_mesh(
             let doubled_area = (b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0);
             let centroid = ((a.0 + b.0 + c.0) / 3.0, (a.1 + b.1 + c.1) / 3.0);
             // A triangle bridging a gap (arm to torso, between the legs) has its
-            // centroid in the gap. Edge midpoints get a little slack because
-            // chords along tightly curved concave outline, like the ankles,
-            // dip just outside it.
+            // centroid or an edge in the gap. An edge between neighboring
+            // outline points follows the outline, so it may dip outside where
+            // the outline turns inward, as at the crotch; trimming it there
+            // would leave a notch in the skin that bares the muscle. Other
+            // edges get a little slack for gently curved outline.
             doubled_area > spacing * spacing * 0.02
                 && depth(centroid) > inset
-                && [midpoint(a, b), midpoint(b, c), midpoint(c, a)]
+                && [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])]
                     .iter()
-                    .all(|&m| depth(m) > inset - 1.5)
+                    .all(|&(i, j)| {
+                        follows_outline(i, j)
+                            || depth(midpoint(candidates[i], candidates[j])) > inset - 1.5
+                    })
         })
         .collect();
 

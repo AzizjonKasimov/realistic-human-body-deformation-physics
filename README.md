@@ -18,8 +18,8 @@ See [docs/DESTRUCTION_ARCHITECTURE.md](docs/DESTRUCTION_ARCHITECTURE.md) for the
 - On-screen control buttons that work with mouse and touch, so the browser version is playable on phones and tablets.
 - Verlet/PBD-style soft body points, springs, area constraints, and attachments.
 - XPBD-style compliant spring and area-constraint projection is available behind material knobs, with focused tests covering compliant residual stretch/area behavior before production tuning raises those defaults.
-- Realistic front-view human body: skin and muscle sheets are meshed to follow an outline traced from a public-domain anatomical silhouette (outline points plus an interior hexagonal lattice, Delaunay-triangulated), with mitten hands, separated legs, and the muscle sheet inset just inside the skin.
-- Dynamic segmented bones placed at landmarks measured on the same silhouette, including a low-resolution rib-cage proxy and hands and feet on wrist and ankle joints, attached to nearby muscle points, and connected by breakable bone joints.
+- Front-view mannequin body: a neutral, exactly mirror-symmetric figure defined in code (egg-shaped head, smooth torso, tapered limbs, mitten hands, simple feet, legs apart). Skin and muscle sheets are meshed to follow its outline (outline points plus an interior hexagonal lattice, Delaunay-triangulated), with the muscle sheet inset just inside the skin, and the mesh mirrors across the midline too.
+- Dynamic segmented bones built on the figure's own limb joints, so every limb bone runs down the middle of its limb, plus a low-resolution rib-cage proxy and hands and feet on wrist and ankle joints, attached to nearby muscle points, and connected by breakable bone joints.
 - Bone joints can subluxate under traumatic stretch/overextension before full breakage, adding limited slack, weaker correction, and first-time local ligament/capsule tissue damage so dislocation exists between intact articulation and total separation.
 - Post-fracture joint limits let broken or remapped limb joints sag and twist with slack instead of snapping rigidly or separating without bounds.
 - Three hand-held tools whose drawings match their collision shapes exactly: a baseball bat (blunt; the barrel lies across the swing), a double-edged knife (sharp; the tip leads), and a sledgehammer (heavy; a striking face leads). Each tool is a solid object with momentum: the hand pulls it toward the pointer like a spring, presses it into the body no harder than an arm can push whatever the tool weighs, and the body pushes back. Tools turn to follow their motion in the air but resist turning once in tissue, a knife pulled back withdraws instead of flipping around in the wound, and each step's motion is swept so fast swings cannot skip thin limbs.
@@ -214,7 +214,7 @@ The visual diagnostic exits nonzero if the captures no longer include expected w
 - `src/bin/strike_scenarios.rs` writes deterministic strike telemetry and tuning summaries.
 - `src/bin/visual_damage_diagnostics.rs` writes deterministic SVG damage captures and visual primitive metrics.
 - `tests/simulation_tests.rs` contains focused Rust simulation checks.
-- `src/silhouette.rs` turns `docs/reference/human_body_silhouette.svg` (public domain, see `docs/reference/README.md`) into a signed distance field; `src/simulation/body.rs` meshes the body from it and places the anatomy. `body_frame` maps body coordinates (fractions of body height) to the window, which the strike scenarios use to aim at anatomy.
+- `src/silhouette.rs` defines the mannequin figure (torso outline, limb joints and radii, head, hands, feet) for one side and mirrors it into a signed distance field; `src/simulation/body.rs` meshes the body from it, builds the limb bones on the same joints, and places the rest of the anatomy. `body_frame` maps body coordinates (fractions of body height) to the window, which the strike scenarios use to aim at anatomy.
 
 The next Rust simulation milestones are:
 
