@@ -7,9 +7,13 @@ A no-engine 2D physics sandbox rewritten in Rust. The simulation is kept separat
 See [docs/VISION.md](docs/VISION.md) for the original project description and agreed direction.
 See [docs/DESTRUCTION_ARCHITECTURE.md](docs/DESTRUCTION_ARCHITECTURE.md) for the research-backed simulation architecture the Rust prototype is moving toward.
 
-## Demo Video
+## Demo Videos
 
-[![Watch the Realistic Physics demo video on YouTube](https://img.youtube.com/vi/hCXVPSU6etE/hqdefault.jpg)](https://www.youtube.com/watch?v=hCXVPSU6etE)
+[![Watch the latest Realistic Physics video on YouTube](https://img.youtube.com/vi/YSuN8D9t4ZI/hqdefault.jpg)](https://www.youtube.com/watch?v=YSuN8D9t4ZI)
+
+- [I Made My Body Physics Engine More Realistic With Claude Opus 5.5](https://www.youtube.com/watch?v=YSuN8D9t4ZI) (October 2026): damage that follows the speed of a blow, the mannequin body, and the browser version.
+- [My Body Physics Engine Got a Big Update](https://youtube.com/shorts/L87wyjLrdNE) (October 2026): a 20-second Short rendered by the app itself.
+- [Game Engine with Realistic Body Destruction Physics](https://www.youtube.com/watch?v=hCXVPSU6etE) (June 2026): the first version, written in C++ before the port to Rust.
 
 ## Current Rust Milestone
 
