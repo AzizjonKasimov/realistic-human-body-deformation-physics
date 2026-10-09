@@ -17,6 +17,8 @@
 //!                                     app is (steps: U,V/N, down, up, wait=N);
 //!                                     writes strike_custom_frames.csv too
 //!   --list                            print the scenarios and their plays
+//!   --solver SUBSTEPSxPASSES          small steps per step and solver passes in
+//!                                     each, e.g. 12x1 (default: the tuned setting)
 //! ```
 //!
 //! Outputs go next to the CSV path (default `output/strike_scenarios.csv`).
@@ -55,7 +57,7 @@ fn main() {
     let options = parse_options().unwrap_or_else(|message| {
         eprintln!("{message}");
         eprintln!(
-            "usage: strike_scenarios [CSV] [--only NAME,...] [--sweep] [--strike SPEC | --gesture SPEC] [--list]"
+            "usage: strike_scenarios [CSV] [--only NAME,...] [--sweep] [--strike SPEC | --gesture SPEC] [--list] [--solver SUBSTEPSxPASSES]"
         );
         process::exit(2);
     });
@@ -127,6 +129,13 @@ fn parse_options() -> Result<Options, String> {
             "--gesture" => {
                 let spec = args.next().ok_or("--gesture needs a gesture")?;
                 options.custom = Some(Play::Gesture(Gesture::parse(&spec)?));
+            }
+            "--solver" => {
+                let spec = args.next().ok_or("--solver needs SUBSTEPSxPASSES")?;
+                let (substeps, passes) = rp::simulation::parse_solver(&spec).ok_or(format!(
+                    "bad solver `{spec}`: use SUBSTEPSxPASSES, e.g. 12x1"
+                ))?;
+                rp::simulation::set_default_solver(substeps, passes);
             }
             flag if flag.starts_with("--") => return Err(format!("unknown option `{flag}`")),
             path => options.csv_path = PathBuf::from(path),

@@ -136,6 +136,10 @@ pub fn request() -> Option<CaptureRequest> {
                     Some(parse_body_frame(&value("--body-frame")).unwrap_or_else(|e| fail(&e)));
             }
             "--events" => request.events = Some(PathBuf::from(value("--events"))),
+            // Read by `solver_requested` at startup.
+            "--solver" => {
+                value("--solver");
+            }
             other => fail(&format!("unknown option `{other}`")),
         }
     }

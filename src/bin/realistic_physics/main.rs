@@ -248,6 +248,10 @@ fn window_conf() -> Conf {
 #[macroquad::main(window_conf)]
 async fn main() {
     #[cfg(not(target_arch = "wasm32"))]
+    if let Some((substeps, passes)) = solver_requested() {
+        rp::set_default_solver(substeps, passes);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     if let Some(request) = capture::request() {
         capture::run(request).await;
         return;
@@ -271,6 +275,14 @@ async fn main() {
         app.world.restore_motion(&app.actual);
         next_frame().await;
     }
+}
+
+/// `--solver SUBSTEPSxPASSES` (native only), for comparing solver settings.
+#[cfg(not(target_arch = "wasm32"))]
+fn solver_requested() -> Option<(usize, usize)> {
+    let args: Vec<String> = std::env::args().collect();
+    let index = args.iter().position(|arg| arg == "--solver")?;
+    args.get(index + 1).and_then(|text| rp::parse_solver(text))
 }
 
 fn handle_input(app: &mut AppState) {

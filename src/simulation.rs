@@ -128,6 +128,9 @@ impl Default for InputState {
 #[derive(Clone, Copy, Debug)]
 pub struct Materials {
     pub fixed_dt: f64,
+    /// Small steps each step is divided into (see `World::step`), and solver
+    /// passes in each.
+    pub substeps: usize,
     pub solver_iterations: usize,
     pub gravity: f64,
     pub damping: f64,
@@ -337,10 +340,42 @@ pub struct Materials {
     pub fragment_repulsion_slop: f64,
 }
 
+static SOLVER_OVERRIDE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Makes `Materials::default()` use `substeps` small steps of `iterations`
+/// solver passes each, so a tool can compare solver settings without a
+/// rebuild (strike_scenarios and the app take `--solver 12x1`).
+pub fn set_default_solver(substeps: usize, iterations: usize) {
+    let code = ((substeps.clamp(1, 0xffff) as u32) << 16) | iterations.clamp(1, 0xffff) as u32;
+    SOLVER_OVERRIDE.store(code, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Reads a `SUBSTEPSxITERATIONS` setting such as `12x1`.
+pub fn parse_solver(text: &str) -> Option<(usize, usize)> {
+    let (substeps, iterations) = text.trim().split_once(['x', 'X'])?;
+    let substeps = substeps.trim().parse().ok().filter(|&n: &usize| n >= 1)?;
+    let iterations = iterations.trim().parse().ok().filter(|&n: &usize| n >= 1)?;
+    Some((substeps, iterations))
+}
+
 impl Default for Materials {
     fn default() -> Self {
+        let mut materials = Self::tuned();
+        let code = SOLVER_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed);
+        if code != 0 {
+            materials.substeps = (code >> 16) as usize;
+            materials.solver_iterations = (code & 0xffff) as usize;
+        }
+        materials
+    }
+}
+
+impl Materials {
+    /// The tuned materials, before any `set_default_solver` override.
+    fn tuned() -> Self {
         Self {
             fixed_dt: 1.0 / 60.0,
+            substeps: 1,
             solver_iterations: 12,
             gravity: 920.0,
             damping: 0.988,
@@ -1349,6 +1384,11 @@ pub struct World {
     /// Which points belonged to flesh at the start of this step (see
     /// [`World::flesh_points`]); flesh torn away is not there to touch.
     flesh: Vec<bool>,
+    /// The length of the current substep and of the whole step. A point's
+    /// `previous` is where it was one substep ago, so its velocity is its
+    /// motion since then over `substep_dt`.
+    substep_dt: f64,
+    step_dt: f64,
 }
 
 impl Default for World {
@@ -1389,6 +1429,8 @@ impl World {
             outline_pairs: Vec::new(),
             blunt_knock: Vec::new(),
             flesh: Vec::new(),
+            substep_dt: materials.fixed_dt / materials.substeps.max(1) as f64,
+            step_dt: materials.fixed_dt,
         }
     }
 
@@ -1750,6 +1792,12 @@ impl World {
         index
     }
 
+    /// Advances the world by `dt`, in `materials.substeps` small steps of
+    /// `materials.solver_iterations` solver passes each. Small steps keep stiff
+    /// tissue and joints firm and stable for the same number of passes as one
+    /// big step with many (Macklin et al. 2019, "Small Steps in Physics
+    /// Simulation"; Rapier substeps the same way). What happens once per step
+    /// (the tool, wounds, organs, tear propagation) happens in the first.
     pub fn step(&mut self, dt: f64, input: &InputState, width: f64, height: f64) {
         self.refresh_open_skin();
         self.refresh_flesh();
@@ -1759,6 +1807,9 @@ impl World {
         let striker_radius = tool_geometry(input.tool).contact_radius;
         let striker_mass = self.materials.striker_mass * input.power * profile.mass_scale;
         let striker_speed = hypot(input.vx, input.vy);
+        let substeps = self.materials.substeps.max(1);
+        self.step_dt = dt;
+        self.substep_dt = dt / substeps as f64;
 
         self.debug = ContactDebug {
             active: input.active,
@@ -1776,7 +1827,7 @@ impl World {
             striker_radius,
             tool: input.tool,
             impact: striker_speed * striker_mass,
-            solver_iterations: self.materials.solver_iterations as i32,
+            solver_iterations: (substeps * self.materials.solver_iterations) as i32,
             blood_loss: self.stats.blood_loss,
             blood_volume_fraction: self.blood_volume_fraction_internal(),
             blood_turgor_scale: self.blood_turgor_scale_internal(),
@@ -1784,36 +1835,59 @@ impl World {
         };
 
         self.update_exposure();
-        self.integrate(dt, width, floor_y);
-        self.update_vessel_anchors();
-        self.update_organ_anchors();
-        self.update_wound_anchors();
-        self.update_wounds(dt);
-        self.fresh_skin_cuts.clear();
-        self.move_tool(input, dt);
-        self.update_organ_anchors();
-        self.update_cavities(dt);
-        self.update_organs(dt);
-        self.disturb_wounds_from_loaded_tissue();
-        self.reset_constraint_lambdas();
-        self.gather_outline_pairs();
-
-        for _ in 0..self.materials.solver_iterations {
-            self.solve_springs();
-            self.solve_tool_contact();
-            self.solve_attachments();
-            self.solve_bone_attachments();
-            self.solve_bone_joints();
-            self.solve_bones();
-            self.solve_post_fracture_joints();
-            self.solve_bone_fragment_bone_contacts();
-            self.solve_bone_fragment_tissue_contacts();
-            self.solve_bone_fragment_repulsion();
-            self.solve_areas();
-            self.solve_outline_contacts();
-            self.constrain_to_world(width, floor_y);
+        self.fade_tissue_marks(dt);
+        for substep in 0..substeps {
+            let h = self.substep_dt;
+            self.integrate_motion(h, floor_y);
+            if substep == 0 {
+                self.integrate_fluids(dt, width, floor_y);
+                self.update_vessel_anchors();
+                self.update_organ_anchors();
+                self.update_wound_anchors();
+                self.update_wounds(dt);
+                self.fresh_skin_cuts.clear();
+                self.begin_tool_step(input, dt);
+            }
+            // The tool moves through the step a substep at a time, so the
+            // tissue it pushes keeps up with it instead of being flung clear
+            // in one substep.
+            let t0 = substep as f64 / substeps as f64;
+            let t1 = (substep + 1) as f64 / substeps as f64;
+            self.advance_tool(input, h, dt, t0, t1);
+            if substep + 1 == substeps {
+                // What moves the body once per step moves it now and keeps
+                // it moving over the whole step, not every substep.
+                let before = (substeps > 1).then(|| self.capture_positions());
+                self.finish_tool_motion();
+                self.update_organ_anchors();
+                self.update_cavities(dt);
+                self.update_organs(dt);
+                self.disturb_wounds_from_loaded_tissue();
+                if let Some(before) = before {
+                    self.spread_over_step(&before);
+                }
+            }
+            if substep == 0 {
+                self.gather_outline_pairs();
+            }
+            self.reset_constraint_lambdas();
+            for _ in 0..self.materials.solver_iterations {
+                self.solve_springs();
+                self.solve_tool_contact();
+                self.solve_attachments();
+                self.solve_bone_attachments();
+                self.solve_bone_joints();
+                self.solve_bones();
+                self.solve_post_fracture_joints();
+                self.solve_bone_fragment_bone_contacts();
+                self.solve_bone_fragment_tissue_contacts();
+                self.solve_bone_fragment_repulsion();
+                self.solve_areas();
+                self.solve_outline_contacts();
+                self.constrain_to_world(width, floor_y);
+            }
+            self.finish_tool_substep(h);
         }
-        self.finish_tool_step(dt);
 
         self.update_vessel_anchors();
         self.update_organ_anchors();
@@ -1833,6 +1907,63 @@ impl World {
             .active_fragments
             .max(self.free_fragment_count() as i32);
         self.debug.sleeping_fragments = self.sleeping_fragment_count() as i32;
+    }
+
+    /// How many substeps a step is made of: a point's motion since `previous`
+    /// times this is how far it goes over a whole step at its current speed.
+    fn substeps_per_step(&self) -> f64 {
+        self.step_dt / self.substep_dt.max(EPSILON)
+    }
+
+    /// Where a point now at `now`, last substep at `previous`, was a whole
+    /// step ago at its current speed.
+    fn step_start(&self, now: Vec2, previous: Vec2) -> Vec2 {
+        if self.substep_dt == self.step_dt {
+            previous
+        } else {
+            subtract(
+                now,
+                scale(subtract(now, previous), self.substeps_per_step()),
+            )
+        }
+    }
+
+    /// Keeps a kick written for whole steps a kick over the whole step. Code
+    /// that moves a point by `moved` and sets its `previous` from `previous`
+    /// to `kicked` gives it `moved - (kicked - previous)` more motion per
+    /// step; per substep that is the same over the number of substeps.
+    fn spread_kick(&self, kicked: Vec2, previous: Vec2, moved: Vec2) -> Vec2 {
+        let spread = 1.0 - 1.0 / self.substeps_per_step();
+        if spread == 0.0 {
+            return kicked;
+        }
+        add(
+            kicked,
+            scale(subtract(moved, subtract(kicked, previous)), spread),
+        )
+    }
+
+    /// Where every point and bone end is, for `spread_over_step`.
+    fn capture_positions(&self) -> (Vec<Vec2>, Vec<(Vec2, Vec2)>) {
+        (
+            self.points.iter().map(|point| point.position).collect(),
+            self.bones.iter().map(|bone| (bone.a, bone.b)).collect(),
+        )
+    }
+
+    /// Turns what moved the points and bones since `before` into motion over
+    /// the whole step: they keep the displacement and move at its speed per
+    /// step rather than per substep.
+    fn spread_over_step(&mut self, before: &(Vec<Vec2>, Vec<(Vec2, Vec2)>)) {
+        let spread = 1.0 - 1.0 / self.substeps_per_step();
+        for (point, &was) in self.points.iter_mut().zip(&before.0) {
+            let moved = subtract(point.position, was);
+            point.previous = add(point.previous, scale(moved, spread));
+        }
+        for (bone, &(was_a, was_b)) in self.bones.iter_mut().zip(&before.1) {
+            bone.previous_a = add(bone.previous_a, scale(subtract(bone.a, was_a), spread));
+            bone.previous_b = add(bone.previous_b, scale(subtract(bone.b, was_b), spread));
+        }
     }
 
     fn reset_constraint_lambdas(&mut self) {
@@ -1980,7 +2111,7 @@ impl World {
 
     fn fragment_work_priority(&self, index: usize) -> f64 {
         let bone = self.bones[index];
-        let endpoint_speed = fragment_endpoint_speed(bone, self.materials.fixed_dt);
+        let endpoint_speed = fragment_endpoint_speed(bone, self.substep_dt);
         bone.load
             + endpoint_speed * bone.radius.max(1.0) * 0.18
             + bone.angular_velocity.abs() * bone.radius.max(1.0) * 18.0
@@ -2178,7 +2309,7 @@ impl World {
                 continue;
             }
 
-            let speed = fragment_endpoint_speed(*bone, self.materials.fixed_dt);
+            let speed = fragment_endpoint_speed(*bone, self.substep_dt);
             let quiet = speed < self.materials.fragment_sleep_speed
                 && bone.angular_velocity.abs() < self.materials.fragment_sleep_angular_speed
                 && bone.load < self.materials.fragment_sleep_load;
@@ -2836,7 +2967,7 @@ impl World {
                 };
                 let falloff = 1.0 - (d2.sqrt() / radius).clamp(0.0, 1.0) * 0.45;
                 let local_speed =
-                    distance(point.position, point.previous) / self.materials.fixed_dt.max(EPSILON);
+                    distance(point.position, point.previous) / self.substep_dt.max(EPSILON);
                 let motion_load = local_speed * point.mass * 0.11;
                 let contusion_load =
                     point.contusion * self.materials.contusion_load_threshold * 0.30;
@@ -2887,28 +3018,56 @@ impl World {
         }
     }
 
-    fn integrate(&mut self, dt: f64, width: f64, floor_y: f64) {
-        let blood_turgor = self.blood_turgor_scale_internal();
+    /// Lets the step-to-step marks on the tissue and bones fade.
+    fn fade_tissue_marks(&mut self, dt: f64) {
         for point in &mut self.points {
             point.load *= 0.84;
             point.exposure *= 0.92;
             point.contusion = (point.contusion - dt * self.materials.contusion_decay).max(0.0);
+        }
+        for bone in &mut self.bones {
+            bone.load *= 0.88;
+            if bone.sleeping && free_bone_fragment(*bone) {
+                bone.load *= 0.50;
+            }
+        }
+    }
+
+    /// Moves the points and bones on by one substep of length `h`: their
+    /// speed (less damping), gravity, and the soft pull toward their rest
+    /// place, which is a spring, so its share per substep falls with the
+    /// square of the substep's length.
+    fn integrate_motion(&mut self, h: f64, floor_y: f64) {
+        let substeps = self.substeps_per_step();
+        let per_substep = |per_step: f64| {
+            if substeps == 1.0 {
+                per_step
+            } else {
+                per_step.powf(1.0 / substeps)
+            }
+        };
+        let damping = per_substep(self.materials.damping);
+        let bone_damping = per_substep(self.materials.bone_damping);
+        let bone_angular_damping = per_substep(self.materials.bone_angular_damping);
+        let spring_share = 1.0 / (substeps * substeps);
+        let blood_turgor = self.blood_turgor_scale_internal();
+        for point in &mut self.points {
             if point.pinned {
                 point.position = point.home;
                 point.previous = point.position;
                 continue;
             }
-            let vx = (point.position.x - point.previous.x) * self.materials.damping;
-            let vy = (point.position.y - point.previous.y) * self.materials.damping;
+            let vx = (point.position.x - point.previous.x) * damping;
+            let vy = (point.position.y - point.previous.y) * damping;
             point.previous = point.position;
             point.position.x += vx;
-            point.position.y += vy + self.materials.gravity * dt * dt;
+            point.position.y += vy + self.materials.gravity * h * h;
             let base_shape_stiffness = if point.layer == TissueLayer::Skin {
                 self.materials.skin_shape_stiffness
             } else {
                 self.materials.muscle_shape_stiffness
             };
-            let shape_stiffness = base_shape_stiffness * blood_turgor;
+            let shape_stiffness = base_shape_stiffness * blood_turgor * spring_share;
             point.position.x += (point.home.x - point.position.x) * shape_stiffness;
             point.position.y += (point.home.y - point.position.y) * shape_stiffness;
             if point.position.y > floor_y {
@@ -2920,7 +3079,6 @@ impl World {
 
         for index in 0..self.bones.len() {
             let mut bone = self.bones[index];
-            bone.load *= 0.88;
             if bone.pinned {
                 bone.a = bone.home_a;
                 bone.b = bone.home_b;
@@ -2930,23 +3088,22 @@ impl World {
                 continue;
             }
             if bone.sleeping && free_bone_fragment(bone) {
-                bone.load *= 0.50;
                 bone.angular_velocity = 0.0;
                 bone.previous_a = bone.a;
                 bone.previous_b = bone.b;
                 self.bones[index] = bone;
                 continue;
             }
-            let avx = (bone.a.x - bone.previous_a.x) * self.materials.bone_damping;
-            let avy = (bone.a.y - bone.previous_a.y) * self.materials.bone_damping;
-            let bvx = (bone.b.x - bone.previous_b.x) * self.materials.bone_damping;
-            let bvy = (bone.b.y - bone.previous_b.y) * self.materials.bone_damping;
+            let avx = (bone.a.x - bone.previous_a.x) * bone_damping;
+            let avy = (bone.a.y - bone.previous_a.y) * bone_damping;
+            let bvx = (bone.b.x - bone.previous_b.x) * bone_damping;
+            let bvy = (bone.b.y - bone.previous_b.y) * bone_damping;
             let shape_stiffness = if bone.fractured {
                 0.0
             } else {
-                self.materials.bone_shape_stiffness
+                self.materials.bone_shape_stiffness * spring_share
             };
-            bone.angular_velocity *= self.materials.bone_angular_damping;
+            bone.angular_velocity *= bone_angular_damping;
             let free_fragment = bone.fractured || bone.splinter;
             if !free_fragment && bone.angular_velocity.abs() < 0.01 {
                 bone.angular_velocity = 0.0;
@@ -2960,20 +3117,21 @@ impl World {
             bone.previous_a = bone.a;
             bone.previous_b = bone.b;
             bone.a.x += avx + (bone.home_a.x - bone.a.x) * shape_stiffness;
-            bone.a.y += avy
-                + self.materials.gravity * dt * dt
-                + (bone.home_a.y - bone.a.y) * shape_stiffness;
+            bone.a.y +=
+                avy + self.materials.gravity * h * h + (bone.home_a.y - bone.a.y) * shape_stiffness;
             bone.b.x += bvx + (bone.home_b.x - bone.b.x) * shape_stiffness;
-            bone.b.y += bvy
-                + self.materials.gravity * dt * dt
-                + (bone.home_b.y - bone.b.y) * shape_stiffness;
+            bone.b.y +=
+                bvy + self.materials.gravity * h * h + (bone.home_b.y - bone.b.y) * shape_stiffness;
             if free_fragment {
-                let angular_step = bone.angular_velocity * dt;
+                let angular_step = bone.angular_velocity * h;
                 rotate_bone_around_center(&mut bone, angular_step);
             }
             self.bones[index] = bone;
         }
+    }
 
+    /// Moves the blood particles and lets them stain the floor.
+    fn integrate_fluids(&mut self, dt: f64, width: f64, floor_y: f64) {
         self.update_blood_stains(dt);
         let mut stain_deposits = Vec::new();
         for fluid in &mut self.fluids {
@@ -3566,6 +3724,7 @@ impl World {
     }
 
     fn organ_fragment_load(&self, organ: OrganRegion) -> f64 {
+        let per_step = self.substeps_per_step();
         self.bones
             .iter()
             .filter(|bone| bone.fractured || bone.splinter)
@@ -3575,7 +3734,8 @@ impl World {
                 if point_in_organ(closest, organ) {
                     let speed = (distance(bone.a, bone.previous_a)
                         + distance(bone.b, bone.previous_b))
-                        * 0.5;
+                        * 0.5
+                        * per_step;
                     Some(bone.load.max(speed * bone.radius * 14.0))
                 } else {
                     None
@@ -4159,7 +4319,7 @@ impl World {
                 continue;
             }
             let compliance = tissue_spring_compliance(self.materials, spring.layer);
-            let alpha = xpbd_alpha(compliance, self.materials.fixed_dt);
+            let alpha = xpbd_alpha(compliance, self.substep_dt);
             let constraint = len - self.springs[i].rest;
             let delta_lambda = (-constraint * stiffness - alpha * self.springs[i].lambda)
                 / (weighted_gradient + alpha);
@@ -5129,7 +5289,10 @@ impl World {
                 let previous_anchor = lerp(bone.previous_a, bone.previous_b, t);
                 let bone_velocity = subtract(anchor, previous_anchor);
                 let point_velocity = subtract(point.position, point.previous);
-                let relative_velocity = subtract(bone_velocity, point_velocity);
+                let relative_velocity = scale(
+                    subtract(bone_velocity, point_velocity),
+                    self.substeps_per_step(),
+                );
                 let tangent_velocity = subtract(
                     relative_velocity,
                     scale(normal, dot(relative_velocity, normal)),
@@ -5151,16 +5314,28 @@ impl World {
                     ),
                 );
                 self.points[point_index].position = point_position;
-                self.points[point_index].previous = add(
-                    point.previous,
-                    scale(
-                        tissue_drag,
-                        if point.layer == TissueLayer::Skin {
-                            0.04
-                        } else {
-                            0.10
-                        },
+                let dragged = scale(
+                    tissue_drag,
+                    if point.layer == TissueLayer::Skin {
+                        0.10
+                    } else {
+                        0.22
+                    },
+                );
+                self.points[point_index].previous = self.spread_kick(
+                    add(
+                        point.previous,
+                        scale(
+                            tissue_drag,
+                            if point.layer == TissueLayer::Skin {
+                                0.04
+                            } else {
+                                0.10
+                            },
+                        ),
                     ),
+                    point.previous,
+                    dragged,
                 );
                 self.points[point_index].load = self.points[point_index].load.max(
                     depth * 68.0 * layer_resistance
@@ -5257,7 +5432,7 @@ impl World {
                 let relative_velocity = subtract(velocity_fragment, velocity_support);
                 let normal_speed = dot(relative_velocity, normal);
                 let tangent_velocity = subtract(relative_velocity, scale(normal, normal_speed));
-                let dt = self.materials.fixed_dt.max(EPSILON);
+                let dt = self.substep_dt.max(EPSILON);
                 let closing_speed = (-normal_speed).max(0.0) / dt;
                 let tangential_speed = hypot(tangent_velocity.x, tangent_velocity.y) / dt;
                 let rest_speed = self.materials.fragment_bone_rest_speed.max(1.0);
@@ -5439,7 +5614,7 @@ impl World {
                 let relative_velocity = subtract(velocity_a, velocity_b);
                 let normal_speed = dot(relative_velocity, normal);
                 let tangent_velocity = subtract(relative_velocity, scale(normal, normal_speed));
-                let dt = self.materials.fixed_dt.max(EPSILON);
+                let dt = self.substep_dt.max(EPSILON);
                 let closing_speed = (-normal_speed).max(0.0) / dt;
                 let tangential_speed = hypot(tangent_velocity.x, tangent_velocity.y) / dt;
                 let rest_speed = self.materials.fragment_pair_rest_speed.max(1.0);
@@ -5529,7 +5704,7 @@ impl World {
                 self.process_fragment_tip(
                     i,
                     bone.a,
-                    bone.previous_a,
+                    self.step_start(bone.a, bone.previous_a),
                     bone.broken_start_normal,
                     bone.broken_start,
                 );
@@ -5539,7 +5714,7 @@ impl World {
                 self.process_fragment_tip(
                     i,
                     bone.b,
-                    bone.previous_b,
+                    self.step_start(bone.b, bone.previous_b),
                     bone.broken_end_normal,
                     bone.broken_end,
                 );
@@ -5560,7 +5735,7 @@ impl World {
         }
         let bone = self.bones[bone_index];
         let travel = distance(tip, previous_tip);
-        let speed = travel / self.materials.fixed_dt.max(EPSILON);
+        let speed = travel / self.step_dt.max(EPSILON);
         let radius = self
             .materials
             .fragment_contact_radius
@@ -5880,7 +6055,7 @@ impl World {
                 continue;
             }
             let compliance = tissue_area_compliance(self.materials, area.layer);
-            let alpha = xpbd_alpha(compliance, self.materials.fixed_dt);
+            let alpha = xpbd_alpha(compliance, self.substep_dt);
             let lambda = (-constraint * area.stiffness * blood_turgor
                 - alpha * self.areas[index].lambda)
                 / (weighted_gradient + alpha);
@@ -5923,12 +6098,14 @@ impl World {
                     &mut bone.a,
                     &mut bone.previous_a,
                     contact_floor_y,
+                    self.substep_dt,
                 );
                 let (b_contact, b_resting) = constrain_fragment_endpoint_to_floor(
                     self.materials,
                     &mut bone.b,
                     &mut bone.previous_b,
                     contact_floor_y,
+                    self.substep_dt,
                 );
                 let contacts = usize::from(a_contact) + usize::from(b_contact);
                 if contacts > 0 {
@@ -6140,14 +6317,22 @@ impl World {
             y: old.a.y - normal.y * snap * 0.18,
         };
         first.b = left_cap;
-        first.previous_a = Vec2 {
-            x: old.previous_a.x + normal.x * recoil * 0.20,
-            y: old.previous_a.y + normal.y * recoil * 0.20,
-        };
-        first.previous_b = Vec2 {
-            x: previous_crack.x + normal.x * recoil + dir.x * shear * 0.7,
-            y: previous_crack.y + normal.y * recoil + dir.y * shear * 0.7,
-        };
+        first.previous_a = self.spread_kick(
+            Vec2 {
+                x: old.previous_a.x + normal.x * recoil * 0.20,
+                y: old.previous_a.y + normal.y * recoil * 0.20,
+            },
+            old.previous_a,
+            subtract(first.a, old.a),
+        );
+        first.previous_b = self.spread_kick(
+            Vec2 {
+                x: previous_crack.x + normal.x * recoil + dir.x * shear * 0.7,
+                y: previous_crack.y + normal.y * recoil + dir.y * shear * 0.7,
+            },
+            previous_crack,
+            subtract(left_cap, crack),
+        );
         first.home_b = Vec2 {
             x: home_crack.x - dir.x * gap * 0.5 - normal.x * snap * 0.35,
             y: home_crack.y - dir.y * gap * 0.5 - normal.y * snap * 0.35,
@@ -6171,14 +6356,25 @@ impl World {
                 x: old.b.x + normal.x * snap * 0.18,
                 y: old.b.y + normal.y * snap * 0.18,
             },
-            previous_a: Vec2 {
-                x: previous_crack.x - normal.x * recoil - dir.x * shear * 0.7,
-                y: previous_crack.y - normal.y * recoil - dir.y * shear * 0.7,
-            },
-            previous_b: Vec2 {
-                x: old.previous_b.x - normal.x * recoil * 0.20,
-                y: old.previous_b.y - normal.y * recoil * 0.20,
-            },
+            previous_a: self.spread_kick(
+                Vec2 {
+                    x: previous_crack.x - normal.x * recoil - dir.x * shear * 0.7,
+                    y: previous_crack.y - normal.y * recoil - dir.y * shear * 0.7,
+                },
+                previous_crack,
+                subtract(right_cap, crack),
+            ),
+            previous_b: self.spread_kick(
+                Vec2 {
+                    x: old.previous_b.x - normal.x * recoil * 0.20,
+                    y: old.previous_b.y - normal.y * recoil * 0.20,
+                },
+                old.previous_b,
+                Vec2 {
+                    x: normal.x * snap * 0.18,
+                    y: normal.y * snap * 0.18,
+                },
+            ),
             home_a: Vec2 {
                 x: home_crack.x + dir.x * gap * 0.5 + normal.x * snap * 0.35,
                 y: home_crack.y + dir.y * gap * 0.5 + normal.y * snap * 0.35,
@@ -6403,14 +6599,23 @@ impl World {
             angular_velocity: (spin * 1.65).clamp(-42.0, 42.0),
             ..BoneSegment::default()
         };
-        splinter.previous_a = Vec2 {
-            x: splinter.a.x - normal.x * recoil * 0.55,
-            y: splinter.a.y - normal.y * recoil * 0.55,
-        };
-        splinter.previous_b = Vec2 {
-            x: splinter.b.x - normal.x * recoil * 0.55,
-            y: splinter.b.y - normal.y * recoil * 0.55,
-        };
+        // A chip flies off at its recoil over the whole step.
+        splinter.previous_a = self.spread_kick(
+            Vec2 {
+                x: splinter.a.x - normal.x * recoil * 0.55,
+                y: splinter.a.y - normal.y * recoil * 0.55,
+            },
+            splinter.a,
+            Vec2::default(),
+        );
+        splinter.previous_b = self.spread_kick(
+            Vec2 {
+                x: splinter.b.x - normal.x * recoil * 0.55,
+                y: splinter.b.y - normal.y * recoil * 0.55,
+            },
+            splinter.b,
+            Vec2::default(),
+        );
         splinter.home_a = Vec2 {
             x: home_crack.x - dir.x * chip_length * 0.45 + normal.x * snap * 0.2,
             y: home_crack.y - dir.y * chip_length * 0.45 + normal.y * snap * 0.2,
@@ -6904,7 +7109,9 @@ mod tests {
         /// input position moving at the input velocity, so a test can aim a
         /// single strike precisely.
         fn move_tool_for_test(&mut self, dt: f64, input: &InputState) {
-            self.move_tool(input, dt);
+            self.begin_tool_step(input, dt);
+            self.advance_tool(input, dt, dt, 0.0, 1.0);
+            self.finish_tool_motion();
         }
     }
 
@@ -7356,8 +7563,8 @@ mod tests {
         depleted.points[depleted_point].position.x = 200.0;
         depleted.points[depleted_point].previous = depleted.points[depleted_point].position;
 
-        full.integrate(full.materials.fixed_dt, 400.0, 360.0);
-        depleted.integrate(depleted.materials.fixed_dt, 400.0, 360.0);
+        full.integrate_motion(full.materials.fixed_dt, 360.0);
+        depleted.integrate_motion(depleted.materials.fixed_dt, 360.0);
 
         assert!(
             full.points[full_point].position.x < depleted.points[depleted_point].position.x,
@@ -9635,7 +9842,7 @@ mod tests {
             1.0,
         );
         for _ in 0..24 {
-            world.integrate(world.materials.fixed_dt, 220.0, 120.0);
+            world.integrate_fluids(world.materials.fixed_dt, 220.0, 120.0);
         }
 
         assert!(
@@ -10111,13 +10318,14 @@ fn constrain_fragment_endpoint_to_floor(
     point: &mut Vec2,
     previous: &mut Vec2,
     floor_y: f64,
+    dt: f64,
 ) -> (bool, bool) {
     if point.y <= floor_y {
         return (false, false);
     }
 
     let velocity = subtract(*point, *previous);
-    let speed = hypot(velocity.x, velocity.y) / materials.fixed_dt.max(EPSILON);
+    let speed = hypot(velocity.x, velocity.y) / dt.max(EPSILON);
     let resting = speed < materials.fragment_floor_rest_speed.max(1.0);
     point.y = floor_y;
 
