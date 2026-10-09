@@ -9,12 +9,13 @@ $repoRoot = Get-RepoRoot
 $wasmTarget = "wasm32-unknown-unknown"
 $siteDir = Join-Path $repoRoot "target/web"
 
-# The JS loader has to match the miniquad version in Cargo.lock (macroquad pins it
-# exactly), so copy the gl.js shipped inside that crate instead of vendoring it.
-# macroquad's js/mq_js_bundle.js adds audio and networking plugins this app does not
-# use, and its networking plugin throws on load; switch to that bundle only if the
-# macroquad "audio" feature is ever enabled.
-function Get-MiniquadLoader {
+# The page loads two scripts that ship inside crates, copied from the crates Cargo
+# builds so they always match the wasm: miniquad's loader, gl.js, which has to match
+# the miniquad version in Cargo.lock (macroquad pins it exactly), and the sound
+# plugin, audio.js, from quad-snd, which Cargo.toml points at the patched copy in
+# vendor/quad-snd. (macroquad's js/mq_js_bundle.js bundles both with a networking
+# plugin this app does not use and that throws on load.)
+function Get-CrateScripts {
     $cargo = Get-CargoPath
     Push-Location $repoRoot
     try {
@@ -27,16 +28,19 @@ function Get-MiniquadLoader {
     }
 
     $metadata = ($json -join "`n") | ConvertFrom-Json
-    $miniquad = $metadata.packages | Where-Object { $_.name -eq "miniquad" } | Select-Object -First 1
-    if (-not $miniquad) {
-        throw "cargo metadata did not list the miniquad package."
+    $scripts = @()
+    foreach ($script in @(@{ Package = "miniquad"; File = "js/gl.js" }, @{ Package = "quad-snd"; File = "js/audio.js" })) {
+        $package = $metadata.packages | Where-Object { $_.name -eq $script.Package } | Select-Object -First 1
+        if (-not $package) {
+            throw "cargo metadata did not list the $($script.Package) package."
+        }
+        $path = Join-Path (Split-Path -Parent $package.manifest_path) $script.File
+        if (-not (Test-Path -LiteralPath $path)) {
+            throw "$($script.Package) $($package.version) does not ship $($script.File) (looked in $path)."
+        }
+        $scripts += $path
     }
-
-    $loader = Join-Path (Split-Path -Parent $miniquad.manifest_path) "js/gl.js"
-    if (-not (Test-Path -LiteralPath $loader)) {
-        throw "miniquad $($miniquad.version) does not ship js/gl.js (looked in $loader)."
-    }
-    return $loader
+    return $scripts
 }
 
 Invoke-Cargo -Arguments @("build", "--release", "--target", $wasmTarget, "--bin", "realistic_physics") -Label "Build Rust app for the web (wasm32, Release)"
@@ -51,20 +55,22 @@ if (Test-Path -LiteralPath $siteDir) {
 }
 New-Item -ItemType Directory -Force -Path $siteDir | Out-Null
 Copy-Item -LiteralPath $wasm -Destination $siteDir
-Copy-Item -LiteralPath (Get-MiniquadLoader) -Destination $siteDir
+Copy-Item -LiteralPath (Get-CrateScripts) -Destination $siteDir
 
 # GitHub Pages lets browsers cache every file for ten minutes, so a returning
 # visitor could get a new page with the previous simulation. Stamping the wasm
-# and loader URLs with their content hashes makes each page load its own build.
+# and script URLs with their content hashes makes each page load its own build.
 function Get-ContentStamp([string]$Path) {
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.Substring(0, 12).ToLowerInvariant()
 }
 
 $wasmStamp = Get-ContentStamp (Join-Path $siteDir "realistic_physics.wasm")
 $loaderStamp = Get-ContentStamp (Join-Path $siteDir "gl.js")
+$audioStamp = Get-ContentStamp (Join-Path $siteDir "audio.js")
 $page = [IO.File]::ReadAllText((Join-Path $repoRoot "web/index.html"))
 $references = @(
     @{ From = 'src="gl.js"'; To = "src=`"gl.js?v=$loaderStamp`"" },
+    @{ From = 'src="audio.js"'; To = "src=`"audio.js?v=$audioStamp`"" },
     @{ From = 'load("realistic_physics.wasm")'; To = "load(`"realistic_physics.wasm?v=$wasmStamp`")" }
 )
 foreach ($reference in $references) {

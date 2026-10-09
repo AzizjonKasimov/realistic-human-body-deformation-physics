@@ -63,6 +63,7 @@ See [docs/DESTRUCTION_ARCHITECTURE.md](docs/DESTRUCTION_ARCHITECTURE.md) for the
 - Visual damage diagnostics replay deterministic sharp and heavy strikes, then write a damage-focused SVG and primitive-count CSV so incision, wound-rim, exposed-muscle, lacerated-vessel, fluid, and fracture rendering can be inspected without launching the app.
 - Rust diagnostics, strike scenario playback, and simulation tests.
 - Smoothly shaded skin: one mesh with per-point color for load and bruising, soft shading strips inside the silhouette for volume, and a thin outline.
+- Sound made from the simulation, with no recordings: after every step the game hears what happened and plays it. A bat or sledgehammer lands with a thud as loud and deep as the blow was fast, so a slow push barely makes a sound; a bone cracks as it breaks; flesh torn by a blow tears wetly; fresh blood spatters as it lands; air rushes past a swung tool, brighter as it goes faster; and the knife slices as long as it cuts. The sounds are synthesized when the app starts, the same way the project's videos get their sound, and `M` or the speaker button mutes them (see [Sound](#sound)).
 
 ## Realism Target
 
@@ -131,7 +132,7 @@ Then build and serve it:
 .\tools\build_web.ps1 -Serve
 ```
 
-Open <http://localhost:8080>, or <http://localhost:8080/?stats> to show the frame rate and how long each frame takes. <http://localhost:8080/?selftest> runs a self-test instead: the browser build plays every tuned strike scenario at fixed simulation steps, checks each against its injury bands, and reports how long a simulation step takes in WebAssembly, on screen, in the status line, and as `window.__selftest`. It does not depend on the frame rate, so it also works while the browser throttles a hidden or covered tab; it takes about 15 seconds. `realistic_physics.exe --selftest` runs the same natively and prints the report as JSON, so the two can be compared (they give the same injuries). `.\tools\serve_web.ps1` serves the last build again without rebuilding. The site is assembled in `target\web`: the page from `web\index.html`, the wasm module, and the `gl.js` loader copied from the miniquad version in `Cargo.lock`.
+Open <http://localhost:8080>, or <http://localhost:8080/?stats> to show the frame rate and how long each frame takes. <http://localhost:8080/?selftest> runs a self-test instead: the browser build plays every tuned strike scenario at fixed simulation steps, checks each against its injury bands, and reports how long a simulation step takes in WebAssembly, on screen, in the status line, and as `window.__selftest`. It does not depend on the frame rate, so it also works while the browser throttles a hidden or covered tab; it takes about 15 seconds. `realistic_physics.exe --selftest` runs the same natively and prints the report as JSON, so the two can be compared (they give the same injuries). `.\tools\serve_web.ps1` serves the last build again without rebuilding. The site is assembled in `target\web`: the page from `web\index.html`, the wasm module, the `gl.js` loader copied from the miniquad version in `Cargo.lock`, and the sound plugin `audio.js` from the patched quad-snd in `vendor\quad-snd`. Browsers start sound only after a click or tap, which the start button provides.
 
 ## Controls
 
@@ -140,6 +141,7 @@ Open <http://localhost:8080>, or <http://localhost:8080/?stats> to show the fram
 - `D` toggles the contact debug overlay.
 - `R` resets the body.
 - `Space` pauses or resumes.
+- `M`, or the speaker button, turns the sound off and on.
 - The control chips along the bottom are also buttons: click or tap them for the same actions.
 - On touch screens, drag a finger to strike. The chips grow to finger size after the first touch. A finger put down somewhere new takes the tool up there rather than flinging it across the screen, and a tool taken up on the body passes through it until clear.
 
@@ -155,7 +157,10 @@ The Rust verifier runs formatting checks, simulation tests, deterministic strike
 
 - `-BuildApp` also rebuilds the root `realistic_physics.exe` (`-StopRunningApp` closes a running copy that blocks it).
 - `-Capture` also saves real app screenshots of the body at rest at 1280x720, 800x600, and 390x844 (see [Screenshots](#screenshots)).
+- `-SoundCheck` also runs `.\tools\sound_check.ps1` on the root `realistic_physics.exe`, which checks that its sound reaches the speakers (see [Sound](#sound)).
 - `-SkipSweep` and `-SkipDiagnostics` leave out the sweep and the two diagnostics.
+
+The tests include the patched quad-snd's own mixer tests (`vendor\quad-snd`).
 
 ## Compare A Change
 
@@ -224,6 +229,37 @@ cargo run --release --bin strike_scenarios -- --gesture "bat:-0.35,0.33:wait=10:
 
 `--list` prints every scenario's swing, `--only` limits a run or sweep to some scenarios, and `--strike TOOL:U0,V0:U1,V1[:power=P][:frames=N][:windup=N][:settle=N]` plays one custom swing in body coordinates (fractions of body height from the top of the head on the midline) and prints its injuries, or their spread with `--sweep`. Tools are `bat`, `knife`, and `hammer`, and each swings with its strength in the app unless `power=P` tries another. `--gesture TOOL:U,V[:STEP...]` plays a gesture the way the app does: the hand starts at `U,V`, and the steps are `U,V/N` to move there over N steps (`U,V` jumps), `down` and `up` for the button, and `wait=N`. A custom swing or gesture prints its injuries, how the skin opened (fibers a blade cut, fibers torn, and the lips of cuts that opened), and how steady the tool was (its largest turn in one step, its turning in all, snaps, how often a held tool lost and found the body again, how far it trailed the hand in the air and at the end, and the fastest tissue), and writes its frame-by-frame telemetry, including the tool's angle and position and what its striking part reaches (points of flesh, points of flesh torn away, bones, and the spine), to `output\strike_custom_frames.csv`.
 
+## Sound
+
+The game's sound comes from the simulation, with no recordings or samples. `src/sound.rs` listens to the world after every step and reads what the video foley reads from `--events`: the tool's speed and whether it touches the body, and the running counts of broken bones, torn skin and muscle, and blood drops. From those it hears:
+
+- a thud when a bat or sledgehammer lands, as loud and deep as the blow was fast (silent below 150 px/s, full strength at 2550 px/s), so the speed ladder sounds like one: a slow push is a faint tap and a full swing a heavy blow;
+- a crack when a bone breaks, a wet tear when a blow tears skin or muscle, and a spatter when fresh blood lands (a wound's slow leak stays quiet);
+- air rushing past a tool swung with the button down, louder and brighter as it goes faster, thinner for the knife;
+- a slice while the knife cuts, as loud as the fibers it severs each step.
+
+A sound plays no sooner than 60 to 80 ms after the last of its kind, unless it is much stronger, so a crush that breaks bone after bone does not stack into noise. `src/sound/synth.rs` synthesizes the 26 clips (three takes of each one-off sound, the thud at three strengths) in about 40 ms when the app starts, rebuilt from `video_tools\tools\foley.py`, which makes the sound of the project's videos, so the game and the videos sound alike; the air and the knife are loops whose volume follows the action. Everything plays through macroquad's audio, natively and in the browser, and a soft clip rounds off peaks when several loud sounds land at once. Sound only reads the world, so it never changes what the simulation does.
+
+To hear a scenario without playing it, or check how loud things are:
+
+```powershell
+cargo run --release --bin strike_scenarios -- --sound output\sound
+cargo run --release --bin strike_scenarios -- --only hammer_firm_swing --sound output\sound
+cargo run --release --bin strike_scenarios -- --gesture "knife:-0.3,0.66:wait=10:down:0.1,0.66/8:wait=40:up" --sound output\sound
+```
+
+`--sound DIR` plays the scenarios (or a custom swing or gesture) and mixes what the app would play, step by step, into `DIR\NAME.wav`, writes each clip of the sound bank to `DIR\bank`, and lists every scenario's sounds, strongest strength, and levels in `DIR\sound_report.txt`. A full sledgehammer blow reaches about -16 LUFS over its loudest 400 ms, a knife cut -22, and a slow push -37.
+
+To check that the desktop app's sound really reaches the speakers:
+
+```powershell
+.\tools\sound_check.ps1
+```
+
+It opens `realistic_physics.exe` for a few seconds, presses `H` and swings the sledgehammer by sending messages to the app's window (the real mouse and keyboard are left alone), mutes and swings again, and reads the app's own level meter in the Windows mixer the whole time. It passes when the app is silent at rest, clicks, thuds, and is silent again while muted.
+
+macroquad's sound backend, quad-snd, is used from a patched copy in `vendor\quad-snd` (MIT; `Cargo.toml` points Cargo at it). The patches, listed in `vendor\quad-snd\PATCHES.md`, cut the Windows output latency from 83-93 ms to 13-23 ms, glide volume changes so they do not click, fix a glitch at every loop point, add the soft clip, and make browser audio start on the first tap on phones too. Its mixer tests run with `cargo test --manifest-path vendor\quad-snd\Cargo.toml --target-dir target\vendor`.
+
 ## Anatomy Diagnostics
 
 Use this whenever changing body generation, anatomy layers, bones, constraints, or rendering assumptions:
@@ -256,6 +292,7 @@ The visual diagnostic exits nonzero if the captures no longer include expected w
 - `src/simulation.rs` contains the physics data model, integration, constraints, tearing, bone fracture, major vessels, wounds, and fluid particles; `src/simulation/body.rs` generates the layered body; `src/simulation/tools.rs` holds the tools: their shapes, the hand that drives them, and their contact with tissue and bone; `src/simulation/cuts.rs` opens the cuts a blade makes by splitting the tissue's points along them.
 - `src/bin/realistic_physics/main.rs` owns the `macroquad` app shell, input, timing, and rendering. It also runs in the browser, so the app and simulation must avoid file I/O, threads, and `std::time`, none of which work on `wasm32-unknown-unknown`. `src/bin/realistic_physics/capture.rs` is the native-only screenshot mode, and `src/bin/realistic_physics/selftest.rs` the self-test mode, which runs in both builds (the page hands it a clock and takes its report through a small gl.js plugin).
 - `src/scenarios.rs` holds the scripted strikes and gestures and the tuned scenarios with their injury and steadiness bands, shared by the strike runner, the visual damage diagnostic, the capture mode, and the self-test, which also ships in the browser build.
+- `src/sound.rs` hears what each simulation step sounded like and picks the clip and volume for each sound; `src/sound/synth.rs` synthesizes the clips and `src/sound/mixdown.rs` mixes a run offline the way the app plays it. `src/bin/realistic_physics/audio.rs` plays the sound in the app, and `tests/sound_tests.rs` checks it. `vendor/quad-snd` is the patched sound backend.
 - `web/index.html` is the browser page: start screen with a content warning, loader, error messages, and the `?stats` frame-time overlay (also exposed as `window.__perf` for automated checks).
 - `tools/build_web.ps1` builds the browser version into `target\web`; `tools/serve_web.ps1` serves it locally with the `application/wasm` content type browsers require.
 - `.cargo/config.toml` lets the wasm linker leave miniquad's WebGL functions as imports for `gl.js` to provide; recent Rust versions no longer do that by default.
@@ -263,7 +300,7 @@ The visual diagnostic exits nonzero if the captures no longer include expected w
 - `src/bin/strike_scenarios.rs` writes deterministic strike telemetry and tuning summaries, sweeps scenarios over small swing offsets, and plays custom swings.
 - `src/bin/visual_damage_diagnostics.rs` writes deterministic SVG damage captures and visual primitive metrics.
 - `src/bin/contact_sheet.rs` lays PNG screenshots out in one image.
-- `tools/verify.ps1`, `tools/compare.ps1`, and `tools/capture.ps1` are the checking workflows described above.
+- `tools/verify.ps1`, `tools/compare.ps1`, `tools/capture.ps1`, and `tools/sound_check.ps1` are the checking workflows described above.
 - `tests/simulation_tests.rs` contains focused Rust simulation checks, including mirror symmetry of the body and skin covering the muscle at rest in several window sizes.
 - `src/silhouette.rs` defines the mannequin figure (torso outline, limb joints and radii, head, hands, feet) for one side and mirrors it into a signed distance field; `src/simulation/body.rs` meshes the body from it, builds the limb bones on the same joints, and places the rest of the anatomy. `body_frame` maps body coordinates (fractions of body height) to the window, which the strike scenarios use to aim at anatomy; the app moves and shrinks the body with `body_frame_between` when that placement would run under its status chips or control buttons.
 
@@ -278,7 +315,7 @@ The next Rust simulation milestones are:
 
 ## Toolchain
 
-The primary build now uses Rust and Cargo. The app frontend uses `macroquad` for a cross-platform window, input, and 2D drawing path while the simulation stays in a reusable Rust library. The browser version is the same app compiled for `wasm32-unknown-unknown` and drawn with WebGL.
+The primary build now uses Rust and Cargo. The app frontend uses `macroquad` for a cross-platform window, input, sound, and 2D drawing path while the simulation stays in a reusable Rust library. The browser version is the same app compiled for `wasm32-unknown-unknown`, drawn with WebGL and heard through Web Audio.
 
 ## License
 

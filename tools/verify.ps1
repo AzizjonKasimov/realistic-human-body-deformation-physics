@@ -18,13 +18,18 @@ Also rebuild the root realistic_physics.exe.
 
 .PARAMETER StopRunningApp
 Close a running realistic_physics.exe that would block -BuildApp.
+
+.PARAMETER SoundCheck
+Also check that the root realistic_physics.exe's sound reaches the speakers
+(tools\sound_check.ps1; it briefly opens the app window). Runs after -BuildApp.
 #>
 param(
     [switch]$SkipDiagnostics,
     [switch]$SkipSweep,
     [switch]$Capture,
     [switch]$BuildApp,
-    [switch]$StopRunningApp
+    [switch]$StopRunningApp,
+    [switch]$SoundCheck
 )
 
 . "$PSScriptRoot\common.ps1"
@@ -39,6 +44,8 @@ function Measure-Step([string]$Name, [scriptblock]$Step) {
 
 Measure-Step "Formatting" { Invoke-Cargo -Arguments @("fmt", "--check") -Label "Check Rust formatting" }
 Measure-Step "Tests" { Invoke-Cargo -Arguments @("test") -Label "Run Rust simulation tests" }
+# The patched sound backend is a separate crate, so its mixer tests run on their own.
+Measure-Step "quad-snd tests" { Invoke-Cargo -Arguments @("test", "--manifest-path", "vendor\quad-snd\Cargo.toml", "--target-dir", "target\vendor") -Label "Run the patched quad-snd's tests" }
 # The scenario and diagnostic binaries run in release: the same results as a
 # debug build, several times faster.
 Measure-Step "Strike scenarios" { Invoke-Cargo -Arguments @("run", "--release", "--bin", "strike_scenarios", "--", "output\strike_scenarios.csv") -Label "Run Rust strike scenarios" }
@@ -59,6 +66,12 @@ if ($BuildApp) {
     Stop-RunningAppIfRequested -StopRunningApp:$StopRunningApp
     Measure-Step "Build app" { Invoke-Cargo -Arguments @("build", "--release", "--bin", "realistic_physics") -Label "Build Rust app (Release)" }
     Copy-RustAppToRepoRoot
+}
+
+if ($SoundCheck) {
+    Measure-Step "Sound check" {
+        Invoke-Checked -Label "Check the app's sound reaches the speakers" -Command { & pwsh -NoProfile -File "$PSScriptRoot\sound_check.ps1" }
+    }
 }
 
 Write-Host ""

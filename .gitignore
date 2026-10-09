@@ -4,3 +4,4 @@ output/
 target/
 realistic_physics.exe
 AGENTS.md
+vendor/*/Cargo.lock

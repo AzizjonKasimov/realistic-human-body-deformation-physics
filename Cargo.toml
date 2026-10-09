@@ -29,4 +29,10 @@ name = "contact_sheet"
 path = "src/bin/contact_sheet.rs"
 
 [dependencies]
-macroquad = "0.4"
+# "audio" plays the game's sound through quad-snd.
+macroquad = { version = "0.4", features = ["audio"] }
+
+# quad-snd with lower latency and smooth volume changes; vendor/quad-snd/PATCHES.md
+# lists the changes.
+[patch.crates-io]
+quad-snd = { path = "vendor/quad-snd" }

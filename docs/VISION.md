@@ -20,6 +20,7 @@ The end product is a free standalone download that someone can install, play wit
 - Also ship a browser version so anyone can try the sandbox from a link: the same Rust app compiles to WebAssembly, runs entirely on the visitor's device, and is published on GitHub Pages behind a click-to-start content warning.
 - Start one system at a time, beginning with soft-body skin tearing.
 - Prioritize real simulation behavior over scripted decals or canned animations.
+- Sound follows the simulation too: what the physics does at each step (how fast a blow lands, a bone breaking, flesh tearing, blood landing, a blade cutting) is synthesized into sound, not picked from canned recordings, and the player can mute it.
 - Aim as close as practical to real-life body destruction physics.
 - Treat graphic injury detail as part of the simulation target: gore, exposed tissue, blood, tearing, fracture, and body deformation should be shown when the physics state supports them.
 - Keep the figure itself presentable: a neutral, mirror-symmetric, front-facing mannequin without anatomical surface detail. The realism lives in the layered tissue and the damage, not in the body's outline.

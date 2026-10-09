@@ -16,6 +16,11 @@
 //!   --gesture TOOL:U,V[:STEP...]      the same for a gesture played the way the
 //!                                     app is (steps: U,V/N, down, up, wait=N);
 //!                                     writes strike_custom_frames.csv too
+//!   --sound DIR                       instead, write what each scenario (or the
+//!                                     custom swing) sounds like in the app as
+//!                                     DIR/NAME.wav, list its sounds and levels
+//!                                     in DIR/sound_report.txt, and write each
+//!                                     clip of the sound bank to DIR/bank
 //!   --list                            print the scenarios and their plays
 //! ```
 //!
@@ -27,6 +32,7 @@ use rp::scenarios::{
     spinning_fragment_count, tool_axis, tool_lag, tool_name, tool_touching, Gesture, Play,
     Scenario, ScenarioResult, Strike, SCENARIO_HEIGHT, SCENARIO_WIDTH,
 };
+use rp::sound::{wav_bytes, CueKind, Foley, Heard, Mixdown, SoundBank};
 use std::env;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
@@ -35,6 +41,7 @@ use std::process;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::thread;
+use std::time::Instant;
 
 /// How far a sweep moves each swing along its path and across it, in body
 /// heights: about one point spacing either way, as aim varies from swing to
@@ -48,6 +55,8 @@ struct Options {
     sweep: bool,
     /// A custom swing or gesture to play instead of the scenarios.
     custom: Option<Play>,
+    /// Where to write what each one sounds like, instead of the CSVs.
+    sound: Option<PathBuf>,
     list: bool,
 }
 
@@ -55,7 +64,7 @@ fn main() {
     let options = parse_options().unwrap_or_else(|message| {
         eprintln!("{message}");
         eprintln!(
-            "usage: strike_scenarios [CSV] [--only NAME,...] [--sweep] [--strike SPEC | --gesture SPEC] [--list]"
+            "usage: strike_scenarios [CSV] [--only NAME,...] [--sweep] [--strike SPEC | --gesture SPEC] [--sound DIR] [--list]"
         );
         process::exit(2);
     });
@@ -92,7 +101,9 @@ fn main() {
         }
     };
 
-    if options.sweep {
+    if let Some(dir) = &options.sound {
+        listen(&selected, dir);
+    } else if options.sweep {
         sweep(&selected, &output_dir, options.custom.is_some());
     } else if options.custom.is_some() {
         play_custom(&selected[0], &output_dir);
@@ -107,6 +118,7 @@ fn parse_options() -> Result<Options, String> {
         only: Vec::new(),
         sweep: false,
         custom: None,
+        sound: None,
         list: false,
     };
     let mut args = env::args().skip(1);
@@ -114,6 +126,9 @@ fn parse_options() -> Result<Options, String> {
         match arg.as_str() {
             "--sweep" => options.sweep = true,
             "--list" => options.list = true,
+            "--sound" => {
+                options.sound = Some(PathBuf::from(args.next().ok_or("--sound needs a folder")?));
+            }
             "--only" => {
                 let names = args.next().ok_or("--only needs scenario names")?;
                 options
@@ -225,6 +240,108 @@ fn play_custom(scenario: &Scenario, output_dir: &Path) {
     writeln!(out, "{}", summary_fields(scenario, &result).join(",")).expect("write custom CSV");
     println!("wrote {}", path.display());
     println!("wrote {}", frames_path.display());
+}
+
+/// Plays each scenario on all cores, hearing it the way the app does, and
+/// writes the mix as NAME.wav with a line per scenario in sound_report.txt,
+/// plus every clip of the sound bank on its own in bank/.
+fn listen(selected: &[Scenario], dir: &Path) {
+    let started = Instant::now();
+    let bank = SoundBank::render();
+    let seconds: usize = bank.clips.iter().map(|clip| clip.samples.len()).sum();
+    println!(
+        "sound bank: {} clips, {:.1} s of audio, rendered in {:.0} ms",
+        bank.clips.len(),
+        seconds as f64 / rp::sound::SAMPLE_RATE as f64,
+        started.elapsed().as_secs_f64() * 1000.0
+    );
+    let bank_dir = dir.join("bank");
+    fs::create_dir_all(&bank_dir).expect("create sound folder");
+    for clip in &bank.clips {
+        fs::write(
+            bank_dir.join(format!("{}.wav", clip.name)),
+            wav_bytes(&clip.samples),
+        )
+        .expect("write bank clip");
+    }
+    let step_seconds = rp::Materials::default().fixed_dt;
+    let next = AtomicUsize::new(0);
+    let finished = Mutex::new(Vec::with_capacity(selected.len()));
+    let workers = thread::available_parallelism().map_or(4, |count| count.get());
+    thread::scope(|scope| {
+        for _ in 0..workers.min(selected.len()) {
+            scope.spawn(|| loop {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(scenario) = selected.get(index) else {
+                    break;
+                };
+                let mut foley = Foley::new();
+                let mut mix = Mixdown::new(&bank, step_seconds);
+                let mut heard_all = Vec::new();
+                run(scenario, SCENARIO_WIDTH, SCENARIO_HEIGHT, |_, _, world| {
+                    let heard = foley.hear(world);
+                    mix.step(&heard);
+                    heard_all.push(heard);
+                });
+                let samples = mix.finish();
+                let path = dir.join(format!("{}.wav", scenario.name));
+                fs::write(&path, wav_bytes(&samples)).expect("write sound");
+                let line = sound_summary(scenario.name, &heard_all, &samples);
+                finished.lock().expect("sound results").push((index, line));
+            });
+        }
+    });
+    let mut lines = finished.into_inner().expect("sound results");
+    lines.sort_by_key(|(index, _)| *index);
+    let report: String = lines.into_iter().map(|(_, line)| line + "\n").collect();
+    let report_path = dir.join("sound_report.txt");
+    fs::write(&report_path, &report).expect("write sound report");
+    print!("{report}");
+    println!(
+        "wrote {} WAV files and {}",
+        selected.len(),
+        report_path.display()
+    );
+}
+
+/// One line on what a scenario sounded like: each kind of cue, how many and
+/// the strongest; the loudest the air and the knife got; and the mix's peak,
+/// its loudest 50 ms, and its length.
+fn sound_summary(name: &str, heard: &[Heard], samples: &[f32]) -> String {
+    let cues: Vec<String> = CueKind::ALL
+        .iter()
+        .map(|&kind| {
+            let strengths: Vec<f32> = heard
+                .iter()
+                .flat_map(|step| step.cues.iter())
+                .filter(|cue| cue.kind == kind)
+                .map(|cue| cue.strength)
+                .collect();
+            match strengths.iter().copied().reduce(f32::max) {
+                Some(strongest) => format!("{} {} ({strongest:.2})", kind.name(), strengths.len()),
+                None => format!("{} 0", kind.name()),
+            }
+        })
+        .collect();
+    let loudest = |bed: fn(&Heard) -> f32| heard.iter().map(bed).fold(0.0f32, f32::max);
+    let decibels = |level: f32| 20.0 * level.max(1.0e-6).log10();
+    let peak = samples
+        .iter()
+        .fold(0.0f32, |top, sample| top.max(sample.abs()));
+    let window = (0.05 * rp::sound::SAMPLE_RATE as f64) as usize;
+    let loudest_window = samples
+        .chunks(window)
+        .map(|chunk| (chunk.iter().map(|s| s * s).sum::<f32>() / chunk.len() as f32).sqrt())
+        .fold(0.0f32, f32::max);
+    format!(
+        "{name:<30} {} | rush {:.2} slice {:.2} | peak {:.1} dBFS, loudest 50 ms {:.1} dBFS, {:.2} s",
+        cues.join("  "),
+        loudest(|step| step.beds.rush),
+        loudest(|step| step.beds.slice),
+        decibels(peak),
+        decibels(loudest_window),
+        samples.len() as f64 / rp::sound::SAMPLE_RATE as f64
+    )
 }
 
 struct SweepRun {

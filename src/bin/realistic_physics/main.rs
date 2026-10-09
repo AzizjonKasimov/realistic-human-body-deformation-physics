@@ -1,6 +1,7 @@
 use macroquad::prelude::*;
 use realistic_physics as rp;
 
+mod audio;
 #[cfg(not(target_arch = "wasm32"))]
 mod capture;
 mod selftest;
@@ -21,15 +22,17 @@ enum ControlAction {
     ToggleDebug,
     TogglePause,
     Reset,
+    ToggleMute,
 }
 
-const KEY_CONTROLS: [(KeyCode, ControlAction); 6] = [
+const KEY_CONTROLS: [(KeyCode, ControlAction); 7] = [
     (KeyCode::H, ControlAction::Tool(rp::ToolMode::Heavy)),
     (KeyCode::B, ControlAction::Tool(rp::ToolMode::Blunt)),
     (KeyCode::S, ControlAction::Tool(rp::ToolMode::Sharp)),
     (KeyCode::D, ControlAction::ToggleDebug),
     (KeyCode::Space, ControlAction::TogglePause),
     (KeyCode::R, ControlAction::Reset),
+    (KeyCode::M, ControlAction::ToggleMute),
 ];
 
 const FLOOR_HEIGHT: f32 = 38.0;
@@ -45,6 +48,8 @@ struct AppState {
     /// Window size and button size the body was fitted to.
     built_for: (f32, f32, bool),
     running: bool,
+    /// The sound is switched off.
+    muted: bool,
     pointer_down: bool,
     debug_overlay: bool,
     accumulator: f64,
@@ -110,6 +115,7 @@ impl AppState {
             frame: rp::body_frame(width, height),
             built_for: (0.0, 0.0, false),
             running: true,
+            muted: false,
             pointer_down: false,
             debug_overlay: false,
             accumulator: 0.0,
@@ -259,12 +265,16 @@ async fn main() {
         return;
     }
     let mut app = AppState::new(screen_width() as f64, screen_height() as f64);
+    let mut audio = audio::Audio::start();
 
     loop {
         let dt = get_frame_time().min(0.05) as f64;
-        handle_input(&mut app);
+        if handle_input(&mut app) {
+            audio.click();
+        }
         refit_body(&mut app);
-        step_simulation(&mut app, dt);
+        step_simulation(&mut app, dt, &mut audio);
+        audio.play(dt as f32, app.muted, app.running);
         // Draw the body between the last two simulation steps, so it moves
         // as smoothly as the screen refreshes.
         let alpha = app.accumulator / app.world.materials().fixed_dt;
@@ -275,7 +285,9 @@ async fn main() {
     }
 }
 
-fn handle_input(app: &mut AppState) {
+/// Reads the pointer and keys; true when a control button or key was used.
+fn handle_input(app: &mut AppState) -> bool {
+    let mut used_control = false;
     let (mx, my) = mouse_position();
     if is_mouse_button_pressed(MouseButton::Left) {
         let hints = control_hints(app, &render_palette());
@@ -285,6 +297,7 @@ fn handle_input(app: &mut AppState) {
             app.ui_capture = true;
             if let Some(action) = layout.action_at(point) {
                 apply_control(app, action);
+                used_control = true;
             }
         }
     }
@@ -319,8 +332,10 @@ fn handle_input(app: &mut AppState) {
     for (key, action) in KEY_CONTROLS {
         if is_key_pressed(key) {
             apply_control(app, action);
+            used_control = true;
         }
     }
+    used_control
 }
 
 fn apply_control(app: &mut AppState, action: ControlAction) {
@@ -334,10 +349,13 @@ fn apply_control(app: &mut AppState, action: ControlAction) {
         ControlAction::ToggleDebug => app.debug_overlay = !app.debug_overlay,
         ControlAction::TogglePause => app.running = !app.running,
         ControlAction::Reset => app.rebuild_body(screen_width(), screen_height()),
+        ControlAction::ToggleMute => app.muted = !app.muted,
     }
 }
 
-fn step_simulation(app: &mut AppState, frame_dt: f64) {
+/// Runs the simulation steps this frame's time covers, letting `audio` hear
+/// each one.
+fn step_simulation(app: &mut AppState, frame_dt: f64, audio: &mut audio::Audio) {
     if !app.running {
         return;
     }
@@ -362,6 +380,7 @@ fn step_simulation(app: &mut AppState, frame_dt: f64) {
         };
         app.world.capture_motion(&mut app.earlier);
         step_world(app, &input, screen_width() as f64, screen_height() as f64);
+        audio.hear(&app.world);
         app.accumulator -= fixed_dt;
     }
     if steps > 0 {
@@ -1831,12 +1850,24 @@ fn hud_bottom(width: f32) -> f32 {
 #[derive(Clone, Copy)]
 struct ControlHint {
     key: &'static str,
-    label: &'static str,
+    label: HintLabel,
     accent: Color,
     active: bool,
     /// What tapping or clicking the hint does; `None` for instruction-only hints.
     action: Option<ControlAction>,
 }
+
+#[derive(Clone, Copy)]
+enum HintLabel {
+    Text(&'static str),
+    /// A speaker, with sound waves, or struck out while the sound is off.
+    Speaker {
+        muted: bool,
+    },
+}
+
+/// Width of the speaker drawn as a hint label.
+const SPEAKER_WIDTH: f32 = 17.0;
 
 struct ControlChip {
     rect: Rect,
@@ -1857,56 +1888,63 @@ impl ControlLayout {
     }
 }
 
-fn control_hints(app: &AppState, palette: &RenderPalette) -> [ControlHint; 7] {
+fn control_hints(app: &AppState, palette: &RenderPalette) -> [ControlHint; 8] {
     [
         ControlHint {
             key: "DRAG",
-            label: "strike",
+            label: HintLabel::Text("strike"),
             accent: palette.tool_accent,
             active: app.pointer_down,
             action: None,
         },
         ControlHint {
             key: "H",
-            label: "hammer",
+            label: HintLabel::Text("hammer"),
             accent: tool_color(rp::ToolMode::Heavy),
             active: app.tool == rp::ToolMode::Heavy,
             action: Some(ControlAction::Tool(rp::ToolMode::Heavy)),
         },
         ControlHint {
             key: "B",
-            label: "bat",
+            label: HintLabel::Text("bat"),
             accent: tool_color(rp::ToolMode::Blunt),
             active: app.tool == rp::ToolMode::Blunt,
             action: Some(ControlAction::Tool(rp::ToolMode::Blunt)),
         },
         ControlHint {
             key: "S",
-            label: "knife",
+            label: HintLabel::Text("knife"),
             accent: tool_color(rp::ToolMode::Sharp),
             active: app.tool == rp::ToolMode::Sharp,
             action: Some(ControlAction::Tool(rp::ToolMode::Sharp)),
         },
         ControlHint {
             key: "D",
-            label: "debug",
+            label: HintLabel::Text("debug"),
             accent: rgba(94, 176, 108, 230),
             active: app.debug_overlay,
             action: Some(ControlAction::ToggleDebug),
         },
         ControlHint {
             key: "SPACE",
-            label: "pause",
+            label: HintLabel::Text("pause"),
             accent: rgba(211, 93, 70, 230),
             active: !app.running,
             action: Some(ControlAction::TogglePause),
         },
         ControlHint {
             key: "R",
-            label: "reset",
+            label: HintLabel::Text("reset"),
             accent: palette.hud_border,
             active: false,
             action: Some(ControlAction::Reset),
+        },
+        ControlHint {
+            key: "M",
+            label: HintLabel::Speaker { muted: app.muted },
+            accent: rgba(211, 93, 70, 230),
+            active: app.muted,
+            action: Some(ControlAction::ToggleMute),
         },
     ]
 }
@@ -1978,8 +2016,11 @@ fn draw_controls_hint(ctx: &RenderContext) {
 
 fn control_hint_width(hint: ControlHint) -> f32 {
     let key = measure_text(hint.key, None, 15, 1.0);
-    let label = measure_text(hint.label, None, 15, 1.0);
-    key.width + label.width + 32.0
+    let label = match hint.label {
+        HintLabel::Text(text) => measure_text(text, None, 15, 1.0).width,
+        HintLabel::Speaker { .. } => SPEAKER_WIDTH,
+    };
+    key.width + label + 32.0
 }
 
 fn draw_control_hint(ctx: &RenderContext, rect: Rect, hint: ControlHint, hovered: bool) {
@@ -2014,13 +2055,50 @@ fn draw_control_hint(ctx: &RenderContext, rect: Rect, hint: ControlHint, hovered
         with_alpha(hint.accent, 0.72),
     );
     draw_text(hint.key, rect.x + 9.0, text_y, 15.0, ctx.palette.hud_text);
-    draw_text(
-        hint.label,
-        rect.x + key_width + 11.0,
-        text_y,
-        15.0,
-        ctx.palette.hud_muted,
+    let label_x = rect.x + key_width + 11.0;
+    match hint.label {
+        HintLabel::Text(text) => {
+            draw_text(text, label_x, text_y, 15.0, ctx.palette.hud_muted);
+        }
+        HintLabel::Speaker { muted } => {
+            draw_speaker(label_x, rect.y + rect.h * 0.5, muted, ctx.palette.hud_muted)
+        }
+    }
+}
+
+/// A speaker `SPEAKER_WIDTH` wide from `x`, centered on `y`: sound waves in
+/// front of it, or a cross while the sound is off.
+fn draw_speaker(x: f32, y: f32, muted: bool, color: Color) {
+    draw_rectangle(x, y - 2.5, 3.0, 5.0, color);
+    draw_triangle(
+        vec2(x + 3.0, y - 2.5),
+        vec2(x + 8.0, y - 6.5),
+        vec2(x + 8.0, y + 6.5),
+        color,
     );
+    draw_triangle(
+        vec2(x + 3.0, y - 2.5),
+        vec2(x + 8.0, y + 6.5),
+        vec2(x + 3.0, y + 2.5),
+        color,
+    );
+    if muted {
+        draw_line(x + 11.0, y - 3.5, x + 17.0, y + 3.5, 1.5, color);
+        draw_line(x + 11.0, y + 3.5, x + 17.0, y - 3.5, 1.5, color);
+        return;
+    }
+    for radius in [4.5f32, 8.0] {
+        // An arc of a few straight pieces, opening away from the speaker.
+        let pieces = 6;
+        let point = |i: usize| {
+            let angle = -0.8 + 1.6 * i as f32 / pieces as f32;
+            vec2(x + 8.0 + radius * angle.cos(), y + radius * angle.sin())
+        };
+        for i in 0..pieces {
+            let (a, b) = (point(i), point(i + 1));
+            draw_line(a.x, a.y, b.x, b.y, 1.3, color);
+        }
+    }
 }
 
 fn draw_debug_panel(ctx: &RenderContext) {
