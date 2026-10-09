@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
 
+mod blood;
 mod body;
 mod cuts;
 mod grid;
@@ -9,6 +10,7 @@ mod outline;
 mod phases;
 mod tools;
 
+pub use blood::{BloodTrail, SkinSpot};
 pub use body::{
     body_frame, body_frame_between, create_layered_body, create_layered_body_in, BodyFrame,
 };
@@ -285,13 +287,16 @@ pub struct Materials {
     pub fluid_damping: f64,
     pub fluid_gravity_scale: f64,
     pub fluid_lifetime: f64,
-    pub fluid_floor_friction: f64,
+    /// How much of its speed a drop keeps bouncing off a side of the world.
+    pub fluid_wall_bounce: f64,
     pub fluid_impact_scale: f64,
     pub blood_volume_capacity: f64,
     pub blood_loss_per_wound_particle: f64,
     pub blood_pressure_min_scale: f64,
     pub blood_turgor_min_scale: f64,
     pub max_blood_stains: usize,
+    /// Most stretches of blood trail the skin keeps; the oldest go first.
+    pub max_blood_trails: usize,
     pub blood_stain_merge_radius: f64,
     pub blood_stain_decay: f64,
     pub blood_stain_spread: f64,
@@ -482,15 +487,16 @@ impl Default for Materials {
             max_fresh_blood_per_step: 15,
             max_wound_leak_per_step: 4,
             fluid_damping: 0.982,
-            fluid_gravity_scale: 0.42,
+            fluid_gravity_scale: 1.0,
             fluid_lifetime: 4.8,
-            fluid_floor_friction: 0.48,
+            fluid_wall_bounce: 0.48,
             fluid_impact_scale: 0.03,
             blood_volume_capacity: 1.0,
             blood_loss_per_wound_particle: 0.00016,
             blood_pressure_min_scale: 0.34,
             blood_turgor_min_scale: 0.55,
             max_blood_stains: 320,
+            max_blood_trails: 2400,
             blood_stain_merge_radius: 18.0,
             blood_stain_decay: 0.008,
             blood_stain_spread: 2.4,
@@ -867,6 +873,14 @@ pub struct FluidParticle {
     pub intensity: f64,
     pub settled: bool,
     pub stained: bool,
+    /// Where the drop sits on the skin while it clings to it and runs down
+    /// it; `None` while it flies or lies on the floor (see `blood.rs`).
+    pub on_skin: Option<SkinSpot>,
+    /// Where on the skin the drop's trail last reached.
+    pub trail_from: Option<SkinSpot>,
+    /// How far sideways a drop on the skin drifts for each pixel it runs
+    /// down.
+    pub drift: f64,
 }
 
 impl Default for FluidParticle {
@@ -880,6 +894,9 @@ impl Default for FluidParticle {
             intensity: 1.0,
             settled: false,
             stained: false,
+            on_skin: None,
+            trail_from: None,
+            drift: 0.0,
         }
     }
 }
@@ -998,6 +1015,15 @@ pub struct Stats {
     pub blood_loss: f64,
     pub fracture_marrow_sources: i32,
     pub blood_stain_deposits: i32,
+    /// Blood that welled onto the skin, in particles.
+    pub skin_blood_drops: i32,
+    /// Drops of it that ran off the body's edge and dripped.
+    pub blood_drips: i32,
+    /// The part of `skin_blood_drops` that welled from fresh cuts rather
+    /// than leaking from open wounds.
+    pub fresh_blood_welled: i32,
+    /// How far blood on the skin has run, in pixels of trail.
+    pub blood_trail_length: f64,
     pub contusion_events: i32,
     pub tissue_fatigue_events: i32,
     pub tissue_plastic_events: i32,
@@ -1341,6 +1367,9 @@ pub struct World {
     organs: Vec<OrganRegion>,
     fluids: Vec<FluidParticle>,
     blood_stains: Vec<BloodStain>,
+    /// The trails blood on the skin left running down it (see `blood.rs`).
+    blood_trails: Vec<BloodTrail>,
+    blood_trail_write_cursor: usize,
     wounds: Vec<WoundSource>,
     stats: Stats,
     debug: ContactDebug,
@@ -1407,6 +1436,8 @@ impl World {
             organs: Vec::new(),
             fluids: Vec::new(),
             blood_stains: Vec::new(),
+            blood_trails: Vec::new(),
+            blood_trail_write_cursor: 0,
             wounds: Vec::new(),
             stats: Stats::default(),
             debug: ContactDebug::default(),
@@ -1882,6 +1913,7 @@ impl World {
         self.timed("skin flaps", Self::delaminate_skin_flaps_from_cut_edges);
         self.timed("fragment tips", Self::collide_bone_fragments);
         self.timed("triangle damage", Self::update_triangle_damage);
+        self.timed("blood on skin", |world| world.run_blood_on_skin(dt));
         self.timed("fragment sleep", Self::update_fragment_sleep_states);
         self.timed("metrics", |world| {
             world.debug.active_fluids = world.active_fluid_count() as i32;
@@ -2326,21 +2358,25 @@ impl World {
                 max_life,
                 life: max_life,
                 intensity: clamped_intensity,
-                settled: false,
-                stained: false,
+                ..FluidParticle::default()
             };
-
-            if self.fluids.len() < self.materials.max_fluid_particles {
-                self.fluids.push(particle);
-            } else if !self.fluids.is_empty() {
-                let index = self.fluid_write_cursor % self.fluids.len();
-                self.fluids[index] = particle;
-                self.fluid_write_cursor = (self.fluid_write_cursor + 1) % self.fluids.len();
-                self.debug.fluid_budget_replacements += 1;
-            }
-            self.stats.emitted_fluid_particles += 1;
-            self.debug.fluid_emitted += 1;
+            self.add_fluid(particle);
         }
+    }
+
+    /// Adds a blood particle, in place of the one after the last replaced
+    /// when the budget is full.
+    fn add_fluid(&mut self, particle: FluidParticle) {
+        if self.fluids.len() < self.materials.max_fluid_particles {
+            self.fluids.push(particle);
+        } else if !self.fluids.is_empty() {
+            let index = self.fluid_write_cursor % self.fluids.len();
+            self.fluids[index] = particle;
+            self.fluid_write_cursor = (self.fluid_write_cursor + 1) % self.fluids.len();
+            self.debug.fluid_budget_replacements += 1;
+        }
+        self.stats.emitted_fluid_particles += 1;
+        self.debug.fluid_emitted += 1;
     }
 
     fn update_blood_stains(&mut self, dt: f64) {
@@ -2965,6 +3001,10 @@ impl World {
             if fluid.life <= 0.0 {
                 continue;
             }
+            if fluid.on_skin.is_some() {
+                // The skin carries it (see `blood.rs`).
+                continue;
+            }
             if fluid.settled {
                 fluid.life = (fluid.life - dt * 0.45).max(0.0);
                 continue;
@@ -2978,17 +3018,18 @@ impl World {
             let margin = fluid.radius + 1.0;
             if fluid.position.x < margin {
                 fluid.position.x = margin;
-                fluid.previous.x = fluid.position.x + vx * self.materials.fluid_floor_friction;
+                fluid.previous.x = fluid.position.x + vx * self.materials.fluid_wall_bounce;
             } else if fluid.position.x > width - margin {
                 fluid.position.x = width - margin;
-                fluid.previous.x = fluid.position.x + vx * self.materials.fluid_floor_friction;
+                fluid.previous.x = fluid.position.x + vx * self.materials.fluid_wall_bounce;
             }
             if fluid.position.y > floor_y - fluid.radius {
+                // Blood that lands spreads where it falls into the pool there;
+                // it neither bounces nor slides.
                 fluid.position.y = floor_y - fluid.radius;
-                fluid.previous.x = fluid.position.x + vx * self.materials.fluid_floor_friction;
-                fluid.previous.y = fluid.position.y + vy * self.materials.fluid_floor_friction;
+                fluid.previous = fluid.position;
                 let floor_hit_speed = vy.abs() + vx.abs() * 0.32;
-                if !fluid.stained && floor_hit_speed > 0.45 {
+                if !fluid.stained {
                     let stain_radius = fluid.radius
                         * (self.materials.blood_stain_spread
                             + fluid.intensity * 0.78
@@ -3006,9 +3047,7 @@ impl World {
                     ));
                     fluid.stained = true;
                 }
-                if vx.abs() + vy.abs() < 1.2 {
-                    fluid.settled = true;
-                }
+                fluid.settled = true;
             }
         }
         for (position, radius, intensity) in stain_deposits {
@@ -3100,6 +3139,7 @@ impl World {
                     45.0 + effective_pressure * (38.0 + spray * 92.0),
                     wound.radius * (0.64 + wound.depth * 0.18),
                     0.58 + wound.depth * 0.42 + spray * 0.18,
+                    spray,
                 ));
             }
             wound.pressure = (wound.pressure
@@ -3124,7 +3164,7 @@ impl World {
         }
 
         let mut leak_left = self.materials.max_wound_leak_per_step;
-        for (position, direction, count, speed, radius, intensity) in emissions {
+        for (position, direction, count, speed, radius, intensity, spray) in emissions {
             let count = count.min(leak_left);
             if count <= 0 {
                 break;
@@ -3132,7 +3172,13 @@ impl World {
             leak_left -= count;
             self.drain_blood_volume(count, intensity);
             let before = self.stats.emitted_fluid_particles;
-            self.release_blood(position, direction, count, speed, radius, intensity);
+            // A fresh wound under pressure spurts; otherwise blood wells out
+            // onto the skin and runs down it.
+            if spray > blood::WELLING_SPRAY {
+                self.release_blood(position, direction, count, speed, radius, intensity);
+            } else {
+                self.well_blood(position, direction, count, speed, radius, intensity);
+            }
             let emitted = self.stats.emitted_fluid_particles - before;
             self.stats.wound_fluid_particles += emitted;
             self.debug.wound_leaks += emitted;

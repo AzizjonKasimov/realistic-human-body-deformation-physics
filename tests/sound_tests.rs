@@ -91,6 +91,18 @@ fn knife_slices_without_thuds() {
 }
 
 #[test]
+fn a_knife_cut_wells_blood_without_spatter() {
+    // The cut's blood wells onto the skin and runs down it; none flies off
+    // to land.
+    let heard = hear_scenario("torso_sharp_cut");
+    assert!(
+        cues(&heard, CueKind::Spatter).is_empty(),
+        "a knife cut's welling blood should not spatter: {:?}",
+        cues(&heard, CueKind::Spatter)
+    );
+}
+
+#[test]
 fn a_new_body_is_heard_silently() {
     // A reset swaps a hurt body for a fresh one; its counts start again.
     let scenario = scenario("torso_heavy_high").expect("scenario");

@@ -1068,7 +1068,8 @@ impl World {
         } else {
             blade_normal
         };
-        self.emit_fluid(
+        // A blade's cut wells blood onto the skin rather than spattering it.
+        self.well_fresh_blood(
             center,
             normal,
             if skin { 6 } else { 4 },

@@ -30,6 +30,8 @@ struct VisualExpectations {
     min_visible_contusions: usize,
     min_visible_wound_sources: usize,
     min_visible_fluid_particles: usize,
+    /// Stretches of trail blood left running down the skin.
+    min_visible_blood_trails: usize,
     min_visible_blood_stains: usize,
     min_lacerated_vessels: usize,
     min_fragment_vessel_lacerations: usize,
@@ -62,6 +64,7 @@ struct VisualMetrics {
     visible_wound_sources: usize,
     active_fluid_particles: usize,
     visible_fluid_particles: usize,
+    visible_blood_trails: usize,
     visible_blood_stains: usize,
     lacerated_vessels: usize,
     fragment_vessel_lacerations: usize,
@@ -151,14 +154,16 @@ fn visual_scenarios() -> Vec<VisualScenario> {
             intent: "cut",
             strike: tuned_strike("torso_sharp_cut"),
             // A knife cut on the belly: a cut through skin and muscle that
-            // opens, reaches a vessel and an organ, and breaks no bone.
+            // opens, reaches a vessel and an organ, and breaks no bone. Its
+            // blood wells out and runs down the skin in trickles.
             expectations: VisualExpectations {
                 min_skin_wound_edges: 8,
                 min_incision_segments: 8,
                 min_muscle_fiber_tears: 4,
                 min_opened_cut_insides: 3,
                 min_visible_wound_sources: 3,
-                min_visible_fluid_particles: 100,
+                min_visible_fluid_particles: 20,
+                min_visible_blood_trails: 60,
                 min_lacerated_vessels: 1,
                 min_organ_penetrations: 1,
                 min_organ_damage: 0.4,
@@ -172,16 +177,18 @@ fn visual_scenarios() -> Vec<VisualScenario> {
             intent: "settle",
             strike: tuned_strike("torso_heavy_fragment_settle"),
             // A full-force sledgehammer blow to the chest, left to settle:
-            // broken arm and ribs, deep bruising, torn flesh and bleeding.
-            // Breaking the arm takes much of the blow, so the organs behind
-            // it are only bruised.
+            // broken arm and ribs, deep bruising, torn flesh and bleeding,
+            // which spatters, then runs down the skin and drips. Breaking
+            // the arm takes much of the blow, so the organs behind it are
+            // only bruised.
             expectations: VisualExpectations {
                 min_skin_wound_edges: 30,
                 min_muscle_fiber_tears: 10,
                 min_failed_muscle_voids: 30,
                 min_visible_contusions: 25,
                 min_visible_wound_sources: 8,
-                min_visible_fluid_particles: 200,
+                min_visible_fluid_particles: 120,
+                min_visible_blood_trails: 100,
                 min_visible_blood_stains: 4,
                 min_fractured_bones: 6,
                 min_rib_fractures: 1,
@@ -289,6 +296,12 @@ fn inspect_visual_damage(world: &rp::World) -> VisualMetrics {
         }
     }
 
+    metrics.visible_blood_trails = world
+        .blood_trails()
+        .iter()
+        .filter(|trail| world.blood_trail_ends(trail).is_some())
+        .count();
+
     metrics.visible_blood_stains = world
         .blood_stains()
         .iter()
@@ -332,6 +345,7 @@ fn inspect_visual_damage(world: &rp::World) -> VisualMetrics {
         + metrics.visible_contusions
         + metrics.visible_wound_sources
         + metrics.visible_fluid_particles
+        + metrics.visible_blood_trails
         + metrics.visible_blood_stains
         + metrics.lacerated_vessels
         + metrics.fractured_bones
@@ -412,6 +426,13 @@ fn validate_visual_metrics(
         "visible_fluid_particles",
         metrics.visible_fluid_particles,
         scenario.expectations.min_visible_fluid_particles,
+        warnings,
+    );
+    check_min(
+        scenario,
+        "visible_blood_trails",
+        metrics.visible_blood_trails,
+        scenario.expectations.min_visible_blood_trails,
         warnings,
     );
     check_min(
@@ -590,6 +611,7 @@ fn draw_panel(out: &mut String, capture: &VisualCapture) {
     draw_tissue_layers(out, &capture.world);
     draw_bones(out, &capture.world);
     draw_skin_wounds(out, &capture.world);
+    draw_skin_blood(out, &capture.world);
     draw_major_vessels(out, &capture.world);
     draw_wound_sources(out, &capture.world);
     draw_blood_stains(out, &capture.world);
@@ -965,9 +987,30 @@ fn draw_blood_stains(out: &mut String, world: &rp::World) {
     }
 }
 
+/// Blood on the skin: the trails it left running down, then the drops still
+/// on it.
+fn draw_skin_blood(out: &mut String, world: &rp::World) {
+    for trail in world.blood_trails() {
+        if let Some((from, to)) = world.blood_trail_ends(trail) {
+            write_line(out, from, to, trail.width.max(0.7), "#920a14", 0.9);
+        }
+    }
+    for fluid in world.fluids() {
+        let Some(spot) = fluid.on_skin else {
+            continue;
+        };
+        if fluid.life <= 0.0 {
+            continue;
+        }
+        if let Some(center) = world.skin_spot_position(spot) {
+            write_circle(out, center, (fluid.radius * 0.5).max(0.7), "#9c0c16", 0.95);
+        }
+    }
+}
+
 fn draw_fluids(out: &mut String, world: &rp::World) {
     for fluid in world.fluids() {
-        if fluid.life <= 0.0 {
+        if fluid.life <= 0.0 || fluid.on_skin.is_some() {
             continue;
         }
         let age = 1.0 - (fluid.life / fluid.max_life.max(0.01)).clamp(0.0, 1.0);
@@ -1000,7 +1043,7 @@ fn draw_label(out: &mut String, capture: &VisualCapture) {
     .expect("write label title");
     writeln!(
         out,
-        "<text class=\"muted\" x=\"34\" y=\"69\">wound edges={} incision={} rims={} fiberT={} voids={} cut_insides={} bruises={} wounds={} fluids={} stains={}</text>",
+        "<text class=\"muted\" x=\"34\" y=\"69\">wound edges={} incision={} rims={} fiberT={} voids={} cut_insides={} bruises={} wounds={} fluids={} trails={} stains={}</text>",
         metrics.skin_wound_edges,
         metrics.incision_segments,
         metrics.wound_rim_edges,
@@ -1010,6 +1053,7 @@ fn draw_label(out: &mut String, capture: &VisualCapture) {
         metrics.visible_contusions,
         metrics.visible_wound_sources,
         metrics.visible_fluid_particles,
+        metrics.visible_blood_trails,
         metrics.visible_blood_stains
     )
     .expect("write label line one");
@@ -1055,7 +1099,7 @@ fn write_summary(path: &Path, captures: &[VisualCapture]) -> std::io::Result<()>
     let mut out = BufWriter::new(File::create(path)?);
     writeln!(
         out,
-        "scenario,intent,tool,skin_wound_edges,incision_segments,wound_rim_edges,exposed_muscle_triangles,stats_muscle_fiber_tears,stats_joint_ligament_damage_events,failed_muscle_voids,opened_cut_insides,visible_contusions,visible_wound_sources,active_wound_sources,visible_fluid_particles,active_fluid_particles,visible_blood_stains,lacerated_vessels,fractured_bones,rib_fractures,fracture_caps,final_free_fragments,final_sleeping_fragments,damage_primitives,max_point_load,max_point_exposure,max_contusion,max_muscle_damage,stats_skin_tears,stats_muscle_tears,stats_muscle_crush_ruptures,stats_cavity_pressure_events,stats_cavity_ruptures,peak_cavity_pressure,peak_cavity_collapse,stats_organ_damage_events,stats_organ_penetrations,stats_rib_organ_punctures,stats_organ_ruptures,peak_organ_damage,stats_skin_flap_detachments,stats_vessel_lacerations,stats_fragment_vessel_lacerations,stats_fragment_skin_punctures,stats_bone_joint_subluxations,stats_fracture_marrow_sources,stats_contusion_events,stats_opened_wounds,stats_emitted_fluid,stats_wound_fluid,stats_blood_loss,final_blood_volume,final_blood_turgor,stats_blood_stain_deposits"
+        "scenario,intent,tool,skin_wound_edges,incision_segments,wound_rim_edges,exposed_muscle_triangles,stats_muscle_fiber_tears,stats_joint_ligament_damage_events,failed_muscle_voids,opened_cut_insides,visible_contusions,visible_wound_sources,active_wound_sources,visible_fluid_particles,active_fluid_particles,visible_blood_stains,lacerated_vessels,fractured_bones,rib_fractures,fracture_caps,final_free_fragments,final_sleeping_fragments,damage_primitives,max_point_load,max_point_exposure,max_contusion,max_muscle_damage,stats_skin_tears,stats_muscle_tears,stats_muscle_crush_ruptures,stats_cavity_pressure_events,stats_cavity_ruptures,peak_cavity_pressure,peak_cavity_collapse,stats_organ_damage_events,stats_organ_penetrations,stats_rib_organ_punctures,stats_organ_ruptures,peak_organ_damage,stats_skin_flap_detachments,stats_vessel_lacerations,stats_fragment_vessel_lacerations,stats_fragment_skin_punctures,stats_bone_joint_subluxations,stats_fracture_marrow_sources,stats_contusion_events,stats_opened_wounds,stats_emitted_fluid,stats_wound_fluid,stats_blood_loss,final_blood_volume,final_blood_turgor,stats_blood_stain_deposits,visible_blood_trails,stats_skin_blood_drops,stats_blood_drips,stats_blood_trail_length"
     )?;
     for capture in captures {
         let metrics = capture.metrics;
@@ -1115,6 +1159,10 @@ fn write_summary(path: &Path, captures: &[VisualCapture]) -> std::io::Result<()>
             format!("{:.5}", capture.world.blood_volume_fraction()),
             format!("{:.5}", capture.world.blood_turgor_scale()),
             stats.blood_stain_deposits.to_string(),
+            metrics.visible_blood_trails.to_string(),
+            stats.skin_blood_drops.to_string(),
+            stats.blood_drips.to_string(),
+            format!("{:.1}", stats.blood_trail_length),
         ];
         writeln!(out, "{}", fields.join(","))?;
     }

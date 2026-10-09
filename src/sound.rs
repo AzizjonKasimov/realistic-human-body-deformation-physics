@@ -125,7 +125,8 @@ struct Tally {
     speed: f64,
     fractures: i32,
     torn: i32,
-    /// Blood drops released, without those leaking from wounds.
+    /// Blood drops fresh injuries threw out: not those leaking from wounds,
+    /// nor those welling from a cut onto the skin, which land nowhere.
     fresh_blood: i32,
 }
 
@@ -137,7 +138,9 @@ impl Tally {
             speed: world.debug().striker_speed,
             fractures: stats.fractured_bones,
             torn: stats.broken_skin + stats.broken_muscle,
-            fresh_blood: stats.emitted_fluid_particles - stats.wound_fluid_particles,
+            fresh_blood: stats.emitted_fluid_particles
+                - stats.wound_fluid_particles
+                - stats.fresh_blood_welled,
         }
     }
 

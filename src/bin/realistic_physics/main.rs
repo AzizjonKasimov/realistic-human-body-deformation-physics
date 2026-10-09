@@ -530,6 +530,7 @@ fn draw_body_layers(ctx: &RenderContext) {
     draw_cut_lips(ctx, rp::TissueLayer::Skin);
 
     draw_skin_wounds(ctx);
+    draw_skin_blood(ctx);
     if !ctx.anatomy {
         draw_major_vessels(ctx);
     }
@@ -1394,6 +1395,13 @@ fn draw_effects(ctx: &RenderContext) {
     draw_fluids(ctx);
 }
 
+/// How long blood outside the body takes to darken as it dries: minutes for
+/// a thin film.
+const BLOOD_DRYING_SECONDS: f64 = 240.0;
+
+/// Pools of blood on the floor, seen from in front: wide and flat, lying
+/// just in front of the foot of the wall. Fresh blood is red and glossy; it
+/// dries dark.
 fn draw_blood_stains(ctx: &RenderContext) {
     for stain in ctx.app.world.blood_stains() {
         if stain.intensity <= 0.025 {
@@ -1401,39 +1409,116 @@ fn draw_blood_stains(ctx: &RenderContext) {
         }
         let intensity = stain.intensity.clamp(0.0, 1.75) as f32;
         let radius = stain.radius.max(1.0) as f32;
-        let pos = to_mq(stain.position);
-        draw_soft_circle(
-            pos,
-            radius * (1.16 + intensity * 0.10),
-            5,
-            with_alpha(ctx.palette.blood_stain, 0.16 + intensity * 0.14),
+        let (x, y) = (stain.position.x as f32, ctx.floor_y + 2.0 + radius * 0.1);
+        let (wide, deep) = (radius * 1.2, radius * 0.26);
+        let dry = (stain.age / BLOOD_DRYING_SECONDS).clamp(0.0, 1.0) as f32;
+        let alpha = (0.42 + intensity * 0.32).min(0.9);
+        let body = mix(rgba(118, 6, 16, 255), ctx.palette.blood_stain, dry);
+        draw_ellipse(
+            x,
+            y,
+            wide + 1.2,
+            deep + 0.8,
+            0.0,
+            with_alpha(ctx.palette.blood_dark, alpha * 0.7),
         );
+        draw_ellipse(x, y, wide, deep, 0.0, with_alpha(body, alpha));
+        draw_ellipse(
+            x - wide * 0.25,
+            y - deep * 0.35,
+            wide * 0.35,
+            deep * 0.22,
+            0.0,
+            rgba(255, 190, 190, (36.0 * (1.0 - dry)) as u8),
+        );
+    }
+}
+
+/// Blood on the skin: the trails it left running down, then the drops still
+/// on it, all carried by the skin.
+fn draw_skin_blood(ctx: &RenderContext) {
+    let world = &ctx.app.world;
+    let mut stretches = Vec::new();
+    for trail in world.blood_trails() {
+        let Some((from, to)) = world.blood_trail_ends(trail) else {
+            continue;
+        };
+        // Wet blood is bright; it darkens to brown as it dries.
+        let dry = (trail.age / BLOOD_DRYING_SECONDS).clamp(0.0, 1.0) as f32;
+        let color = mix(rgba(146, 10, 20, 235), rgba(86, 20, 17, 225), dry);
+        stretches.push((from, to, trail.width.max(0.7) as f32, color));
+    }
+    let edge = with_alpha(ctx.palette.blood_dark, 0.22);
+    for &(from, to, width, _) in &stretches {
+        draw_line_vec(from, to, width + 1.0, edge);
+    }
+    for &(from, to, width, color) in &stretches {
+        draw_line_vec(from, to, width, color);
+        draw_circle(to.x as f32, to.y as f32, width * 0.5, color);
+    }
+    for fluid in world.fluids() {
+        let Some(spot) = fluid.on_skin else {
+            continue;
+        };
+        if fluid.life <= 0.0 {
+            continue;
+        }
+        let Some(center) = world.skin_spot_position(spot) else {
+            continue;
+        };
+        // The head of a trickle, joined to the trail behind it, with a dark
+        // rim and a glint.
+        let radius = (fluid.radius * 0.5).max(0.7) as f32;
+        let body = rgba(156, 12, 22, 245);
+        let behind = fluid
+            .trail_from
+            .and_then(|from| world.skin_spot_position(from));
+        if let Some(behind) = behind {
+            let width = (fluid.radius * 0.6) as f32;
+            draw_line_vec(behind, center, width + 1.0, edge);
+            draw_line_vec(behind, center, width, body);
+        }
+        let (x, y) = (center.x as f32, center.y as f32);
+        draw_circle(x, y, radius + 0.6, with_alpha(ctx.palette.blood_dark, 0.5));
+        draw_circle(x, y, radius, body);
         draw_circle(
-            pos.x,
-            pos.y,
-            radius * (0.58 + intensity * 0.08),
-            with_alpha(ctx.palette.blood_dark, 0.20 + intensity * 0.18),
+            x - radius * 0.3,
+            y - radius * 0.3,
+            radius * 0.3,
+            rgba(255, 200, 200, 70),
         );
     }
 }
 
 fn draw_fluids(ctx: &RenderContext) {
     for fluid in ctx.app.world.fluids() {
-        if fluid.life <= 0.0 {
+        if fluid.life <= 0.0 || fluid.on_skin.is_some() {
             continue;
         }
         let fade = (fluid.life / fluid.max_life.max(0.1)).clamp(0.0, 1.0);
         let fade_f = fade as f32;
-        let settled_darkening = if fluid.settled { 0.58 } else { 1.0 };
+        if fluid.settled {
+            // A drop come to rest spreads flat on the floor.
+            let radius = fluid.radius.max(1.0) as f32;
+            draw_ellipse(
+                fluid.position.x as f32,
+                ctx.floor_y + 1.5,
+                radius * 1.4,
+                radius * 0.32,
+                0.0,
+                with_alpha(rgba(96, 6, 14, 255), 0.35 + 0.5 * fade_f),
+            );
+            continue;
+        }
         let travel = sub(fluid.position, fluid.previous);
         let speed_alpha = (length(travel) / 18.0).clamp(0.0, 1.0) as f32;
         let color = Color::new(
-            (0.22 + 0.54 * fluid.intensity as f32 * fade_f) * settled_darkening,
-            (0.015 + 0.04 * fade_f) * settled_darkening,
-            (0.025 + 0.06 * fade_f) * settled_darkening,
+            0.22 + 0.54 * fluid.intensity as f32 * fade_f,
+            0.015 + 0.04 * fade_f,
+            0.025 + 0.06 * fade_f,
             (0.30 + 0.58 * fade_f).min(0.92),
         );
-        if speed_alpha > 0.08 && !fluid.settled {
+        if speed_alpha > 0.08 {
             draw_line_vec(
                 fluid.previous,
                 fluid.position,

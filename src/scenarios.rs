@@ -498,6 +498,8 @@ pub struct ScenarioExpectations {
     pub fluid_emitted: IntBand,
     pub wound_fluid: IntBand,
     pub blood_stain_deposits: IntBand,
+    /// How far blood ran down the skin, in pixels of trail.
+    pub blood_trail_length: DoubleBand,
     pub fracture_marrow_sources: IntBand,
     pub opened_wounds: IntBand,
     pub final_free_fragments: IntBand,
@@ -669,6 +671,11 @@ impl Scenario {
                 "blood_stain_deposits",
                 r.blood_stain_deposits,
                 e.blood_stain_deposits,
+            ),
+            real(
+                "blood_trail_length",
+                r.blood_trail_length,
+                e.blood_trail_length,
             ),
             real("blood_loss", r.blood_loss, e.blood_loss),
             real(
@@ -864,6 +871,12 @@ pub struct ScenarioResult {
     pub final_blood_volume: f64,
     pub final_blood_turgor: f64,
     pub blood_stain_deposits: i32,
+    /// Blood that welled onto the skin, in particles.
+    pub skin_blood_drops: i32,
+    /// Drops of it that ran off the body's edge and dripped.
+    pub blood_drips: i32,
+    /// How far it ran down the skin, in pixels of trail.
+    pub blood_trail_length: f64,
     pub fracture_marrow_sources: i32,
     pub opened_wounds: i32,
     pub max_active_wounds: i32,
@@ -1127,6 +1140,9 @@ impl ScenarioResult {
         self.final_blood_volume = world.blood_volume_fraction();
         self.final_blood_turgor = world.blood_turgor_scale();
         self.blood_stain_deposits = stats.blood_stain_deposits;
+        self.skin_blood_drops = stats.skin_blood_drops;
+        self.blood_drips = stats.blood_drips;
+        self.blood_trail_length = stats.blood_trail_length;
         self.fracture_marrow_sources = stats.fracture_marrow_sources;
         self.opened_wounds = stats.opened_wounds;
         self.fragment_hits = stats.fragment_tissue_hits;
@@ -1675,7 +1691,8 @@ pub fn scenarios() -> Vec<Scenario> {
             ),
             // A knife slashed across the belly cuts a line through skin and
             // muscle and can reach a vessel or organ, but breaks no bone. Blood
-            // from muscle cut under skin left whole bruises it.
+            // from muscle cut under skin left whole bruises it; the rest wells
+            // from the cut and runs down the skin.
             expectations: ScenarioExpectations {
                 bone_fractures: IntBand::range(0, 0),
                 rib_fractures: IntBand::range(0, 0),
@@ -1691,6 +1708,7 @@ pub fn scenarios() -> Vec<Scenario> {
                 vessel_lacerations: IntBand::range(0, 2),
                 cavity_ruptures: IntBand::range(0, 0),
                 blood_loss: DoubleBand::range(0.002, 0.05),
+                blood_trail_length: DoubleBand::range(150.0, f64::INFINITY),
                 ..e
             },
         },
@@ -1724,7 +1742,8 @@ pub fn scenarios() -> Vec<Scenario> {
                 None,
             ),
             // A knife drawn from the armpit down the inside of the arm cuts
-            // along it and opens the arteries there, but breaks no bone.
+            // along it and opens the arteries there, but breaks no bone; the
+            // blood runs down the arm.
             expectations: ScenarioExpectations {
                 bone_fractures: IntBand::range(0, 0),
                 rib_fractures: IntBand::range(0, 0),
@@ -1735,6 +1754,7 @@ pub fn scenarios() -> Vec<Scenario> {
                 cut_openings: IntBand::at_least(1),
                 vessel_lacerations: IntBand::range(1, 3),
                 bone_joint_subluxations: IntBand::range(0, 0),
+                blood_trail_length: DoubleBand::range(80.0, f64::INFINITY),
                 ..e
             },
         },
@@ -1809,6 +1829,8 @@ pub fn scenarios() -> Vec<Scenario> {
                 organ_ruptures: IntBand::range(0, 0),
                 cavity_ruptures: IntBand::range(0, 0),
                 blood_loss: DoubleBand::range(0.0003, 0.05),
+                // The cut's blood runs down the leg.
+                blood_trail_length: DoubleBand::range(150.0, f64::INFINITY),
                 ..e
             },
         },
