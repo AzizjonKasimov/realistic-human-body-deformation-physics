@@ -188,10 +188,6 @@ pub struct Materials {
     pub tear_propagation_fatigue_threshold: f64,
     pub tear_propagation_load_threshold: f64,
     pub max_tear_propagations_per_step: usize,
-    pub muscle_cut_transfer_exposure_threshold: f64,
-    pub muscle_cut_transfer_load_threshold: f64,
-    pub muscle_cut_transfer_radius: f64,
-    pub max_muscle_cut_transfers_per_step: usize,
     pub muscle_crush_rupture_load_threshold: f64,
     pub muscle_crush_rupture_damage_threshold: f64,
     pub max_muscle_crush_ruptures_per_step: usize,
@@ -399,10 +395,6 @@ impl Default for Materials {
             tear_propagation_fatigue_threshold: 0.22,
             tear_propagation_load_threshold: 620.0,
             max_tear_propagations_per_step: 4,
-            muscle_cut_transfer_exposure_threshold: 0.42,
-            muscle_cut_transfer_load_threshold: 520.0,
-            muscle_cut_transfer_radius: 12.0,
-            max_muscle_cut_transfers_per_step: 3,
             muscle_crush_rupture_load_threshold: 820.0,
             muscle_crush_rupture_damage_threshold: 1.0,
             max_muscle_crush_ruptures_per_step: 5,
@@ -1010,7 +1002,6 @@ pub struct Stats {
     pub tissue_fatigue_events: i32,
     pub tissue_plastic_events: i32,
     pub tear_propagations: i32,
-    pub muscle_cut_transfers: i32,
     pub muscle_crush_ruptures: i32,
     pub cavity_pressure_events: i32,
     pub cavity_ruptures: i32,
@@ -1112,7 +1103,6 @@ pub struct ContactDebug {
     pub tissue_plastic_events: i32,
     pub muscle_fiber_tears: i32,
     pub tear_propagations: i32,
-    pub muscle_cut_transfers: i32,
     pub muscle_crush_ruptures: i32,
     pub cavity_pressure_events: i32,
     pub cavity_ruptures: i32,
@@ -1211,7 +1201,6 @@ impl Default for ContactDebug {
             tissue_plastic_events: 0,
             muscle_fiber_tears: 0,
             tear_propagations: 0,
-            muscle_cut_transfers: 0,
             muscle_crush_ruptures: 0,
             cavity_pressure_events: 0,
             cavity_ruptures: 0,
@@ -1885,7 +1874,6 @@ impl World {
             world.update_organ_anchors();
         });
         self.timed("tear propagation", Self::propagate_skin_tears);
-        self.timed("cut transfer", Self::transfer_sharp_cut_to_exposed_muscle);
         self.timed("skin flaps", Self::delaminate_skin_flaps_from_cut_edges);
         self.timed("fragment tips", Self::collide_bone_fragments);
         self.timed("triangle damage", Self::update_triangle_damage);
@@ -4306,142 +4294,6 @@ impl World {
                 load / 1650.0,
                 1.55,
                 0.42,
-            );
-        }
-    }
-
-    fn transfer_sharp_cut_to_exposed_muscle(&mut self) {
-        let max_transfers = self.materials.max_muscle_cut_transfers_per_step;
-        if max_transfers == 0
-            || self.debug.tool != ToolMode::Sharp
-            || self.debug.impact <= EPSILON
-            || self.springs.is_empty()
-            || self.points.is_empty()
-        {
-            return;
-        }
-
-        // Only cuts made this step deepen, so a wound does not keep widening
-        // while the knife moves elsewhere.
-        let mut skin_openings = Vec::new();
-        for &index in &self.fresh_skin_cuts {
-            let Some(spring) = self.springs.get(index) else {
-                continue;
-            };
-            if !spring_opens_skin(spring) || spring.layer != TissueLayer::Skin {
-                continue;
-            }
-            if spring.a >= self.points.len() || spring.b >= self.points.len() {
-                continue;
-            }
-            let a = self.points[spring.a];
-            let b = self.points[spring.b];
-            let opening = midpoint(a.position, b.position);
-            let direction = normalized(subtract(b.position, a.position), Vec2 { x: 1.0, y: 0.0 });
-            let severity = a.exposure.max(b.exposure) + a.load.max(b.load) / 1600.0;
-            skin_openings.push((opening, direction, severity));
-        }
-        if skin_openings.is_empty() {
-            return;
-        }
-
-        let radius = self.materials.muscle_cut_transfer_radius.max(1.0);
-        let mut candidates = Vec::new();
-        for (index, spring) in self.springs.iter().enumerate() {
-            if spring.broken
-                || spring.cut
-                || spring.layer != TissueLayer::Muscle
-                || spring.a >= self.points.len()
-                || spring.b >= self.points.len()
-            {
-                continue;
-            }
-            let a = self.points[spring.a];
-            let b = self.points[spring.b];
-            let midpoint = midpoint(a.position, b.position);
-            let exposure = a.exposure.max(b.exposure);
-            let endpoint_load = a.load.max(b.load);
-            let fatigue = spring.fatigue.clamp(0.0, 1.35);
-            if exposure < self.materials.muscle_cut_transfer_exposure_threshold
-                && endpoint_load < self.materials.muscle_cut_transfer_load_threshold
-                && fatigue < self.materials.tear_propagation_fatigue_threshold
-            {
-                continue;
-            }
-
-            let spring_dir = normalized(subtract(b.position, a.position), Vec2 { x: 1.0, y: 0.0 });
-            let mut best_score = 0.0;
-            let mut best_normal = Vec2 { x: 0.0, y: -1.0 };
-            for (opening, opening_dir, severity) in &skin_openings {
-                let d = distance(midpoint, *opening);
-                if d > radius {
-                    continue;
-                }
-                let proximity = 1.0 - d / radius;
-                let alignment = cross(spring_dir, *opening_dir).abs().clamp(0.0, 1.0);
-                let score = proximity
-                    * (0.42 + alignment * 0.34)
-                    * (0.70 + exposure * 0.26 + fatigue * 0.18 + endpoint_load / 3400.0)
-                    * (0.78 + severity * 0.18);
-                if score > best_score {
-                    best_score = score;
-                    best_normal = normalized(
-                        Vec2 {
-                            x: -opening_dir.y,
-                            y: opening_dir.x - 0.28,
-                        },
-                        Vec2 { x: 0.0, y: -1.0 },
-                    );
-                }
-            }
-            if best_score > 0.18 {
-                candidates.push((best_score, index, best_normal));
-            }
-        }
-
-        if candidates.is_empty() {
-            return;
-        }
-        candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
-        let mut events = Vec::new();
-        for (_, index, normal) in candidates.into_iter().take(max_transfers) {
-            let spring = self.springs[index];
-            if spring.broken || spring.a >= self.points.len() || spring.b >= self.points.len() {
-                continue;
-            }
-            let a = self.points[spring.a];
-            let b = self.points[spring.b];
-            let load = a
-                .load
-                .max(b.load)
-                .max(spring.tear_impulse * (0.34 + spring.fatigue.clamp(0.0, 1.0) * 0.16));
-            self.break_spring(index);
-            self.springs[index].stress = 1.0;
-            self.stats.broken_muscle += 1;
-            self.stats.muscle_cut_transfers += 1;
-            self.debug.muscle_cut_transfers += 1;
-            self.bump_point_exposure_load(spring.a, 1.0, load * 0.24);
-            self.bump_point_exposure_load(spring.b, 1.0, load * 0.24);
-            events.push((midpoint(a.position, b.position), normal, load));
-        }
-
-        for (midpoint, normal, load) in events {
-            self.emit_fluid(
-                midpoint,
-                normal,
-                2 + (load / 1350.0).clamp(0.0, 4.0) as i32,
-                82.0 + load * self.materials.fluid_impact_scale * 0.54,
-                1.75,
-                0.74,
-            );
-            self.open_wound(
-                midpoint,
-                normal,
-                TissueLayer::Muscle,
-                load / 1500.0,
-                1.75,
-                0.78,
             );
         }
     }
@@ -9323,93 +9175,6 @@ mod tests {
         );
         assert_eq!(world.stats.tear_propagations, 0);
         assert_eq!(world.debug.tear_propagations, 0);
-    }
-
-    #[test]
-    fn sharp_skin_opening_transfers_cut_into_exposed_muscle() {
-        let mut materials = Materials::default();
-        materials.max_fluid_particles = 0;
-        materials.max_wound_sources = 0;
-        materials.muscle_cut_transfer_exposure_threshold = 0.40;
-        materials.muscle_cut_transfer_load_threshold = 800.0;
-        materials.muscle_cut_transfer_radius = 16.0;
-        materials.max_muscle_cut_transfers_per_step = 2;
-        let mut world = World::new(materials);
-        world.debug.tool = ToolMode::Sharp;
-        world.debug.impact = 1200.0;
-        let skin_a = world.add_point(Vec2 { x: 0.0, y: 0.0 }, TissueLayer::Skin, false);
-        let skin_b = world.add_point(Vec2 { x: 12.0, y: 0.0 }, TissueLayer::Skin, false);
-        let muscle_a = world.add_point(Vec2 { x: 0.0, y: 5.0 }, TissueLayer::Muscle, false);
-        let muscle_b = world.add_point(Vec2 { x: 12.0, y: 5.0 }, TissueLayer::Muscle, false);
-        world.add_spring(skin_a, skin_b, TissueLayer::Skin, 0.8, 1.7, 1000.0, false);
-        world.add_spring(
-            muscle_a,
-            muscle_b,
-            TissueLayer::Muscle,
-            0.8,
-            1.9,
-            1200.0,
-            true,
-        );
-        world.springs[0].broken = true;
-        world.fresh_skin_cuts.push(0);
-        world.points[muscle_a].exposure = 0.62;
-        world.points[muscle_b].exposure = 0.62;
-        world.points[muscle_a].load = 520.0;
-        world.points[muscle_b].load = 520.0;
-
-        world.transfer_sharp_cut_to_exposed_muscle();
-
-        assert!(
-            world.springs[1].broken,
-            "open stressed skin should transfer a sharp cut into nearby exposed muscle"
-        );
-        assert_eq!(world.stats.broken_muscle, 1);
-        assert_eq!(world.stats.muscle_cut_transfers, 1);
-        assert_eq!(world.debug.muscle_cut_transfers, 1);
-    }
-
-    #[test]
-    fn quiet_muscle_does_not_get_cut_by_nearby_skin_opening() {
-        let mut materials = Materials::default();
-        materials.max_fluid_particles = 0;
-        materials.max_wound_sources = 0;
-        materials.muscle_cut_transfer_exposure_threshold = 0.70;
-        materials.muscle_cut_transfer_load_threshold = 1200.0;
-        materials.muscle_cut_transfer_radius = 16.0;
-        materials.max_muscle_cut_transfers_per_step = 2;
-        let mut world = World::new(materials);
-        world.debug.tool = ToolMode::Sharp;
-        world.debug.impact = 1200.0;
-        let skin_a = world.add_point(Vec2 { x: 0.0, y: 0.0 }, TissueLayer::Skin, false);
-        let skin_b = world.add_point(Vec2 { x: 12.0, y: 0.0 }, TissueLayer::Skin, false);
-        let muscle_a = world.add_point(Vec2 { x: 0.0, y: 5.0 }, TissueLayer::Muscle, false);
-        let muscle_b = world.add_point(Vec2 { x: 12.0, y: 5.0 }, TissueLayer::Muscle, false);
-        world.add_spring(skin_a, skin_b, TissueLayer::Skin, 0.8, 1.7, 1000.0, false);
-        world.add_spring(
-            muscle_a,
-            muscle_b,
-            TissueLayer::Muscle,
-            0.8,
-            1.9,
-            1200.0,
-            true,
-        );
-        world.springs[0].broken = true;
-        world.fresh_skin_cuts.push(0);
-        world.points[muscle_a].exposure = 0.15;
-        world.points[muscle_b].exposure = 0.15;
-        world.points[muscle_a].load = 120.0;
-        world.points[muscle_b].load = 120.0;
-
-        world.transfer_sharp_cut_to_exposed_muscle();
-
-        assert!(
-            !world.springs[1].broken,
-            "nearby quiet muscle should require exposure, load, or fatigue before cut transfer"
-        );
-        assert_eq!(world.stats.muscle_cut_transfers, 0);
-        assert_eq!(world.debug.muscle_cut_transfers, 0);
     }
 
     #[test]

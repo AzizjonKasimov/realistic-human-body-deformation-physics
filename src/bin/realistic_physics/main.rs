@@ -2140,12 +2140,11 @@ fn draw_debug_panel(ctx: &RenderContext) {
             debug.max_point_load, debug.max_bone_load, debug.last_fracture_impulse
         ),
         format!(
-            "damage  skin={} muscle={} fiber={} prop={} deep={} crush={} flaps={} vessels={} attach={}/{} joints={}",
+            "damage  skin={} muscle={} fiber={} prop={} crush={} flaps={} vessels={} attach={}/{} joints={}",
             stats.broken_skin,
             stats.broken_muscle,
             stats.muscle_fiber_tears,
             stats.tear_propagations,
-            stats.muscle_cut_transfers,
             stats.muscle_crush_ruptures,
             stats.skin_flap_detachments,
             stats.vessel_lacerations,

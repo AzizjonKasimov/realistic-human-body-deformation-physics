@@ -25,6 +25,8 @@ struct VisualExpectations {
     min_muscle_fiber_tears: usize,
     min_joint_ligament_damage_events: usize,
     min_failed_muscle_voids: usize,
+    /// Gaps between the lips of opened muscle cuts, drawn as raw flesh.
+    min_opened_cut_insides: usize,
     min_visible_contusions: usize,
     min_visible_wound_sources: usize,
     min_visible_fluid_particles: usize,
@@ -54,6 +56,7 @@ struct VisualMetrics {
     muscle_fiber_tears: usize,
     joint_ligament_damage_events: usize,
     failed_muscle_voids: usize,
+    opened_cut_insides: usize,
     visible_contusions: usize,
     active_wound_sources: usize,
     visible_wound_sources: usize,
@@ -147,13 +150,13 @@ fn visual_scenarios() -> Vec<VisualScenario> {
             name: "torso_sharp_cut_visual",
             intent: "cut",
             strike: tuned_strike("torso_sharp_cut"),
-            // A knife cut on the belly: an incision line through skin and
-            // muscle that reaches a vessel and an organ, with no broken bone.
+            // A knife cut on the belly: a cut through skin and muscle that
+            // opens, reaches a vessel and an organ, and breaks no bone.
             expectations: VisualExpectations {
                 min_skin_wound_edges: 8,
                 min_incision_segments: 8,
                 min_muscle_fiber_tears: 4,
-                min_failed_muscle_voids: 8,
+                min_opened_cut_insides: 3,
                 min_visible_wound_sources: 3,
                 min_visible_fluid_particles: 100,
                 min_lacerated_vessels: 1,
@@ -255,6 +258,18 @@ fn inspect_visual_damage(world: &rp::World) -> VisualMetrics {
             metrics.failed_muscle_voids += 1;
         }
     }
+    // Each pair of an opened muscle cut's lips frames one stretch of its
+    // inside.
+    metrics.opened_cut_insides = world
+        .springs()
+        .iter()
+        .enumerate()
+        .filter(|(index, spring)| {
+            spring.layer == rp::TissueLayer::Muscle
+                && spring.twin != rp::MISSING_SPRING
+                && *index < spring.twin
+        })
+        .count();
 
     for wound in world.wounds() {
         if wound.age > 0.0 || wound.pressure > 0.0 || wound.clot > 0.0 {
@@ -313,6 +328,7 @@ fn inspect_visual_damage(world: &rp::World) -> VisualMetrics {
         + metrics.incision_segments
         + metrics.wound_rim_edges
         + metrics.failed_muscle_voids
+        + metrics.opened_cut_insides
         + metrics.visible_contusions
         + metrics.visible_wound_sources
         + metrics.visible_fluid_particles
@@ -368,6 +384,13 @@ fn validate_visual_metrics(
         "failed_muscle_voids",
         metrics.failed_muscle_voids,
         scenario.expectations.min_failed_muscle_voids,
+        warnings,
+    );
+    check_min(
+        scenario,
+        "opened_cut_insides",
+        metrics.opened_cut_insides,
+        scenario.expectations.min_opened_cut_insides,
         warnings,
     );
     check_min(
@@ -977,12 +1000,13 @@ fn draw_label(out: &mut String, capture: &VisualCapture) {
     .expect("write label title");
     writeln!(
         out,
-        "<text class=\"muted\" x=\"34\" y=\"69\">wound edges={} incision={} rims={} fiberT={} voids={} bruises={} wounds={} fluids={} stains={}</text>",
+        "<text class=\"muted\" x=\"34\" y=\"69\">wound edges={} incision={} rims={} fiberT={} voids={} cut_insides={} bruises={} wounds={} fluids={} stains={}</text>",
         metrics.skin_wound_edges,
         metrics.incision_segments,
         metrics.wound_rim_edges,
         metrics.muscle_fiber_tears,
         metrics.failed_muscle_voids,
+        metrics.opened_cut_insides,
         metrics.visible_contusions,
         metrics.visible_wound_sources,
         metrics.visible_fluid_particles,
@@ -1031,7 +1055,7 @@ fn write_summary(path: &Path, captures: &[VisualCapture]) -> std::io::Result<()>
     let mut out = BufWriter::new(File::create(path)?);
     writeln!(
         out,
-        "scenario,intent,tool,skin_wound_edges,incision_segments,wound_rim_edges,exposed_muscle_triangles,stats_muscle_fiber_tears,stats_joint_ligament_damage_events,failed_muscle_voids,visible_contusions,visible_wound_sources,active_wound_sources,visible_fluid_particles,active_fluid_particles,visible_blood_stains,lacerated_vessels,fractured_bones,rib_fractures,fracture_caps,final_free_fragments,final_sleeping_fragments,damage_primitives,max_point_load,max_point_exposure,max_contusion,max_muscle_damage,stats_skin_tears,stats_muscle_tears,stats_muscle_crush_ruptures,stats_cavity_pressure_events,stats_cavity_ruptures,peak_cavity_pressure,peak_cavity_collapse,stats_organ_damage_events,stats_organ_penetrations,stats_rib_organ_punctures,stats_organ_ruptures,peak_organ_damage,stats_skin_flap_detachments,stats_vessel_lacerations,stats_fragment_vessel_lacerations,stats_fragment_skin_punctures,stats_bone_joint_subluxations,stats_fracture_marrow_sources,stats_contusion_events,stats_opened_wounds,stats_emitted_fluid,stats_wound_fluid,stats_blood_loss,final_blood_volume,final_blood_turgor,stats_blood_stain_deposits"
+        "scenario,intent,tool,skin_wound_edges,incision_segments,wound_rim_edges,exposed_muscle_triangles,stats_muscle_fiber_tears,stats_joint_ligament_damage_events,failed_muscle_voids,opened_cut_insides,visible_contusions,visible_wound_sources,active_wound_sources,visible_fluid_particles,active_fluid_particles,visible_blood_stains,lacerated_vessels,fractured_bones,rib_fractures,fracture_caps,final_free_fragments,final_sleeping_fragments,damage_primitives,max_point_load,max_point_exposure,max_contusion,max_muscle_damage,stats_skin_tears,stats_muscle_tears,stats_muscle_crush_ruptures,stats_cavity_pressure_events,stats_cavity_ruptures,peak_cavity_pressure,peak_cavity_collapse,stats_organ_damage_events,stats_organ_penetrations,stats_rib_organ_punctures,stats_organ_ruptures,peak_organ_damage,stats_skin_flap_detachments,stats_vessel_lacerations,stats_fragment_vessel_lacerations,stats_fragment_skin_punctures,stats_bone_joint_subluxations,stats_fracture_marrow_sources,stats_contusion_events,stats_opened_wounds,stats_emitted_fluid,stats_wound_fluid,stats_blood_loss,final_blood_volume,final_blood_turgor,stats_blood_stain_deposits"
     )?;
     for capture in captures {
         let metrics = capture.metrics;
@@ -1047,6 +1071,7 @@ fn write_summary(path: &Path, captures: &[VisualCapture]) -> std::io::Result<()>
             metrics.muscle_fiber_tears.to_string(),
             metrics.joint_ligament_damage_events.to_string(),
             metrics.failed_muscle_voids.to_string(),
+            metrics.opened_cut_insides.to_string(),
             metrics.visible_contusions.to_string(),
             metrics.visible_wound_sources.to_string(),
             metrics.active_wound_sources.to_string(),

@@ -9,7 +9,7 @@ use std::fmt;
 
 use crate::{
     body_frame, create_layered_body, swing_power, BodyFrame, BoneSegment, InputState, Materials,
-    ToolMode, Vec2, World,
+    TissueLayer, ToolMode, Vec2, World, MISSING_SPRING,
 };
 
 /// Window size the tuned scenarios are played in.
@@ -481,7 +481,6 @@ pub struct ScenarioExpectations {
     pub tissue_fatigue_events: IntBand,
     pub tissue_plastic_events: IntBand,
     pub tear_propagations: IntBand,
-    pub muscle_cut_transfers: IntBand,
     pub muscle_fiber_tears: IntBand,
     pub muscle_crush_ruptures: IntBand,
     pub cavity_pressure_events: IntBand,
@@ -614,11 +613,6 @@ impl Scenario {
                 "tear_propagations",
                 r.tear_propagations,
                 e.tear_propagations,
-            ),
-            int(
-                "muscle_cut_transfers",
-                r.muscle_cut_transfers,
-                e.muscle_cut_transfers,
             ),
             int(
                 "muscle_fiber_tears",
@@ -841,7 +835,6 @@ pub struct ScenarioResult {
     pub tissue_fatigue_events: i32,
     pub tissue_plastic_events: i32,
     pub tear_propagations: i32,
-    pub muscle_cut_transfers: i32,
     pub muscle_crush_ruptures: i32,
     pub cavity_pressure_events: i32,
     pub cavity_ruptures: i32,
@@ -944,10 +937,27 @@ pub struct ScenarioResult {
     /// How far the tool was from the hand on the last step, in pixels: one
     /// held still where nothing is drawn should be in hand.
     pub final_lag: f64,
+    /// How well a knife cut follows its blade (`measure_cut`): the length of
+    /// the blade's path on the steps it cut fibers, the opened skin slit's
+    /// length in the rest shape, and how far, on average, the slit runs from
+    /// the path, in pixels.
+    pub blade_path_length: f64,
+    pub slit_length: f64,
+    pub slit_off_path: f64,
+    /// How wide an opened cut gapes at the end, in pixels: the skin at the
+    /// middle of the blade's path and at its widest, and the muscle at its
+    /// widest.
+    pub skin_gap_middle: f64,
+    pub skin_gap_max: f64,
+    pub muscle_gap_max: f64,
     last_positions: Vec<Vec2>,
     last_tool_axis: Option<Vec2>,
     last_touching: bool,
     touched_this_press: bool,
+    /// The knife tip's moves on the steps it cut fibers.
+    blade_path: Vec<(Vec2, Vec2)>,
+    last_tip: Option<Vec2>,
+    last_cuts: i32,
 }
 
 impl ScenarioResult {
@@ -955,6 +965,14 @@ impl ScenarioResult {
     /// with.
     pub fn accumulate(&mut self, world: &World, input: &InputState) {
         self.accumulate_steadiness(world, input);
+        let tip = world.current_tool_pose().map(|pose| pose.contact_end);
+        let cuts = world.stats().broken_skin + world.stats().broken_muscle;
+        if let (Some(from), Some(to)) = (self.last_tip, tip) {
+            if input.tool == ToolMode::Sharp && cuts > self.last_cuts {
+                self.blade_path.push((from, to));
+            }
+        }
+        (self.last_tip, self.last_cuts) = (tip, cuts);
         let debug = world.debug();
         self.tissue_contacts += debug.tissue_contacts;
         self.bone_contacts += debug.bone_contacts;
@@ -1082,7 +1100,6 @@ impl ScenarioResult {
         self.tissue_fatigue_events = stats.tissue_fatigue_events;
         self.tissue_plastic_events = stats.tissue_plastic_events;
         self.tear_propagations = stats.tear_propagations;
-        self.muscle_cut_transfers = stats.muscle_cut_transfers;
         self.muscle_crush_ruptures = stats.muscle_crush_ruptures;
         self.cavity_pressure_events = stats.cavity_pressure_events;
         self.cavity_ruptures = stats.cavity_ruptures;
@@ -1118,7 +1135,117 @@ impl ScenarioResult {
         self.final_free_fragments = free_fragment_count(world);
         self.final_spinning_fragments = spinning_fragment_count(world);
         self.final_sleeping_fragments = sleeping_fragment_count(world);
+        self.measure_cut(world);
     }
+
+    /// Measures the knife's cut against the blade's path (see
+    /// `blade_path_length` and the fields after it). Each pair of lips gives
+    /// where the cut ran in the rest shape, between the two lips' rest
+    /// places, and how far apart they are now.
+    fn measure_cut(&mut self, world: &World) {
+        let points = world.points();
+        let springs = world.springs();
+        let path = &self.blade_path;
+        self.blade_path_length = path.iter().map(|&(a, b)| span(a, b)).sum();
+        let mut lines = Vec::new();
+        for (index, lip) in springs.iter().enumerate() {
+            if lip.twin == MISSING_SPRING || lip.twin < index {
+                continue;
+            }
+            let twin = springs[lip.twin];
+            let start = midpoint(points[lip.a].home, points[twin.a].home);
+            let end = midpoint(points[lip.b].home, points[twin.b].home);
+            let gap = (span(points[lip.a].position, points[twin.a].position)
+                + span(points[lip.b].position, points[twin.b].position))
+                * 0.5;
+            lines.push((lip.layer, start, end, gap));
+        }
+        let widest = |layer: TissueLayer| {
+            lines
+                .iter()
+                .filter(|line| line.0 == layer)
+                .map(|line| line.3)
+                .fold(0.0, f64::max)
+        };
+        self.skin_gap_max = widest(TissueLayer::Skin);
+        self.muscle_gap_max = widest(TissueLayer::Muscle);
+        let skin: Vec<_> = lines
+            .iter()
+            .filter(|line| line.0 == TissueLayer::Skin)
+            .collect();
+        self.slit_length = skin.iter().map(|line| span(line.1, line.2)).sum();
+        if skin.is_empty() || path.is_empty() {
+            return;
+        }
+        self.slit_off_path = skin
+            .iter()
+            .flat_map(|line| [line.1, line.2])
+            .map(|point| distance_to_path(point, path))
+            .sum::<f64>()
+            / (skin.len() * 2) as f64;
+        let middle = point_along_path(path, self.blade_path_length * 0.5);
+        self.skin_gap_middle = skin
+            .iter()
+            .map(|line| (span(midpoint(line.1, line.2), middle), line.3))
+            .fold((f64::INFINITY, 0.0), |best, here| {
+                if here.0 < best.0 {
+                    here
+                } else {
+                    best
+                }
+            })
+            .1;
+    }
+}
+
+fn span(a: Vec2, b: Vec2) -> f64 {
+    (b.x - a.x).hypot(b.y - a.y)
+}
+
+fn midpoint(a: Vec2, b: Vec2) -> Vec2 {
+    Vec2 {
+        x: (a.x + b.x) * 0.5,
+        y: (a.y + b.y) * 0.5,
+    }
+}
+
+/// The distance from `point` to the nearest of the segments of `path`.
+fn distance_to_path(point: Vec2, path: &[(Vec2, Vec2)]) -> f64 {
+    path.iter()
+        .map(|&(a, b)| {
+            let (dx, dy) = (b.x - a.x, b.y - a.y);
+            let length_sq = dx * dx + dy * dy;
+            let t = if length_sq > 1.0e-12 {
+                (((point.x - a.x) * dx + (point.y - a.y) * dy) / length_sq).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            span(
+                point,
+                Vec2 {
+                    x: a.x + dx * t,
+                    y: a.y + dy * t,
+                },
+            )
+        })
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// The point `along` pixels down the segments of `path`, taken in order.
+fn point_along_path(path: &[(Vec2, Vec2)], along: f64) -> Vec2 {
+    let mut left = along;
+    for &(a, b) in path {
+        let length = span(a, b);
+        if left <= length && length > 0.0 {
+            let t = left / length;
+            return Vec2 {
+                x: a.x + (b.x - a.x) * t,
+                y: a.y + (b.y - a.y) * t,
+            };
+        }
+        left -= length;
+    }
+    path[path.len() - 1].1
 }
 
 /// Plays `scenario` on a fresh body in a window of the given size, calling
@@ -1555,7 +1682,6 @@ pub fn scenarios() -> Vec<Scenario> {
                 muscle_tears: IntBand::range(15, 100),
                 contusion_events: IntBand::range(0, 100),
                 tear_propagations: IntBand::range(0, 20),
-                muscle_cut_transfers: IntBand::range(10, 80),
                 skin_flap_detachments: IntBand::range(8, 60),
                 // The cut opens rather than leaving a line of torn skin.
                 cut_openings: IntBand::at_least(2),
@@ -1602,10 +1728,9 @@ pub fn scenarios() -> Vec<Scenario> {
                 bone_fractures: IntBand::range(0, 0),
                 rib_fractures: IntBand::range(0, 0),
                 skin_tears: IntBand::range(10, 60),
-                muscle_tears: IntBand::range(20, 120),
+                muscle_tears: IntBand::range(10, 120),
                 contusion_events: IntBand::range(0, 60),
                 tear_propagations: IntBand::range(0, 20),
-                muscle_cut_transfers: IntBand::range(15, 100),
                 cut_openings: IntBand::at_least(1),
                 vessel_lacerations: IntBand::range(1, 3),
                 bone_joint_subluxations: IntBand::range(0, 0),
@@ -1662,7 +1787,7 @@ pub fn scenarios() -> Vec<Scenario> {
             // the cut lies a little below the hand's path; the bat aims at its
             // lower half, below the hanging hand.
             play: Play::Swing(
-                strike(ToolMode::Sharp, (-0.075, 0.585), (-0.075, 0.685), 16, 190),
+                strike(ToolMode::Sharp, (-0.075, 0.585), (-0.075, 0.685), 16, 260),
                 Some(strike(
                     ToolMode::Blunt,
                     (-0.340, 0.700),
@@ -1674,8 +1799,7 @@ pub fn scenarios() -> Vec<Scenario> {
             expectations: ScenarioExpectations {
                 bone_fractures: IntBand::range(0, 1),
                 skin_tears: IntBand::range(8, 50),
-                muscle_tears: IntBand::range(10, 80),
-                muscle_cut_transfers: IntBand::range(8, 60),
+                muscle_tears: IntBand::range(5, 80),
                 skin_flap_detachments: IntBand::range(0, 40),
                 contusion_events: IntBand::at_least(30),
                 // The bat must make the clotted cut bleed again.

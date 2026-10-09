@@ -401,7 +401,6 @@ fn rest_simulation_stays_stable_and_idle() {
         || stats.tissue_plastic_events != 0
         || stats.muscle_fiber_tears != 0
         || stats.tear_propagations != 0
-        || stats.muscle_cut_transfers != 0
         || stats.muscle_crush_ruptures != 0
         || stats.cavity_ruptures != 0
         || stats.organ_damage_events != 0
@@ -418,7 +417,7 @@ fn rest_simulation_stays_stable_and_idle() {
         || stats.fractured_bones != 0
     {
         panic!(
-            "FAIL: rest simulation should not tear tissue: skin={} muscle={} fiber_tears={} attachments={} bone_attachments={} bone_joints={} subluxations={} ligament_damage={} emitted_fluid={} marrow_sources={} blood_loss={:.3} stains={} wounds={} wound_fluid={} contusions={} fatigue={} plastic={} propagation={} deep_cut={} crush_ruptures={} cavity={} organ_damage={} organ_penetrations={} rib_organ_punctures={} organ_ruptures={} flaps={} vessel_lacerations={} fragment_vessel_lacerations={} reopens={} fragment_hits={} fragment_tears={} fragment_punctures={} fractures={}",
+            "FAIL: rest simulation should not tear tissue: skin={} muscle={} fiber_tears={} attachments={} bone_attachments={} bone_joints={} subluxations={} ligament_damage={} emitted_fluid={} marrow_sources={} blood_loss={:.3} stains={} wounds={} wound_fluid={} contusions={} fatigue={} plastic={} propagation={} crush_ruptures={} cavity={} organ_damage={} organ_penetrations={} rib_organ_punctures={} organ_ruptures={} flaps={} vessel_lacerations={} fragment_vessel_lacerations={} reopens={} fragment_hits={} fragment_tears={} fragment_punctures={} fractures={}",
             stats.broken_skin,
             stats.broken_muscle,
             stats.muscle_fiber_tears,
@@ -437,7 +436,6 @@ fn rest_simulation_stays_stable_and_idle() {
             stats.tissue_fatigue_events,
             stats.tissue_plastic_events,
             stats.tear_propagations,
-            stats.muscle_cut_transfers,
             stats.muscle_crush_ruptures,
             stats.cavity_ruptures,
             stats.organ_damage_events,

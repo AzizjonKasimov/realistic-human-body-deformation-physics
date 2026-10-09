@@ -223,22 +223,11 @@ fn play_custom(scenario: &Scenario, output_dir: &Path) {
     write_frame_header(&mut frames).expect("write frame header");
     let mut write_error = None;
     let mut last_positions = Vec::new();
-    // Where the knife's tip went on each step it cut fibers.
-    let mut blade_path = Vec::new();
-    let (mut last_tip, mut last_cuts) = (None, 0);
     let (world, result) = run(
         scenario,
         SCENARIO_WIDTH,
         SCENARIO_HEIGHT,
         |frame, input, world| {
-            let tip = world.current_tool_pose().map(|pose| pose.contact_end);
-            let cuts = world.stats().broken_skin + world.stats().broken_muscle;
-            if let (Some(from), Some(to)) = (last_tip, tip) {
-                if input.tool == rp::ToolMode::Sharp && cuts > last_cuts {
-                    blade_path.push((from, to));
-                }
-            }
-            (last_tip, last_cuts) = (tip, cuts);
             if write_error.is_none() {
                 write_error = write_frame(
                     &mut frames,
@@ -258,8 +247,8 @@ fn play_custom(scenario: &Scenario, output_dir: &Path) {
     println!("{}", scenario.play);
     println!("  {}", headline(&result));
     println!("  {}", skin_openings(&world));
-    if !blade_path.is_empty() {
-        println!("  {}", cut_quality(&world, &blade_path));
+    if result.blade_path_length > 0.0 {
+        println!("  {}", cut_quality(&result));
     }
     println!("  {}", steadiness(&result));
     let path = output_dir.join("strike_custom.csv");
@@ -631,132 +620,48 @@ fn steadiness(result: &ScenarioResult) -> String {
     )
 }
 
-/// How the skin was opened: fibers a blade cut, fibers torn by stretching or
-/// load, and the lips of cuts that opened.
+/// How the skin and muscle were opened: fibers a blade cut, fibers torn by
+/// stretching or load, and the lips of cuts that opened.
 fn skin_openings(world: &rp::World) -> String {
-    let (mut cut, mut torn, mut lips) = (0, 0, 0);
-    for spring in world.springs() {
-        if spring.layer != rp::TissueLayer::Skin {
-            continue;
-        }
-        cut += usize::from(spring.cut);
-        torn += usize::from(spring.broken && !spring.cut);
-        lips += usize::from(spring.twin != rp::MISSING_SPRING);
-    }
-    format!("skin fibers cut {cut}, torn {torn}; cut lips {lips}")
-}
-
-/// How well a knife cut follows its blade and how far it gapes: the length of
-/// the blade's path where it cut fibers (`blade_path`, the tip's moves on
-/// those steps), the slit's length in the rest shape against it, how far the
-/// slit runs from the path, and how wide the cut is open at the middle of the
-/// path and at its widest, in skin and in muscle.
-fn cut_quality(world: &rp::World, blade_path: &[(rp::Vec2, rp::Vec2)]) -> String {
-    let points = world.points();
-    let springs = world.springs();
-    // Each pair of lips once: where the cut ran in the rest shape (between the
-    // two lips' rest places) and how far apart the lips are now.
-    let mut lines = Vec::new();
-    for (index, lip) in springs.iter().enumerate() {
-        if lip.twin == rp::MISSING_SPRING || lip.twin < index {
-            continue;
-        }
-        let twin = springs[lip.twin];
-        let start = midpoint(points[lip.a].home, points[twin.a].home);
-        let end = midpoint(points[lip.b].home, points[twin.b].home);
-        let gap = (span(points[lip.a].position, points[twin.a].position)
-            + span(points[lip.b].position, points[twin.b].position))
-            * 0.5;
-        lines.push((lip.layer, start, end, gap));
-    }
-    let path_length: f64 = blade_path.iter().map(|&(a, b)| span(a, b)).sum();
-    let skin: Vec<_> = lines
-        .iter()
-        .filter(|line| line.0 == rp::TissueLayer::Skin)
-        .collect();
-    if skin.is_empty() {
-        return format!("cut: blade path {path_length:.0} px, no cut opened in the skin");
-    }
-    let slit: f64 = skin.iter().map(|line| span(line.1, line.2)).sum();
-    let off_path = skin
-        .iter()
-        .flat_map(|line| [line.1, line.2])
-        .map(|point| distance_to_path(point, blade_path))
-        .sum::<f64>()
-        / (skin.len() * 2) as f64;
-    let middle = point_along_path(blade_path, path_length * 0.5);
-    let middle_gap = skin
-        .iter()
-        .min_by(|x, y| {
-            let to = |line: &&&(rp::TissueLayer, rp::Vec2, rp::Vec2, f64)| {
-                span(midpoint(line.1, line.2), middle)
-            };
-            to(x).total_cmp(&to(y))
-        })
-        .map_or(0.0, |line| line.3);
-    let widest = |layer: rp::TissueLayer| {
-        lines
+    let count = |layer: rp::TissueLayer| {
+        let (mut cut, mut torn, mut lips) = (0, 0, 0);
+        for spring in world
+            .springs()
             .iter()
-            .filter(|line| line.0 == layer)
-            .map(|line| line.3)
-            .fold(0.0, f64::max)
+            .filter(|spring| spring.layer == layer)
+        {
+            cut += usize::from(spring.cut);
+            torn += usize::from(spring.broken && !spring.cut);
+            lips += usize::from(spring.twin != rp::MISSING_SPRING);
+        }
+        format!("fibers cut {cut}, torn {torn}; cut lips {lips}")
     };
     format!(
-        "cut: blade path {path_length:.0} px, slit {slit:.0} px ({:.2} of the path), {off_path:.1} px off the path; skin gap {middle_gap:.1} px at the middle, {:.1} px at most; muscle gap {:.1} px at most",
-        slit / path_length.max(1.0),
-        widest(rp::TissueLayer::Skin),
-        widest(rp::TissueLayer::Muscle)
+        "skin {}; muscle {}",
+        count(rp::TissueLayer::Skin),
+        count(rp::TissueLayer::Muscle)
     )
 }
 
-fn span(a: rp::Vec2, b: rp::Vec2) -> f64 {
-    (b.x - a.x).hypot(b.y - a.y)
-}
-
-fn midpoint(a: rp::Vec2, b: rp::Vec2) -> rp::Vec2 {
-    rp::Vec2 {
-        x: (a.x + b.x) * 0.5,
-        y: (a.y + b.y) * 0.5,
+/// How well a knife cut follows its blade and how far it gapes (see
+/// `ScenarioResult::blade_path_length` and the fields after it).
+fn cut_quality(result: &ScenarioResult) -> String {
+    if result.slit_length <= 0.0 {
+        return format!(
+            "cut: blade path {:.0} px, no cut opened in the skin",
+            result.blade_path_length
+        );
     }
-}
-
-/// The distance from `point` to the nearest of the segments of `path`.
-fn distance_to_path(point: rp::Vec2, path: &[(rp::Vec2, rp::Vec2)]) -> f64 {
-    path.iter()
-        .map(|&(a, b)| {
-            let (dx, dy) = (b.x - a.x, b.y - a.y);
-            let length_sq = dx * dx + dy * dy;
-            let t = if length_sq > 1.0e-12 {
-                (((point.x - a.x) * dx + (point.y - a.y) * dy) / length_sq).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            span(
-                point,
-                rp::Vec2 {
-                    x: a.x + dx * t,
-                    y: a.y + dy * t,
-                },
-            )
-        })
-        .fold(f64::INFINITY, f64::min)
-}
-
-/// The point `along` pixels down the segments of `path`, taken in order.
-fn point_along_path(path: &[(rp::Vec2, rp::Vec2)], along: f64) -> rp::Vec2 {
-    let mut left = along;
-    for &(a, b) in path {
-        let length = span(a, b);
-        if left <= length && length > 0.0 {
-            let t = left / length;
-            return rp::Vec2 {
-                x: a.x + (b.x - a.x) * t,
-                y: a.y + (b.y - a.y) * t,
-            };
-        }
-        left -= length;
-    }
-    path[path.len() - 1].1
+    format!(
+        "cut: blade path {:.0} px, slit {:.0} px ({:.2} of the path), {:.1} px off the path; skin gap {:.1} px at the middle, {:.1} px at most; muscle gap {:.1} px at most",
+        result.blade_path_length,
+        result.slit_length,
+        result.slit_length / result.blade_path_length.max(1.0),
+        result.slit_off_path,
+        result.skin_gap_middle,
+        result.skin_gap_max,
+        result.muscle_gap_max
+    )
 }
 
 fn headline(result: &ScenarioResult) -> String {
@@ -776,7 +681,7 @@ fn headline(result: &ScenarioResult) -> String {
 }
 
 /// Columns of a summary row: the scenario, then its result.
-const SUMMARY_HEADER: &str = "scenario,region,intent,tool,tissue_contacts,bone_contacts,skin_tears,muscle_tears,muscle_fiber_tears,contusion_events,tissue_fatigue_events,tissue_plastic_events,tear_propagations,muscle_cut_transfers,muscle_crush_ruptures,cavity_pressure_events,cavity_ruptures,organ_damage_events,organ_penetrations,rib_organ_punctures,organ_ruptures,skin_flap_detachments,cut_openings,vessel_lacerations,fragment_vessel_lacerations,wound_reopens,max_active_contusions,detachments,bone_detachments,bone_joint_breaks,bone_joint_subluxations,joint_ligament_damage_events,bone_fractures,rib_fractures,fracture_marrow_sources,final_bones,fluid_emitted,wound_fluid,blood_loss,final_blood_volume,final_blood_turgor,blood_stain_deposits,max_active_blood_stains,opened_wounds,max_active_wounds,wound_leaks,fragment_hits,fragment_tears,fragment_skin_punctures,fragment_bone_contacts,fragment_bone_damping_events,fragment_bone_resting_contacts,fragment_pair_contacts,fragment_pair_damping_events,fragment_pair_resting_contacts,fragment_floor_contacts,fragment_floor_resting_contacts,post_fracture_joint_corrections,max_impact,max_bone_load,max_point_load,max_depth,max_fragment_depth,max_fragment_impulse,max_fragment_overlap,max_post_fracture_joint_stretch,max_post_fracture_joint_angle,max_bone_joint_subluxation,max_wound_pressure,max_wound_clot,max_cavity_pressure,max_cavity_collapse,max_organ_damage,max_contusion,max_tissue_softening,max_tissue_fatigue,max_tissue_plasticity,max_bone_angular_speed,final_free_fragments,final_spinning_fragments,final_sleeping_fragments,max_active_fragments,max_sleeping_fragments,fragment_sleep_events,fragment_wake_events,fragment_budget_skips,fracture_budget_blocks,fragment_bone_checks,fragment_bone_budget_skips,fragment_pair_checks,fragment_pair_budget_skips,fragment_tissue_checks,fragment_tissue_budget_skips,fluid_budget_replacements,blood_stain_budget_replacements,wound_budget_replacements,max_solver_iterations,max_tool_turn,tool_snaps,tool_turning,contact_toggles,max_point_speed,max_free_lag,internal_bleeding,final_lag";
+const SUMMARY_HEADER: &str = "scenario,region,intent,tool,tissue_contacts,bone_contacts,skin_tears,muscle_tears,muscle_fiber_tears,contusion_events,tissue_fatigue_events,tissue_plastic_events,tear_propagations,muscle_crush_ruptures,cavity_pressure_events,cavity_ruptures,organ_damage_events,organ_penetrations,rib_organ_punctures,organ_ruptures,skin_flap_detachments,cut_openings,blade_path_length,slit_length,slit_off_path,skin_gap_middle,skin_gap_max,muscle_gap_max,vessel_lacerations,fragment_vessel_lacerations,wound_reopens,max_active_contusions,detachments,bone_detachments,bone_joint_breaks,bone_joint_subluxations,joint_ligament_damage_events,bone_fractures,rib_fractures,fracture_marrow_sources,final_bones,fluid_emitted,wound_fluid,blood_loss,final_blood_volume,final_blood_turgor,blood_stain_deposits,max_active_blood_stains,opened_wounds,max_active_wounds,wound_leaks,fragment_hits,fragment_tears,fragment_skin_punctures,fragment_bone_contacts,fragment_bone_damping_events,fragment_bone_resting_contacts,fragment_pair_contacts,fragment_pair_damping_events,fragment_pair_resting_contacts,fragment_floor_contacts,fragment_floor_resting_contacts,post_fracture_joint_corrections,max_impact,max_bone_load,max_point_load,max_depth,max_fragment_depth,max_fragment_impulse,max_fragment_overlap,max_post_fracture_joint_stretch,max_post_fracture_joint_angle,max_bone_joint_subluxation,max_wound_pressure,max_wound_clot,max_cavity_pressure,max_cavity_collapse,max_organ_damage,max_contusion,max_tissue_softening,max_tissue_fatigue,max_tissue_plasticity,max_bone_angular_speed,final_free_fragments,final_spinning_fragments,final_sleeping_fragments,max_active_fragments,max_sleeping_fragments,fragment_sleep_events,fragment_wake_events,fragment_budget_skips,fracture_budget_blocks,fragment_bone_checks,fragment_bone_budget_skips,fragment_pair_checks,fragment_pair_budget_skips,fragment_tissue_checks,fragment_tissue_budget_skips,fluid_budget_replacements,blood_stain_budget_replacements,wound_budget_replacements,max_solver_iterations,max_tool_turn,tool_snaps,tool_turning,contact_toggles,max_point_speed,max_free_lag,internal_bleeding,final_lag";
 
 fn summary_fields(scenario: &Scenario, result: &ScenarioResult) -> Vec<String> {
     vec![
@@ -793,7 +698,6 @@ fn summary_fields(scenario: &Scenario, result: &ScenarioResult) -> Vec<String> {
         result.tissue_fatigue_events.to_string(),
         result.tissue_plastic_events.to_string(),
         result.tear_propagations.to_string(),
-        result.muscle_cut_transfers.to_string(),
         result.muscle_crush_ruptures.to_string(),
         result.cavity_pressure_events.to_string(),
         result.cavity_ruptures.to_string(),
@@ -803,6 +707,12 @@ fn summary_fields(scenario: &Scenario, result: &ScenarioResult) -> Vec<String> {
         result.organ_ruptures.to_string(),
         result.skin_flap_detachments.to_string(),
         result.cut_openings.to_string(),
+        format!("{:.1}", result.blade_path_length),
+        format!("{:.1}", result.slit_length),
+        format!("{:.2}", result.slit_off_path),
+        format!("{:.2}", result.skin_gap_middle),
+        format!("{:.2}", result.skin_gap_max),
+        format!("{:.2}", result.muscle_gap_max),
         result.vessel_lacerations.to_string(),
         result.fragment_vessel_lacerations.to_string(),
         result.wound_reopens.to_string(),
@@ -889,7 +799,7 @@ fn summary_fields(scenario: &Scenario, result: &ScenarioResult) -> Vec<String> {
 }
 
 fn write_frame_header(csv: &mut dyn Write) -> std::io::Result<()> {
-    writeln!(csv, "scenario,region,intent,tool,frame,striker_x,striker_y,striker_speed,impact,tissue_contacts,bone_contacts,max_depth,max_point_load,max_bone_load,fractures,skin_tears,muscle_tears,muscle_fiber_tears_frame,total_muscle_fiber_tears,contusion_events_frame,active_contusions,total_contusion_events,max_contusion,max_tissue_softening,tissue_fatigue_events_frame,total_tissue_fatigue_events,max_tissue_fatigue,tissue_plastic_events_frame,total_tissue_plastic_events,max_tissue_plasticity,tear_propagations_frame,total_tear_propagations,muscle_cut_transfers_frame,total_muscle_cut_transfers,muscle_crush_ruptures_frame,total_muscle_crush_ruptures,cavity_pressure_events_frame,total_cavity_pressure_events,cavity_ruptures_frame,total_cavity_ruptures,organ_damage_events_frame,total_organ_damage_events,organ_penetrations_frame,total_organ_penetrations,rib_organ_punctures_frame,total_rib_organ_punctures,organ_ruptures_frame,total_organ_ruptures,skin_flap_detachments_frame,total_skin_flap_detachments,vessel_lacerations_frame,total_vessel_lacerations,fragment_vessel_lacerations_frame,total_fragment_vessel_lacerations,wound_reopens_frame,total_wound_reopens,detachments,bone_detachments,bone_joint_breaks,bone_joint_subluxations_frame,total_bone_joint_subluxations,joint_ligament_damage_frame,total_joint_ligament_damage,max_bone_joint_subluxation,bone_fractures,rib_fractures_frame,total_rib_fractures,fracture_marrow_sources,fluid_emitted_frame,active_fluids,total_fluid,blood_stain_deposits_frame,active_blood_stains,total_blood_stain_deposits,opened_wounds,active_wounds,wound_leaks,wound_fluid,blood_loss,blood_volume,blood_turgor,max_wound_pressure,max_wound_clot,max_cavity_pressure,max_cavity_collapse,max_organ_damage,fragment_contacts,fragment_tears,fragment_skin_punctures_frame,total_fragment_skin_punctures,fragment_bone_contacts,fragment_bone_damping_events,fragment_bone_resting_contacts,fragment_pair_contacts,fragment_pair_damping_events,fragment_pair_resting_contacts,fragment_floor_contacts,fragment_floor_resting_contacts,max_fragment_depth,max_fragment_impulse,max_fragment_overlap,post_fracture_joint_corrections,max_post_fracture_joint_stretch,max_post_fracture_joint_angle,fragment_hits,fragment_tissue_tears,max_bone_angular_speed,free_fragments,spinning_fragments,active_fragments,sleeping_fragments,fragment_sleep_events,fragment_wake_events,fragment_budget_skips,fracture_budget_blocks,fragment_bone_checks,fragment_bone_budget_skips,fragment_pair_checks,fragment_pair_budget_skips,fragment_tissue_checks,fragment_tissue_budget_skips,fluid_budget_replacements,blood_stain_budget_replacements,wound_budget_replacements,solver_iterations,tool_down,tool_touching,tool_axis_deg,tool_x,tool_y,max_point_speed,hand_x,hand_y,tool_lag,reach_flesh,reach_torn_away,reach_bones,reach_spine")
+    writeln!(csv, "scenario,region,intent,tool,frame,striker_x,striker_y,striker_speed,impact,tissue_contacts,bone_contacts,max_depth,max_point_load,max_bone_load,fractures,skin_tears,muscle_tears,muscle_fiber_tears_frame,total_muscle_fiber_tears,contusion_events_frame,active_contusions,total_contusion_events,max_contusion,max_tissue_softening,tissue_fatigue_events_frame,total_tissue_fatigue_events,max_tissue_fatigue,tissue_plastic_events_frame,total_tissue_plastic_events,max_tissue_plasticity,tear_propagations_frame,total_tear_propagations,muscle_crush_ruptures_frame,total_muscle_crush_ruptures,cavity_pressure_events_frame,total_cavity_pressure_events,cavity_ruptures_frame,total_cavity_ruptures,organ_damage_events_frame,total_organ_damage_events,organ_penetrations_frame,total_organ_penetrations,rib_organ_punctures_frame,total_rib_organ_punctures,organ_ruptures_frame,total_organ_ruptures,skin_flap_detachments_frame,total_skin_flap_detachments,vessel_lacerations_frame,total_vessel_lacerations,fragment_vessel_lacerations_frame,total_fragment_vessel_lacerations,wound_reopens_frame,total_wound_reopens,detachments,bone_detachments,bone_joint_breaks,bone_joint_subluxations_frame,total_bone_joint_subluxations,joint_ligament_damage_frame,total_joint_ligament_damage,max_bone_joint_subluxation,bone_fractures,rib_fractures_frame,total_rib_fractures,fracture_marrow_sources,fluid_emitted_frame,active_fluids,total_fluid,blood_stain_deposits_frame,active_blood_stains,total_blood_stain_deposits,opened_wounds,active_wounds,wound_leaks,wound_fluid,blood_loss,blood_volume,blood_turgor,max_wound_pressure,max_wound_clot,max_cavity_pressure,max_cavity_collapse,max_organ_damage,fragment_contacts,fragment_tears,fragment_skin_punctures_frame,total_fragment_skin_punctures,fragment_bone_contacts,fragment_bone_damping_events,fragment_bone_resting_contacts,fragment_pair_contacts,fragment_pair_damping_events,fragment_pair_resting_contacts,fragment_floor_contacts,fragment_floor_resting_contacts,max_fragment_depth,max_fragment_impulse,max_fragment_overlap,post_fracture_joint_corrections,max_post_fracture_joint_stretch,max_post_fracture_joint_angle,fragment_hits,fragment_tissue_tears,max_bone_angular_speed,free_fragments,spinning_fragments,active_fragments,sleeping_fragments,fragment_sleep_events,fragment_wake_events,fragment_budget_skips,fracture_budget_blocks,fragment_bone_checks,fragment_bone_budget_skips,fragment_pair_checks,fragment_pair_budget_skips,fragment_tissue_checks,fragment_tissue_budget_skips,fluid_budget_replacements,blood_stain_budget_replacements,wound_budget_replacements,solver_iterations,tool_down,tool_touching,tool_axis_deg,tool_x,tool_y,max_point_speed,hand_x,hand_y,tool_lag,reach_flesh,reach_torn_away,reach_bones,reach_spine")
 }
 
 fn write_frame(
@@ -939,8 +849,6 @@ fn write_frame(
         format!("{:.3}", debug.max_tissue_plasticity),
         debug.tear_propagations.to_string(),
         stats.tear_propagations.to_string(),
-        debug.muscle_cut_transfers.to_string(),
-        stats.muscle_cut_transfers.to_string(),
         debug.muscle_crush_ruptures.to_string(),
         stats.muscle_crush_ruptures.to_string(),
         debug.cavity_pressure_events.to_string(),
