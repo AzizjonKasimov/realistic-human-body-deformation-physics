@@ -556,7 +556,15 @@ fn push_spring(
     layer: TissueLayer,
     (stiffness, tear_stretch, tear_impulse, fiber): (f64, f64, f64, bool),
 ) -> usize {
-    let rest = distance(world.points[a].position, world.points[b].position);
+    // Skin, and muscle along its fibers, rest a little shorter than the body
+    // holds them: living tissue is under tension.
+    let m = world.materials;
+    let prestretch = match layer {
+        TissueLayer::Skin => 1.0 / (1.0 - m.skin_pretension).max(0.5),
+        TissueLayer::Muscle if fiber => 1.0 / (1.0 - m.muscle_fiber_pretension).max(0.5),
+        TissueLayer::Muscle => 1.0,
+    };
+    let rest = distance(world.points[a].position, world.points[b].position) / prestretch;
     world.springs.push(Spring {
         a,
         b,
@@ -567,6 +575,7 @@ fn push_spring(
         tear_impulse,
         layer,
         fiber,
+        prestretch,
         ..Spring::default()
     });
     world.springs.len() - 1
@@ -701,6 +710,13 @@ fn add_layer_triangles(
     } else {
         world.materials.muscle_area_stiffness
     };
+    // The tension that shortens the sheet's springs shrinks its rest area
+    // too: skin both ways, muscle along its fibers.
+    let shrink = if layer == TissueLayer::Skin {
+        (1.0 - world.materials.skin_pretension).powi(2)
+    } else {
+        1.0 - world.materials.muscle_fiber_pretension
+    };
     for &[a, b, c] in &mesh.triangles {
         let edge_ab = edges[&edge_key(a, b)];
         let edge_bc = edges[&edge_key(b, c)];
@@ -726,7 +742,7 @@ fn add_layer_triangles(
                 world.points[a].position,
                 world.points[b].position,
                 world.points[c].position,
-            ),
+            ) * shrink,
             stiffness,
             layer,
             lambda: 0.0,

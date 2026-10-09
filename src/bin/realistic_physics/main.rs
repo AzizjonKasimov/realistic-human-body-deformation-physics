@@ -777,7 +777,8 @@ fn draw_shaded_skin(ctx: &RenderContext) {
 /// length. A clean cut starts near 1; tissue torn by stretching starts wide.
 fn cut_gap(world: &rp::World, spring: &rp::Spring) -> f64 {
     let points = world.points();
-    length(sub(points[spring.b].position, points[spring.a].position)) / spring.rest.max(1.0)
+    length(sub(points[spring.b].position, points[spring.a].position))
+        / (spring.rest * spring.prestretch).max(1.0)
 }
 
 /// How open a skin triangle is, from 0 (intact, or split by a cut whose edges

@@ -905,7 +905,7 @@ fn cut_gap(world: &rp::World, spring: &rp::Spring) -> f64 {
     length(subtract(
         points[spring.b].position,
         points[spring.a].position,
-    )) / spring.rest.max(1.0)
+    )) / (spring.rest * spring.prestretch).max(1.0)
 }
 
 fn smoothstep(edge0: f64, edge1: f64, x: f64) -> f64 {

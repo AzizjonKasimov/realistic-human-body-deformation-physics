@@ -225,10 +225,18 @@ pub struct Materials {
     pub skin_flap_cut_radius: f64,
     pub max_skin_flap_detachments_per_step: usize,
     /// How far each lip of a cut through skin pulls back from it, in point
-    /// spacings: skin is under tension in a living body, so a cut gapes.
+    /// spacings, besides what the tissue's resting tension opens.
     pub skin_cut_retraction: f64,
-    /// The same for muscle, whose cut fibers retract further.
+    /// The same for muscle.
     pub muscle_cut_retraction: f64,
+    /// The share by which skin rests shorter than the body holds it: living
+    /// skin is under tension, so a cut through it gapes (residual stress, as
+    /// in Wu et al., "Interactive Residual Stress Modeling for Soft Tissue
+    /// Simulation", 2012).
+    pub skin_pretension: f64,
+    /// The same for the muscle's fibers along their length (resting tone),
+    /// so cut muscle draws back along its fibers.
+    pub muscle_fiber_pretension: f64,
     pub attachment_stiffness: f64,
     pub attachment_break_stretch: f64,
     pub attachment_break_impulse: f64,
@@ -431,8 +439,10 @@ impl Default for Materials {
             skin_flap_stress_threshold: 0.18,
             skin_flap_cut_radius: 20.0,
             max_skin_flap_detachments_per_step: 5,
-            skin_cut_retraction: 0.20,
+            skin_cut_retraction: 0.15,
             muscle_cut_retraction: 0.30,
+            skin_pretension: 0.05,
+            muscle_fiber_pretension: 0.06,
             attachment_stiffness: 0.46,
             attachment_break_stretch: 2.40,
             attachment_break_impulse: 980.0,
@@ -607,6 +617,11 @@ pub struct Spring {
     /// This edge is a lip of an opened cut, and `twin` is the edge across
     /// the opening from it; `MISSING_SPRING` otherwise.
     pub twin: usize,
+    /// How far the body holds the fiber stretched at rest (its resting
+    /// tension): `rest` is that much shorter than the fiber's unloaded
+    /// length, which the tearing, fatigue, and creep rules measure stretch
+    /// against.
+    pub prestretch: f64,
 }
 
 impl Default for Spring {
@@ -630,6 +645,7 @@ impl Default for Spring {
             cut_at: 0.5,
             parted: false,
             twin: MISSING_SPRING,
+            prestretch: 1.0,
         }
     }
 }
@@ -2884,7 +2900,10 @@ impl World {
             } else {
                 self.materials.muscle_shape_stiffness
             };
-            let shape_stiffness = base_shape_stiffness * blood_turgor;
+            // A cut frees its lips from what held them in place, so the
+            // tension the cut released sets where they rest.
+            let anchoring = if point.on_cut { 0.0 } else { 1.0 };
+            let shape_stiffness = base_shape_stiffness * blood_turgor * anchoring;
             point.position.x += (point.home.x - point.position.x) * shape_stiffness;
             point.position.y += (point.home.y - point.position.y) * shape_stiffness;
             if point.position.y > floor_y {
@@ -3998,7 +4017,9 @@ impl World {
             if len < EPSILON {
                 continue;
             }
-            let mut stretch_ratio = len / spring.rest.max(EPSILON);
+            // Injury reads stretch from the fiber's unloaded length, so the
+            // body's resting tension tears nothing.
+            let mut stretch_ratio = len / (spring.rest * spring.prestretch).max(EPSILON);
             let endpoint_load = a.load.max(b.load);
             let contusion = a.contusion.max(b.contusion).clamp(0.0, 1.0);
             let fatigue_delta = tissue_fatigue_delta(
@@ -4046,7 +4067,7 @@ impl World {
                         ((new_rest - reference) / reference).abs().clamp(0.0, 1.0);
                     self.stats.tissue_plastic_events += 1;
                     self.debug.tissue_plastic_events += 1;
-                    stretch_ratio = len / new_rest.max(EPSILON);
+                    stretch_ratio = len / (new_rest * spring.prestretch).max(EPSILON);
                 }
             }
             self.debug.max_tissue_plasticity = self
