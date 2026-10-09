@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
 
+mod bending;
 mod blood;
 mod body;
 mod cuts;
@@ -857,8 +858,12 @@ pub struct BoneSegment {
     pub load: f64,
     /// What bears toward breaking the bone: blows, scaled by each tool's
     /// `break_scale`, pieces of bone striking it, and flesh pressed onto it.
-    /// What a joint passes on strains the joint but breaks no bone.
+    /// What a joint passes on strains the joint but breaks no bone. Each
+    /// counts by how hard it bends the bone where it lands (`bending.rs`).
     pub break_load: f64,
+    /// Where along the bone, from `a` to `b`, the load behind `break_load`
+    /// bent it: where it breaks.
+    pub break_t: f64,
     pub angular_velocity: f64,
     pub fractured: bool,
     pub broken_start: bool,
@@ -891,6 +896,7 @@ impl Default for BoneSegment {
             fracture_impulse: 2600.0,
             load: 0.0,
             break_load: 0.0,
+            break_t: 0.5,
             angular_velocity: 0.0,
             fractured: false,
             broken_start: false,
@@ -1143,6 +1149,8 @@ pub struct Stats {
     pub fractured_ribs: i32,
     /// Breaks whose ends came out through the skin.
     pub open_fractures: i32,
+    /// Bending breaks that broke a butterfly wedge out of the struck side.
+    pub butterfly_fragments: i32,
     pub emitted_fluid_particles: i32,
     pub wound_fluid_particles: i32,
     /// Blood that stayed under unbroken skin, in particles: it bruises
@@ -1221,6 +1229,10 @@ pub struct ContactDebug {
     pub fractures: i32,
     /// Fractures this step by [`BonePart`], indexed by [`BonePart::index`].
     pub part_fractures: [i32; BONE_PARTS],
+    /// The hardest load, as a share of its strength, a bone of each part
+    /// broke under this step: a break drops its pieces' loads, so the end of
+    /// the step no longer shows it.
+    pub part_break_share: [f64; BONE_PARTS],
     pub rib_fractures: i32,
     pub fluid_emitted: i32,
     pub fragment_contacts: i32,
@@ -1323,6 +1335,7 @@ impl Default for ContactDebug {
             tissue_contacts: 0,
             fractures: 0,
             part_fractures: [0; BONE_PARTS],
+            part_break_share: [0.0; BONE_PARTS],
             rib_fractures: 0,
             fluid_emitted: 0,
             fragment_contacts: 0,
@@ -4821,7 +4834,12 @@ impl World {
             if self.debug.tool == ToolMode::Sharp && bone.part.is_long_bone() {
                 transfer = transfer.min(bone.fracture_impulse * BLADE_LONG_BONE_LOAD);
             }
-            bone.break_load = bone.break_load.max(transfer);
+            if transfer > bone.break_load {
+                bone.bear_break_load(
+                    transfer * self.bending_share(attachment.bone, attachment.t),
+                    attachment.t,
+                );
+            }
             let raw_anchor = bone_point(bone, attachment.t);
             let current_distance = distance(point.position, raw_anchor);
             let stretch_ratio = current_distance / attachment.rest.max(1.0);
@@ -5062,9 +5080,10 @@ impl World {
             }
         }
         for i in fractures {
+            let at = self.bones.get(i).map_or(0.5, |bone| bone.break_t);
             self.fracture_bone(
                 i,
-                0.5,
+                at,
                 Vec2::default(),
                 self.bones.get(i).map(|b| b.load).unwrap_or(0.0),
             );
@@ -5529,11 +5548,12 @@ impl World {
                 self.bones[fragment_index].load =
                     self.bones[fragment_index].load.max(contact_load * 0.72);
                 self.bones[bone_index].load = self.bones[bone_index].load.max(contact_load * 0.54);
-                self.bones[fragment_index].break_load = self.bones[fragment_index]
-                    .break_load
-                    .max(contact_load * 0.72);
-                self.bones[bone_index].break_load =
-                    self.bones[bone_index].break_load.max(contact_load * 0.54);
+                let fragment_bending =
+                    contact_load * 0.72 * self.bending_share(fragment_index, closest.t_a);
+                self.bones[fragment_index].bear_break_load(fragment_bending, closest.t_a);
+                let support_bending =
+                    contact_load * 0.54 * self.bending_share(bone_index, closest.t_b);
+                self.bones[bone_index].bear_break_load(support_bending, closest.t_b);
                 self.debug.fragment_bone_contacts += 1;
                 if resting_contact {
                     self.debug.fragment_bone_resting_contacts += 1;
@@ -6286,6 +6306,9 @@ impl World {
         let raw_overload =
             (impulse.max(old.break_load) - old.fracture_impulse) / old.fracture_impulse.max(1.0);
         let overload = raw_overload.clamp(0.0, 1.4);
+        let butterfly = self.breaks_out_butterfly(&old, raw_overload, impulse_normal);
+        let share = &mut self.debug.part_break_share[old.part.index()];
+        *share = share.max(raw_overload + 1.0);
         // An ordinary break barely shifts its ends; only a break far past the
         // bone's strength throws the pieces apart and chips off a splinter.
         let open = raw_overload
@@ -6344,11 +6367,16 @@ impl World {
         first.rest_length = distance(first.a, first.b).max(EPSILON);
         first.fractured = true;
         first.broken_end = true;
-        first.broken_end_normal = normal;
+        first.broken_end_normal = if butterfly {
+            bending::butterfly_cap(normal, dir, 1.0)
+        } else {
+            normal
+        };
         first.fracture_generation += 1;
         first.fracture_impulse = secondary_fracture_impulse;
         first.load = old.load * 0.28;
         first.break_load = old.break_load * 0.28;
+        first.break_t = 0.5;
         first.angular_velocity = (first.angular_velocity
             + spin_sign * fracture_spin * (1.0 - break_t))
             .clamp(-36.0, 36.0);
@@ -6382,7 +6410,11 @@ impl World {
             break_load: old.break_load * 0.28,
             fractured: true,
             broken_start: true,
-            broken_start_normal: normal,
+            broken_start_normal: if butterfly {
+                bending::butterfly_cap(normal, dir, -1.0)
+            } else {
+                normal
+            },
             fracture_generation: first.fracture_generation,
             open_break: first.open_break,
             pinned: old.pinned,
@@ -6507,6 +6539,9 @@ impl World {
                 recoil,
                 spin_sign * fracture_spin,
             );
+        }
+        if butterfly {
+            self.chip_butterfly(&old, crack, previous_crack, home_crack, dir, normal);
         }
 
         let blood_direction = Vec2 {
@@ -9916,7 +9951,9 @@ fn tool_profile(tool: ToolMode) -> ToolProfile {
             bone_push_scale: 1.46,
             bone_load_scale: 1.0,
             fracture_scale: 1.0,
-            break_scale: 2.57,
+            // Set, with the bat's, for blows that bend the bone as they land
+            // on it (`bending.rs`).
+            break_scale: 3.08,
             cut_pressure_scale: 0.0,
             crush_tear_scale: 0.10,
             // About half its hardest breaks come out open, as from clubs and
@@ -9931,14 +9968,17 @@ fn tool_profile(tool: ToolMode) -> ToolProfile {
         // presses on bone is set so a bat breaks bones as often as blows of
         // its energy do in real life (`docs/INJURY_REFERENCE.md`): an
         // ordinary man's hard swing, about 112 J, usually breaks an upper
-        // arm, and a 10 J swing breaks nothing.
+        // arm, and a 10 J swing breaks nothing. Swung at a hanging arm, the
+        // barrel lies along the bone and spreads its blow over it, which
+        // bends the bone about half as hard as a blow across it would
+        // (`bending.rs`).
         // A bat's smooth, rounded barrel rarely drives a broken bone out
         // through the skin: a fifth of fractures from bat blows were open
         // (Bryant et al. 1992), against 44% from clubs and 70% of iron-bar
         // victims (Nolan et al. 2000; Eames et al. 1997).
         ToolMode::Blunt => ToolProfile {
             tissue_load_scale: 0.05,
-            break_scale: 1.543,
+            break_scale: 2.47,
             open_fracture_scale: 6.0,
             ..ToolProfile::default()
         },

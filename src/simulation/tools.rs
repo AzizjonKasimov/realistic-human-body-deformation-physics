@@ -20,6 +20,7 @@
 //! there for them, so a tool moves through a wound as freely as through the
 //! air and meets only its edges and the bone left in it.
 
+use super::bending::pressed_stretch;
 use super::*;
 
 /// Below this speed a tool keeps its orientation instead of turning to follow
@@ -1026,7 +1027,10 @@ impl World {
                 load
             };
             bone.load = bone.load.max(load);
-            bone.break_load = bone.break_load.max(load * strike.profile.break_scale);
+            let cut = load * strike.profile.break_scale;
+            if cut > bone.break_load {
+                bone.bear_break_load(cut * self.bending_share(index, after.t_b), after.t_b);
+            }
             if load > self.materials.fragment_wake_load {
                 self.wake_fragment(&mut bone);
             }
@@ -1425,10 +1429,23 @@ impl World {
             bone.load = bone
                 .load
                 .max(direct_load / strike.profile.fracture_scale.max(EPSILON));
-            bone.break_load = bone.break_load.max(
-                direct_load / strike.profile.fracture_scale.max(EPSILON)
-                    * strike.profile.break_scale,
+            // The blow bends the bone by its lever on the bone's joints, and
+            // the bone breaks where it is bent hardest (see `bending.rs`).
+            // A tool lying along a bone presses a stretch of it rather than
+            // one point, which bends it less.
+            let (from, to) = pressed_stretch(
+                shape.axis_start,
+                shape.axis_end,
+                shape.influence + bone.radius,
+                &bone,
+                t,
             );
+            let (bending, worst) = self.bending(i, from, to);
+            let blow = direct_load / strike.profile.fracture_scale.max(EPSILON)
+                * strike.profile.break_scale;
+            if blow > bone.break_load {
+                bone.bear_break_load(blow * bending, worst);
+            }
             if direct_load > self.materials.fragment_wake_load
                 || speed > self.materials.fragment_sleep_speed * 2.0
             {
@@ -1489,7 +1506,7 @@ impl World {
                 self.can_fracture_bone(bone) && bone.break_load > bone.fracture_impulse;
             self.bones[i] = bone;
             if should_fracture {
-                self.fracture_bone(i, t, normal, direct_load);
+                self.fracture_bone(i, bone.break_t, normal, direct_load * bending);
             }
         }
         given

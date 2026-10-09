@@ -1193,6 +1193,8 @@ pub struct ScenarioResult {
     /// How far it ran down the skin, in pixels of trail.
     pub blood_trail_length: f64,
     pub fracture_marrow_sources: i32,
+    /// Bending breaks that broke a butterfly wedge out of the struck side.
+    pub butterfly_fragments: i32,
     pub opened_wounds: i32,
     pub max_active_wounds: i32,
     pub wound_leaks: i32,
@@ -1332,6 +1334,9 @@ impl ScenarioResult {
             let share = bone.break_load / bone.fracture_impulse.max(1.0);
             let peak = &mut self.part_peak_load[bone.part.index()];
             *peak = peak.max(share);
+        }
+        for (peak, broke) in self.part_peak_load.iter_mut().zip(debug.part_break_share) {
+            *peak = peak.max(broke);
         }
         if debug.blood_loss > 0.0 {
             self.bleed_frames += 1;
@@ -1491,6 +1496,7 @@ impl ScenarioResult {
         self.blood_drips = stats.blood_drips;
         self.blood_trail_length = stats.blood_trail_length;
         self.fracture_marrow_sources = stats.fracture_marrow_sources;
+        self.butterfly_fragments = stats.butterfly_fragments;
         self.opened_wounds = stats.opened_wounds;
         self.fragment_hits = stats.fragment_tissue_hits;
         self.fragment_tears = stats.fragment_tissue_tears;
