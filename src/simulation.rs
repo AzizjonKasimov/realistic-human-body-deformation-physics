@@ -126,6 +126,18 @@ pub enum BonePart {
 /// How many [`BonePart`]s there are.
 pub const BONE_PARTS: usize = 12;
 
+/// How exposed skin counts once the muscle under it has come away: below the
+/// 0.35 a gently moving piece of bone needs to cut it.
+const DETACHED_SKIN_EXPOSURE: f64 = 0.3;
+
+/// How far skin under a heavy load stretches before it tears.
+const SKIN_LOAD_TEAR_STRETCH: f64 = 1.35;
+
+/// The most a blade loads a long bone, as a share of what breaks it. A blade
+/// notches a long bone but does not break it; that takes a heavy chopping
+/// blade (Lynn and Fairgrieve 2009).
+const BLADE_LONG_BONE_LOAD: f64 = 0.9;
+
 impl BonePart {
     pub const ALL: [BonePart; BONE_PARTS] = [
         BonePart::Other,
@@ -363,7 +375,6 @@ pub struct Materials {
     pub fluid_wall_bounce: f64,
     pub fluid_impact_scale: f64,
     pub blood_volume_capacity: f64,
-    pub blood_loss_per_wound_particle: f64,
     pub blood_pressure_min_scale: f64,
     pub blood_turgor_min_scale: f64,
     pub max_blood_stains: usize,
@@ -373,6 +384,7 @@ pub struct Materials {
     pub blood_stain_decay: f64,
     pub blood_stain_spread: f64,
     pub max_wound_sources: usize,
+    /// How fast wounds bleed against the real rates in `WoundKind`; 1 is real.
     pub wound_leak_rate: f64,
     pub wound_pressure_decay: f64,
     pub wound_clot_rate: f64,
@@ -556,7 +568,9 @@ impl Default for Materials {
             fragment_sleep_frames: 36,
             fragment_wake_load: 260.0,
             max_fluid_particles: 900,
-            max_fresh_blood_per_step: 15,
+            // A fresh cut or split wells up a little blood rather than
+            // spattering it; a cut artery's wound spurts on its own.
+            max_fresh_blood_per_step: 4,
             max_wound_leak_per_step: 4,
             fluid_damping: 0.982,
             fluid_gravity_scale: 1.0,
@@ -564,7 +578,6 @@ impl Default for Materials {
             fluid_wall_bounce: 0.48,
             fluid_impact_scale: 0.03,
             blood_volume_capacity: 1.0,
-            blood_loss_per_wound_particle: 0.00016,
             blood_pressure_min_scale: 0.34,
             blood_turgor_min_scale: 0.55,
             max_blood_stains: 320,
@@ -573,7 +586,7 @@ impl Default for Materials {
             blood_stain_decay: 0.008,
             blood_stain_spread: 2.4,
             max_wound_sources: 160,
-            wound_leak_rate: 3.0,
+            wound_leak_rate: 1.0,
             wound_pressure_decay: 0.20,
             wound_clot_rate: 0.13,
             wound_spray_pressure: 1.25,
@@ -839,7 +852,13 @@ pub struct BoneSegment {
     pub radius: f64,
     pub rest_length: f64,
     pub fracture_impulse: f64,
+    /// What the bone carries from blows, fragments, joints, and the flesh
+    /// on it, which strains its joints and muscle anchors.
     pub load: f64,
+    /// What bears toward breaking the bone: blows, scaled by each tool's
+    /// `break_scale`, pieces of bone striking it, and flesh pressed onto it.
+    /// What a joint passes on strains the joint but breaks no bone.
+    pub break_load: f64,
     pub angular_velocity: f64,
     pub fractured: bool,
     pub broken_start: bool,
@@ -848,6 +867,9 @@ pub struct BoneSegment {
     pub broken_end_normal: Vec2,
     pub fracture_generation: i32,
     pub splinter: bool,
+    /// A piece of a break that came out open: its ends can cut through the
+    /// skin from inside. A closed break's pieces leave the skin whole.
+    pub open_break: bool,
     pub pinned: bool,
     pub sleeping: bool,
     pub sleep_frames: i32,
@@ -868,6 +890,7 @@ impl Default for BoneSegment {
             rest_length: 1.0,
             fracture_impulse: 2600.0,
             load: 0.0,
+            break_load: 0.0,
             angular_velocity: 0.0,
             fractured: false,
             broken_start: false,
@@ -876,6 +899,7 @@ impl Default for BoneSegment {
             broken_end_normal: Vec2::default(),
             fracture_generation: 0,
             splinter: false,
+            open_break: false,
             pinned: false,
             sleeping: false,
             sleep_frames: 0,
@@ -1033,6 +1057,8 @@ pub struct WoundSource {
     pub position: Vec2,
     pub direction: Vec2,
     pub layer: TissueLayer,
+    /// What it bleeds from, which sets how fast it bleeds.
+    pub kind: WoundKind,
     pub pressure: f64,
     pub clot: f64,
     pub age: f64,
@@ -1046,12 +1072,46 @@ pub struct WoundSource {
     pub anchor_offset: Vec2,
 }
 
+/// What a wound bleeds from. Each bleeds at the rate the surgical bleeding
+/// scale gives it (Lewis et al. 2017; `docs/INJURY_REFERENCE.md`): skin and
+/// muscle ooze from capillaries and small vessels (grades 1-2, up to 10 ml a
+/// minute), an open fracture's marrow bleeds steadily (grade 3, 10-50), and a
+/// cut artery gushes (grade 4, over 50).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum WoundKind {
+    #[default]
+    Tissue,
+    Marrow,
+    Artery,
+}
+
+impl WoundKind {
+    /// How fast a wound of this kind bleeds, in ml a minute, at the pressure
+    /// it opened with, before it clots or the body runs short of blood.
+    fn flow_ml_per_min(self, pressure: f64) -> f64 {
+        match self {
+            WoundKind::Tissue => 6.0 * pressure.clamp(0.2, 1.6),
+            WoundKind::Marrow => 25.0 * pressure.clamp(0.4, 2.0),
+            WoundKind::Artery => 250.0 * pressure.clamp(0.3, 2.4),
+        }
+    }
+}
+
+/// Blood one particle stands for, in ml: about a drop. Particles show the
+/// blood a wound loses; they no longer decide how much it loses.
+const BLOOD_DROP_ML: f64 = 0.05;
+
+/// Blood in the 70 kg adult the figure stands for, in ml: about 70 ml per kg
+/// (Gutierrez et al. 2004). The world's blood volume is a share of it.
+const BODY_BLOOD_ML: f64 = 4900.0;
+
 impl Default for WoundSource {
     fn default() -> Self {
         Self {
             position: Vec2::default(),
             direction: Vec2::default(),
             layer: TissueLayer::Skin,
+            kind: WoundKind::Tissue,
             pressure: 0.0,
             clot: 0.0,
             age: 0.0,
@@ -1081,6 +1141,8 @@ pub struct Stats {
     pub joint_ligament_damage_events: i32,
     pub fractured_bones: i32,
     pub fractured_ribs: i32,
+    /// Breaks whose ends came out through the skin.
+    pub open_fractures: i32,
     pub emitted_fluid_particles: i32,
     pub wound_fluid_particles: i32,
     /// Blood that stayed under unbroken skin, in particles: it bruises
@@ -1347,6 +1409,14 @@ struct ToolProfile {
     cut_pressure_scale: f64,
     /// How readily a heavy head splits tissue it crushes.
     crush_tear_scale: f64,
+    /// How far past a bone's strength a blow of this tool must go to drive
+    /// the broken ends out through the skin, against
+    /// `Materials::open_fracture_overload`.
+    open_fracture_scale: f64,
+    /// How hard a blow of this tool bears toward breaking bone, against its
+    /// load on the bone: set so each tool breaks bones as often as blows of
+    /// its energy do in real life (`docs/INJURY_REFERENCE.md`).
+    break_scale: f64,
     fluid_scale: f64,
     drag_scale: f64,
     rebound_scale: f64,
@@ -1364,6 +1434,8 @@ impl Default for ToolProfile {
             fracture_scale: 1.0,
             cut_pressure_scale: 0.0,
             crush_tear_scale: 0.0,
+            open_fracture_scale: 1.0,
+            break_scale: 1.0,
             fluid_scale: 1.0,
             drag_scale: 1.0,
             rebound_scale: 1.0,
@@ -1462,6 +1534,8 @@ pub struct World {
     /// Skin springs a blade severed this step; cuts deepen into the muscle
     /// right under them.
     fresh_skin_cuts: Vec<usize>,
+    /// Whether this is a step's last solver pass, which judges tearing.
+    tearing_pass: bool,
     /// The tissue sheets' outlines, and the points and stretches of them that
     /// may touch this step.
     outlines: Vec<outline::OutlineLoop>,
@@ -1526,6 +1600,7 @@ impl World {
             fluid_seed: 0x9e3779b9,
             tool: tools::ToolBody::default(),
             fresh_skin_cuts: Vec::new(),
+            tearing_pass: true,
             outlines: Vec::new(),
             outline_pairs: Vec::new(),
             blunt_knock: Vec::new(),
@@ -1962,7 +2037,11 @@ impl World {
         self.reset_constraint_lambdas();
         self.timed("outline pairs", Self::gather_outline_pairs);
 
-        for _ in 0..self.materials.solver_iterations {
+        for pass in 0..self.materials.solver_iterations {
+            // Tissue tears from how far it is stretched once a step's push
+            // has spread through it, not from the instant a tool's push lands
+            // on a few points, which the first passes are still smoothing out.
+            self.tearing_pass = pass + 1 == self.materials.solver_iterations;
             self.timed("springs", Self::solve_springs);
             self.timed("tool contact", Self::solve_tool_contact);
             self.timed("attachments", Self::solve_attachments);
@@ -2536,8 +2615,31 @@ impl World {
         radius: f64,
         depth: f64,
     ) -> bool {
+        self.open_wound_of_kind(
+            center,
+            direction,
+            layer,
+            pressure,
+            radius,
+            depth,
+            WoundKind::Tissue,
+        )
+    }
+
+    /// A wound like [`World::open_wound`] that bleeds as `kind` does.
+    #[allow(clippy::too_many_arguments)]
+    fn open_wound_of_kind(
+        &mut self,
+        center: Vec2,
+        direction: Vec2,
+        layer: TissueLayer,
+        pressure: f64,
+        radius: f64,
+        depth: f64,
+        kind: WoundKind,
+    ) -> bool {
         self.open_wound_with_anchor(
-            center, direction, layer, pressure, radius, depth, None, true,
+            center, direction, layer, pressure, radius, depth, None, true, kind,
         )
     }
 
@@ -2551,6 +2653,7 @@ impl World {
         depth: f64,
         forced_anchor: Option<WoundAnchorCandidate>,
         merge_active_sources: bool,
+        kind: WoundKind,
     ) -> bool {
         if self.materials.max_wound_sources == 0 || pressure <= 0.0 {
             return false;
@@ -2639,6 +2742,12 @@ impl World {
             dir,
         );
         target.layer = merged_layer;
+        // A wound merged into one with a cut artery still bleeds as an artery.
+        target.kind = if keeps_site {
+            target.kind.max(kind)
+        } else {
+            kind
+        };
         target.pressure = (target.pressure * 0.72).max(clamped_pressure) + clamped_pressure * 0.34;
         target.pressure = target.pressure.min(6.0);
         target.clot = if reopening {
@@ -2707,6 +2816,7 @@ impl World {
             depth,
             Some(anchor),
             false,
+            WoundKind::Marrow,
         ) {
             self.stats.fracture_marrow_sources += 1;
             self.debug.fracture_marrow_sources += 1;
@@ -3015,6 +3125,7 @@ impl World {
         for index in 0..self.bones.len() {
             let mut bone = self.bones[index];
             bone.load *= 0.88;
+            bone.break_load *= 0.88;
             if bone.pinned {
                 bone.a = bone.home_a;
                 bone.b = bone.home_b;
@@ -3025,6 +3136,7 @@ impl World {
             }
             if bone.sleeping && free_bone_fragment(bone) {
                 bone.load *= 0.50;
+                bone.break_load *= 0.50;
                 bone.angular_velocity = 0.0;
                 bone.previous_a = bone.a;
                 bone.previous_b = bone.b;
@@ -3147,16 +3259,12 @@ impl World {
         min_scale + (1.0 - min_scale) * self.blood_volume_fraction_internal()
     }
 
-    fn drain_blood_volume(&mut self, count: i32, intensity: f64) {
-        if count <= 0 || self.materials.blood_volume_capacity <= 0.0 {
+    /// Takes `ml` of blood out of the body.
+    fn drain_blood_ml(&mut self, ml: f64) {
+        if ml <= 0.0 || self.materials.blood_volume_capacity <= 0.0 {
             return;
         }
-        let loss = f64::from(count)
-            * self.materials.blood_loss_per_wound_particle.max(0.0)
-            * intensity.clamp(0.25, 2.2);
-        if loss <= 0.0 {
-            return;
-        }
+        let loss = ml / BODY_BLOOD_ML * self.materials.blood_volume_capacity;
         let drained = loss.min(self.blood_volume.max(0.0));
         self.blood_volume = (self.blood_volume - drained).max(0.0);
         self.stats.blood_loss += drained;
@@ -3167,6 +3275,7 @@ impl World {
 
     fn update_wounds(&mut self, dt: f64) {
         let mut emissions = Vec::new();
+        let mut drained_ml = 0.0;
         let systemic_pressure = self.blood_pressure_scale();
         self.debug.blood_loss = self.stats.blood_loss;
         self.debug.blood_volume_fraction = self.blood_volume_fraction_internal();
@@ -3176,7 +3285,7 @@ impl World {
                 continue;
             }
             wound.age += dt;
-            let layer_scale = if wound.layer == TissueLayer::Muscle {
+            let layer_scale: f64 = if wound.layer == TissueLayer::Muscle {
                 1.35
             } else {
                 0.78
@@ -3184,24 +3293,36 @@ impl World {
             let open_factor = (1.0 - wound.clot).max(0.0);
             self.debug.max_wound_pressure = self.debug.max_wound_pressure.max(wound.pressure);
             self.debug.max_wound_clot = self.debug.max_wound_clot.max(wound.clot);
-            wound.accumulator += dt
+            // How much it bleeds this step, from what was cut, as the vessel
+            // closes and clots and as the body runs short of blood.
+            let flow_ml_per_min = wound.kind.flow_ml_per_min(wound.pressure)
                 * self.materials.wound_leak_rate
-                * wound.pressure
                 * systemic_pressure
                 * open_factor
-                * layer_scale
-                * (0.45 + wound.depth * 0.82);
+                * layer_scale.min(1.0);
+            let shed_ml = flow_ml_per_min * dt / 60.0;
+            drained_ml += shed_ml;
+            wound.accumulator += shed_ml / BLOOD_DROP_ML;
             let effective_pressure = wound.pressure * systemic_pressure;
-            if wound.age < 0.42 && effective_pressure > self.materials.wound_spray_pressure {
+            // Only a cut artery spurts.
+            if wound.kind == WoundKind::Artery
+                && wound.age < 0.42
+                && effective_pressure > self.materials.wound_spray_pressure
+            {
                 wound.accumulator +=
                     dt * (effective_pressure - self.materials.wound_spray_pressure) * 2.1;
             }
             let count = (wound.accumulator.floor() as i32).min(4);
             if count > 0 {
                 wound.accumulator -= f64::from(count);
-                let spray = ((effective_pressure - self.materials.wound_spray_pressure) / 2.4)
-                    .clamp(0.0, 1.0)
-                    * (1.0 - wound.age / 0.9).clamp(0.0, 1.0);
+                // Only a cut artery sprays; flesh and marrow well out.
+                let spray = if wound.kind == WoundKind::Artery {
+                    ((effective_pressure - self.materials.wound_spray_pressure) / 2.4)
+                        .clamp(0.0, 1.0)
+                        * (1.0 - wound.age / 0.9).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
                 let leak_direction = normalized(
                     Vec2 {
                         x: wound.direction.x * (0.25 + spray * 0.85),
@@ -3240,6 +3361,9 @@ impl World {
             }
         }
 
+        // The blood is lost whatever is shown; at most a few drops a step show
+        // it.
+        self.drain_blood_ml(drained_ml);
         let mut leak_left = self.materials.max_wound_leak_per_step;
         for (position, direction, count, speed, radius, intensity, spray) in emissions {
             let count = count.min(leak_left);
@@ -3247,7 +3371,6 @@ impl World {
                 break;
             }
             leak_left -= count;
-            self.drain_blood_volume(count, intensity);
             let before = self.stats.emitted_fluid_particles;
             // A fresh wound under pressure spurts; otherwise blood wells out
             // onto the skin and runs down it.
@@ -3900,13 +4023,14 @@ impl World {
         }
 
         for (index, position, direction, pressure, radius, depth) in events {
-            if self.open_wound(
+            if self.open_wound_of_kind(
                 position,
                 direction,
                 TissueLayer::Muscle,
                 pressure,
                 radius,
                 depth,
+                WoundKind::Artery,
             ) {
                 let vessel = self.vessels[index];
                 self.vessels[index].laceration_t = segment_t(position, vessel.a, vessel.b);
@@ -4006,13 +4130,14 @@ impl World {
         }
 
         for (index, position, direction, pressure, radius, depth) in events {
-            if self.open_wound(
+            if self.open_wound_of_kind(
                 position,
                 direction,
                 TissueLayer::Muscle,
                 pressure,
                 radius,
                 depth,
+                WoundKind::Artery,
             ) {
                 let vessel = self.vessels[index];
                 self.vessels[index].laceration_t = segment_t(position, vessel.a, vessel.b);
@@ -4199,7 +4324,17 @@ impl World {
             } * (1.0 - tear_weakening).clamp(0.48, 1.0);
             let tear_stretch =
                 spring.tear_stretch * (1.0 - contusion * 0.06 - fatigue * 0.10).clamp(0.76, 1.0);
-            let load_tear_stretch = (1.12 - contusion * 0.055 - fatigue * 0.045).clamp(1.04, 1.12);
+            // Loaded tissue tears at less stretch than its limit. Skin
+            // stretches 54 +/- 17% before it fails (Ni Annaidh et al. 2012), so
+            // even crushed skin must stretch about a third to split; muscle
+            // fails across its fibers at about 15% (Takaza et al. 2013).
+            let load_tear_base = if spring.layer == TissueLayer::Skin {
+                SKIN_LOAD_TEAR_STRETCH
+            } else {
+                1.12
+            };
+            let load_tear_stretch = (load_tear_base - contusion * 0.055 - fatigue * 0.045)
+                .clamp(load_tear_base - 0.08, load_tear_base);
             let stiffness = spring.stiffness * (1.0 - stiffness_softening).clamp(0.52, 1.0);
             self.debug.max_tissue_softening = self
                 .debug
@@ -4207,8 +4342,9 @@ impl World {
                 .max(tear_weakening.max(stiffness_softening));
             self.springs[i].stress =
                 (self.springs[i].stress * 0.9).max((stretch_ratio - 1.0).max(0.0));
-            if stretch_ratio > tear_stretch
-                || (endpoint_load > tear_impulse && stretch_ratio > load_tear_stretch)
+            if self.tearing_pass
+                && (stretch_ratio > tear_stretch
+                    || (endpoint_load > tear_impulse && stretch_ratio > load_tear_stretch))
             {
                 let midpoint = midpoint(a.position, b.position);
                 let tangent = normalized(delta, Vec2 { x: 1.0, y: 0.0 });
@@ -4677,9 +4813,15 @@ impl World {
             }
             let point = self.points[attachment.point];
             let mut bone = self.bones[attachment.bone];
-            bone.load = bone
-                .load
-                .max(point.load * self.materials.bone_impact_transfer);
+            let mut transfer = point.load * self.materials.bone_impact_transfer;
+            // A blade cuts flesh with a few hundred newtons at most (Bleetman
+            // et al. 2003), far below what breaks a long bone, so its cutting
+            // load does not carry through the flesh to break one.
+            bone.load = bone.load.max(transfer);
+            if self.debug.tool == ToolMode::Sharp && bone.part.is_long_bone() {
+                transfer = transfer.min(bone.fracture_impulse * BLADE_LONG_BONE_LOAD);
+            }
+            bone.break_load = bone.break_load.max(transfer);
             let raw_anchor = bone_point(bone, attachment.t);
             let current_distance = distance(point.position, raw_anchor);
             let stretch_ratio = current_distance / attachment.rest.max(1.0);
@@ -4838,6 +4980,9 @@ impl World {
             }
             self.debug.max_bone_joint_subluxation =
                 self.debug.max_bone_joint_subluxation.max(joint.subluxation);
+            // A joint passes on part of what each bone carries, straining
+            // the joint and the muscle on the bones; only blows, bone pieces,
+            // and the flesh pressed onto a bone break it (`break_load`).
             self.bones[joint.a].load = self.bones[joint.a]
                 .load
                 .max(self.bones[joint.b].load * 0.30);
@@ -4909,7 +5054,8 @@ impl World {
             let correction = scale(delta, diff * 0.5);
             bone.a = add(bone.a, correction);
             bone.b = subtract(bone.b, correction);
-            let should_fracture = self.can_fracture_bone(bone) && bone.load > bone.fracture_impulse;
+            let should_fracture =
+                self.can_fracture_bone(bone) && bone.break_load > bone.fracture_impulse;
             self.bones[i] = bone;
             if should_fracture {
                 fractures.push(i);
@@ -5161,13 +5307,22 @@ impl World {
                         },
                     ),
                 );
-                self.points[point_index].load = self.points[point_index].load.max(
-                    depth * 68.0 * layer_resistance
-                        + contact * self.materials.fragment_damage_impulse * 0.30,
-                );
+                // A piece of bone pressing on the skin from inside tents it
+                // but does not load it toward tearing; a sharp chip does.
+                if point.layer == TissueLayer::Muscle || bone.splinter {
+                    self.points[point_index].load = self.points[point_index].load.max(
+                        depth * 68.0 * layer_resistance
+                            + contact * self.materials.fragment_damage_impulse * 0.30,
+                    );
+                }
                 if point.layer == TissueLayer::Muscle {
                     self.points[point_index].exposure = self.points[point_index].exposure.max(0.92);
-                } else if contact > 0.42 || bone.splinter {
+                } else if bone.splinter {
+                    // A broken bone pressing on the skin from inside tents it
+                    // but leaves it whole; only a sharp chip, thrown off by a
+                    // break far past the bone's strength, starts to open it.
+                    // Most fractures stay closed: a fifth of those from bat
+                    // blows were open (Bryant et al. 1992).
                     self.points[point_index].exposure =
                         self.points[point_index].exposure.max(0.48 + contact * 0.34);
                 }
@@ -5374,6 +5529,11 @@ impl World {
                 self.bones[fragment_index].load =
                     self.bones[fragment_index].load.max(contact_load * 0.72);
                 self.bones[bone_index].load = self.bones[bone_index].load.max(contact_load * 0.54);
+                self.bones[fragment_index].break_load = self.bones[fragment_index]
+                    .break_load
+                    .max(contact_load * 0.72);
+                self.bones[bone_index].break_load =
+                    self.bones[bone_index].break_load.max(contact_load * 0.54);
                 self.debug.fragment_bone_contacts += 1;
                 if resting_contact {
                     self.debug.fragment_bone_resting_contacts += 1;
@@ -5679,7 +5839,11 @@ impl World {
                 continue;
             }
             let contact = 1.0 - d / (radius * 1.18);
+            // Only the pieces of a break that came out open, and sharp chips,
+            // cut through the skin from inside; a closed break leaves it whole.
+            let cuts_skin = bone.open_break || bone.splinter;
             if spring.layer == TissueLayer::Skin
+                && cuts_skin
                 && (self.debug.fragment_skin_punctures as usize)
                     < self.materials.max_fragment_skin_punctures_per_step
             {
@@ -5708,9 +5872,11 @@ impl World {
                     continue;
                 }
             }
+            // A piece of bone tears exposed muscle, but rips skin only when it
+            // is driven out violently, as in an open fracture; a gently moving
+            // piece does not saw a small split into a gaping wound.
             let reachable = spring.layer == TissueLayer::Muscle
-                || a.exposure.max(b.exposure) > 0.35
-                || impulse > self.materials.fragment_damage_impulse * 1.75;
+                || (cuts_skin && impulse > self.materials.fragment_damage_impulse * 1.75);
             if !reachable {
                 continue;
             }
@@ -5972,7 +6138,9 @@ impl World {
         for index in 0..self.attachments.len() {
             let attachment = self.attachments[index];
             if attachment.broken {
-                self.bump_point_exposure_load(attachment.skin_point, 1.0, 0.0);
+                // Skin come loose from the muscle under it is still whole, so
+                // only a piece of bone driven out violently cuts through it.
+                self.bump_point_exposure_load(attachment.skin_point, DETACHED_SKIN_EXPOSURE, 0.0);
                 self.bump_point_exposure_load(attachment.muscle_point, 1.0, 0.0);
             }
         }
@@ -6115,12 +6283,14 @@ impl World {
         let crack = lerp(old.a, old.b, break_t);
         let previous_crack = lerp(old.previous_a, old.previous_b, break_t);
         let home_crack = lerp(old.home_a, old.home_b, break_t);
-        let overload = ((impulse.max(old.load) - old.fracture_impulse)
-            / old.fracture_impulse.max(1.0))
-        .clamp(0.0, 1.4);
+        let raw_overload =
+            (impulse.max(old.break_load) - old.fracture_impulse) / old.fracture_impulse.max(1.0);
+        let overload = raw_overload.clamp(0.0, 1.4);
         // An ordinary break barely shifts its ends; only a break far past the
         // bone's strength throws the pieces apart and chips off a splinter.
-        let open = overload >= self.materials.open_fracture_overload;
+        let open = raw_overload
+            >= self.materials.open_fracture_overload
+                * tool_profile(self.debug.tool).open_fracture_scale;
         let violence = if open {
             1.0
         } else {
@@ -6153,6 +6323,7 @@ impl World {
                 .clamp(0.45, 1.10);
 
         let mut first = old;
+        first.open_break = old.open_break || open;
         first.a = Vec2 {
             x: old.a.x - normal.x * snap * 0.18,
             y: old.a.y - normal.y * snap * 0.18,
@@ -6177,6 +6348,7 @@ impl World {
         first.fracture_generation += 1;
         first.fracture_impulse = secondary_fracture_impulse;
         first.load = old.load * 0.28;
+        first.break_load = old.break_load * 0.28;
         first.angular_velocity = (first.angular_velocity
             + spin_sign * fracture_spin * (1.0 - break_t))
             .clamp(-36.0, 36.0);
@@ -6207,10 +6379,12 @@ impl World {
             rest_length: 1.0,
             fracture_impulse: secondary_fracture_impulse,
             load: old.load * 0.28,
+            break_load: old.break_load * 0.28,
             fractured: true,
             broken_start: true,
             broken_start_normal: normal,
             fracture_generation: first.fracture_generation,
+            open_break: first.open_break,
             pinned: old.pinned,
             ..BoneSegment::default()
         };
@@ -6340,6 +6514,9 @@ impl World {
             y: normal.y + dir.y * 0.28 - 0.30,
         };
         let load = impulse.max(old.load);
+        if open {
+            self.stats.open_fractures += 1;
+        }
         if !open {
             self.bruise_tissue_around_fracture(crack, old.radius, load);
             self.count_fracture(old.part, old.kind, load);
@@ -6489,7 +6666,11 @@ impl World {
             }
             let falloff = 1.0 - d / bruise_radius;
             let bruise = bruise_load * falloff * severity;
-            point.load = point.load.max(bruise.min(bruise_load));
+            // The skin over a closed break bruises but stays whole, so only
+            // the muscle around it takes the load that tears tissue.
+            if point.layer == TissueLayer::Muscle {
+                point.load = point.load.max(bruise.min(bruise_load));
+            }
             if apply_point_contusion(point, self.materials, bruise, 1.0) {
                 self.stats.contusion_events += 1;
                 self.debug.contusion_events += 1;
@@ -7288,7 +7469,6 @@ mod tests {
         materials.wound_leak_rate = 120.0;
         materials.wound_clot_rate = 0.0;
         materials.blood_volume_capacity = 1.0;
-        materials.blood_loss_per_wound_particle = 0.05;
         let mut world = World::new(materials);
         world.open_wound(
             Vec2 { x: 10.0, y: 10.0 },
@@ -7317,7 +7497,6 @@ mod tests {
         materials.wound_leak_rate = 120.0;
         materials.wound_clot_rate = 0.0;
         materials.blood_volume_capacity = 1.0;
-        materials.blood_loss_per_wound_particle = 0.05;
         materials.blood_pressure_min_scale = 0.34;
 
         let mut full = World::new(materials);
@@ -8833,7 +9012,8 @@ mod tests {
         world.points[b].contusion = 1.0;
         world.points[a].load = 700.0;
         world.points[b].load = 700.0;
-        world.points[b].position.x = 112.0;
+        // Loaded skin tears at 35% stretch, bruised skin a little sooner.
+        world.points[b].position.x = 132.0;
 
         world.solve_springs();
 
@@ -9722,6 +9902,8 @@ fn tool_profile(tool: ToolMode) -> ToolProfile {
             fracture_scale: 3.2,
             cut_pressure_scale: 1.0,
             crush_tear_scale: 0.0,
+            open_fracture_scale: 1.0,
+            break_scale: 1.0,
             fluid_scale: 1.35,
             drag_scale: 0.72,
             rebound_scale: 0.58,
@@ -9734,15 +9916,30 @@ fn tool_profile(tool: ToolMode) -> ToolProfile {
             bone_push_scale: 1.46,
             bone_load_scale: 1.0,
             fracture_scale: 1.0,
+            break_scale: 2.57,
             cut_pressure_scale: 0.0,
             crush_tear_scale: 0.10,
+            // About half its hardest breaks come out open, as from clubs and
+            // iron bars (Nolan et al. 2000; Eames et al. 1997); a break it only
+            // just makes stays closed.
+            open_fracture_scale: 4.5,
             fluid_scale: 0.92,
             drag_scale: 0.82,
             rebound_scale: 1.42,
         },
-        // A bat's broad barrel bruises far more than it tears.
+        // A bat's broad barrel bruises far more than it tears. How hard it
+        // presses on bone is set so a bat breaks bones as often as blows of
+        // its energy do in real life (`docs/INJURY_REFERENCE.md`): an
+        // ordinary man's hard swing, about 112 J, usually breaks an upper
+        // arm, and a 10 J swing breaks nothing.
+        // A bat's smooth, rounded barrel rarely drives a broken bone out
+        // through the skin: a fifth of fractures from bat blows were open
+        // (Bryant et al. 1992), against 44% from clubs and 70% of iron-bar
+        // victims (Nolan et al. 2000; Eames et al. 1997).
         ToolMode::Blunt => ToolProfile {
             tissue_load_scale: 0.05,
+            break_scale: 1.543,
+            open_fracture_scale: 6.0,
             ..ToolProfile::default()
         },
     }

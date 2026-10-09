@@ -821,7 +821,12 @@ fn resting_body_carries_no_hidden_motion() {
 #[test]
 fn arm_pressed_against_the_chest_stays_outside_it() {
     let (width, height) = (1280.0, 720.0);
-    let mut world = rp::create_layered_body(width, height, rp::Materials::default());
+    // Bones too strong to break: a firm swing can break the upper arm, as in
+    // real life, and a broken arm folds instead of being driven against the
+    // chest. This checks how body parts meet, not fractures.
+    let mut materials = rp::Materials::default();
+    materials.bone_fracture_impulse *= 4.0;
+    let mut world = rp::create_layered_body(width, height, materials);
     let dt = world.materials().fixed_dt;
     let body = rp::body_frame(width, height);
     // A firm hammer swing into the outside of the arm, leaning on it after.

@@ -154,21 +154,22 @@ fn visual_scenarios() -> Vec<VisualScenario> {
             intent: "cut",
             strike: tuned_strike("torso_sharp_cut"),
             // A knife cut on the belly: a cut through skin and muscle that
-            // opens, reaches a vessel and an organ, and breaks no bone. Its
-            // blood wells out and runs down the skin in trickles.
+            // opens and reaches an organ, and breaks no bone. Like most
+            // slashes it stays clear of the major vessels (Steel et al. 2021),
+            // so its blood oozes, wells out, and runs down the skin in
+            // trickles.
             expectations: VisualExpectations {
                 min_skin_wound_edges: 8,
                 min_incision_segments: 8,
                 min_muscle_fiber_tears: 4,
                 min_opened_cut_insides: 3,
                 min_visible_wound_sources: 3,
-                min_visible_fluid_particles: 20,
+                min_visible_fluid_particles: 10,
                 min_visible_blood_trails: 60,
-                min_lacerated_vessels: 1,
                 min_organ_penetrations: 1,
                 min_organ_damage: 0.4,
                 max_fractured_bones: Some(0),
-                min_damage_primitives: 200,
+                min_damage_primitives: 120,
                 ..VisualExpectations::default()
             },
         },
@@ -177,25 +178,46 @@ fn visual_scenarios() -> Vec<VisualScenario> {
             intent: "settle",
             strike: tuned_strike("torso_heavy_fragment_settle"),
             // A full-force sledgehammer blow to the chest, left to settle:
-            // broken arm and ribs, deep bruising, torn flesh and bleeding,
-            // which spatters, then runs down the skin and drips. Breaking
-            // the arm takes much of the blow, so the organs behind it are
-            // only bruised.
+            // the upper arm breaks (ribs only sometimes), with deep bruising
+            // and torn muscle. The skin mostly holds over a closed break, so
+            // it bleeds a little, and that runs down the skin. Breaking the
+            // arm takes much of the blow, so the organs behind it are only
+            // bruised.
             expectations: VisualExpectations {
-                min_skin_wound_edges: 30,
+                min_skin_wound_edges: 3,
                 min_muscle_fiber_tears: 10,
                 min_failed_muscle_voids: 30,
                 min_visible_contusions: 25,
-                min_visible_wound_sources: 8,
-                min_visible_fluid_particles: 120,
-                min_visible_blood_trails: 100,
+                min_visible_wound_sources: 4,
+                min_visible_fluid_particles: 15,
+                min_visible_blood_trails: 20,
                 min_visible_blood_stains: 4,
-                min_fractured_bones: 6,
-                min_rib_fractures: 1,
-                min_fracture_caps: 6,
-                min_cavity_pressure: 0.4,
-                min_organ_damage: 0.1,
-                min_damage_primitives: 500,
+                min_fractured_bones: 2,
+                min_fracture_caps: 2,
+                min_cavity_pressure: 0.1,
+                min_organ_damage: 0.05,
+                min_damage_primitives: 120,
+                ..VisualExpectations::default()
+            },
+        },
+        VisualScenario {
+            name: "arm_sharp_cut_visual",
+            intent: "cut",
+            strike: tuned_strike("arm_sharp"),
+            // A knife drawn down the inside of the arm opens the artery that
+            // runs under the skin there, which spurts, then bleeds steadily
+            // down the arm; no bone breaks.
+            expectations: VisualExpectations {
+                min_skin_wound_edges: 8,
+                min_incision_segments: 15,
+                min_muscle_fiber_tears: 4,
+                min_opened_cut_insides: 2,
+                min_visible_wound_sources: 1,
+                min_visible_fluid_particles: 12,
+                min_visible_blood_trails: 30,
+                min_lacerated_vessels: 1,
+                max_fractured_bones: Some(0),
+                min_damage_primitives: 100,
                 ..VisualExpectations::default()
             },
         },

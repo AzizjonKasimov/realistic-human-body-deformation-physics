@@ -103,7 +103,13 @@ struct ToolHandling {
     /// Share of the arm's full push a tool presses with. A broad bat or hammer
     /// face spreads a push the arm can only half put behind it.
     press_share: f64,
+    /// Fastest the striking part moves, in pixels per second. For the 1.75 m
+    /// adult the figure stands for, 1,000 px/s is about 3.1 m/s
+    /// (`docs/INJURY_REFERENCE.md`).
     max_speed: f64,
+    /// A press farther from the hand than two steps at this speed is a finger
+    /// put down somewhere new, not a swing.
+    regrip_speed: f64,
     /// Farthest lead the hand presses with: pulling the pointer farther from a
     /// tool stuck in the body does not press it any harder.
     max_reach: f64,
@@ -123,7 +129,10 @@ fn tool_handling(tool: ToolMode) -> ToolHandling {
             press_drive: 132.0,
             press_damping: 13.0,
             press_share: 1.0,
-            max_speed: 4600.0,
+            // The fastest slashes measured reach about 15 m/s (Bleetman et
+            // al. 2003).
+            max_speed: 4800.0,
+            regrip_speed: 4600.0,
             max_reach: 150.0,
             swing_radius: 60.0,
         },
@@ -135,7 +144,11 @@ fn tool_handling(tool: ToolMode) -> ToolHandling {
             press_drive: 96.0,
             press_damping: 14.0,
             press_share: PRESS_SHARE,
+            // About 10.6 m/s: no study has measured a sledgehammer swing, and
+            // this is inside the energies people strike with (Sprenger et al.
+            // 2016).
             max_speed: 3400.0,
+            regrip_speed: 3400.0,
             max_reach: 150.0,
             swing_radius: 140.0,
         },
@@ -145,7 +158,11 @@ fn tool_handling(tool: ToolMode) -> ToolHandling {
             press_drive: 118.0,
             press_damping: 15.0,
             press_share: PRESS_SHARE,
-            max_speed: 4200.0,
+            // About 25 m/s: an ordinary man swings a bat at about 15.5 m/s,
+            // trained hitters at over 30 (Guo et al. 2026; Escamilla et al.
+            // 2009).
+            max_speed: 8000.0,
+            regrip_speed: 4200.0,
             max_reach: 150.0,
             swing_radius: 170.0,
         },
@@ -607,7 +624,7 @@ impl World {
         let regrip = pressed
             && self.tool.present
             && self.tool.last_hand.is_some_and(|last| {
-                distance(target, last) > handling.max_speed * dt * REGRIP_JUMP_STEPS
+                distance(target, last) > handling.regrip_speed * dt * REGRIP_JUMP_STEPS
             });
         if regrip {
             self.tool.present = false;
@@ -685,6 +702,7 @@ impl World {
         self.debug.impact = speed * mass;
         for bone in &mut self.bones {
             bone.load *= 0.88;
+            bone.break_load *= 0.88;
         }
 
         let start = tool_pose(
@@ -999,7 +1017,16 @@ impl World {
                 continue;
             }
             let load = force * strike.profile.bone_load_scale / strike.profile.fracture_scale;
+            // A blade notches a long bone but does not break it; that takes a
+            // heavy chopping blade (Lynn and Fairgrieve 2009). It can still
+            // cut through a rib (Bolliger et al. 2016).
+            let load = if bone.part.is_long_bone() {
+                load.min(bone.fracture_impulse * BLADE_LONG_BONE_LOAD)
+            } else {
+                load
+            };
             bone.load = bone.load.max(load);
+            bone.break_load = bone.break_load.max(load * strike.profile.break_scale);
             if load > self.materials.fragment_wake_load {
                 self.wake_fragment(&mut bone);
             }
@@ -1398,6 +1425,10 @@ impl World {
             bone.load = bone
                 .load
                 .max(direct_load / strike.profile.fracture_scale.max(EPSILON));
+            bone.break_load = bone.break_load.max(
+                direct_load / strike.profile.fracture_scale.max(EPSILON)
+                    * strike.profile.break_scale,
+            );
             if direct_load > self.materials.fragment_wake_load
                 || speed > self.materials.fragment_sleep_speed * 2.0
             {
@@ -1454,7 +1485,8 @@ impl World {
                     },
                 );
             }
-            let should_fracture = self.can_fracture_bone(bone) && bone.load > bone.fracture_impulse;
+            let should_fracture =
+                self.can_fracture_bone(bone) && bone.break_load > bone.fracture_impulse;
             self.bones[i] = bone;
             if should_fracture {
                 self.fracture_bone(i, t, normal, direct_load);

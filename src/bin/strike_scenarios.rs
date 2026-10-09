@@ -451,11 +451,19 @@ fn sweep(selected: &[Scenario], output_dir: &Path, custom: bool) {
 
     let mut report = String::new();
     let mut mismatches = Vec::new();
+    let mut gaps = Vec::new();
     for (index, scenario) in selected.iter().enumerate() {
         let mine: Vec<&SweepRun> = runs.iter().filter(|run| run.scenario == index).collect();
         report.push_str(&sweep_summary(scenario, &mine, custom));
         let results: Vec<&ScenarioResult> = mine.iter().map(|run| &run.result).collect();
         mismatches.extend(scenario.sweep_violations(&results));
+        gaps.extend(scenario.sweep_gaps(&results));
+    }
+    if !custom && !gaps.is_empty() {
+        report.push_str("Known gaps, still short of real life:\n");
+        for gap in &gaps {
+            report.push_str(&format!("  {gap}\n"));
+        }
     }
     if !custom {
         if mismatches.is_empty() {
@@ -555,6 +563,40 @@ fn sweep_summary(scenario: &Scenario, runs: &[&SweepRun], custom: bool) -> Strin
             })
             .collect();
         text.push_str(&format!("  {}\n", tallies.join("; ")));
+        // How close each checked bone came to breaking, as a share of its
+        // strength, for tuning.
+        let loads: Vec<String> = scenario
+            .real
+            .iter()
+            .filter_map(|check| match check.outcome {
+                rp::scenarios::Outcome::Breaks(part) => Some(part),
+                _ => None,
+            })
+            .map(|part| {
+                spread(
+                    &format!("{} load", part.name()),
+                    &|r: &ScenarioResult| r.part_peak_load[part.index()],
+                    2,
+                )
+            })
+            .collect();
+        if !loads.is_empty() {
+            text.push_str(&format!("  {}\n", loads.join(", ")));
+        }
+    }
+    // Which bones broke, in how many runs.
+    let broken: Vec<String> = rp::BonePart::ALL
+        .iter()
+        .filter_map(|part| {
+            let count = runs
+                .iter()
+                .filter(|run| run.result.part_fractures[part.index()] > 0)
+                .count();
+            (count > 0).then(|| format!("{} in {count}", part.name()))
+        })
+        .collect();
+    if !broken.is_empty() {
+        text.push_str(&format!("  broken: {}\n", broken.join(", ")));
     }
     text.push_str(&format!("  {}\n", lines[..5].join(", ")));
     text.push_str(&format!("  {}\n", lines[5..9].join(", ")));

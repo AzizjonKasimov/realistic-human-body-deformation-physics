@@ -62,8 +62,10 @@ const RIBS: [(f64, f64, f64); 4] = [
     (0.343, 0.058, 0.52),
 ];
 const RIB_DROP: f64 = 0.022;
-/// The aorta sits deep in the torso, so it takes this much more force to cut.
-const AORTA_DEPTH_SCALE: f64 = 2.4;
+/// The aorta lies deep, against the spine and behind the organs, so it takes
+/// this much more force to cut: most slashes stay shallow (Steel et al.
+/// 2021), and only a deep stab or crushing trauma reaches it.
+const AORTA_DEPTH_SCALE: f64 = 6.0;
 /// Torso muscle inside this box forms the pressurized cavity.
 const CAVITY_U: f64 = 0.078;
 const CAVITY_V: (f64, f64) = (0.215, 0.505);
@@ -290,25 +292,68 @@ fn fiber_guide_landmarks() -> [(Landmark, Landmark); 16] {
     ]
 }
 
+/// How strong each part of the skeleton is, against
+/// `Materials::bone_fracture_impulse`. In fracture tests the collarbone takes
+/// about half the force that breaks a forearm, and the upper arm, shin, and
+/// thigh about 2.1, 2.25, and 2.5 times it (`docs/INJURY_REFERENCE.md`);
+/// parts the research does not cover keep their earlier tuned strength. The
+/// forearm is set 30% stronger than its share, within the spread of the
+/// forearm studies, so a 10 J bat swing rarely breaks it. How hard a tool's
+/// blow bears toward a break is each tool's `break_scale`.
+fn bone_strength(part: BonePart) -> f64 {
+    const FOREARM: f64 = 0.72;
+    match part {
+        BonePart::Forearm => FOREARM * 1.3,
+        BonePart::Collarbone => FOREARM * 0.53,
+        BonePart::UpperArm => FOREARM * 2.14,
+        BonePart::Shin => FOREARM * 2.25,
+        BonePart::Thigh => FOREARM * 2.5,
+        BonePart::Skull => FOREARM * 1.04,
+        BonePart::Spine => FOREARM * 1.39,
+        BonePart::Pelvis => FOREARM * 1.25,
+        BonePart::Hand => FOREARM * 0.83,
+        BonePart::Foot => FOREARM * 0.9,
+        // Ribs have their own strengths, in `RIBS`.
+        BonePart::Rib | BonePart::Other => 1.0,
+    }
+}
+
 fn add_skeleton(world: &mut World, frame: BodyFrame, materials: Materials) {
     let at = |landmark: Landmark| frame.point(landmark.0, landmark.1);
     let strength = materials.bone_fracture_impulse;
-    let bone = |world: &mut World, a: Landmark, b: Landmark, radius: f64, scale: f64| {
-        world.add_bone_segment(at(a), at(b), radius, strength * scale, false)
+    let bone = |world: &mut World, a: Landmark, b: Landmark, radius: f64, part: BonePart| {
+        let index =
+            world.add_bone_segment(at(a), at(b), radius, strength * bone_strength(part), false);
+        world.bones[index].part = part;
+        index
     };
 
     // The skull is pinned with the crown, so it must stay at index 0 and the spine at 1.
-    let head = world.add_bone_segment(at(SKULL[0]), at(SKULL[1]), 8.2, strength * 0.75, true);
+    let head = world.add_bone_segment(
+        at(SKULL[0]),
+        at(SKULL[1]),
+        8.2,
+        strength * bone_strength(BonePart::Skull),
+        true,
+    );
+    world.bones[head].part = BonePart::Skull;
     let spine = world.add_bone_segment_with_kind(
         at(SPINE[0]),
         at(SPINE[1]),
         7.2,
-        strength,
+        strength * bone_strength(BonePart::Spine),
         false,
         BoneKind::Spine,
     );
-    let shoulders = bone(world, SHOULDER_GIRDLE[0], SHOULDER_GIRDLE[1], 6.2, 0.95);
-    let pelvis = bone(world, PELVIS[0], PELVIS[1], 6.4, 0.9);
+    world.bones[spine].part = BonePart::Spine;
+    let shoulders = bone(
+        world,
+        SHOULDER_GIRDLE[0],
+        SHOULDER_GIRDLE[1],
+        6.2,
+        BonePart::Collarbone,
+    );
+    let pelvis = bone(world, PELVIS[0], PELVIS[1], 6.4, BonePart::Pelvis);
     let spine_t = |v: f64| ((v - SPINE[0].1) / (SPINE[1].1 - SPINE[0].1)).clamp(0.0, 1.0);
 
     let mut ribs = Vec::new();
@@ -322,6 +367,7 @@ fn add_skeleton(world: &mut World, frame: BodyFrame, materials: Materials) {
                 false,
                 BoneKind::Rib,
             );
+            world.bones[rib].part = BonePart::Rib;
             ribs.push((rib, root_v));
         }
     }
@@ -331,57 +377,35 @@ fn add_skeleton(world: &mut World, frame: BodyFrame, materials: Materials) {
     // overshoot into a subluxation while the body is still at rest.
     let joint_gap = materials.point_spacing * 0.70;
     let below_joint =
-        |world: &mut World, joint: Landmark, tip: Landmark, radius: f64, strength_scale: f64| {
+        |world: &mut World, joint: Landmark, tip: Landmark, radius: f64, part: BonePart| {
             let start = at(joint);
             let end = at(tip);
             let gap = scale(
                 normalized(subtract(end, start), Vec2 { x: 0.0, y: 1.0 }),
                 joint_gap,
             );
-            world.add_bone_segment(
+            let index = world.add_bone_segment(
                 add(start, gap),
                 end,
                 radius,
-                strength * strength_scale,
+                strength * bone_strength(part),
                 false,
-            )
+            );
+            world.bones[index].part = part;
+            index
         };
-    let left_upper_arm = bone(world, LEFT_SHOULDER, LEFT_ELBOW, 5.7, 0.82);
-    let left_forearm = below_joint(world, LEFT_ELBOW, LEFT_WRIST, 4.8, 0.72);
-    let right_upper_arm = bone(world, RIGHT_SHOULDER, RIGHT_ELBOW, 5.7, 0.82);
-    let right_forearm = below_joint(world, RIGHT_ELBOW, RIGHT_WRIST, 4.8, 0.72);
-    let left_thigh = bone(world, LEFT_HIP, LEFT_KNEE, 6.4, 0.9);
-    let left_shin = below_joint(world, LEFT_KNEE, LEFT_ANKLE, 5.3, 0.78);
-    let right_thigh = bone(world, RIGHT_HIP, RIGHT_KNEE, 6.4, 0.9);
-    let right_shin = below_joint(world, RIGHT_KNEE, RIGHT_ANKLE, 5.3, 0.78);
-    let left_hand = below_joint(world, LEFT_WRIST, LEFT_KNUCKLES, 3.6, 0.6);
-    let right_hand = below_joint(world, RIGHT_WRIST, RIGHT_KNUCKLES, 3.6, 0.6);
-    let left_foot = below_joint(world, LEFT_ANKLE, LEFT_TOES, 4.0, 0.65);
-    let right_foot = below_joint(world, RIGHT_ANKLE, RIGHT_TOES, 4.0, 0.65);
-    // What each bone is, as injury research names it.
-    for (bone, part) in [
-        (head, BonePart::Skull),
-        (spine, BonePart::Spine),
-        (shoulders, BonePart::Collarbone),
-        (pelvis, BonePart::Pelvis),
-        (left_upper_arm, BonePart::UpperArm),
-        (right_upper_arm, BonePart::UpperArm),
-        (left_forearm, BonePart::Forearm),
-        (right_forearm, BonePart::Forearm),
-        (left_hand, BonePart::Hand),
-        (right_hand, BonePart::Hand),
-        (left_thigh, BonePart::Thigh),
-        (right_thigh, BonePart::Thigh),
-        (left_shin, BonePart::Shin),
-        (right_shin, BonePart::Shin),
-        (left_foot, BonePart::Foot),
-        (right_foot, BonePart::Foot),
-    ] {
-        world.bones[bone].part = part;
-    }
-    for &(rib, _) in &ribs {
-        world.bones[rib].part = BonePart::Rib;
-    }
+    let left_upper_arm = bone(world, LEFT_SHOULDER, LEFT_ELBOW, 5.7, BonePart::UpperArm);
+    let left_forearm = below_joint(world, LEFT_ELBOW, LEFT_WRIST, 4.8, BonePart::Forearm);
+    let right_upper_arm = bone(world, RIGHT_SHOULDER, RIGHT_ELBOW, 5.7, BonePart::UpperArm);
+    let right_forearm = below_joint(world, RIGHT_ELBOW, RIGHT_WRIST, 4.8, BonePart::Forearm);
+    let left_thigh = bone(world, LEFT_HIP, LEFT_KNEE, 6.4, BonePart::Thigh);
+    let left_shin = below_joint(world, LEFT_KNEE, LEFT_ANKLE, 5.3, BonePart::Shin);
+    let right_thigh = bone(world, RIGHT_HIP, RIGHT_KNEE, 6.4, BonePart::Thigh);
+    let right_shin = below_joint(world, RIGHT_KNEE, RIGHT_ANKLE, 5.3, BonePart::Shin);
+    let left_hand = below_joint(world, LEFT_WRIST, LEFT_KNUCKLES, 3.6, BonePart::Hand);
+    let right_hand = below_joint(world, RIGHT_WRIST, RIGHT_KNUCKLES, 3.6, BonePart::Hand);
+    let left_foot = below_joint(world, LEFT_ANKLE, LEFT_TOES, 4.0, BonePart::Foot);
+    let right_foot = below_joint(world, RIGHT_ANKLE, RIGHT_TOES, 4.0, BonePart::Foot);
 
     world.add_bone_joint(head, 1.0, spine, 0.0, -0.45, 0.45);
     world.add_bone_joint(
