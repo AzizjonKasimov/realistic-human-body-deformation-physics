@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
 
+mod blood;
 mod body;
 mod cuts;
 mod grid;
@@ -3014,6 +3015,7 @@ impl World {
         for (position, radius, intensity) in stain_deposits {
             self.deposit_blood_stain(position, radius, intensity);
         }
+        self.cohere_blood();
     }
 
     fn blood_volume_fraction_internal(&self) -> f64 {
