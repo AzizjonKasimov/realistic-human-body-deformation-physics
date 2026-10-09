@@ -53,13 +53,8 @@ if ($Clean) {
     Write-Host "Removed the compare worktrees and cached results; the shared build cache in target\compare\target stays."
     return
 }
-$sha =(& git -C $repoRoot rev-parse --verify --quiet "$Ref^{commit}")
-if ($LASTEXITCODE -ne 0 -or -not $sha) {
-    throw "Unknown commit: $Ref"
-}
-$sha = $sha.Trim()
+$sha = Resolve-Commit $Ref
 $short = $sha.Substring(0, 10)
-$baseTree = Join-Path $compareRoot $short
 $baseTarget = Join-Path $compareRoot "target"
 $baseResults = Join-Path $compareRoot "results\$short"
 if (-not $Out) {
@@ -101,13 +96,7 @@ function Invoke-Diagnostics([string]$Tree, [string]$TargetDir, [string]$Results,
 }
 
 # The commit's side, built once in a worktree and cached by commit.
-if (-not (Test-Path -LiteralPath (Join-Path $baseTree "Cargo.toml"))) {
-    & git -C $repoRoot worktree prune
-    & git -C $repoRoot worktree add --detach $baseTree $sha | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "git worktree add failed for $short"
-    }
-}
+$baseTree = Get-CommitWorktree $sha
 $baseSweeps = $Sweep -and (Test-SourceHas $baseTree "src\bin\strike_scenarios.rs" "--sweep")
 $baseDone = Join-Path $baseResults "done.txt"
 $haveBase = (Test-Path -LiteralPath $baseDone) -and

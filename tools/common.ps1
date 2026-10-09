@@ -24,6 +24,31 @@ function Get-CargoPath {
     throw "Could not find cargo.exe. Install Rust with: winget install Rustlang.Rustup; then restart PowerShell."
 }
 
+# The full hash of the commit $Ref names.
+function Resolve-Commit([string]$Ref) {
+    $sha = (& git -C (Get-RepoRoot) rev-parse --verify --quiet "$Ref^{commit}")
+    if ($LASTEXITCODE -ne 0 -or -not $sha) {
+        throw "Unknown commit: $Ref"
+    }
+    return $sha.Trim()
+}
+
+# A checkout of commit $Sha in a git worktree under target\compare, made once
+# and kept for later runs; compare.ps1 and bench.ps1 build commits there.
+function Get-CommitWorktree([string]$Sha) {
+    $repoRoot = Get-RepoRoot
+    $short = $Sha.Substring(0, 10)
+    $tree = Join-Path $repoRoot "target\compare\$short"
+    if (-not (Test-Path -LiteralPath (Join-Path $tree "Cargo.toml"))) {
+        & git -C $repoRoot worktree prune
+        & git -C $repoRoot worktree add --detach $tree $Sha | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "git worktree add failed for $short"
+        }
+    }
+    return $tree
+}
+
 function Invoke-Checked {
     param(
         [Parameter(Mandatory = $true)]

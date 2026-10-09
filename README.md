@@ -201,6 +201,19 @@ Each capture briefly opens the app window at the given size, plays the strike at
 
 Captures can also become videos: `--every 1 --no-ui --no-label` saves every 60 Hz step as a clean frame. Injuries depend on the body's size in pixels, because tools keep their pixel size, and a tall window draws the body larger than the 561.6 px the tuned scenarios use (its height in a 1280x720 window). `--body-frame X,Y,H` puts the top of the head at `X,Y` and makes the body `H` pixels tall, so `--size 576x1024 --body-frame 288,240,561.6` films a vertical video whose swings do what the scenarios check, with room above the head for captions. `--events FILE` writes what happens at each step as CSV (the tool, its speed and impact, whether it touches the body, and running counts of broken bones, torn skin and muscle, bruises, and blood drops), so a video's sound can be made from the same run as its picture.
 
+## Measure Speed
+
+To see whether a change makes the simulation faster or slower, time it against a commit:
+
+```powershell
+.\tools\bench.ps1 -Ref main
+cargo run --release --bin strike_scenarios -- --phases
+```
+
+`bench.ps1` plays the app's native self-test with the working tree's release build and the commit's (built in the same cached worktree as `compare.ps1`, with that commit's own release profile), taking turns for `-Runs` rounds (default 5) so changes in the machine's load hit both alike. It reports each build's best and median average step and slowest step, the speedup, and whether every scenario's injuries stayed the same, as they must when a change only makes the simulation faster (`output\bench\report.txt`). `-BaseExe` and `-Exe` time two prebuilt apps instead. Builds or other heavy work on the machine show up as noise, so compare the best runs and add runs when the two are close.
+
+`strike_scenarios --phases` times each phase of a step (springs, areas, the contact passes, the tool's sweep, and so on) over the tuned scenarios, or `--only` some of them, or a custom `--strike` or `--gesture`, on one thread, and prints where the time goes, slowest phase first, with each phase's worst step and each scenario's average and slowest step (`output\strike_phases.txt`). The world times its phases only when given a clock (`World::time_phases`), which the app never does.
+
 ## Strike Scenarios
 
 `.\tools\verify.ps1` builds and runs deterministic strike playback across representative torso, shoulder, arm, hip, and leg strikes with blunt, sharp, and heavy tools, plus gestures that check how steadily a tool moves in hand. The scenarios live in `src/scenarios.rs`, where the strike runner, the visual damage diagnostic, and the app's capture mode all play them from. Each scripted swing moves the hand from outside the body and holds briefly at the end with the button down, so the tool, which trails the hand, lands as a real swing would. A gesture instead plays the tool the way the app does: the tool is in hand from the start and hovers with the button up, and the hand moves, presses, holds, and lets go on cue. The scenario target writes frame-by-frame contact telemetry to:
@@ -301,15 +314,16 @@ The visual diagnostic exits nonzero if the captures no longer include expected w
 ## Development Notes
 
 - `Cargo.toml` defines the Rust library, app, diagnostics, strike scenario, and contact sheet binaries.
-- `src/simulation.rs` contains the physics data model, integration, constraints, tearing, bone fracture, major vessels, wounds, and fluid particles; `src/simulation/body.rs` generates the layered body; `src/simulation/tools.rs` holds the tools: their shapes, the hand that drives them, and their contact with tissue and bone; `src/simulation/cuts.rs` opens the cuts a blade makes by splitting the tissue's points along them.
+- `src/simulation.rs` contains the physics data model, integration, constraints, tearing, bone fracture, major vessels, wounds, and fluid particles; `src/simulation/body.rs` generates the layered body; `src/simulation/tools.rs` holds the tools: their shapes, the hand that drives them, and their contact with tissue and bone; `src/simulation/cuts.rs` opens the cuts a blade makes by splitting the tissue's points along them; `src/simulation/outline.rs` keeps body parts from passing through each other; `src/simulation/grid.rs` is the spatial grid the bone fragment contacts and the outline contact search use (rebuilt with a counting sort into reused arrays, and searched in a fixed order, since the contact passes resolve contacts one after another); `src/simulation/phases.rs` times each phase of a step for `strike_scenarios --phases`.
 - `src/bin/realistic_physics/main.rs` owns the `macroquad` app shell, input, timing, and rendering. It also runs in the browser, so the app and simulation must avoid file I/O, threads, and `std::time`, none of which work on `wasm32-unknown-unknown`. `src/bin/realistic_physics/capture.rs` is the native-only screenshot mode, and `src/bin/realistic_physics/selftest.rs` the self-test mode, which runs in both builds (the page hands it a clock and takes its report through a small gl.js plugin).
 - `src/scenarios.rs` holds the scripted strikes and gestures and the tuned scenarios with their injury and steadiness bands, shared by the strike runner, the visual damage diagnostic, the capture mode, and the self-test, which also ships in the browser build.
 - `src/sound.rs` hears what each simulation step sounded like and picks the clip and volume for each sound; `src/sound/synth.rs` synthesizes the clips and `src/sound/mixdown.rs` mixes a run offline the way the app plays it. `src/bin/realistic_physics/audio.rs` plays the sound in the app, and `tests/sound_tests.rs` checks it. `vendor/quad-snd` is the patched sound backend.
 - `web/index.html` is the browser page: start screen with a content warning, loader, error messages, and the `?stats` frame-time overlay (also exposed as `window.__perf` for automated checks).
 - `tools/build_web.ps1` builds the browser version into `target\web`; `tools/serve_web.ps1` serves it locally with the `application/wasm` content type browsers require.
+- `tools/bench.ps1` times the simulation against a commit (see [Measure Speed](#measure-speed)).
 - `.cargo/config.toml` lets the wasm linker leave miniquad's WebGL functions as imports for `gl.js` to provide; recent Rust versions no longer do that by default.
 - `src/bin/anatomy_diagnostics.rs` writes a deterministic SVG anatomy snapshot and reports geometry validation metrics.
-- `src/bin/strike_scenarios.rs` writes deterministic strike telemetry and tuning summaries, sweeps scenarios over small swing offsets, and plays custom swings.
+- `src/bin/strike_scenarios.rs` writes deterministic strike telemetry and tuning summaries, sweeps scenarios over small swing offsets, plays custom swings, and times the phases of a step.
 - `src/bin/visual_damage_diagnostics.rs` writes deterministic SVG damage captures and visual primitive metrics.
 - `src/bin/contact_sheet.rs` lays PNG screenshots out in one image.
 - `tools/verify.ps1`, `tools/compare.ps1`, `tools/parity.ps1`, `tools/capture.ps1`, and `tools/sound_check.ps1` are the checking workflows described above.
