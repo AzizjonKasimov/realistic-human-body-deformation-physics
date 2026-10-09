@@ -86,6 +86,8 @@ struct OutlineEdge {
 
 #[derive(Default)]
 struct SkinRim {
+    /// The mesh it was built from (`World::topology_version`).
+    version: u64,
     edges: Vec<OutlineEdge>,
     /// Per point: rest distance across the body along the inward direction,
     /// which caps the shading strip so it never spills past a thin limb.
@@ -371,6 +373,10 @@ fn step_simulation(app: &mut AppState, frame_dt: f64) {
 fn step_world(app: &mut AppState, input: &rp::InputState, width: f64, height: f64) {
     let fixed_dt = app.world.materials().fixed_dt;
     app.world.step(fixed_dt, input, width, height);
+    // A cut that opened rejoined the mesh, so the outline is rebuilt.
+    if app.skin_rim.version != app.world.topology_version() {
+        app.skin_rim = skin_rim(&app.world);
+    }
     let emitted = app.world.stats().emitted_fluid_particles;
     if input.down {
         let fresh = (emitted - app.seen_fluid).max(0) as f32;
@@ -485,6 +491,7 @@ fn draw_body_layers(ctx: &RenderContext) {
     if ctx.anatomy {
         draw_muscle_layer(ctx);
         draw_muscle_voids(ctx);
+        draw_cut_insides(ctx);
         draw_major_vessels(ctx);
         draw_skin_layer(ctx);
         draw_bone_attachments(ctx);
@@ -494,11 +501,14 @@ fn draw_body_layers(ctx: &RenderContext) {
         // muscle, then the skin. Bone shows only through openings in the
         // flesh, or where a broken end sticks out of the body.
         draw_muscle_voids(ctx);
+        draw_cut_insides(ctx);
         draw_bones(ctx, BonePass::Buried);
         draw_muscle_layer(ctx);
+        draw_cut_lips(ctx, rp::TissueLayer::Muscle);
         draw_skin_layer(ctx);
         draw_closed_cut_skin(ctx);
     }
+    draw_cut_lips(ctx, rp::TissueLayer::Skin);
 
     draw_skin_wounds(ctx);
     if !ctx.anatomy {
@@ -614,6 +624,53 @@ fn draw_muscle_flesh(ctx: &RenderContext) {
         }
     }
     draw_mesh(&mesh);
+}
+
+/// The inside of a cut through muscle: the gap between its two lips, as deep
+/// raw flesh. It lies beneath the bones and muscle, so it shows only where
+/// the cut has opened.
+fn draw_cut_insides(ctx: &RenderContext) {
+    let world = &ctx.app.world;
+    let points = world.points();
+    let color = with_alpha(
+        mix(ctx.palette.wound_core, ctx.palette.wound_edge, 0.32),
+        0.96,
+    );
+    for (index, lip) in world.springs().iter().enumerate() {
+        if lip.layer != rp::TissueLayer::Muscle
+            || lip.twin == rp::MISSING_SPRING
+            || lip.twin < index
+        {
+            continue;
+        }
+        let twin = world.springs()[lip.twin];
+        // The twin was made from this lip, so their ends correspond in order.
+        let corners = [lip.a, lip.b, twin.b, twin.a].map(|point| to_mq(points[point].position));
+        draw_triangle(corners[0], corners[1], corners[2], color);
+        draw_triangle(corners[0], corners[2], corners[3], color);
+    }
+}
+
+/// A thin dark line along each lip of the open cuts through `layer`.
+fn draw_cut_lips(ctx: &RenderContext, layer: rp::TissueLayer) {
+    let world = &ctx.app.world;
+    let points = world.points();
+    let (width, color) = match layer {
+        rp::TissueLayer::Skin => (
+            1.3,
+            with_alpha(
+                mix(ctx.palette.wound_edge, ctx.palette.wound_shadow, 0.45),
+                0.86,
+            ),
+        ),
+        rp::TissueLayer::Muscle => (1.0, with_alpha(ctx.palette.wound_shadow, 0.55)),
+    };
+    for lip in world.springs() {
+        if lip.layer != layer || lip.twin == rp::MISSING_SPRING || lip.broken {
+            continue;
+        }
+        draw_line_vec(points[lip.a].position, points[lip.b].position, width, color);
+    }
 }
 
 /// Torn-through muscle as a dark cavity. It is drawn beneath the skin, so it
@@ -906,11 +963,12 @@ fn skin_rim(world: &rp::World) -> SkinRim {
             }
         }
     }
+    // A cut's lips border one triangle too, but they are wound, not outline.
     let edges: Vec<OutlineEdge> = owners
         .iter()
         .enumerate()
         .filter_map(|(spring, &(count, inner_point))| {
-            (count == 1).then_some(OutlineEdge {
+            (count == 1 && springs[spring].twin == rp::MISSING_SPRING).then_some(OutlineEdge {
                 spring,
                 inner_point,
             })
@@ -943,6 +1001,7 @@ fn skin_rim(world: &rp::World) -> SkinRim {
         }
     }
     SkinRim {
+        version: world.topology_version(),
         edges,
         reach,
         edge_triangles,
@@ -1185,10 +1244,12 @@ fn draw_bone_attachments(ctx: &RenderContext) {
     }
 }
 
-/// Skin wounds drawn from the mesh itself. A cut is a line through the middle
-/// of every severed skin spring, joined across each triangle it passes through,
-/// so it follows the blade's path and fades as the cut pulls open. Where skin
-/// has opened, a thin dark rim marks the edge of the intact skin around it.
+/// Skin wounds drawn from the mesh itself. A cut is a line through where the
+/// blade crossed each skin spring, or through the middle of a torn one, joined
+/// across each triangle it passes through, so it follows the blade's path. A
+/// torn spring's line fades as the tear pulls open; a blade cut that opened
+/// gapes between its lips instead (`draw_cut_lips`). Where skin has torn
+/// open, a thin dark rim marks the edge of the intact skin around it.
 fn draw_skin_wounds(ctx: &RenderContext) {
     let world = &ctx.app.world;
     let points = world.points();
@@ -1213,15 +1274,20 @@ fn draw_skin_wounds(ctx: &RenderContext) {
         let mut cut = [(rp::Vec2 { x: 0.0, y: 0.0 }, 0.0f32); 3];
         let mut count = 0;
         for edge in [triangle.edge_ab, triangle.edge_bc, triangle.edge_ca] {
-            let Some(spring) = springs.get(edge).filter(|spring| spring.broken) else {
+            let Some(spring) = springs
+                .get(edge)
+                .filter(|spring| spring.broken || spring.cut)
+            else {
                 continue;
             };
-            // A torn spring gapes at once; only a clean cut reads as a line.
-            let clean = 1.0 - smoothstep(1.3, 1.9, cut_gap(world, spring) as f32);
-            cut[count] = (
-                mid(points[spring.a].position, points[spring.b].position),
-                clean,
-            );
+            let (a, b) = (points[spring.a].position, points[spring.b].position);
+            cut[count] = if spring.broken {
+                // A torn spring gapes at once; only a clean cut reads as a line.
+                let clean = 1.0 - smoothstep(1.3, 1.9, cut_gap(world, spring) as f32);
+                (mid(a, b), clean)
+            } else {
+                (add(a, scale(sub(b, a), spring.cut_at)), 1.0)
+            };
             count += 1;
         }
         let shown = 1.0 - opening[index];

@@ -194,7 +194,7 @@ fn play_custom(scenario: &Scenario, output_dir: &Path) {
     write_frame_header(&mut frames).expect("write frame header");
     let mut write_error = None;
     let mut last_positions = Vec::new();
-    let (_, result) = run(
+    let (world, result) = run(
         scenario,
         SCENARIO_WIDTH,
         SCENARIO_HEIGHT,
@@ -217,6 +217,7 @@ fn play_custom(scenario: &Scenario, output_dir: &Path) {
     }
     println!("{}", scenario.play);
     println!("  {}", headline(&result));
+    println!("  {}", skin_openings(&world));
     println!("  {}", steadiness(&result));
     let path = output_dir.join("strike_custom.csv");
     let mut out = BufWriter::new(File::create(&path).expect("create custom CSV"));
@@ -410,13 +411,29 @@ fn steadiness(result: &ScenarioResult) -> String {
     )
 }
 
+/// How the skin was opened: fibers a blade cut, fibers torn by stretching or
+/// load, and the lips of cuts that opened.
+fn skin_openings(world: &rp::World) -> String {
+    let (mut cut, mut torn, mut lips) = (0, 0, 0);
+    for spring in world.springs() {
+        if spring.layer != rp::TissueLayer::Skin {
+            continue;
+        }
+        cut += usize::from(spring.cut);
+        torn += usize::from(spring.broken && !spring.cut);
+        lips += usize::from(spring.twin != rp::MISSING_SPRING);
+    }
+    format!("skin fibers cut {cut}, torn {torn}; cut lips {lips}")
+}
+
 fn headline(result: &ScenarioResult) -> String {
     format!(
-        "bones {} (ribs {}), skin {}, muscle {}, bruises {}, vessels {}, organ damage {:.2}, reopens {}, blood loss {:.3}",
+        "bones {} (ribs {}), skin {}, muscle {}, cut open {}, bruises {}, vessels {}, organ damage {:.2}, reopens {}, blood loss {:.3}",
         result.bone_fractures,
         result.rib_fractures,
         result.skin_tears,
         result.muscle_tears,
+        result.cut_openings,
         result.contusion_events,
         result.vessel_lacerations,
         result.max_organ_damage,
@@ -426,7 +443,7 @@ fn headline(result: &ScenarioResult) -> String {
 }
 
 /// Columns of a summary row: the scenario, then its result.
-const SUMMARY_HEADER: &str = "scenario,region,intent,tool,tissue_contacts,bone_contacts,skin_tears,muscle_tears,muscle_fiber_tears,contusion_events,tissue_fatigue_events,tissue_plastic_events,tear_propagations,muscle_cut_transfers,muscle_crush_ruptures,cavity_pressure_events,cavity_ruptures,organ_damage_events,organ_penetrations,rib_organ_punctures,organ_ruptures,skin_flap_detachments,vessel_lacerations,fragment_vessel_lacerations,wound_reopens,max_active_contusions,detachments,bone_detachments,bone_joint_breaks,bone_joint_subluxations,joint_ligament_damage_events,bone_fractures,rib_fractures,fracture_marrow_sources,final_bones,fluid_emitted,wound_fluid,blood_loss,final_blood_volume,final_blood_turgor,blood_stain_deposits,max_active_blood_stains,opened_wounds,max_active_wounds,wound_leaks,fragment_hits,fragment_tears,fragment_skin_punctures,fragment_bone_contacts,fragment_bone_damping_events,fragment_bone_resting_contacts,fragment_pair_contacts,fragment_pair_damping_events,fragment_pair_resting_contacts,fragment_floor_contacts,fragment_floor_resting_contacts,post_fracture_joint_corrections,max_impact,max_bone_load,max_point_load,max_depth,max_fragment_depth,max_fragment_impulse,max_fragment_overlap,max_post_fracture_joint_stretch,max_post_fracture_joint_angle,max_bone_joint_subluxation,max_wound_pressure,max_wound_clot,max_cavity_pressure,max_cavity_collapse,max_organ_damage,max_contusion,max_tissue_softening,max_tissue_fatigue,max_tissue_plasticity,max_bone_angular_speed,final_free_fragments,final_spinning_fragments,final_sleeping_fragments,max_active_fragments,max_sleeping_fragments,fragment_sleep_events,fragment_wake_events,fragment_budget_skips,fracture_budget_blocks,fragment_bone_checks,fragment_bone_budget_skips,fragment_pair_checks,fragment_pair_budget_skips,fragment_tissue_checks,fragment_tissue_budget_skips,fluid_budget_replacements,blood_stain_budget_replacements,wound_budget_replacements,max_solver_iterations,max_tool_turn,tool_snaps,tool_turning,contact_toggles,max_point_speed,max_free_lag,internal_bleeding,final_lag";
+const SUMMARY_HEADER: &str = "scenario,region,intent,tool,tissue_contacts,bone_contacts,skin_tears,muscle_tears,muscle_fiber_tears,contusion_events,tissue_fatigue_events,tissue_plastic_events,tear_propagations,muscle_cut_transfers,muscle_crush_ruptures,cavity_pressure_events,cavity_ruptures,organ_damage_events,organ_penetrations,rib_organ_punctures,organ_ruptures,skin_flap_detachments,cut_openings,vessel_lacerations,fragment_vessel_lacerations,wound_reopens,max_active_contusions,detachments,bone_detachments,bone_joint_breaks,bone_joint_subluxations,joint_ligament_damage_events,bone_fractures,rib_fractures,fracture_marrow_sources,final_bones,fluid_emitted,wound_fluid,blood_loss,final_blood_volume,final_blood_turgor,blood_stain_deposits,max_active_blood_stains,opened_wounds,max_active_wounds,wound_leaks,fragment_hits,fragment_tears,fragment_skin_punctures,fragment_bone_contacts,fragment_bone_damping_events,fragment_bone_resting_contacts,fragment_pair_contacts,fragment_pair_damping_events,fragment_pair_resting_contacts,fragment_floor_contacts,fragment_floor_resting_contacts,post_fracture_joint_corrections,max_impact,max_bone_load,max_point_load,max_depth,max_fragment_depth,max_fragment_impulse,max_fragment_overlap,max_post_fracture_joint_stretch,max_post_fracture_joint_angle,max_bone_joint_subluxation,max_wound_pressure,max_wound_clot,max_cavity_pressure,max_cavity_collapse,max_organ_damage,max_contusion,max_tissue_softening,max_tissue_fatigue,max_tissue_plasticity,max_bone_angular_speed,final_free_fragments,final_spinning_fragments,final_sleeping_fragments,max_active_fragments,max_sleeping_fragments,fragment_sleep_events,fragment_wake_events,fragment_budget_skips,fracture_budget_blocks,fragment_bone_checks,fragment_bone_budget_skips,fragment_pair_checks,fragment_pair_budget_skips,fragment_tissue_checks,fragment_tissue_budget_skips,fluid_budget_replacements,blood_stain_budget_replacements,wound_budget_replacements,max_solver_iterations,max_tool_turn,tool_snaps,tool_turning,contact_toggles,max_point_speed,max_free_lag,internal_bleeding,final_lag";
 
 fn summary_fields(scenario: &Scenario, result: &ScenarioResult) -> Vec<String> {
     vec![
@@ -452,6 +469,7 @@ fn summary_fields(scenario: &Scenario, result: &ScenarioResult) -> Vec<String> {
         result.rib_organ_punctures.to_string(),
         result.organ_ruptures.to_string(),
         result.skin_flap_detachments.to_string(),
+        result.cut_openings.to_string(),
         result.vessel_lacerations.to_string(),
         result.fragment_vessel_lacerations.to_string(),
         result.wound_reopens.to_string(),

@@ -491,6 +491,8 @@ pub struct ScenarioExpectations {
     pub rib_organ_punctures: IntBand,
     pub organ_ruptures: IntBand,
     pub skin_flap_detachments: IntBand,
+    /// Tissue points split to open cuts.
+    pub cut_openings: IntBand,
     pub vessel_lacerations: IntBand,
     pub fragment_vessel_lacerations: IntBand,
     pub wound_reopens: IntBand,
@@ -655,6 +657,7 @@ impl Scenario {
                 r.skin_flap_detachments,
                 e.skin_flap_detachments,
             ),
+            int("cut_openings", r.cut_openings, e.cut_openings),
             int(
                 "vessel_lacerations",
                 r.vessel_lacerations,
@@ -847,6 +850,7 @@ pub struct ScenarioResult {
     pub rib_organ_punctures: i32,
     pub organ_ruptures: i32,
     pub skin_flap_detachments: i32,
+    pub cut_openings: i32,
     pub vessel_lacerations: i32,
     pub fragment_vessel_lacerations: i32,
     pub wound_reopens: i32,
@@ -1087,6 +1091,7 @@ impl ScenarioResult {
         self.rib_organ_punctures = stats.rib_organ_punctures;
         self.organ_ruptures = stats.organ_ruptures;
         self.skin_flap_detachments = stats.skin_flap_detachments;
+        self.cut_openings = stats.cut_openings;
         self.vessel_lacerations = stats.vessel_lacerations;
         self.fragment_vessel_lacerations = stats.fragment_vessel_lacerations;
         self.wound_reopens = stats.wound_reopens;
@@ -1540,6 +1545,8 @@ pub fn scenarios() -> Vec<Scenario> {
                 tear_propagations: IntBand::range(0, 20),
                 muscle_cut_transfers: IntBand::range(10, 80),
                 skin_flap_detachments: IntBand::range(8, 60),
+                // The cut opens rather than leaving a line of torn skin.
+                cut_openings: IntBand::at_least(2),
                 organ_penetrations: IntBand::range(0, 2),
                 organ_ruptures: IntBand::range(0, 1),
                 vessel_lacerations: IntBand::range(0, 2),
@@ -1587,6 +1594,7 @@ pub fn scenarios() -> Vec<Scenario> {
                 contusion_events: IntBand::range(0, 60),
                 tear_propagations: IntBand::range(0, 20),
                 muscle_cut_transfers: IntBand::range(15, 100),
+                cut_openings: IntBand::at_least(1),
                 vessel_lacerations: IntBand::range(1, 3),
                 bone_joint_subluxations: IntBand::range(0, 0),
                 ..e

@@ -74,6 +74,40 @@ impl World {
         });
     }
 
+    /// Keeps the outline loops on the copies of `point` after a cut split it
+    /// into `copies` (the point among them): each stretch of outline follows
+    /// the copy its spring went to, and where the two stretches meeting at
+    /// the point went to different copies, the loop crosses the cut's mouth
+    /// between them, which is no surface to press against.
+    pub(super) fn follow_split_outline(&mut self, point: usize, copies: &[usize]) {
+        let springs = &self.springs;
+        let holder = |spring: Option<usize>| {
+            spring.and_then(|index| {
+                let spring = springs[index];
+                copies
+                    .iter()
+                    .copied()
+                    .find(|&copy| spring.a == copy || spring.b == copy)
+            })
+        };
+        for outline in &mut self.outlines {
+            let count = outline.points.len();
+            let Some(position) = outline.points.iter().position(|&p| p == point) else {
+                continue;
+            };
+            let previous = (position + count - 1) % count;
+            let before = holder(outline.edge_springs[previous]).unwrap_or(point);
+            let after = holder(outline.edge_springs[position]).unwrap_or(point);
+            outline.points[position] = before;
+            if after != before {
+                outline.points.insert(position + 1, after);
+                let onward = outline.edge_springs[position];
+                outline.edge_springs[position] = None;
+                outline.edge_springs.insert(position + 1, onward);
+            }
+        }
+    }
+
     /// Finds the points and stretches of outline close enough to touch on
     /// this step, so each solver pass checks only those.
     pub(super) fn gather_outline_pairs(&mut self) {

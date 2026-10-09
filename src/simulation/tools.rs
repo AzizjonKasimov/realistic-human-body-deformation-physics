@@ -774,11 +774,11 @@ impl World {
             // How far along this part of the stroke the tip got before a fiber
             // held it, so the knife rests right against that fiber.
             let mut stop_fraction = 0.0;
-            for (spring_index, along, by_tip) in
+            for (spring_index, along, by_tip, cut_at) in
                 self.springs_reached(&candidates, &resting, &reached, &shape)
             {
                 let spring = self.springs[spring_index];
-                if spring.broken {
+                if spring.broken || spring.cut {
                     continue;
                 }
                 let force = (strike.mass * speed).max(push);
@@ -798,7 +798,7 @@ impl World {
                     }
                     break;
                 }
-                self.sever_with_blade(spring_index, pressure, shape.blade_normal, strike);
+                self.sever_with_blade(spring_index, cut_at, pressure, shape.blade_normal, strike);
                 speed = (speed - threshold * BLADE_CUT_COST / strike.inertia).max(0.0);
             }
             if stopped.is_none() {
@@ -829,6 +829,7 @@ impl World {
         }
         let alongside = self.part_tissue_around_blade(strike, &reached, strike.mass * speed, dt);
         self.tool.embedded = alongside > 0;
+        self.open_blade_cuts();
     }
 
     /// Unbroken springs whose bounds come near the cutting edge's path this step.
@@ -848,7 +849,7 @@ impl World {
             .iter()
             .enumerate()
             .filter(|(_, spring)| {
-                if spring.broken || !self.spring_in_flesh(**spring) {
+                if spring.broken || spring.cut || !self.spring_in_flesh(**spring) {
                     return false;
                 }
                 let a = self.points[spring.a].position;
@@ -863,6 +864,63 @@ impl World {
     }
 
     fn spring_crosses_edge(&self, spring_index: usize, shape: &ToolContactShape) -> bool {
+        self.edge_crossing(spring_index, shape).is_some()
+    }
+
+    /// For each point on a cut, the side of the cut along `normal` its
+    /// triangles lie on: 1 or -1 for a lip, 0 for a point whose triangles
+    /// still lie on both sides, and for points not on a cut.
+    fn lip_sides(&self, normal: Vec2) -> Vec<f64> {
+        let mut lean = vec![0.0; self.points.len()];
+        for triangle in &self.triangles {
+            if !self.triangle_alive(triangle) {
+                continue;
+            }
+            let corners = [triangle.a, triangle.b, triangle.c];
+            if corners.iter().all(|&corner| !self.points[corner].on_cut) {
+                continue;
+            }
+            let centroid = scale(
+                add(
+                    add(
+                        self.points[triangle.a].position,
+                        self.points[triangle.b].position,
+                    ),
+                    self.points[triangle.c].position,
+                ),
+                1.0 / 3.0,
+            );
+            for corner in corners {
+                if self.points[corner].on_cut {
+                    lean[corner] += dot(subtract(centroid, self.points[corner].position), normal);
+                }
+            }
+        }
+        let balanced = self.materials.point_spacing * 0.25;
+        lean.into_iter()
+            .map(|lean| {
+                if lean > balanced {
+                    1.0
+                } else if lean < -balanced {
+                    -1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    }
+
+    /// The blade meets `spring` at an end already on a cut, `cut_at` of the
+    /// way along it: it passes through the cut there, not through the fiber.
+    fn crosses_at_cut(&self, spring: Spring, cut_at: f64) -> bool {
+        const END: f64 = 0.05;
+        (cut_at < END && self.points[spring.a].on_cut)
+            || (cut_at > 1.0 - END && self.points[spring.b].on_cut)
+    }
+
+    /// Where along spring `spring_index`, from its `a` end, the cutting edge
+    /// lies across it, if it does.
+    fn edge_crossing(&self, spring_index: usize, shape: &ToolContactShape) -> Option<f64> {
         let spring = self.springs[spring_index];
         let (edge, tip) = cutting_edge(shape);
         segment_crossing(
@@ -871,35 +929,41 @@ impl World {
             edge,
             tip,
         )
-        .is_some()
+        .map(|(along_spring, _)| along_spring)
     }
 
     /// Fibers the tip passes through between two blade positions, or that newly
     /// lie across the cutting edge, nearest along the tip's path first, with
-    /// where along that path the tip met each one and whether the tip did. The rest
-    /// of the blade follows the tip through the cut, so it neither cuts nor
-    /// catches; letting it cut would scythe through tissue whenever the knife turns.
+    /// where along that path the tip met each one, whether the tip did, and
+    /// where along the fiber the blade crossed it. The rest of the blade
+    /// follows the tip through the cut, so it neither cuts nor catches;
+    /// letting it cut would scythe through tissue whenever the knife turns.
     fn springs_reached(
         &self,
         candidates: &[usize],
         resting: &[usize],
         from: &ToolContactShape,
         to: &ToolContactShape,
-    ) -> Vec<(usize, f64, bool)> {
-        let mut reached: Vec<(usize, f64, bool)> = candidates
+    ) -> Vec<(usize, f64, bool, f64)> {
+        let mut reached: Vec<(usize, f64, bool, f64)> = candidates
             .iter()
             .filter_map(|&index| {
                 let spring = self.springs[index];
-                if spring.broken {
+                if spring.broken || spring.cut || spring.parted {
                     return None;
                 }
                 let a = self.points[spring.a].position;
                 let b = self.points[spring.b].position;
-                if let Some((_, along)) = segment_crossing(a, b, from.axis_end, to.axis_end) {
-                    return Some((index, along, true));
+                if let Some((cut_at, along)) = segment_crossing(a, b, from.axis_end, to.axis_end) {
+                    return (!self.crosses_at_cut(spring, cut_at))
+                        .then_some((index, along, true, cut_at));
                 }
-                (!resting.contains(&index) && self.spring_crosses_edge(index, to))
-                    .then_some((index, 1.0, false))
+                if resting.contains(&index) {
+                    return None;
+                }
+                self.edge_crossing(index, to)
+                    .filter(|&cut_at| !self.crosses_at_cut(spring, cut_at))
+                    .map(|cut_at| (index, 1.0, false, cut_at))
             })
             .collect();
         reached.sort_by(|a, b| a.1.total_cmp(&b.1));
@@ -969,12 +1033,13 @@ impl World {
     fn sever_with_blade(
         &mut self,
         spring_index: usize,
+        cut_at: f64,
         pressure: f64,
         blade_normal: Vec2,
         strike: ToolStrike,
     ) {
         let spring = self.springs[spring_index];
-        self.break_spring(spring_index);
+        self.cut_spring(spring_index, cut_at);
         let skin = spring.layer == TissueLayer::Skin;
         let exposure = if skin { 0.92 } else { 1.0 };
         self.bump_point_exposure_load(spring.a, exposure, pressure * 0.18);
@@ -1034,6 +1099,7 @@ impl World {
     ) -> usize {
         let along_reach = self.materials.point_spacing * 0.7;
         let velocity = self.tool.velocity;
+        let lip_sides = self.lip_sides(shape.blade_normal);
         let mut alongside = 0;
         for (index, point) in self.points.iter_mut().enumerate() {
             if point.pinned || !is_flesh(&self.flesh, index) {
@@ -1043,12 +1109,21 @@ impl World {
             if t <= 0.0 || t >= 1.0 {
                 continue;
             }
-            let point_contact = sample_point_contact(point.position, shape);
+            let mut point_contact = sample_point_contact(point.position, shape);
             if point_contact.distance <= along_reach {
                 alongside += 1;
             }
             if point_contact.distance > shape.influence {
                 continue;
+            }
+            if point.on_cut {
+                // A point on a cut lies on the blade's path, so which way the
+                // blade wedges it is the side of the cut its own tissue is on.
+                // One the cut has not split yet holds both sides together.
+                match lip_sides[index] {
+                    0.0 => continue,
+                    side => point_contact.normal = scale(shape.blade_normal, side),
+                }
             }
             let depth = shape.influence - point_contact.distance;
             point.position.x += point_contact.normal.x * depth + velocity.x * dt * 0.06;

@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
 
 mod body;
+mod cuts;
 mod motion;
 mod outline;
 mod tools;
@@ -224,6 +225,11 @@ pub struct Materials {
     pub skin_flap_stress_threshold: f64,
     pub skin_flap_cut_radius: f64,
     pub max_skin_flap_detachments_per_step: usize,
+    /// How far each lip of a cut through skin pulls back from it, in point
+    /// spacings: skin is under tension in a living body, so a cut gapes.
+    pub skin_cut_retraction: f64,
+    /// The same for muscle, whose cut fibers retract further.
+    pub muscle_cut_retraction: f64,
     pub attachment_stiffness: f64,
     pub attachment_break_stretch: f64,
     pub attachment_break_impulse: f64,
@@ -430,6 +436,8 @@ impl Default for Materials {
             skin_flap_stress_threshold: 0.18,
             skin_flap_cut_radius: 20.0,
             max_skin_flap_detachments_per_step: 5,
+            skin_cut_retraction: 0.20,
+            muscle_cut_retraction: 0.30,
             attachment_stiffness: 0.46,
             attachment_break_stretch: 2.40,
             attachment_break_impulse: 980.0,
@@ -552,6 +560,9 @@ pub struct Point {
     pub mass: f64,
     /// Rest distance below the body outline in pixels, used for shading.
     pub surface_depth: f64,
+    /// A cut runs through this point: its rest place was moved onto a
+    /// blade's path, or it was split to open the cut (see `cuts.rs`).
+    pub on_cut: bool,
 }
 
 impl Default for Point {
@@ -567,6 +578,7 @@ impl Default for Point {
             contusion: 0.0,
             mass: 1.0,
             surface_depth: 0.0,
+            on_cut: false,
         }
     }
 }
@@ -587,6 +599,19 @@ pub struct Spring {
     pub fatigue: f64,
     pub plastic_strain: f64,
     pub lambda: f64,
+    /// A blade cut through this fiber. A fiber of a tissue sheet stays
+    /// whole: the cut opens along the sheet's edges nearest the blade's path
+    /// instead (see `cuts.rs`). A lone fiber breaks.
+    pub cut: bool,
+    /// Where along the fiber, as a share of the way from `a` to `b`, the
+    /// blade crossed it.
+    pub cut_at: f64,
+    /// A cut runs along this edge: the tissue on its two sides has parted,
+    /// or will once its ends can split.
+    pub parted: bool,
+    /// This edge is a lip of an opened cut, and `twin` is the edge across
+    /// the opening from it; `MISSING_SPRING` otherwise.
+    pub twin: usize,
 }
 
 impl Default for Spring {
@@ -606,6 +631,10 @@ impl Default for Spring {
             fatigue: 0.0,
             plastic_strain: 0.0,
             lambda: 0.0,
+            cut: false,
+            cut_at: 0.5,
+            parted: false,
+            twin: MISSING_SPRING,
         }
     }
 }
@@ -955,6 +984,8 @@ impl Default for WoundSource {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Stats {
     pub broken_skin: i32,
+    /// Tissue points split to open cuts.
+    pub cut_openings: i32,
     pub broken_muscle: i32,
     pub muscle_fiber_tears: i32,
     pub broken_attachments: i32,
@@ -1349,6 +1380,12 @@ pub struct World {
     /// Which points belonged to flesh at the start of this step (see
     /// [`World::flesh_points`]); flesh torn away is not there to touch.
     flesh: Vec<bool>,
+    /// Fibers a blade cut this step, whose cut opens when the knife's step
+    /// ends.
+    pending_cuts: Vec<usize>,
+    /// Counts changes to which points the springs and triangles join, so
+    /// anything built from the mesh knows to rebuild.
+    topology_version: u64,
 }
 
 impl Default for World {
@@ -1389,6 +1426,8 @@ impl World {
             outline_pairs: Vec::new(),
             blunt_knock: Vec::new(),
             flesh: Vec::new(),
+            pending_cuts: Vec::new(),
+            topology_version: 0,
         }
     }
 
@@ -1454,6 +1493,12 @@ impl World {
 
     pub fn stats(&self) -> &Stats {
         &self.stats
+    }
+
+    /// Changes whenever a cut rejoins the mesh's points, springs, and
+    /// triangles differently; outlines built from the mesh must be rebuilt.
+    pub fn topology_version(&self) -> u64 {
+        self.topology_version
     }
 
     pub fn debug(&self) -> &ContactDebug {
@@ -2225,7 +2270,7 @@ impl World {
     fn refresh_open_skin(&mut self) {
         self.open_skin.clear();
         for (index, spring) in self.springs.iter().enumerate() {
-            if spring.broken && spring.layer == TissueLayer::Skin {
+            if spring.layer == TissueLayer::Skin && spring_opens_skin(spring) {
                 self.open_skin.push(index);
             }
         }
@@ -4215,7 +4260,7 @@ impl World {
 
         let mut broken_skin_endpoint = vec![false; self.points.len()];
         for spring in &self.springs {
-            if spring.broken && spring.layer == TissueLayer::Skin {
+            if spring.layer == TissueLayer::Skin && spring_opens_skin(spring) {
                 if spring.a < broken_skin_endpoint.len() {
                     broken_skin_endpoint[spring.a] = true;
                 }
@@ -4231,6 +4276,7 @@ impl World {
         let mut candidates = Vec::new();
         for (index, spring) in self.springs.iter().enumerate() {
             if spring.broken
+                || spring.cut
                 || spring.layer != TissueLayer::Skin
                 || spring.a >= self.points.len()
                 || spring.b >= self.points.len()
@@ -4268,7 +4314,11 @@ impl World {
         let mut events = Vec::new();
         for (_, index) in candidates.into_iter().take(max_propagations) {
             let spring = self.springs[index];
-            if spring.broken || spring.a >= self.points.len() || spring.b >= self.points.len() {
+            if spring.broken
+                || spring.cut
+                || spring.a >= self.points.len()
+                || spring.b >= self.points.len()
+            {
                 continue;
             }
             let a = self.points[spring.a];
@@ -4284,7 +4334,9 @@ impl World {
                 x: -tangent.y,
                 y: tangent.x - 0.24,
             };
-            self.break_spring(index);
+            // The tear runs on from the wound's edge across this fiber, and
+            // opens as the cut it extends does.
+            self.cut_spring(index, 0.5);
             self.springs[index].stress = 1.0;
             self.stats.broken_skin += 1;
             self.stats.tear_propagations += 1;
@@ -4293,6 +4345,7 @@ impl World {
             self.bump_point_exposure_load(spring.b, 1.0, endpoint_load * 0.22);
             events.push((midpoint(a.position, b.position), normal, endpoint_load));
         }
+        self.open_blade_cuts();
 
         for (midpoint, normal, load) in events {
             self.emit_fluid(
@@ -4332,7 +4385,7 @@ impl World {
             let Some(spring) = self.springs.get(index) else {
                 continue;
             };
-            if !spring.broken || spring.layer != TissueLayer::Skin {
+            if !spring_opens_skin(spring) || spring.layer != TissueLayer::Skin {
                 continue;
             }
             if spring.a >= self.points.len() || spring.b >= self.points.len() {
@@ -4353,6 +4406,7 @@ impl World {
         let mut candidates = Vec::new();
         for (index, spring) in self.springs.iter().enumerate() {
             if spring.broken
+                || spring.cut
                 || spring.layer != TissueLayer::Muscle
                 || spring.a >= self.points.len()
                 || spring.b >= self.points.len()
@@ -4463,7 +4517,7 @@ impl World {
 
         let mut skin_openings = Vec::new();
         for spring in &self.springs {
-            if !spring.broken
+            if !spring_opens_skin(spring)
                 || spring.layer != TissueLayer::Skin
                 || spring.a >= self.points.len()
                 || spring.b >= self.points.len()
@@ -10159,6 +10213,12 @@ fn bone_contact_mass(bone: BoneSegment, scale: f64) -> f64 {
 
 /// Point `index` belonged to flesh at the start of the step (see
 /// [`World::flesh_points`]); a point the mask does not cover yet counts.
+/// Skin is open along this spring: it broke, a blade cut across it, or it
+/// is a lip of an opened cut.
+fn spring_opens_skin(spring: &Spring) -> bool {
+    spring.broken || spring.cut || spring.twin != MISSING_SPRING
+}
+
 fn is_flesh(flesh: &[bool], index: usize) -> bool {
     flesh.get(index).copied().unwrap_or(true)
 }
