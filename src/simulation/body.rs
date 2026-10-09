@@ -358,6 +358,30 @@ fn add_skeleton(world: &mut World, frame: BodyFrame, materials: Materials) {
     let right_hand = below_joint(world, RIGHT_WRIST, RIGHT_KNUCKLES, 3.6, 0.6);
     let left_foot = below_joint(world, LEFT_ANKLE, LEFT_TOES, 4.0, 0.65);
     let right_foot = below_joint(world, RIGHT_ANKLE, RIGHT_TOES, 4.0, 0.65);
+    // What each bone is, as injury research names it.
+    for (bone, part) in [
+        (head, BonePart::Skull),
+        (spine, BonePart::Spine),
+        (shoulders, BonePart::Collarbone),
+        (pelvis, BonePart::Pelvis),
+        (left_upper_arm, BonePart::UpperArm),
+        (right_upper_arm, BonePart::UpperArm),
+        (left_forearm, BonePart::Forearm),
+        (right_forearm, BonePart::Forearm),
+        (left_hand, BonePart::Hand),
+        (right_hand, BonePart::Hand),
+        (left_thigh, BonePart::Thigh),
+        (right_thigh, BonePart::Thigh),
+        (left_shin, BonePart::Shin),
+        (right_shin, BonePart::Shin),
+        (left_foot, BonePart::Foot),
+        (right_foot, BonePart::Foot),
+    ] {
+        world.bones[bone].part = part;
+    }
+    for &(rib, _) in &ribs {
+        world.bones[rib].part = BonePart::Rib;
+    }
 
     world.add_bone_joint(head, 1.0, spine, 0.0, -0.45, 0.45);
     world.add_bone_joint(

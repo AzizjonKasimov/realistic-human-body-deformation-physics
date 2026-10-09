@@ -8,8 +8,8 @@
 use std::fmt;
 
 use crate::{
-    body_frame, create_layered_body, swing_power, BodyFrame, BoneSegment, InputState, Materials,
-    TissueLayer, ToolMode, Vec2, World, MISSING_SPRING,
+    body_frame, create_layered_body, swing_power, BodyFrame, BonePart, BoneSegment, InputState,
+    Materials, TissueLayer, ToolMode, Vec2, World, BONE_PARTS, MISSING_SPRING,
 };
 
 /// Window size the tuned scenarios are played in.
@@ -348,6 +348,17 @@ pub enum Play {
 }
 
 impl Play {
+    /// Whether every tool the play uses is the knife.
+    pub fn knife_only(&self) -> bool {
+        match self {
+            Play::Swing(strike, followup) => {
+                strike.tool == ToolMode::Sharp
+                    && followup.map_or(true, |next| next.tool == ToolMode::Sharp)
+            }
+            Play::Gesture(gesture) => gesture.tool == ToolMode::Sharp,
+        }
+    }
+
     /// The tool the play starts with.
     pub fn tool(&self) -> ToolMode {
         match self {
@@ -552,13 +563,140 @@ pub struct ScenarioExpectations {
 /// rather than turned.
 pub const TOOL_SNAP_DEGREES: f64 = 45.0;
 
+/// The figure stands for an adult 1.75 m tall, weighing about 70 kg; the
+/// injury checks compare it with injury research in real units
+/// (`docs/INJURY_REFERENCE.md`).
+pub const BODY_HEIGHT_M: f64 = 1.75;
+
+/// Blood in that adult: about 70 ml per kg of body weight (Gutierrez et al.
+/// 2004, "Clinical review: Hemorrhagic shock").
+pub const BLOOD_VOLUME_ML: f64 = 4900.0;
+
+/// Metres per pixel for a body `body_height` pixels tall.
+pub fn metres_per_px(body_height: f64) -> f64 {
+    BODY_HEIGHT_M / body_height.max(1.0)
+}
+
+/// Metres per pixel in the scenarios' window, where the body is 561.6 px
+/// tall: about 3.1 mm.
+pub fn scenario_metres_per_px() -> f64 {
+    metres_per_px(body_frame(SCENARIO_WIDTH, SCENARIO_HEIGHT).height)
+}
+
+/// How often something happens in real life. The sweep judges it over its
+/// replays of a scenario, aimed a little differently and on bones a little
+/// weaker or stronger, as people's are; a single run can only break `Never`
+/// and `Always`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Often {
+    /// In no run.
+    Never,
+    /// In at most a third of the runs.
+    Rarely,
+    /// In some runs but not all.
+    Sometimes,
+    /// In at least half of the runs.
+    Usually,
+    /// In every run.
+    Always,
+}
+
+impl Often {
+    pub fn name(self) -> &'static str {
+        match self {
+            Often::Never => "never",
+            Often::Rarely => "rarely",
+            Often::Sometimes => "sometimes",
+            Often::Usually => "usually",
+            Often::Always => "always",
+        }
+    }
+
+    /// Whether happening in `hits` of `runs` runs fits.
+    pub fn fits(self, hits: usize, runs: usize) -> bool {
+        match self {
+            Often::Never => hits == 0,
+            Often::Rarely => hits * 3 <= runs,
+            Often::Sometimes => hits > 0 && hits < runs,
+            Often::Usually => hits * 2 >= runs,
+            Often::Always => hits == runs,
+        }
+    }
+}
+
+/// Something a blow does to the body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// A bone of this part breaks.
+    Breaks(BonePart),
+    /// Any bone breaks.
+    BreaksAnyBone,
+    /// The skin splits or is cut open.
+    OpensSkin,
+    /// A major blood vessel is cut or torn.
+    CutsArtery,
+    /// The flesh is bruised.
+    Bruises,
+}
+
+impl Outcome {
+    /// Whether it happened in `result`.
+    pub fn happened(self, result: &ScenarioResult) -> bool {
+        match self {
+            Outcome::Breaks(part) => result.part_fractures[part.index()] > 0,
+            Outcome::BreaksAnyBone => result.bone_fractures > 0,
+            Outcome::OpensSkin => result.skin_tears > 0 || result.cut_openings > 0,
+            Outcome::CutsArtery => {
+                result.vessel_lacerations + result.fragment_vessel_lacerations > 0
+            }
+            Outcome::Bruises => result.contusion_events > 0,
+        }
+    }
+
+    pub fn describe(self) -> String {
+        match self {
+            Outcome::Breaks(part) => format!("the {} breaks", part.name()),
+            Outcome::BreaksAnyBone => "a bone breaks".to_string(),
+            Outcome::OpensSkin => "the skin opens".to_string(),
+            Outcome::CutsArtery => "an artery is cut".to_string(),
+            Outcome::Bruises => "the flesh bruises".to_string(),
+        }
+    }
+
+    /// A short name for reports.
+    pub fn slug(self) -> String {
+        match self {
+            Outcome::Breaks(part) => format!("breaks_{}", part.name().replace(' ', "_")),
+            Outcome::BreaksAnyBone => "breaks_any_bone".to_string(),
+            Outcome::OpensSkin => "opens_skin".to_string(),
+            Outcome::CutsArtery => "cuts_artery".to_string(),
+            Outcome::Bruises => "bruises".to_string(),
+        }
+    }
+}
+
+/// Something a scenario must do as it happens in real life, how often, and
+/// the research it rests on (`docs/INJURY_REFERENCE.md` has the details).
+#[derive(Clone, Copy, Debug)]
+pub struct RealCheck {
+    pub outcome: Outcome,
+    pub often: Often,
+    pub source: &'static str,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Scenario {
     pub name: &'static str,
     pub region: &'static str,
     pub intent: &'static str,
     pub play: Play,
+    /// Checks of the engine and of how the tools handle.
     pub expectations: ScenarioExpectations,
+    /// What the play does in real life, from injury research.
+    pub real: &'static [RealCheck],
+    /// How strong the bones are, against the tuned strength: the sweep plays
+    /// weaker and stronger bones too, as people's differ.
+    pub bone_strength: f64,
 }
 
 impl Scenario {
@@ -570,6 +708,8 @@ impl Scenario {
             intent: "custom",
             play,
             expectations: ScenarioExpectations::default(),
+            real: &[],
+            bone_strength: 1.0,
         }
     }
 
@@ -588,6 +728,121 @@ impl Scenario {
             play: self.play.shifted(along, across),
             ..*self
         }
+    }
+
+    /// The scenario on a body whose bones are `strength` times as strong as
+    /// tuned.
+    pub fn with_bone_strength(&self, strength: f64) -> Scenario {
+        Scenario {
+            bone_strength: strength,
+            ..*self
+        }
+    }
+
+    /// The materials the scenario plays on: the defaults, on bones as strong
+    /// as its `bone_strength`.
+    pub fn materials(&self) -> Materials {
+        let mut materials = Materials::default();
+        materials.bone_fracture_impulse *= self.bone_strength;
+        materials
+    }
+
+    /// The real-world checks over a sweep's runs of this scenario: how often
+    /// each outcome happened against how often it does in real life.
+    pub fn sweep_violations(&self, results: &[&ScenarioResult]) -> Vec<String> {
+        let runs = results.len();
+        self.real
+            .iter()
+            .filter_map(|check| {
+                let hits = results
+                    .iter()
+                    .filter(|result| check.outcome.happened(result))
+                    .count();
+                (!check.often.fits(hits, runs)).then(|| {
+                    format!(
+                        "{}: {}={hits}/{runs} runs, but {} in real life ({})",
+                        self.name,
+                        check.outcome.slug(),
+                        check.often.name(),
+                        check.source
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// What a run did against real life: the scenario's own checks that one
+    /// run can judge (never and always), and rules for every play.
+    fn real_world_problems(&self, result: &ScenarioResult) -> Vec<String> {
+        let r = result;
+        let mut problems = Vec::new();
+        for check in self.real {
+            let happened = check.outcome.happened(r);
+            let wrong = match check.often {
+                Often::Never => happened,
+                Often::Always => !happened,
+                _ => false,
+            };
+            if wrong {
+                problems.push(format!(
+                    "{}={}, but {} in real life ({})",
+                    check.outcome.slug(),
+                    u8::from(happened),
+                    check.often.name(),
+                    check.source
+                ));
+            }
+        }
+        // A knife notches and cuts into long bones but does not break them;
+        // breaking one takes a heavy chopping blade (Lynn and Fairgrieve 2009;
+        // Gentile et al. 2019).
+        if self.play.knife_only() {
+            let long_bones: i32 = BonePart::ALL
+                .iter()
+                .filter(|part| part.is_long_bone())
+                .map(|part| r.part_fractures[part.index()])
+                .sum();
+            if long_bones > 0 {
+                problems.push(format!(
+                    "knife_breaks_long_bone={long_bones}, but a knife only notches long bones (Lynn and Fairgrieve 2009)"
+                ));
+            }
+        }
+        // Bleeding follows what was cut (Lewis et al. 2017, the surgical
+        // bleeding scale): wounds that miss arteries ooze at most 10 ml a
+        // minute, an open fracture's marrow up to 50, and a cut artery spurts
+        // at least 10.
+        if let Some(rate) = r.bleeding_ml_per_min() {
+            if Outcome::CutsArtery.happened(r) {
+                if rate < 10.0 {
+                    problems.push(format!(
+                        "bleeding={rate:.1} ml/min, but a cut artery spurts at least 10 (Lewis et al. 2017)"
+                    ));
+                }
+            } else {
+                let limit = if r.fracture_marrow_sources > 0 {
+                    50.0
+                } else {
+                    10.0
+                };
+                if rate > limit {
+                    problems.push(format!(
+                        "bleeding={rate:.1} ml/min, but wounds that miss arteries bleed at most {limit:.0} (Lewis et al. 2017)"
+                    ));
+                }
+            }
+        }
+        // Struck flesh moves at most twice as fast as the tool that hit it,
+        // the limit of a perfectly elastic collision; faster flesh is the
+        // simulation flinging it.
+        let flesh_limit = (2.0 * r.max_tool_speed).max(1000.0);
+        if r.max_point_speed > flesh_limit {
+            problems.push(format!(
+                "flesh_speed={:.0} px/s, above {flesh_limit:.0}: twice the tool's speed",
+                r.max_point_speed
+            ));
+        }
+        problems
     }
 
     /// Band violations of `result`, one line each.
@@ -811,9 +1066,10 @@ impl Scenario {
             real("max_free_lag", r.max_free_lag, e.free_lag),
             real("final_lag", r.final_lag, e.final_lag),
         ];
-        checks
+        let mut problems: Vec<String> = checks.into_iter().flatten().collect();
+        problems.extend(self.real_world_problems(r));
+        problems
             .into_iter()
-            .flatten()
             .map(|problem| format!("{}: {problem}", self.name))
             .collect()
     }
@@ -963,6 +1219,12 @@ pub struct ScenarioResult {
     pub skin_gap_middle: f64,
     pub skin_gap_max: f64,
     pub muscle_gap_max: f64,
+    /// Bones broken by part, indexed by [`BonePart::index`].
+    pub part_fractures: [i32; BONE_PARTS],
+    /// Fastest the tool moved, in pixels per second.
+    pub max_tool_speed: f64,
+    /// Steps since the body first lost blood.
+    pub bleed_frames: i32,
     last_positions: Vec<Vec2>,
     last_tool_axis: Option<Vec2>,
     last_touching: bool,
@@ -974,6 +1236,14 @@ pub struct ScenarioResult {
 }
 
 impl ScenarioResult {
+    /// How fast the body bled on average since it first lost blood, in ml a
+    /// minute for the 1.75 m adult the figure stands for, or `None` when it
+    /// bled for under half a second.
+    pub fn bleeding_ml_per_min(&self) -> Option<f64> {
+        (self.bleed_frames >= 30)
+            .then(|| self.blood_loss * BLOOD_VOLUME_ML / (f64::from(self.bleed_frames) / 3600.0))
+    }
+
     /// Adds one step's events and peaks; `input` is what the step was played
     /// with.
     pub fn accumulate(&mut self, world: &World, input: &InputState) {
@@ -990,6 +1260,13 @@ impl ScenarioResult {
         self.tissue_contacts += debug.tissue_contacts;
         self.bone_contacts += debug.bone_contacts;
         self.fractures += debug.fractures;
+        for (count, fresh) in self.part_fractures.iter_mut().zip(debug.part_fractures) {
+            *count += fresh;
+        }
+        self.max_tool_speed = self.max_tool_speed.max(debug.striker_speed);
+        if debug.blood_loss > 0.0 {
+            self.bleed_frames += 1;
+        }
         self.max_impact = self.max_impact.max(debug.impact);
         self.max_bone_load = self.max_bone_load.max(debug.max_bone_load);
         self.max_point_load = self.max_point_load.max(debug.max_point_load);
@@ -1273,12 +1550,13 @@ pub fn run(
     height: f64,
     observe: impl FnMut(i32, &InputState, &World),
 ) -> (World, ScenarioResult) {
-    let world = create_layered_body(width, height, Materials::default());
+    let world = create_layered_body(width, height, scenario.materials());
     run_on(world, scenario, width, height, observe)
 }
 
-/// [`run`] on a body the caller made for that window, such as one that times
-/// its phases ([`World::time_phases`]).
+/// [`run`] on a body the caller made for that window from the scenario's
+/// [`Scenario::materials`], such as one that times its phases
+/// ([`World::time_phases`]).
 pub fn run_on(
     mut world: World,
     scenario: &Scenario,
@@ -1578,20 +1856,102 @@ const DRAG_INTO_A_WOUND: &[GestureStep] = &[
     GestureStep::Wait(20),
 ];
 
-/// The tuned scenarios, played in a 1280x720 window: scripted strikes with the
-/// injuries they should cause, and gestures played the way the app is, which
-/// check that a bat or hammer moves steadily in hand.
+// The research behind the real-world checks, in short; `docs/INJURY_REFERENCE.md`
+// has the numbers and the sources in full. Energies assume a 4.5 kg
+// sledgehammer head, a 0.8 kg bat, and the figure as a 1.75 m adult.
+const BRUISE: &str = "Desmoulin and Anderson 2007: half of 3.2 J blows bruise";
+const FOREARM: &str = "Begeman and Pratima 1999: 4.5 kg at 3 m/s, about 20 J, breaks forearms";
+const UPPER_ARM: &str =
+    "Santago et al. 2008: the upper arm takes 2.6 times the forearm's bending, roughly 90 J";
+const THIGH: &str =
+    "Kennedy et al. 2004: 123 J broke all 45 thigh bones held at both ends; Barnes et al. 2022: 47 J on a thigh only bruised";
+const SHIN: &str =
+    "Nyquist et al. 1985: the shin takes 3 times the forearm's bending, roughly 100 J";
+const COLLARBONE: &str =
+    "Kemper et al. 2006: the collarbone breaks at 0.73 kN, half a forearm's force";
+const RIBS: &str = "Kent and Patrie 2005: ribs break once the chest is pressed in about a third";
+const BAT_ASSAULTS: &str =
+    "Bryant et al. 1992: bats break the forearm most; Guo et al. 2026: an ordinary man's swing carries 112 J";
+const SHIN_BAT: &str = "Levy et al. 1994: bat blows break the shin";
+const SKIN_CUT: &str =
+    "Bleetman et al. 2003: slashes press up to 212 N; skin gives way far below that";
+const SHALLOW_SLASH: &str = "Steel et al. 2021: most slash wounds are shallow";
+const BLUNT_SPLIT: &str =
+    "Sharkey et al. 2012: blunt blows split skin over bone; Barnes et al. 2022: 47 J left a thigh unsplit";
+
+/// A [`RealCheck`] built as a constant, so a scenario's list of them lasts as
+/// long as the program.
+macro_rules! check {
+    ($outcome:expr, $often:expr, $source:expr) => {
+        RealCheck {
+            outcome: $outcome,
+            often: $often,
+            source: $source,
+        }
+    };
+}
+
+/// A knife slashed fast into the upper arm, about 7 m/s, held there, and drawn
+/// back.
+const SLASH_INTO_THE_ARM_FAST: &[GestureStep] = &[
+    GestureStep::Move {
+        to: (-0.42, 0.34),
+        frames: 0,
+    },
+    GestureStep::Wait(10),
+    GestureStep::Press(true),
+    GestureStep::Move {
+        to: (0.0, 0.34),
+        frames: 6,
+    },
+    GestureStep::Wait(60),
+    GestureStep::Move {
+        to: (-0.42, 0.34),
+        frames: 20,
+    },
+    GestureStep::Press(false),
+    GestureStep::Wait(30),
+];
+
+/// A knife thrust fast into the thigh, about 7 m/s, held there, and drawn back.
+const THRUST_INTO_THE_THIGH_FAST: &[GestureStep] = &[
+    GestureStep::Move {
+        to: (-0.30, 0.66),
+        frames: 0,
+    },
+    GestureStep::Wait(10),
+    GestureStep::Press(true),
+    GestureStep::Move {
+        to: (0.10, 0.66),
+        frames: 6,
+    },
+    GestureStep::Wait(40),
+    GestureStep::Move {
+        to: (-0.30, 0.66),
+        frames: 20,
+    },
+    GestureStep::Press(false),
+    GestureStep::Wait(40),
+];
+
+/// The tuned scenarios, played in a 1280x720 window: scripted strikes and
+/// gestures played the way the app is. Each one checks what the play does in
+/// real life (`real`, from injury research), and that the engine and the tool
+/// in hand behave (`expectations`). Speeds are given for the 1.75 m adult the
+/// figure stands for.
 pub fn scenarios() -> Vec<Scenario> {
-    // Every scenario: the tool never snaps round, and no tissue flies off.
+    use Often::*;
+    use Outcome::*;
+    // Every scenario: the tool never snaps round.
     let steady = ScenarioExpectations {
         tool_turn: DoubleBand::range(0.0, 30.0),
         tool_snaps: IntBand::range(0, 0),
-        point_speed: DoubleBand::range(0.0, 4000.0),
         ..ScenarioExpectations::default()
     };
+    // A strike reaches the body, and broken bone does not sink into itself
+    // or spin wildly.
     let e = ScenarioExpectations {
         contacts: IntBand::at_least(1),
-        contusion_events: IntBand::at_least(1),
         fragment_overlap: DoubleBand::range(0.0, 18.0),
         bone_spin: DoubleBand::range(0.0, 38.0),
         ..steady
@@ -1628,24 +1988,16 @@ pub fn scenarios() -> Vec<Scenario> {
                 strike(ToolMode::Blunt, (-0.360, 0.330), (0.200, 0.330), 9, 60),
                 None,
             ),
-            // A hard bat swing into the upper arm and chest: deep bruising
-            // and perhaps a broken arm, but the torso is not torn open.
-            expectations: ScenarioExpectations {
-                skin_tears: IntBand::range(0, 30),
-                muscle_tears: IntBand::range(0, 60),
-                muscle_fiber_tears: IntBand::range(0, 40),
-                contusion_events: IntBand::at_least(40),
-                bone_fractures: IntBand::range(0, 2),
-                rib_fractures: IntBand::range(0, 1),
-                vessel_lacerations: IntBand::range(0, 0),
-                fragment_vessel_lacerations: IntBand::range(0, 0),
-                organ_penetrations: IntBand::range(0, 0),
-                rib_organ_punctures: IntBand::range(0, 0),
-                organ_ruptures: IntBand::range(0, 0),
-                cavity_ruptures: IntBand::range(0, 0),
-                blood_loss: DoubleBand::range(0.0, 0.02),
-                ..e
-            },
+            // A bat swung at about 7 m/s, about 21 J, across the upper arm into
+            // the chest: a moderate swing, since an ordinary man's hard swing
+            // reaches 15.5 m/s.
+            expectations: e,
+            real: &[
+                check!(Bruises, Always, BRUISE),
+                check!(Breaks(BonePart::UpperArm), Rarely, UPPER_ARM),
+                check!(Breaks(BonePart::Rib), Rarely, RIBS),
+            ],
+            bone_strength: 1.0,
         },
         Scenario {
             name: "torso_heavy_high",
@@ -1655,31 +2007,15 @@ pub fn scenarios() -> Vec<Scenario> {
                 strike(ToolMode::Heavy, (-0.260, 0.340), (0.300, 0.340), 6, 60),
                 None,
             ),
-            // A full-force sledgehammer blow, as fast as the hammer goes,
-            // through the arm into the chest breaks the arm, often a rib too,
-            // bruises deeply,
-            // and leaves a wound. Breaking the arm takes much of the blow, so
-            // the chest behind it is not pulped.
-            expectations: ScenarioExpectations {
-                bone_fractures: IntBand::range(1, 10),
-                rib_fractures: IntBand::range(0, 6),
-                skin_tears: IntBand::range(10, 120),
-                muscle_tears: IntBand::range(20, 220),
-                muscle_fiber_tears: IntBand::range(5, 80),
-                contusion_events: IntBand::at_least(60),
-                muscle_crush_ruptures: IntBand::range(0, 40),
-                cavity_pressure_events: IntBand::range(0, 60),
-                cavity_ruptures: IntBand::range(0, 1),
-                organ_damage_events: IntBand::range(0, 60),
-                organ_penetrations: IntBand::range(0, 0),
-                fracture_marrow_sources: IntBand::range(0, 12),
-                vessel_lacerations: IntBand::range(0, 4),
-                cavity_pressure: DoubleBand::range(0.05, 1.20),
-                organ_damage: DoubleBand::range(0.0, 1.81),
-                blood_loss: DoubleBand::range(0.0, 0.08),
-                fluid_emitted: IntBand::range(0, 2500),
-                ..e
-            },
+            // The sledgehammer at its top speed, 10.6 m/s, about 250 J, through
+            // the upper arm into the chest.
+            expectations: e,
+            real: &[
+                check!(Bruises, Always, BRUISE),
+                check!(Breaks(BonePart::UpperArm), Always, UPPER_ARM),
+                check!(Breaks(BonePart::Rib), Sometimes, RIBS),
+            ],
+            bone_strength: 1.0,
         },
         Scenario {
             name: "torso_sharp_cut",
@@ -1689,28 +2025,19 @@ pub fn scenarios() -> Vec<Scenario> {
                 strike(ToolMode::Sharp, (-0.075, 0.380), (0.065, 0.480), 16, 60),
                 None,
             ),
-            // A knife slashed across the belly cuts a line through skin and
-            // muscle and can reach a vessel or organ, but breaks no bone. Blood
-            // from muscle cut under skin left whole bruises it; the rest wells
-            // from the cut and runs down the skin.
+            // A knife drawn slowly across the belly, about 1 m/s. The cut
+            // opens rather than leaving a line of torn skin, and its blood
+            // wells out and runs down the skin.
             expectations: ScenarioExpectations {
-                bone_fractures: IntBand::range(0, 0),
-                rib_fractures: IntBand::range(0, 0),
-                skin_tears: IntBand::range(6, 40),
-                muscle_tears: IntBand::range(15, 100),
-                contusion_events: IntBand::range(0, 100),
-                tear_propagations: IntBand::range(0, 20),
-                skin_flap_detachments: IntBand::range(8, 60),
-                // The cut opens rather than leaving a line of torn skin.
                 cut_openings: IntBand::at_least(2),
-                organ_penetrations: IntBand::range(0, 2),
-                organ_ruptures: IntBand::range(0, 1),
-                vessel_lacerations: IntBand::range(0, 2),
-                cavity_ruptures: IntBand::range(0, 0),
-                blood_loss: DoubleBand::range(0.002, 0.05),
                 blood_trail_length: DoubleBand::range(150.0, f64::INFINITY),
                 ..e
             },
+            real: &[
+                check!(OpensSkin, Always, SKIN_CUT),
+                check!(CutsArtery, Rarely, SHALLOW_SLASH),
+            ],
+            bone_strength: 1.0,
         },
         Scenario {
             name: "shoulder_blunt",
@@ -1720,18 +2047,14 @@ pub fn scenarios() -> Vec<Scenario> {
                 strike(ToolMode::Blunt, (-0.100, 0.000), (-0.100, 0.320), 6, 60),
                 None,
             ),
-            // A bat brought down on the shoulder bruises it.
-            expectations: ScenarioExpectations {
-                skin_tears: IntBand::range(0, 12),
-                muscle_tears: IntBand::range(0, 20),
-                contusion_events: IntBand::at_least(30),
-                bone_fractures: IntBand::range(0, 1),
-                vessel_lacerations: IntBand::range(0, 0),
-                organ_penetrations: IntBand::range(0, 0),
-                organ_ruptures: IntBand::range(0, 0),
-                cavity_ruptures: IntBand::range(0, 0),
-                ..e
-            },
+            // A bat brought down on the shoulder at about 7 m/s, about 18 J,
+            // onto the collarbone, which lies right under the skin.
+            expectations: e,
+            real: &[
+                check!(Bruises, Always, BRUISE),
+                check!(Breaks(BonePart::Collarbone), Sometimes, COLLARBONE),
+            ],
+            bone_strength: 1.0,
         },
         Scenario {
             name: "arm_sharp",
@@ -1741,22 +2064,15 @@ pub fn scenarios() -> Vec<Scenario> {
                 strike(ToolMode::Sharp, (-0.086, 0.230), (-0.128, 0.450), 24, 48),
                 None,
             ),
-            // A knife drawn from the armpit down the inside of the arm cuts
-            // along it and opens the arteries there, but breaks no bone; the
-            // blood runs down the arm.
+            // A knife drawn slowly from the armpit down the inside of the arm,
+            // over the artery there; the blood runs down the arm.
             expectations: ScenarioExpectations {
-                bone_fractures: IntBand::range(0, 0),
-                rib_fractures: IntBand::range(0, 0),
-                skin_tears: IntBand::range(10, 60),
-                muscle_tears: IntBand::range(10, 120),
-                contusion_events: IntBand::range(0, 60),
-                tear_propagations: IntBand::range(0, 20),
                 cut_openings: IntBand::at_least(1),
-                vessel_lacerations: IntBand::range(1, 3),
-                bone_joint_subluxations: IntBand::range(0, 0),
                 blood_trail_length: DoubleBand::range(80.0, f64::INFINITY),
                 ..e
             },
+            real: &[check!(OpensSkin, Always, SKIN_CUT)],
+            bone_strength: 1.0,
         },
         Scenario {
             name: "hip_heavy",
@@ -1766,18 +2082,13 @@ pub fn scenarios() -> Vec<Scenario> {
                 strike(ToolMode::Heavy, (-0.340, 0.620), (0.100, 0.620), 7, 60),
                 None,
             ),
-            // A full-force sledgehammer into the thigh bruises it deeply and
-            // can split the skin; the femur, the strongest bone, holds.
-            expectations: ScenarioExpectations {
-                contusion_events: IntBand::at_least(60),
-                skin_tears: IntBand::range(0, 60),
-                bone_fractures: IntBand::range(0, 1),
-                vessel_lacerations: IntBand::range(0, 1),
-                organ_penetrations: IntBand::range(0, 0),
-                organ_ruptures: IntBand::range(0, 0),
-                cavity_ruptures: IntBand::range(0, 0),
-                ..e
-            },
+            // The sledgehammer into the thigh at about 7.7 m/s, about 130 J.
+            expectations: e,
+            real: &[
+                check!(Bruises, Always, BRUISE),
+                check!(Breaks(BonePart::Thigh), Sometimes, THIGH),
+            ],
+            bone_strength: 1.0,
         },
         Scenario {
             name: "leg_blunt",
@@ -1787,17 +2098,13 @@ pub fn scenarios() -> Vec<Scenario> {
                 strike(ToolMode::Blunt, (-0.300, 0.780), (0.050, 0.800), 7, 60),
                 None,
             ),
-            // A hard bat swing into the shin bruises it and can split the thin
-            // skin over the bone.
-            expectations: ScenarioExpectations {
-                contusion_events: IntBand::at_least(30),
-                skin_tears: IntBand::range(0, 30),
-                bone_fractures: IntBand::range(0, 1),
-                vessel_lacerations: IntBand::range(0, 0),
-                organ_penetrations: IntBand::range(0, 0),
-                cavity_ruptures: IntBand::range(0, 0),
-                ..e
-            },
+            // A bat into the shin at about 6 m/s, about 15 J.
+            expectations: e,
+            real: &[
+                check!(Bruises, Always, BRUISE),
+                check!(Breaks(BonePart::Shin), Rarely, SHIN),
+            ],
+            bone_strength: 1.0,
         },
         Scenario {
             name: "thigh_cut_rebleed",
@@ -1818,21 +2125,17 @@ pub fn scenarios() -> Vec<Scenario> {
                 )),
             ),
             expectations: ScenarioExpectations {
-                bone_fractures: IntBand::range(0, 1),
-                skin_tears: IntBand::range(8, 50),
-                muscle_tears: IntBand::range(5, 80),
-                skin_flap_detachments: IntBand::range(0, 40),
-                contusion_events: IntBand::at_least(30),
-                // The bat must make the clotted cut bleed again.
+                // A fresh clot is weak, so the blow makes the cut bleed again.
                 wound_reopens: IntBand::range(1, 30),
-                organ_penetrations: IntBand::range(0, 0),
-                organ_ruptures: IntBand::range(0, 0),
-                cavity_ruptures: IntBand::range(0, 0),
-                blood_loss: DoubleBand::range(0.0003, 0.05),
                 // The cut's blood runs down the leg.
                 blood_trail_length: DoubleBand::range(150.0, f64::INFINITY),
                 ..e
             },
+            real: &[
+                check!(OpensSkin, Always, SKIN_CUT),
+                check!(Bruises, Always, BRUISE),
+            ],
+            bone_strength: 1.0,
         },
         Scenario {
             name: "torso_heavy_fragment_settle",
@@ -1842,21 +2145,17 @@ pub fn scenarios() -> Vec<Scenario> {
                 strike(ToolMode::Heavy, (-0.260, 0.340), (0.300, 0.340), 6, 260),
                 None,
             ),
-            // The bone fragments from a full-force sledgehammer blow to the
+            // The pieces of bone broken by a full-force sledgehammer blow to the
             // chest settle against the bones and flesh around them without
             // spinning or flying off.
             expectations: ScenarioExpectations {
-                bone_fractures: IntBand::range(1, 10),
-                rib_fractures: IntBand::range(0, 6),
-                contusion_events: IntBand::at_least(60),
                 final_free_fragments: IntBand::range(1, 40),
                 fragment_bone_contacts: IntBand::at_least(1),
                 fragment_pair_contacts: IntBand::at_least(1),
-                wound_reopens: IntBand::range(0, 60),
-                organ_penetrations: IntBand::range(0, 0),
-                blood_loss: DoubleBand::range(0.01, 0.15),
                 ..e
             },
+            real: &[check!(Breaks(BonePart::UpperArm), Always, UPPER_ARM)],
+            bone_strength: 1.0,
         },
         Scenario {
             name: "bat_carried_steady",
@@ -1871,6 +2170,8 @@ pub fn scenarios() -> Vec<Scenario> {
                 tool_turning: DoubleBand::range(0.0, 1.0),
                 ..steady
             },
+            real: &[],
+            bone_strength: 1.0,
         },
         Scenario {
             name: "bat_drag_steady",
@@ -1878,14 +2179,11 @@ pub fn scenarios() -> Vec<Scenario> {
             intent: "steady",
             play: gesture(ToolMode::Blunt, DRAG_DOWN_THE_SIDE),
             // A bat pressed against the side and dragged down the body slides
-            // along it nearly upright without hurting it much; it does not
-            // swing round into the body like a spear.
-            expectations: ScenarioExpectations {
-                contusion_events: IntBand::at_least(0),
-                skin_tears: IntBand::range(0, 4),
-                bone_fractures: IntBand::range(0, 0),
-                ..held
-            },
+            // along it nearly upright; it does not swing round into the body
+            // like a spear. At about 1.6 m/s it carries about 1 J.
+            expectations: held,
+            real: &[check!(BreaksAnyBone, Never, FOREARM)],
+            bone_strength: 1.0,
         },
         Scenario {
             name: "bat_swing_back_steady",
@@ -1894,77 +2192,67 @@ pub fn scenarios() -> Vec<Scenario> {
             play: gesture(ToolMode::Blunt, SWING_ACROSS_AND_BACK),
             // A bat swung across the chest and back keeps its barrel across
             // the swing both ways instead of spinning round at the turn.
-            expectations: ScenarioExpectations {
-                contusion_events: IntBand::at_least(10),
-                bone_fractures: IntBand::range(0, 2),
-                ..held
-            },
+            expectations: held,
+            real: &[check!(Bruises, Always, BRUISE)],
+            bone_strength: 1.0,
         },
         Scenario {
             name: "hammer_drag_steady",
             region: "torso",
             intent: "steady",
             play: gesture(ToolMode::Heavy, DRAG_DOWN_THE_SIDE),
-            // The sledgehammer dragged down the side stays as steady, and its
-            // weight bruises without breaking anything on the way.
-            expectations: ScenarioExpectations {
-                contusion_events: IntBand::at_least(0),
-                skin_tears: IntBand::range(0, 6),
-                bone_fractures: IntBand::range(0, 0),
-                ..held
-            },
+            // The sledgehammer dragged down the side stays as steady; at about
+            // 1.7 m/s it carries about 6 J.
+            expectations: held,
+            real: &[check!(BreaksAnyBone, Never, FOREARM)],
+            bone_strength: 1.0,
         },
         Scenario {
             name: "hammer_slow_push",
             region: "torso",
             intent: "speed",
             play: gesture(ToolMode::Heavy, PUSH_INTO_CHEST_SLOWLY),
-            // Pushed slowly into the side, about 400 px/s, then held there,
-            // the sledgehammer does no harm: hurting takes speed, and a hand
-            // cannot press a broad face through skin.
+            // Pushed slowly into the side, about 1.2 m/s and 3 J, then held
+            // there: at most a light bruise.
             expectations: ScenarioExpectations {
                 contacts: IntBand::at_least(1),
-                contusion_events: IntBand::range(0, 30),
-                skin_tears: IntBand::range(0, 1),
-                muscle_tears: IntBand::range(0, 1),
-                bone_fractures: IntBand::range(0, 0),
-                fluid_emitted: IntBand::range(0, 10),
                 ..held
             },
+            real: &[
+                check!(BreaksAnyBone, Never, FOREARM),
+                check!(OpensSkin, Never, BLUNT_SPLIT),
+            ],
+            bone_strength: 1.0,
         },
         Scenario {
             name: "hammer_moderate_swing",
             region: "torso",
             intent: "speed",
             play: gesture(ToolMode::Heavy, SWING_INTO_CHEST_MODERATELY),
-            // Swung at about 800 px/s, it bruises the arm but breaks and
-            // tears nothing much.
-            expectations: ScenarioExpectations {
-                contusion_events: IntBand::at_least(10),
-                skin_tears: IntBand::range(0, 6),
-                muscle_tears: IntBand::range(0, 4),
-                bone_fractures: IntBand::range(0, 0),
-                fluid_emitted: IntBand::range(0, 60),
-                ..held
-            },
+            // Swung at about 2.5 m/s, about 14 J, into the upper arm and chest:
+            // a bruise.
+            expectations: held,
+            real: &[
+                check!(Bruises, Always, BRUISE),
+                check!(BreaksAnyBone, Never, FOREARM),
+                check!(OpensSkin, Rarely, BLUNT_SPLIT),
+            ],
+            bone_strength: 1.0,
         },
         Scenario {
             name: "hammer_firm_swing",
             region: "torso",
             intent: "speed",
             play: gesture(ToolMode::Heavy, SWING_INTO_CHEST_FIRMLY),
-            // Swung firmly, about 1600 px/s, it bruises deeply and may break
-            // the arm, but nothing bursts open.
-            expectations: ScenarioExpectations {
-                contusion_events: IntBand::at_least(30),
-                skin_tears: IntBand::range(0, 40),
-                muscle_tears: IntBand::range(0, 60),
-                bone_fractures: IntBand::range(0, 2),
-                rib_fractures: IntBand::range(0, 0),
-                fracture_marrow_sources: IntBand::range(0, 0),
-                fluid_emitted: IntBand::range(0, 1600),
-                ..held
-            },
+            // Swung firmly, about 5 m/s and 54 J, into the upper arm and chest:
+            // a deep bruise, and sometimes a broken upper arm.
+            expectations: held,
+            real: &[
+                check!(Bruises, Always, BRUISE),
+                check!(Breaks(BonePart::UpperArm), Sometimes, UPPER_ARM),
+                check!(OpensSkin, Rarely, BLUNT_SPLIT),
+            ],
+            bone_strength: 1.0,
         },
         Scenario {
             name: "hammer_finger_lands",
@@ -1981,6 +2269,8 @@ pub fn scenarios() -> Vec<Scenario> {
                 contusion_events: IntBand::range(0, 0),
                 ..steady
             },
+            real: &[],
+            bone_strength: 1.0,
         },
         Scenario {
             name: "hammer_first_touch",
@@ -1998,6 +2288,8 @@ pub fn scenarios() -> Vec<Scenario> {
                 contusion_events: IntBand::range(0, 0),
                 ..steady
             },
+            real: &[],
+            bone_strength: 1.0,
         },
         Scenario {
             name: "hammer_into_wound",
@@ -2012,21 +2304,95 @@ pub fn scenarios() -> Vec<Scenario> {
                 final_lag: DoubleBand::range(0.0, 10.0),
                 ..steady
             },
+            real: &[],
+            bone_strength: 1.0,
         },
         Scenario {
             name: "bat_firm_swing",
             region: "torso",
             intent: "speed",
             play: gesture(ToolMode::Blunt, SWING_INTO_CHEST_FIRMLY),
-            // The lighter bat swung as firmly bruises without breaking bone,
-            // and rarely splits the skin.
-            expectations: ScenarioExpectations {
-                contusion_events: IntBand::at_least(20),
-                skin_tears: IntBand::range(0, 12),
-                bone_fractures: IntBand::range(0, 0),
-                fluid_emitted: IntBand::range(0, 100),
-                ..held
-            },
+            // The lighter bat swung at about 5 m/s, about 10 J: a bruise.
+            expectations: held,
+            real: &[
+                check!(Bruises, Always, BRUISE),
+                check!(BreaksAnyBone, Never, FOREARM),
+                check!(OpensSkin, Rarely, BLUNT_SPLIT),
+            ],
+            bone_strength: 1.0,
+        },
+        Scenario {
+            name: "bat_hard_swing",
+            region: "torso",
+            intent: "high",
+            play: Play::Swing(
+                strike(ToolMode::Blunt, (-0.700, 0.330), (0.200, 0.330), 6, 60),
+                None,
+            ),
+            // An ordinary man's hard bat swing, about 16 m/s and 110 J, across
+            // the upper arm into the chest.
+            expectations: e,
+            real: &[
+                check!(Bruises, Always, BRUISE),
+                check!(Breaks(BonePart::UpperArm), Usually, BAT_ASSAULTS),
+                check!(Breaks(BonePart::Rib), Sometimes, RIBS),
+            ],
+            bone_strength: 1.0,
+        },
+        Scenario {
+            name: "bat_hard_forearm",
+            region: "arm",
+            intent: "high",
+            play: Play::Swing(
+                strike(ToolMode::Blunt, (-0.700, 0.440), (0.200, 0.440), 6, 60),
+                None,
+            ),
+            // The same hard swing into the hanging forearm, the bone bats break
+            // most often.
+            expectations: e,
+            real: &[
+                check!(Bruises, Always, BRUISE),
+                check!(Breaks(BonePart::Forearm), Always, BAT_ASSAULTS),
+            ],
+            bone_strength: 1.0,
+        },
+        Scenario {
+            name: "bat_hard_shin",
+            region: "leg",
+            intent: "high",
+            play: Play::Swing(
+                strike(ToolMode::Blunt, (-0.700, 0.830), (0.200, 0.830), 6, 60),
+                None,
+            ),
+            // The same hard swing into the shin, about as much as it takes.
+            expectations: e,
+            real: &[
+                check!(Bruises, Always, BRUISE),
+                check!(Breaks(BonePart::Shin), Sometimes, SHIN_BAT),
+            ],
+            bone_strength: 1.0,
+        },
+        Scenario {
+            name: "knife_fast_slash",
+            region: "arm",
+            intent: "cut",
+            play: gesture(ToolMode::Sharp, SLASH_INTO_THE_ARM_FAST),
+            // A knife slashed into the upper arm at about 7 m/s, a real
+            // slash's speed: it cuts deep but breaks no bone.
+            expectations: steady,
+            real: &[check!(OpensSkin, Always, SKIN_CUT)],
+            bone_strength: 1.0,
+        },
+        Scenario {
+            name: "knife_fast_thrust",
+            region: "leg",
+            intent: "cut",
+            play: gesture(ToolMode::Sharp, THRUST_INTO_THE_THIGH_FAST),
+            // A knife thrust into the thigh at about 7 m/s: it cuts deep but
+            // breaks no bone.
+            expectations: steady,
+            real: &[check!(OpensSkin, Always, SKIN_CUT)],
+            bone_strength: 1.0,
         },
     ]
 }

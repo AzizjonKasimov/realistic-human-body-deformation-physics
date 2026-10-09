@@ -51,6 +51,11 @@ use std::time::Instant;
 /// swing.
 const SWEEP_ALONG: [f64; 5] = [-0.010, -0.005, 0.0, 0.005, 0.010];
 const SWEEP_ACROSS: [f64; 3] = [-0.005, 0.0, 0.005];
+/// Bone strengths a sweep plays, against the tuned strength: people's bones
+/// differ by 15-28% (one standard deviation) in the fracture studies in
+/// `docs/INJURY_REFERENCE.md`, so a blow near a bone's limit breaks it in
+/// some people and not in others.
+const SWEEP_STRENGTH: [f64; 3] = [0.8, 1.0, 1.25];
 
 struct Options {
     csv_path: PathBuf,
@@ -365,6 +370,7 @@ struct SweepRun {
     scenario: usize,
     along: f64,
     across: f64,
+    strength: f64,
     result: ScenarioResult,
     violations: Vec<String>,
 }
@@ -372,12 +378,14 @@ struct SweepRun {
 /// Replays each scenario with its swing moved by every combination of
 /// `SWEEP_ALONG` and `SWEEP_ACROSS`, on all cores, and reports the spread.
 fn sweep(selected: &[Scenario], output_dir: &Path, custom: bool) {
-    let jobs: Vec<(usize, f64, f64)> = (0..selected.len())
+    let jobs: Vec<(usize, f64, f64, f64)> = (0..selected.len())
         .flat_map(|index| {
-            SWEEP_ALONG.iter().flat_map(move |&along| {
-                SWEEP_ACROSS
-                    .iter()
-                    .map(move |&across| (index, along, across))
+            SWEEP_STRENGTH.iter().flat_map(move |&strength| {
+                SWEEP_ALONG.iter().flat_map(move |&along| {
+                    SWEEP_ACROSS
+                        .iter()
+                        .map(move |&across| (index, along, across, strength))
+                })
             })
         })
         .collect();
@@ -388,10 +396,12 @@ fn sweep(selected: &[Scenario], output_dir: &Path, custom: bool) {
         for _ in 0..workers.min(jobs.len()) {
             scope.spawn(|| loop {
                 let job = next.fetch_add(1, Ordering::Relaxed);
-                let Some(&(index, along, across)) = jobs.get(job) else {
+                let Some(&(index, along, across, strength)) = jobs.get(job) else {
                     break;
                 };
-                let scenario = selected[index].shifted(along, across);
+                let scenario = selected[index]
+                    .shifted(along, across)
+                    .with_bone_strength(strength);
                 let (_, result) = run(&scenario, SCENARIO_WIDTH, SCENARIO_HEIGHT, |_, _, _| {});
                 let violations = scenario.violations(&result);
                 finished.lock().expect("sweep results").push((
@@ -400,6 +410,7 @@ fn sweep(selected: &[Scenario], output_dir: &Path, custom: bool) {
                         scenario: index,
                         along,
                         across,
+                        strength,
                         result,
                         violations,
                     },
@@ -413,7 +424,11 @@ fn sweep(selected: &[Scenario], output_dir: &Path, custom: bool) {
 
     let csv_path = output_dir.join("strike_sweep.csv");
     let mut csv = BufWriter::new(File::create(&csv_path).expect("create sweep CSV"));
-    writeln!(csv, "along,across,in_band,violations,{SUMMARY_HEADER}").expect("write sweep CSV");
+    writeln!(
+        csv,
+        "along,across,bone_strength,in_band,violations,{SUMMARY_HEADER}"
+    )
+    .expect("write sweep CSV");
     for run in &runs {
         let scenario = &selected[run.scenario];
         let failed: Vec<&str> = run
@@ -423,9 +438,10 @@ fn sweep(selected: &[Scenario], output_dir: &Path, custom: bool) {
             .collect();
         writeln!(
             csv,
-            "{:.4},{:.4},{},{},{}",
+            "{:.4},{:.4},{:.2},{},{},{}",
             run.along,
             run.across,
+            run.strength,
             u8::from(run.violations.is_empty()),
             failed.join(";"),
             summary_fields(scenario, &run.result).join(",")
@@ -434,15 +450,36 @@ fn sweep(selected: &[Scenario], output_dir: &Path, custom: bool) {
     }
 
     let mut report = String::new();
+    let mut mismatches = Vec::new();
     for (index, scenario) in selected.iter().enumerate() {
         let mine: Vec<&SweepRun> = runs.iter().filter(|run| run.scenario == index).collect();
         report.push_str(&sweep_summary(scenario, &mine, custom));
+        let results: Vec<&ScenarioResult> = mine.iter().map(|run| &run.result).collect();
+        mismatches.extend(scenario.sweep_violations(&results));
+    }
+    if !custom {
+        if mismatches.is_empty() {
+            report.push_str("Real life: every scenario breaks, opens, and bruises as often as it does in real life.\n");
+        } else {
+            report.push_str(
+                "Real life: how often things happen across the sweep, against injury research:\n",
+            );
+            for mismatch in &mismatches {
+                report.push_str(&format!("  {mismatch}\n"));
+            }
+        }
     }
     let report_path = output_dir.join("strike_sweep_report.txt");
     fs::write(&report_path, &report).expect("write sweep report");
     print!("{report}");
     println!("wrote {}", csv_path.display());
     println!("wrote {}", report_path.display());
+    if !custom && !mismatches.is_empty() {
+        println!(
+            "WARN: {} real-life mismatches across the sweep",
+            mismatches.len()
+        );
+    }
 }
 
 fn sweep_summary(scenario: &Scenario, runs: &[&SweepRun], custom: bool) -> String {
@@ -500,6 +537,25 @@ fn sweep_summary(scenario: &Scenario, runs: &[&SweepRun], custom: bool) -> Strin
         spread("final lag", &|r| r.final_lag, 0),
         spread("point speed", &|r| r.max_point_speed, 0),
     ];
+    if !scenario.real.is_empty() {
+        let tallies: Vec<String> = scenario
+            .real
+            .iter()
+            .map(|check| {
+                let hits = runs
+                    .iter()
+                    .filter(|run| check.outcome.happened(&run.result))
+                    .count();
+                format!(
+                    "{} {hits}/{} (real life: {})",
+                    check.outcome.describe(),
+                    runs.len(),
+                    check.often.name()
+                )
+            })
+            .collect();
+        text.push_str(&format!("  {}\n", tallies.join("; ")));
+    }
     text.push_str(&format!("  {}\n", lines[..5].join(", ")));
     text.push_str(&format!("  {}\n", lines[5..9].join(", ")));
     text.push_str(&format!("  {}\n", lines[9..].join(", ")));
@@ -545,7 +601,7 @@ fn time_phases(selected: &[Scenario], output_dir: &Path) {
     let mut scenario_lines = String::new();
     for scenario in selected {
         let mut world =
-            rp::create_layered_body(SCENARIO_WIDTH, SCENARIO_HEIGHT, rp::Materials::default());
+            rp::create_layered_body(SCENARIO_WIDTH, SCENARIO_HEIGHT, scenario.materials());
         world.time_phases(Some(now_ms));
         let (world, _) = run_on(
             world,
@@ -665,8 +721,24 @@ fn cut_quality(result: &ScenarioResult) -> String {
 }
 
 fn headline(result: &ScenarioResult) -> String {
+    let metres = rp::scenarios::scenario_metres_per_px();
+    let broken: Vec<&str> = rp::BonePart::ALL
+        .iter()
+        .filter(|part| result.part_fractures[part.index()] > 0)
+        .map(|part| part.name())
+        .collect();
+    let bleeding = result
+        .bleeding_ml_per_min()
+        .map_or("none".to_string(), |rate| format!("{rate:.1} ml/min"));
     format!(
-        "bones {} (ribs {}), skin {}, muscle {}, cut open {}, bruises {}, vessels {}, organ damage {:.2}, reopens {}, blood loss {:.3}",
+        "tool up to {:.1} m/s; broken: {}; bleeding {}\n  bones {} (ribs {}), skin {}, muscle {}, cut open {}, bruises {}, vessels {}, organ damage {:.2}, reopens {}, blood loss {:.3}",
+        result.max_tool_speed * metres,
+        if broken.is_empty() {
+            "nothing".to_string()
+        } else {
+            broken.join(", ")
+        },
+        bleeding,
         result.bone_fractures,
         result.rib_fractures,
         result.skin_tears,

@@ -104,6 +104,78 @@ impl Default for BoneKind {
     }
 }
 
+/// Which bone a segment is, as injury research names it, so a test can check
+/// which bones a blow breaks. Pieces of a broken bone keep its part.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BonePart {
+    #[default]
+    Other,
+    Skull,
+    Spine,
+    Collarbone,
+    Rib,
+    Pelvis,
+    UpperArm,
+    Forearm,
+    Hand,
+    Thigh,
+    Shin,
+    Foot,
+}
+
+/// How many [`BonePart`]s there are.
+pub const BONE_PARTS: usize = 12;
+
+impl BonePart {
+    pub const ALL: [BonePart; BONE_PARTS] = [
+        BonePart::Other,
+        BonePart::Skull,
+        BonePart::Spine,
+        BonePart::Collarbone,
+        BonePart::Rib,
+        BonePart::Pelvis,
+        BonePart::UpperArm,
+        BonePart::Forearm,
+        BonePart::Hand,
+        BonePart::Thigh,
+        BonePart::Shin,
+        BonePart::Foot,
+    ];
+
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            BonePart::Other => "other bone",
+            BonePart::Skull => "skull",
+            BonePart::Spine => "spine",
+            BonePart::Collarbone => "collarbone",
+            BonePart::Rib => "rib",
+            BonePart::Pelvis => "pelvis",
+            BonePart::UpperArm => "upper arm",
+            BonePart::Forearm => "forearm",
+            BonePart::Hand => "hand",
+            BonePart::Thigh => "thigh bone",
+            BonePart::Shin => "shin",
+            BonePart::Foot => "foot",
+        }
+    }
+
+    /// A long bone of a limb, the kind a knife can notch but not break.
+    pub fn is_long_bone(self) -> bool {
+        matches!(
+            self,
+            BonePart::Collarbone
+                | BonePart::UpperArm
+                | BonePart::Forearm
+                | BonePart::Thigh
+                | BonePart::Shin
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct InputState {
     pub active: bool,
@@ -757,6 +829,7 @@ impl Default for OrganRegion {
 #[derive(Clone, Copy, Debug)]
 pub struct BoneSegment {
     pub kind: BoneKind,
+    pub part: BonePart,
     pub a: Vec2,
     pub b: Vec2,
     pub previous_a: Vec2,
@@ -784,6 +857,7 @@ impl Default for BoneSegment {
     fn default() -> Self {
         Self {
             kind: BoneKind::default(),
+            part: BonePart::default(),
             a: Vec2::default(),
             b: Vec2::default(),
             previous_a: Vec2::default(),
@@ -1083,6 +1157,8 @@ pub struct ContactDebug {
     pub bone_contacts: i32,
     pub tissue_contacts: i32,
     pub fractures: i32,
+    /// Fractures this step by [`BonePart`], indexed by [`BonePart::index`].
+    pub part_fractures: [i32; BONE_PARTS],
     pub rib_fractures: i32,
     pub fluid_emitted: i32,
     pub fragment_contacts: i32,
@@ -1184,6 +1260,7 @@ impl Default for ContactDebug {
             bone_contacts: 0,
             tissue_contacts: 0,
             fractures: 0,
+            part_fractures: [0; BONE_PARTS],
             rib_fractures: 0,
             fluid_emitted: 0,
             fragment_contacts: 0,
@@ -6107,6 +6184,7 @@ impl World {
 
         let mut second = BoneSegment {
             kind: old.kind,
+            part: old.part,
             a: right_cap,
             b: Vec2 {
                 x: old.b.x + normal.x * snap * 0.18,
@@ -6264,7 +6342,7 @@ impl World {
         let load = impulse.max(old.load);
         if !open {
             self.bruise_tissue_around_fracture(crack, old.radius, load);
-            self.count_fracture(old.kind, load);
+            self.count_fracture(old.part, old.kind, load);
             return;
         }
 
@@ -6303,7 +6381,7 @@ impl World {
         // Scaled to the bone, so an open break in a thin shin or forearm tears
         // out around the bone instead of through the whole limb.
         self.damage_tissue_around_fracture(crack, old.radius * 1.6 + overload * 3.0, load);
-        self.count_fracture(old.kind, load);
+        self.count_fracture(old.part, old.kind, load);
     }
 
     /// A violent break also chips a splinter that flies out from the crack.
@@ -6368,9 +6446,10 @@ impl World {
         self.bones.push(splinter);
     }
 
-    fn count_fracture(&mut self, kind: BoneKind, load: f64) {
+    fn count_fracture(&mut self, part: BonePart, kind: BoneKind, load: f64) {
         self.stats.fractured_bones += 1;
         self.debug.fractures += 1;
+        self.debug.part_fractures[part.index()] += 1;
         if kind == BoneKind::Rib {
             self.stats.fractured_ribs += 1;
             self.debug.rib_fractures += 1;
