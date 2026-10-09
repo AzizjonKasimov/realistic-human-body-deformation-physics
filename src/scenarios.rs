@@ -1199,7 +1199,8 @@ impl ScenarioResult {
 }
 
 fn span(a: Vec2, b: Vec2) -> f64 {
-    (b.x - a.x).hypot(b.y - a.y)
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    (dx * dx + dy * dy).sqrt()
 }
 
 fn midpoint(a: Vec2, b: Vec2) -> Vec2 {
