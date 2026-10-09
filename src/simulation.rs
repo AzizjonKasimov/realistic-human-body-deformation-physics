@@ -1369,6 +1369,9 @@ pub struct World {
     /// Fibers a blade cut this step, whose cut opens when the knife's step
     /// ends.
     pending_cuts: Vec<usize>,
+    /// Fibers stretching tore this step, which split open across themselves
+    /// once the solver is done (see `cuts.rs`).
+    pending_tears: Vec<usize>,
     /// Counts changes to which points the springs and triangles join, so
     /// anything built from the mesh knows to rebuild.
     topology_version: u64,
@@ -1420,6 +1423,7 @@ impl World {
             blunt_knock: Vec::new(),
             flesh: Vec::new(),
             pending_cuts: Vec::new(),
+            pending_tears: Vec::new(),
             topology_version: 0,
             phase_clock: None,
             phase_times: PhaseTimes::default(),
@@ -1868,6 +1872,7 @@ impl World {
             });
         }
         self.finish_tool_step(dt);
+        self.timed("tears open", Self::open_tears);
 
         self.timed("anchors", |world| {
             world.update_vessel_anchors();
@@ -4089,6 +4094,18 @@ impl World {
                     y: tangent.x - 0.35,
                 };
                 self.break_spring(i);
+                // Tissue a fast blow tears by stretching alone splits open
+                // across the fiber once the solver is done, as a laceration
+                // runs. A slow overload only parts the fiber, tissue torn
+                // under a crushing load is torn away, and so is a fiber at
+                // the edge of a cut, whose lips the blade keeps pulling apart.
+                if endpoint_load <= tear_impulse
+                    && self.debug.striker_speed >= cuts::TEAR_OPENING_SPEED
+                    && !a.on_cut
+                    && !b.on_cut
+                {
+                    self.pending_tears.push(i);
+                }
                 if spring.layer == TissueLayer::Skin {
                     self.stats.broken_skin += 1;
                     events.push((

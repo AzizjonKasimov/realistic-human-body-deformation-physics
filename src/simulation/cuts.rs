@@ -21,6 +21,11 @@
 
 use super::*;
 
+/// How fast, in pixels per second, a tool must move for the tissue it tears
+/// by stretching to split open into a laceration: half a firm swing, below
+/// which a blow should tear nothing much.
+pub(super) const TEAR_OPENING_SPEED: f64 = 800.0;
+
 /// The farthest a point's rest place moves onto a blade's path, in point
 /// spacings, so a stray crossing cannot drag the mesh.
 const MAX_SNAP: f64 = 0.6;
@@ -147,9 +152,70 @@ impl World {
             return;
         }
 
-        // Each lip draws back into its own side of the cut.
+        self.retract_lips(&families);
+        self.follow_rest_places(&homes_before, &origin);
+        self.finish_topology_change();
+    }
+
+    /// Opens the tears stretching made this step: each fiber torn by
+    /// stretching alone splits one of its ends across itself, so the tissue
+    /// parts perpendicular to the pull, as a laceration does, and the fiber
+    /// itself stays whole on the far side. A fiber whose ends cannot split
+    /// stays torn.
+    pub(super) fn open_tears(&mut self) {
+        if self.pending_tears.is_empty() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending_tears);
+        let homes_before: Vec<Vec2> = self.points.iter().map(|point| point.home).collect();
+        let mut origin = Vec::new();
+        let mut families = Vec::new();
+        for index in pending {
+            let spring = self.springs[index];
+            if !spring.broken {
+                continue;
+            }
+            // The more loaded end opens first.
+            let (first, second) = if self.points[spring.a].load >= self.points[spring.b].load {
+                (spring.a, spring.b)
+            } else {
+                (spring.b, spring.a)
+            };
+            self.springs[index].broken = false;
+            let mut opened = None;
+            for (end, other) in [(first, second), (second, first)] {
+                let normal = subtract(self.points[other].home, self.points[end].home);
+                let before_split = self.points.len();
+                if let Some(family) = self.split_point_across(end, normal) {
+                    opened = Some((end, before_split, family));
+                    break;
+                }
+            }
+            match opened {
+                Some((end, before_split, family)) => {
+                    for &(member, _) in &family {
+                        if member >= before_split {
+                            origin.push(end);
+                        }
+                    }
+                    families.push(family);
+                }
+                None => self.springs[index].broken = true,
+            }
+        }
+        if families.is_empty() {
+            return;
+        }
+        // A tear parts as far as what tore it pulls it; only a blade's cut
+        // draws its lips back.
+        self.follow_rest_places(&homes_before, &origin);
+        self.finish_topology_change();
+    }
+
+    /// Each lip of `families` draws back into its own side of the opening.
+    fn retract_lips(&mut self, families: &[Vec<(usize, Vec2)>]) {
         let spacing = self.materials.point_spacing;
-        for family in &families {
+        for family in families {
             for &(member, toward) in family {
                 let retraction = match self.points[member].layer {
                     TissueLayer::Skin => self.materials.skin_cut_retraction,
@@ -161,7 +227,11 @@ impl World {
                 }
             }
         }
-        self.follow_rest_places(&homes_before, &origin);
+    }
+
+    /// Keeps the per-point state in step with points a cut added, and tells
+    /// anything built from the mesh to rebuild.
+    fn finish_topology_change(&mut self) {
         self.blunt_knock.resize(self.points.len(), 0.0);
         self.flesh.resize(self.points.len(), true);
         self.topology_version += 1;
@@ -247,11 +317,44 @@ impl World {
     /// Splits point `point` along the parted edges through it: its triangles
     /// fall into groups that still share an unparted edge through it, and
     /// every group but the one with the most area gets its own copy of the
-    /// point.
-    /// Returns each copy (the point itself among them) with the direction, in
-    /// the rest shape, from the point into its group's triangles; `None` when
-    /// the point's triangles all still hold together.
+    /// point (see `split_fan`).
     fn split_point(&mut self, point: usize) -> Option<Vec<(usize, Vec2)>> {
+        let fan = self.fan_of(point)?;
+        let springs = &self.springs;
+        let (group, groups) = self.group_fan(point, &fan, |first, _, other| {
+            triangle_edge(first, point, other).is_some_and(|edge| !springs[edge].parted)
+        });
+        self.split_fan(point, fan, group, groups)
+    }
+
+    /// Splits point `point` across the line through its rest place normal to
+    /// `normal`: each of its triangles goes to the side its rest centroid is
+    /// on, and the triangles of each side that share edges through the point
+    /// stay together. A fiber torn by stretching opens this way, across
+    /// itself, as Müller et al.'s position-based tearing and Rapier's
+    /// `crack_across_edge` open a crack (see `split_fan`).
+    fn split_point_across(&mut self, point: usize, normal: Vec2) -> Option<Vec<(usize, Vec2)>> {
+        let fan = self.fan_of(point)?;
+        let home = self.points[point].home;
+        let side = |triangle: &Triangle| {
+            let [a, b, c] = corners(triangle);
+            let centroid = scale(
+                add(
+                    add(self.points[a].home, self.points[b].home),
+                    self.points[c].home,
+                ),
+                1.0 / 3.0,
+            );
+            dot(subtract(centroid, home), normal) > 0.0
+        };
+        let (group, groups) =
+            self.group_fan(point, &fan, |first, second, _| side(first) == side(second));
+        self.split_fan(point, fan, group, groups)
+    }
+
+    /// The triangles of point `point`'s sheet around it, unless it is pinned
+    /// or has fewer than two.
+    fn fan_of(&self, point: usize) -> Option<Vec<usize>> {
         let source = self.points[point];
         if source.pinned {
             return None;
@@ -262,23 +365,31 @@ impl World {
                 triangle.layer == source.layer && corners(triangle).contains(&point)
             })
             .collect();
-        if fan.len() < 2 {
-            return None;
-        }
+        (fan.len() >= 2).then_some(fan)
+    }
+
+    /// Groups the triangles of `fan`: two that share an edge through `point`
+    /// to the corner `other` belong together when `joined(first, second,
+    /// other)` holds. Returns each triangle's group, numbered in fan order,
+    /// and the number of groups.
+    fn group_fan(
+        &self,
+        point: usize,
+        fan: &[usize],
+        joined: impl Fn(&Triangle, &Triangle, usize) -> bool,
+    ) -> (Vec<usize>, usize) {
         let count = fan.len();
         let mut parent: Vec<usize> = (0..count).collect();
         for i in 0..count {
             for j in i + 1..count {
-                let (first, second) = (self.triangles[fan[i]], self.triangles[fan[j]]);
-                let Some(other) = corners(&first)
+                let (first, second) = (&self.triangles[fan[i]], &self.triangles[fan[j]]);
+                let Some(other) = corners(first)
                     .into_iter()
-                    .find(|&corner| corner != point && corners(&second).contains(&corner))
+                    .find(|&corner| corner != point && corners(second).contains(&corner))
                 else {
                     continue;
                 };
-                let joined = triangle_edge(&first, point, other)
-                    .is_some_and(|edge| !self.springs[edge].parted);
-                if joined {
+                if joined(first, second, other) {
                     let (root_i, root_j) = (find_root(&mut parent, i), find_root(&mut parent, j));
                     parent[root_i.max(root_j)] = root_i.min(root_j);
                 }
@@ -286,7 +397,7 @@ impl World {
         }
         let mut group_of_root = vec![usize::MAX; count];
         let mut groups = 0;
-        let group: Vec<usize> = (0..count)
+        let group = (0..count)
             .map(|i| {
                 let root = find_root(&mut parent, i);
                 if group_of_root[root] == usize::MAX {
@@ -296,9 +407,26 @@ impl World {
                 group_of_root[root]
             })
             .collect();
+        (group, groups)
+    }
+
+    /// Splits point `point` by the groups of its triangles `fan` (`group` of
+    /// `groups`): every group but the one with the most area gets its own
+    /// copy of the point. Returns each copy (the point itself among them)
+    /// with the direction, in the rest shape, from the point into its
+    /// group's triangles; `None` when the triangles are all one group.
+    fn split_fan(
+        &mut self,
+        point: usize,
+        fan: Vec<usize>,
+        group: Vec<usize>,
+        groups: usize,
+    ) -> Option<Vec<(usize, Vec2)>> {
         if groups < 2 {
             return None;
         }
+        let source = self.points[point];
+        let count = fan.len();
 
         let fan_corners: Vec<[usize; 3]> = fan
             .iter()
@@ -517,14 +645,17 @@ impl World {
     /// to a point whose rest place moved in step with it, so the new rest
     /// shape is the one the tissue settles into. `before` holds the rest
     /// places before the move; a copy made since moved from where its
-    /// source was (`origin`, in order of the copies).
+    /// source was (`origin`, in order of the copies), which may itself be a
+    /// copy made earlier.
     fn follow_rest_places(&mut self, before: &[Vec2], origin: &[usize]) {
-        let old: Vec<Vec2> = (0..self.points.len())
-            .map(|index| match index.checked_sub(before.len()) {
+        let mut old: Vec<Vec2> = Vec::with_capacity(self.points.len());
+        for index in 0..self.points.len() {
+            let was = match index.checked_sub(before.len()) {
                 None => before[index],
-                Some(copy) => before[origin[copy]],
-            })
-            .collect();
+                Some(copy) => old[origin[copy]],
+            };
+            old.push(was);
+        }
         let homes: Vec<Vec2> = self.points.iter().map(|point| point.home).collect();
         let moved: Vec<bool> = old
             .iter()
