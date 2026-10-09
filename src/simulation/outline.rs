@@ -118,49 +118,35 @@ impl World {
         let spacing = self.materials.point_spacing.max(1.0);
         let reach = spacing * OUTLINE_CONTACT_REACH;
         let cell = spacing * 2.0;
+        let mut grid = std::mem::take(&mut self.grid);
         for (outline_index, outline) in self.outlines.iter().enumerate() {
             let count = outline.points.len();
-            let mut grid: HashMap<GridKey, Vec<usize>> = HashMap::new();
-            for edge in 0..count {
-                // A torn edge, or one of flesh torn away, is no longer a
-                // surface anything can press against.
-                let intact = outline.edge_springs[edge].is_some_and(|spring| {
-                    !self.springs[spring].broken && self.spring_in_flesh(self.springs[spring])
-                });
-                if !intact {
-                    continue;
-                }
-                let a = self.points[outline.points[edge]].position;
-                let b = self.points[outline.points[(edge + 1) % count]].position;
-                let low = Vec2 {
-                    x: a.x.min(b.x) - reach,
-                    y: a.y.min(b.y) - reach,
-                };
-                let high = Vec2 {
-                    x: a.x.max(b.x) + reach,
-                    y: a.y.max(b.y) + reach,
-                };
-                for_spatial_cells(
-                    Aabb {
-                        min: low,
-                        max: high,
-                    },
-                    cell,
-                    |key| {
-                        grid.entry(key).or_default().push(edge);
-                    },
-                );
-            }
+            // Each edge goes in every cell within reach of it. A torn edge, or
+            // one of flesh torn away, is no longer a surface anything can
+            // press against.
+            grid.build_boxes(
+                cell,
+                (0..count)
+                    .filter(|&edge| {
+                        outline.edge_springs[edge].is_some_and(|spring| {
+                            !self.springs[spring].broken
+                                && self.spring_in_flesh(self.springs[spring])
+                        })
+                    })
+                    .map(|edge| {
+                        let a = self.points[outline.points[edge]].position;
+                        let b = self.points[outline.points[(edge + 1) % count]].position;
+                        (edge, segment_aabb(a, b, reach))
+                    }),
+            );
             for (position, &point) in outline.points.iter().enumerate() {
                 // Flesh torn away is not surface.
                 if !is_flesh(&self.flesh, point) {
                     continue;
                 }
                 let p = self.points[point].position;
-                let Some(edges) = grid.get(&spatial_key(p, cell)) else {
-                    continue;
-                };
-                for &edge in edges {
+                for &edge in grid.at(p) {
+                    let edge = edge as usize;
                     let next = (edge + 1) % count;
                     if loop_distance(position, edge, count) <= OUTLINE_NEIGHBORS
                         || loop_distance(position, next, count) <= OUTLINE_NEIGHBORS
@@ -190,6 +176,7 @@ impl World {
                 }
             }
         }
+        self.grid = grid;
     }
 
     /// Pushes outline points out from behind the stretches of outline they

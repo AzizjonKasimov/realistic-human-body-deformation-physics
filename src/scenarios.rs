@@ -1127,9 +1127,21 @@ pub fn run(
     scenario: &Scenario,
     width: f64,
     height: f64,
+    observe: impl FnMut(i32, &InputState, &World),
+) -> (World, ScenarioResult) {
+    let world = create_layered_body(width, height, Materials::default());
+    run_on(world, scenario, width, height, observe)
+}
+
+/// [`run`] on a body the caller made for that window, such as one that times
+/// its phases ([`World::time_phases`]).
+pub fn run_on(
+    mut world: World,
+    scenario: &Scenario,
+    width: f64,
+    height: f64,
     mut observe: impl FnMut(i32, &InputState, &World),
 ) -> (World, ScenarioResult) {
-    let mut world = create_layered_body(width, height, Materials::default());
     let mut result = ScenarioResult::default();
     let dt = world.materials().fixed_dt;
     let body = body_frame(width, height);

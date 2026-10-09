@@ -3,14 +3,17 @@ use std::f64::consts::PI;
 
 mod body;
 mod cuts;
+mod grid;
 mod motion;
 mod outline;
+mod phases;
 mod tools;
 
 pub use body::{
     body_frame, body_frame_between, create_layered_body, create_layered_body_in, BodyFrame,
 };
 pub use motion::MotionSnapshot;
+pub use phases::{PhaseClock, PhaseTime, PhaseTimes};
 pub use tools::{swing_power, tool_geometry, tool_pose, ToolGeometry, ToolPose, ToolReach};
 
 const EPSILON: f64 = 0.0001;
@@ -1300,12 +1303,6 @@ struct OrganToolContact {
     contact: f64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct GridKey {
-    x: i32,
-    y: i32,
-}
-
 #[derive(Clone, Copy, Debug, Default)]
 struct SegmentClosestPoints {
     t_a: f64,
@@ -1386,6 +1383,13 @@ pub struct World {
     /// Counts changes to which points the springs and triangles join, so
     /// anything built from the mesh knows to rebuild.
     topology_version: u64,
+    /// The clock that times each phase of a step, when one is set
+    /// ([`World::time_phases`]), and what it measured.
+    phase_clock: Option<PhaseClock>,
+    phase_times: PhaseTimes,
+    /// The spatial grid the contact passes rebuild for each search, kept so
+    /// its arrays are reused.
+    grid: grid::SpatialGrid,
 }
 
 impl Default for World {
@@ -1428,6 +1432,9 @@ impl World {
             flesh: Vec::new(),
             pending_cuts: Vec::new(),
             topology_version: 0,
+            phase_clock: None,
+            phase_times: PhaseTimes::default(),
+            grid: grid::SpatialGrid::default(),
         }
     }
 
@@ -1796,8 +1803,15 @@ impl World {
     }
 
     pub fn step(&mut self, dt: f64, input: &InputState, width: f64, height: f64) {
-        self.refresh_open_skin();
-        self.refresh_flesh();
+        self.timed_step(|world| world.run_step(dt, input, width, height));
+    }
+
+    /// One step, phase by phase; [`World::time_phases`] can time each.
+    fn run_step(&mut self, dt: f64, input: &InputState, width: f64, height: f64) {
+        self.timed("flesh mask", |world| {
+            world.refresh_open_skin();
+            world.refresh_flesh();
+        });
         self.fresh_blood_used = 0;
         let floor_y = height - 38.0;
         let profile = tool_profile(input.tool);
@@ -1828,56 +1842,66 @@ impl World {
             ..ContactDebug::default()
         };
 
-        self.update_exposure();
-        self.integrate(dt, width, floor_y);
-        self.update_vessel_anchors();
-        self.update_organ_anchors();
-        self.update_wound_anchors();
-        self.update_wounds(dt);
+        self.timed("exposure", Self::update_exposure);
+        self.timed("integrate", |world| world.integrate(dt, width, floor_y));
+        self.timed("anchors", |world| {
+            world.update_vessel_anchors();
+            world.update_organ_anchors();
+            world.update_wound_anchors();
+        });
+        self.timed("wounds", |world| world.update_wounds(dt));
         self.fresh_skin_cuts.clear();
-        self.move_tool(input, dt);
-        self.update_organ_anchors();
-        self.update_cavities(dt);
-        self.update_organs(dt);
-        self.disturb_wounds_from_loaded_tissue();
+        self.timed("tool sweep", |world| world.move_tool(input, dt));
+        self.timed("organs", |world| {
+            world.update_organ_anchors();
+            world.update_cavities(dt);
+            world.update_organs(dt);
+        });
+        self.timed("wounds", Self::disturb_wounds_from_loaded_tissue);
         self.reset_constraint_lambdas();
-        self.gather_outline_pairs();
+        self.timed("outline pairs", Self::gather_outline_pairs);
 
         for _ in 0..self.materials.solver_iterations {
-            self.solve_springs();
-            self.solve_tool_contact();
-            self.solve_attachments();
-            self.solve_bone_attachments();
-            self.solve_bone_joints();
-            self.solve_bones();
-            self.solve_post_fracture_joints();
-            self.solve_bone_fragment_bone_contacts();
-            self.solve_bone_fragment_tissue_contacts();
-            self.solve_bone_fragment_repulsion();
-            self.solve_areas();
-            self.solve_outline_contacts();
-            self.constrain_to_world(width, floor_y);
+            self.timed("springs", Self::solve_springs);
+            self.timed("tool contact", Self::solve_tool_contact);
+            self.timed("attachments", Self::solve_attachments);
+            self.timed("bone attachments", Self::solve_bone_attachments);
+            self.timed("bone joints", Self::solve_bone_joints);
+            self.timed("bones", Self::solve_bones);
+            self.timed("broken joints", Self::solve_post_fracture_joints);
+            self.timed("fragment-bone", Self::solve_bone_fragment_bone_contacts);
+            self.timed("fragment-tissue", Self::solve_bone_fragment_tissue_contacts);
+            self.timed("fragment pairs", Self::solve_bone_fragment_repulsion);
+            self.timed("areas", Self::solve_areas);
+            self.timed("outline contact", Self::solve_outline_contacts);
+            self.timed("world bounds", |world| {
+                world.constrain_to_world(width, floor_y)
+            });
         }
         self.finish_tool_step(dt);
 
-        self.update_vessel_anchors();
-        self.update_organ_anchors();
-        self.propagate_skin_tears();
-        self.transfer_sharp_cut_to_exposed_muscle();
-        self.delaminate_skin_flaps_from_cut_edges();
-        self.collide_bone_fragments();
-        self.update_triangle_damage();
-        self.update_fragment_sleep_states();
-        self.debug.active_fluids = self.active_fluid_count() as i32;
-        self.debug.active_blood_stains = self.active_blood_stain_count() as i32;
-        let (active_contusions, max_contusion) = self.contusion_metrics();
-        self.debug.active_contusions = active_contusions as i32;
-        self.debug.max_contusion = self.debug.max_contusion.max(max_contusion);
-        self.debug.active_fragments = self
-            .debug
-            .active_fragments
-            .max(self.free_fragment_count() as i32);
-        self.debug.sleeping_fragments = self.sleeping_fragment_count() as i32;
+        self.timed("anchors", |world| {
+            world.update_vessel_anchors();
+            world.update_organ_anchors();
+        });
+        self.timed("tear propagation", Self::propagate_skin_tears);
+        self.timed("cut transfer", Self::transfer_sharp_cut_to_exposed_muscle);
+        self.timed("skin flaps", Self::delaminate_skin_flaps_from_cut_edges);
+        self.timed("fragment tips", Self::collide_bone_fragments);
+        self.timed("triangle damage", Self::update_triangle_damage);
+        self.timed("fragment sleep", Self::update_fragment_sleep_states);
+        self.timed("metrics", |world| {
+            world.debug.active_fluids = world.active_fluid_count() as i32;
+            world.debug.active_blood_stains = world.active_blood_stain_count() as i32;
+            let (active_contusions, max_contusion) = world.contusion_metrics();
+            world.debug.active_contusions = active_contusions as i32;
+            world.debug.max_contusion = world.debug.max_contusion.max(max_contusion);
+            world.debug.active_fragments = world
+                .debug
+                .active_fragments
+                .max(world.free_fragment_count() as i32);
+            world.debug.sleeping_fragments = world.sleeping_fragment_count() as i32;
+        });
     }
 
     fn reset_constraint_lambdas(&mut self) {
@@ -2115,87 +2139,6 @@ impl World {
         (self.materials.fragment_contact_radius * 2.8)
             .max(self.materials.point_spacing * 2.0)
             .max(18.0)
-    }
-
-    fn build_point_spatial_grid(&self, cell_size: f64) -> HashMap<GridKey, Vec<usize>> {
-        let mut grid = HashMap::new();
-        for (index, point) in self.points.iter().enumerate() {
-            grid.entry(spatial_key(point.position, cell_size))
-                .or_insert_with(Vec::new)
-                .push(index);
-        }
-        grid
-    }
-
-    fn build_fragment_spatial_grid(
-        &self,
-        fragment_indices: &[usize],
-        cell_size: f64,
-    ) -> HashMap<GridKey, Vec<usize>> {
-        let mut grid = HashMap::new();
-        for &index in fragment_indices {
-            let bone = self.bones[index];
-            let margin = bone.radius + self.materials.fragment_repulsion_slop + 1.0;
-            add_index_to_spatial_cells(
-                &mut grid,
-                segment_aabb(bone.a, bone.b, margin),
-                cell_size,
-                index,
-            );
-        }
-        grid
-    }
-
-    fn build_intact_bone_spatial_grid(&self, cell_size: f64) -> HashMap<GridKey, Vec<usize>> {
-        let mut grid = HashMap::new();
-        for (index, bone) in self.bones.iter().enumerate() {
-            if free_bone_fragment(*bone) {
-                continue;
-            }
-            let margin = bone.radius + self.materials.fragment_repulsion_slop + 1.0;
-            add_index_to_spatial_cells(
-                &mut grid,
-                segment_aabb(bone.a, bone.b, margin),
-                cell_size,
-                index,
-            );
-        }
-        grid
-    }
-
-    fn point_candidates_near_aabb(
-        &self,
-        grid: &HashMap<GridKey, Vec<usize>>,
-        aabb: Aabb,
-        cell_size: f64,
-    ) -> Vec<usize> {
-        let mut candidates = Vec::new();
-        for_spatial_cells(aabb, cell_size, |key| {
-            if let Some(indices) = grid.get(&key) {
-                candidates.extend(indices.iter().copied());
-            }
-        });
-        candidates
-    }
-
-    fn fragment_candidates_near_aabb(
-        &self,
-        grid: &HashMap<GridKey, Vec<usize>>,
-        aabb: Aabb,
-        cell_size: f64,
-    ) -> Vec<usize> {
-        let mut seen = HashSet::new();
-        let mut candidates = Vec::new();
-        for_spatial_cells(aabb, cell_size, |key| {
-            if let Some(indices) = grid.get(&key) {
-                for &index in indices {
-                    if seen.insert(index) {
-                        candidates.push(index);
-                    }
-                }
-            }
-        });
-        candidates
     }
 
     fn wake_fragment(&mut self, bone: &mut BoneSegment) {
@@ -5096,10 +5039,21 @@ impl World {
 
     fn solve_bone_fragment_tissue_contacts(&mut self) {
         let fragment_indices = self.budgeted_fragment_indices();
+        if fragment_indices.is_empty() {
+            return;
+        }
         let point_radius_base =
             (self.materials.point_spacing * FRAGMENT_TISSUE_POINT_RADIUS_SCALE).max(4.0);
-        let cell_size = self.fragment_tissue_cell_size();
-        let point_grid = self.build_point_spatial_grid(cell_size);
+        // Every pass moves the points, so each pass sorts them afresh.
+        let mut point_grid = std::mem::take(&mut self.grid);
+        point_grid.build_points(
+            self.fragment_tissue_cell_size(),
+            self.points
+                .iter()
+                .enumerate()
+                .map(|(index, point)| (index, point.position)),
+        );
+        let mut candidate_points = Vec::new();
 
         for bone_index in fragment_indices {
             let mut bone = self.bones[bone_index];
@@ -5117,12 +5071,11 @@ impl World {
                     bone.radius * 0.08
                 }
                 + 1.0;
-            let candidate_points = self.point_candidates_near_aabb(
-                &point_grid,
+            point_grid.query(
                 segment_aabb(bone.a, bone.b, query_radius),
-                cell_size,
+                &mut candidate_points,
             );
-            for point_index in candidate_points {
+            for &point_index in &candidate_points {
                 if !self.consume_fragment_tissue_check() {
                     continue;
                 }
@@ -5261,27 +5214,41 @@ impl World {
             }
             self.bones[bone_index] = bone;
         }
+        self.grid = point_grid;
+    }
+
+    /// The box a bone or fragment fills, with room for the contact slop: what
+    /// the fragment contact passes sort into their grids and search with.
+    fn bone_contact_box(&self, bone: BoneSegment) -> Aabb {
+        segment_aabb(
+            bone.a,
+            bone.b,
+            bone.radius + self.materials.fragment_repulsion_slop + 1.0,
+        )
     }
 
     fn solve_bone_fragment_bone_contacts(&mut self) {
         let fragment_indices = self.budgeted_fragment_indices();
-        let cell_size = self.fragment_bone_cell_size();
-        let intact_grid = self.build_intact_bone_spatial_grid(cell_size);
+        if fragment_indices.is_empty() {
+            return;
+        }
+        let mut intact_grid = std::mem::take(&mut self.grid);
+        intact_grid.build_boxes(
+            self.fragment_bone_cell_size(),
+            self.bones
+                .iter()
+                .enumerate()
+                .filter(|(_, bone)| !free_bone_fragment(**bone))
+                .map(|(index, bone)| (index, self.bone_contact_box(*bone))),
+        );
+        let mut candidates = Vec::new();
         for fragment_index in fragment_indices {
             let fragment = self.bones[fragment_index];
             if !free_bone_fragment(fragment) {
                 continue;
             }
-            let candidates = self.fragment_candidates_near_aabb(
-                &intact_grid,
-                segment_aabb(
-                    fragment.a,
-                    fragment.b,
-                    fragment.radius + self.materials.fragment_repulsion_slop + 1.0,
-                ),
-                cell_size,
-            );
-            for bone_index in candidates {
+            intact_grid.query(self.bone_contact_box(fragment), &mut candidates);
+            for &bone_index in &candidates {
                 if bone_index == fragment_index {
                     continue;
                 }
@@ -5427,25 +5394,27 @@ impl World {
                 );
             }
         }
+        self.grid = intact_grid;
     }
 
     fn solve_bone_fragment_repulsion(&mut self) {
         let fragment_indices = self.budgeted_fragment_indices();
-        let cell_size = self.fragment_pair_cell_size();
-        let fragment_grid = self.build_fragment_spatial_grid(&fragment_indices, cell_size);
+        if fragment_indices.is_empty() {
+            return;
+        }
+        let mut fragment_grid = std::mem::take(&mut self.grid);
+        fragment_grid.build_boxes(
+            self.fragment_pair_cell_size(),
+            fragment_indices
+                .iter()
+                .map(|&index| (index, self.bone_contact_box(self.bones[index]))),
+        );
+        let mut candidates = Vec::new();
         let mut seen_pairs = HashSet::new();
         for i in fragment_indices.iter().copied() {
             let a = self.bones[i];
-            let candidates = self.fragment_candidates_near_aabb(
-                &fragment_grid,
-                segment_aabb(
-                    a.a,
-                    a.b,
-                    a.radius + self.materials.fragment_repulsion_slop + 1.0,
-                ),
-                cell_size,
-            );
-            for j in candidates {
+            fragment_grid.query(self.bone_contact_box(a), &mut candidates);
+            for &j in &candidates {
                 if i == j {
                     continue;
                 }
@@ -5570,6 +5539,7 @@ impl World {
                 self.debug.max_fragment_overlap = self.debug.max_fragment_overlap.max(overlap);
             }
         }
+        self.grid = fragment_grid;
     }
 
     fn collide_bone_fragments(&mut self) {
@@ -6007,13 +5977,15 @@ impl World {
     }
 
     fn update_exposure(&mut self) {
-        for attachment in self.attachments.clone() {
+        for index in 0..self.attachments.len() {
+            let attachment = self.attachments[index];
             if attachment.broken {
                 self.bump_point_exposure_load(attachment.skin_point, 1.0, 0.0);
                 self.bump_point_exposure_load(attachment.muscle_point, 1.0, 0.0);
             }
         }
-        for spring in self.springs.clone() {
+        for index in 0..self.springs.len() {
+            let spring = self.springs[index];
             if spring.broken && spring.layer == TissueLayer::Skin {
                 self.bump_point_exposure_load(spring.a, 0.85, 0.0);
                 self.bump_point_exposure_load(spring.b, 0.85, 0.0);
@@ -10239,39 +10211,6 @@ fn segment_aabb(a: Vec2, b: Vec2, margin: f64) -> Aabb {
             y: a.y.max(b.y) + margin,
         },
     }
-}
-
-fn spatial_key(point: Vec2, cell_size: f64) -> GridKey {
-    let cell_size = cell_size.max(1.0);
-    GridKey {
-        x: (point.x / cell_size).floor() as i32,
-        y: (point.y / cell_size).floor() as i32,
-    }
-}
-
-fn for_spatial_cells<F>(aabb: Aabb, cell_size: f64, mut visit: F)
-where
-    F: FnMut(GridKey),
-{
-    let cell_size = cell_size.max(1.0);
-    let min_key = spatial_key(aabb.min, cell_size);
-    let max_key = spatial_key(aabb.max, cell_size);
-    for y in min_key.y.min(max_key.y)..=min_key.y.max(max_key.y) {
-        for x in min_key.x.min(max_key.x)..=min_key.x.max(max_key.x) {
-            visit(GridKey { x, y });
-        }
-    }
-}
-
-fn add_index_to_spatial_cells(
-    grid: &mut HashMap<GridKey, Vec<usize>>,
-    aabb: Aabb,
-    cell_size: f64,
-    index: usize,
-) {
-    for_spatial_cells(aabb, cell_size, |key| {
-        grid.entry(key).or_insert_with(Vec::new).push(index);
-    });
 }
 
 fn distance_sq(a: Vec2, b: Vec2) -> f64 {

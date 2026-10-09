@@ -22,13 +22,16 @@
 //!                                     in DIR/sound_report.txt, and write each
 //!                                     clip of the sound bank to DIR/bank
 //!   --list                            print the scenarios and their plays
+//!   --phases                          instead, time each phase of a step over the
+//!                                     selected scenarios (or the custom play) and
+//!                                     print where the time goes (strike_phases.txt)
 //! ```
 //!
 //! Outputs go next to the CSV path (default `output/strike_scenarios.csv`).
 
 use realistic_physics as rp;
 use rp::scenarios::{
-    active_fluid_count, fastest_point_speed, free_fragment_count, run, scenarios,
+    active_fluid_count, fastest_point_speed, free_fragment_count, run, run_on, scenarios,
     spinning_fragment_count, tool_axis, tool_lag, tool_name, tool_touching, Gesture, Play,
     Scenario, ScenarioResult, Strike, SCENARIO_HEIGHT, SCENARIO_WIDTH,
 };
@@ -39,7 +42,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Instant;
 
@@ -58,6 +61,8 @@ struct Options {
     /// Where to write what each one sounds like, instead of the CSVs.
     sound: Option<PathBuf>,
     list: bool,
+    /// Time each phase of a step instead of checking injuries.
+    phases: bool,
 }
 
 fn main() {
@@ -65,6 +70,9 @@ fn main() {
         eprintln!("{message}");
         eprintln!(
             "usage: strike_scenarios [CSV] [--only NAME,...] [--sweep] [--strike SPEC | --gesture SPEC] [--sound DIR] [--list]"
+        );
+        eprintln!(
+            "       strike_scenarios [CSV] [--only NAME,...] [--strike SPEC | --gesture SPEC] --phases"
         );
         process::exit(2);
     });
@@ -100,6 +108,10 @@ fn main() {
                 .collect()
         }
     };
+    if options.phases {
+        time_phases(&selected, &output_dir);
+        return;
+    }
 
     if let Some(dir) = &options.sound {
         listen(&selected, dir);
@@ -120,11 +132,13 @@ fn parse_options() -> Result<Options, String> {
         custom: None,
         sound: None,
         list: false,
+        phases: false,
     };
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--sweep" => options.sweep = true,
+            "--phases" => options.phases = true,
             "--list" => options.list = true,
             "--sound" => {
                 options.sound = Some(PathBuf::from(args.next().ok_or("--sound needs a folder")?));
@@ -526,6 +540,81 @@ fn violated_metric(violation: &str) -> &str {
         .split_once(": ")
         .map_or(violation, |(_, rest)| rest);
     after_name.split('=').next().unwrap_or(after_name)
+}
+
+/// Milliseconds since the first call: the clock that times each phase.
+fn now_ms() -> f64 {
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_secs_f64() * 1000.0
+}
+
+/// Plays each scenario on one thread with every phase of its steps timed, and
+/// reports where the time goes, slowest phase first.
+fn time_phases(selected: &[Scenario], output_dir: &Path) {
+    let mut total = rp::PhaseTimes::default();
+    let mut report = String::new();
+    let mut scenario_lines = String::new();
+    for scenario in selected {
+        let mut world =
+            rp::create_layered_body(SCENARIO_WIDTH, SCENARIO_HEIGHT, rp::Materials::default());
+        world.time_phases(Some(now_ms));
+        let (world, _) = run_on(
+            world,
+            scenario,
+            SCENARIO_WIDTH,
+            SCENARIO_HEIGHT,
+            |_, _, _| {},
+        );
+        let times = world.phase_times();
+        scenario_lines.push_str(&format!(
+            "  {:<30} {:>7.3} {:>8.3}\n",
+            scenario.name,
+            times.total_ms / times.steps.max(1) as f64,
+            times.slowest_step_ms
+        ));
+        total.merge(times);
+    }
+
+    let steps = total.steps.max(1) as f64;
+    report.push_str(&format!(
+        "{} steps of {} scenarios: {:.3} ms a step on average, {:.3} ms at most\n\n",
+        total.steps,
+        selected.len(),
+        total.total_ms / steps,
+        total.slowest_step_ms
+    ));
+    report.push_str(&format!(
+        "  {:<30} {:>7} {:>6} {:>8}\n",
+        "phase", "ms/step", "share", "slowest"
+    ));
+    let mut phases = total.phases.clone();
+    phases.sort_by(|a, b| b.total_ms.total_cmp(&a.total_ms));
+    for phase in &phases {
+        report.push_str(&format!(
+            "  {:<30} {:>7.3} {:>5.1}% {:>8.3}\n",
+            phase.name,
+            phase.total_ms / steps,
+            phase.total_ms / total.total_ms.max(f64::EPSILON) * 100.0,
+            phase.slowest_step_ms
+        ));
+    }
+    let between = total.total_ms - phases.iter().map(|phase| phase.total_ms).sum::<f64>();
+    report.push_str(&format!(
+        "  {:<30} {:>7.3} {:>5.1}%\n\n",
+        "(between phases)",
+        between / steps,
+        between / total.total_ms.max(f64::EPSILON) * 100.0
+    ));
+    report.push_str(&format!(
+        "  {:<30} {:>7} {:>8}\n",
+        "scenario", "ms/step", "slowest"
+    ));
+    report.push_str(&scenario_lines);
+
+    let path = output_dir.join("strike_phases.txt");
+    fs::write(&path, &report).expect("write phase times");
+    print!("{report}");
+    println!("wrote {}", path.display());
 }
 
 /// How steady the tool was, in one line.
