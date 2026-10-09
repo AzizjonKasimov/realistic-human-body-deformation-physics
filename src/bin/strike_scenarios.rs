@@ -209,11 +209,22 @@ fn play_custom(scenario: &Scenario, output_dir: &Path) {
     write_frame_header(&mut frames).expect("write frame header");
     let mut write_error = None;
     let mut last_positions = Vec::new();
+    // Where the knife's tip went on each step it cut fibers.
+    let mut blade_path = Vec::new();
+    let (mut last_tip, mut last_cuts) = (None, 0);
     let (world, result) = run(
         scenario,
         SCENARIO_WIDTH,
         SCENARIO_HEIGHT,
         |frame, input, world| {
+            let tip = world.current_tool_pose().map(|pose| pose.contact_end);
+            let cuts = world.stats().broken_skin + world.stats().broken_muscle;
+            if let (Some(from), Some(to)) = (last_tip, tip) {
+                if input.tool == rp::ToolMode::Sharp && cuts > last_cuts {
+                    blade_path.push((from, to));
+                }
+            }
+            (last_tip, last_cuts) = (tip, cuts);
             if write_error.is_none() {
                 write_error = write_frame(
                     &mut frames,
@@ -233,6 +244,9 @@ fn play_custom(scenario: &Scenario, output_dir: &Path) {
     println!("{}", scenario.play);
     println!("  {}", headline(&result));
     println!("  {}", skin_openings(&world));
+    if !blade_path.is_empty() {
+        println!("  {}", cut_quality(&world, &blade_path));
+    }
     println!("  {}", steadiness(&result));
     let path = output_dir.join("strike_custom.csv");
     let mut out = BufWriter::new(File::create(&path).expect("create custom CSV"));
@@ -541,6 +555,119 @@ fn skin_openings(world: &rp::World) -> String {
         lips += usize::from(spring.twin != rp::MISSING_SPRING);
     }
     format!("skin fibers cut {cut}, torn {torn}; cut lips {lips}")
+}
+
+/// How well a knife cut follows its blade and how far it gapes: the length of
+/// the blade's path where it cut fibers (`blade_path`, the tip's moves on
+/// those steps), the slit's length in the rest shape against it, how far the
+/// slit runs from the path, and how wide the cut is open at the middle of the
+/// path and at its widest, in skin and in muscle.
+fn cut_quality(world: &rp::World, blade_path: &[(rp::Vec2, rp::Vec2)]) -> String {
+    let points = world.points();
+    let springs = world.springs();
+    // Each pair of lips once: where the cut ran in the rest shape (between the
+    // two lips' rest places) and how far apart the lips are now.
+    let mut lines = Vec::new();
+    for (index, lip) in springs.iter().enumerate() {
+        if lip.twin == rp::MISSING_SPRING || lip.twin < index {
+            continue;
+        }
+        let twin = springs[lip.twin];
+        let start = midpoint(points[lip.a].home, points[twin.a].home);
+        let end = midpoint(points[lip.b].home, points[twin.b].home);
+        let gap = (span(points[lip.a].position, points[twin.a].position)
+            + span(points[lip.b].position, points[twin.b].position))
+            * 0.5;
+        lines.push((lip.layer, start, end, gap));
+    }
+    let path_length: f64 = blade_path.iter().map(|&(a, b)| span(a, b)).sum();
+    let skin: Vec<_> = lines
+        .iter()
+        .filter(|line| line.0 == rp::TissueLayer::Skin)
+        .collect();
+    if skin.is_empty() {
+        return format!("cut: blade path {path_length:.0} px, no cut opened in the skin");
+    }
+    let slit: f64 = skin.iter().map(|line| span(line.1, line.2)).sum();
+    let off_path = skin
+        .iter()
+        .flat_map(|line| [line.1, line.2])
+        .map(|point| distance_to_path(point, blade_path))
+        .sum::<f64>()
+        / (skin.len() * 2) as f64;
+    let middle = point_along_path(blade_path, path_length * 0.5);
+    let middle_gap = skin
+        .iter()
+        .min_by(|x, y| {
+            let to = |line: &&&(rp::TissueLayer, rp::Vec2, rp::Vec2, f64)| {
+                span(midpoint(line.1, line.2), middle)
+            };
+            to(x).total_cmp(&to(y))
+        })
+        .map_or(0.0, |line| line.3);
+    let widest = |layer: rp::TissueLayer| {
+        lines
+            .iter()
+            .filter(|line| line.0 == layer)
+            .map(|line| line.3)
+            .fold(0.0, f64::max)
+    };
+    format!(
+        "cut: blade path {path_length:.0} px, slit {slit:.0} px ({:.2} of the path), {off_path:.1} px off the path; skin gap {middle_gap:.1} px at the middle, {:.1} px at most; muscle gap {:.1} px at most",
+        slit / path_length.max(1.0),
+        widest(rp::TissueLayer::Skin),
+        widest(rp::TissueLayer::Muscle)
+    )
+}
+
+fn span(a: rp::Vec2, b: rp::Vec2) -> f64 {
+    (b.x - a.x).hypot(b.y - a.y)
+}
+
+fn midpoint(a: rp::Vec2, b: rp::Vec2) -> rp::Vec2 {
+    rp::Vec2 {
+        x: (a.x + b.x) * 0.5,
+        y: (a.y + b.y) * 0.5,
+    }
+}
+
+/// The distance from `point` to the nearest of the segments of `path`.
+fn distance_to_path(point: rp::Vec2, path: &[(rp::Vec2, rp::Vec2)]) -> f64 {
+    path.iter()
+        .map(|&(a, b)| {
+            let (dx, dy) = (b.x - a.x, b.y - a.y);
+            let length_sq = dx * dx + dy * dy;
+            let t = if length_sq > 1.0e-12 {
+                (((point.x - a.x) * dx + (point.y - a.y) * dy) / length_sq).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            span(
+                point,
+                rp::Vec2 {
+                    x: a.x + dx * t,
+                    y: a.y + dy * t,
+                },
+            )
+        })
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// The point `along` pixels down the segments of `path`, taken in order.
+fn point_along_path(path: &[(rp::Vec2, rp::Vec2)], along: f64) -> rp::Vec2 {
+    let mut left = along;
+    for &(a, b) in path {
+        let length = span(a, b);
+        if left <= length && length > 0.0 {
+            let t = left / length;
+            return rp::Vec2 {
+                x: a.x + (b.x - a.x) * t,
+                y: a.y + (b.y - a.y) * t,
+            };
+        }
+        left -= length;
+    }
+    path[path.len() - 1].1
 }
 
 fn headline(result: &ScenarioResult) -> String {
