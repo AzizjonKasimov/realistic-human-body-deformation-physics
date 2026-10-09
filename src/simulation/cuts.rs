@@ -10,11 +10,14 @@
 //!   a point's triangles that no longer shares an edge with the others gets
 //!   its own copy of the point, the point's mass is shared by area, and the
 //!   springs follow their triangles.
-//! - Node snapping, from Nienhuys and van der Stappen, "A surgery simulation
-//!   supporting cuts and finite element deformation" (MICCAI 2001): the points
-//!   nearest the blade's path move onto it in the rest shape, so a cut runs
-//!   straight along the path instead of zigzagging through the mesh as
-//!   Rapier's cuts do.
+//! - Hybrid cutting, from Steinemann, Harders, Gross, and Szekely, "Hybrid
+//!   cutting of deformable solids" (IEEE VR 2006): where the blade crosses a
+//!   fiber near one of its points, that point moves onto the blade's path in
+//!   the rest shape (node snapping, after Nienhuys and van der Stappen, MICCAI
+//!   2001); elsewhere a new point is inserted at the crossing and the
+//!   triangles on the fiber split. Either way the cut runs along the blade's
+//!   path instead of zigzagging through the mesh as Rapier's cuts do, without
+//!   leaving slivers.
 //!
 //! Skin and muscle are under tension in a living body and pull back when cut,
 //! so each lip's rest shape draws back from the cut, and the cut gapes.
@@ -24,6 +27,16 @@ use super::*;
 /// The farthest a point's rest place moves onto a blade's path, in point
 /// spacings, so a stray crossing cannot drag the mesh.
 const MAX_SNAP: f64 = 0.6;
+/// A crossing this close to an end of its fiber, as a share of its length,
+/// snaps that end onto the blade's path; one farther in gets a point of its
+/// own. Snapping near the ends keeps the triangles around a cut from turning
+/// into slivers.
+const SNAP_SHARE: f64 = 0.35;
+/// The share of each end's mass a point inserted between them takes.
+const INSERTED_MASS_SHARE: f64 = 0.125;
+/// How far from a cut, in point spacings, the tissue draws back with it,
+/// less with distance.
+const RETRACTION_REACH: f64 = 1.5;
 
 impl World {
     /// The blade crossed spring `index`, `cut_at` of the way from its `a`
@@ -52,7 +65,20 @@ impl World {
         if self.pending_cuts.is_empty() {
             return;
         }
-        let pending = std::mem::take(&mut self.pending_cuts);
+        let mut pending = std::mem::take(&mut self.pending_cuts);
+        // A crossing well away from both ends of its fiber gets a point of
+        // its own, so the cut runs through it rather than through a point
+        // moved there; one near an end snaps that end onto the path below.
+        let points_before = self.points.len();
+        let mut halves = Vec::new();
+        for &index in &pending {
+            let spring = self.springs[index];
+            if !spring.broken && (SNAP_SHARE..=1.0 - SNAP_SHARE).contains(&spring.cut_at) {
+                halves.extend(self.insert_cut_point(index));
+            }
+        }
+        pending.extend(halves);
+        let inserted = self.points.len() > points_before;
         let mut fresh = vec![false; self.springs.len()];
         for &index in &pending {
             fresh[index] = true;
@@ -116,6 +142,9 @@ impl World {
         }
         if opened.is_empty() {
             self.follow_rest_places(&homes_before, &[]);
+            if inserted {
+                self.finish_topology_change();
+            }
             return;
         }
         opened.sort_unstable();
@@ -144,27 +173,289 @@ impl World {
         }
         if families.is_empty() {
             self.follow_rest_places(&homes_before, &origin);
+            if inserted {
+                self.finish_topology_change();
+            }
             return;
         }
 
-        // Each lip draws back into its own side of the cut.
+        self.retract_from_cut(&families);
+        self.follow_rest_places(&homes_before, &origin);
+        self.finish_topology_change();
+    }
+
+    /// Each side of a cut draws back from it: every lip of `families` by
+    /// the layer's retraction, toward its own side, and the tissue near it
+    /// less with distance, out to `RETRACTION_REACH` point spacings. Drawing
+    /// back the lips alone would flatten the triangles between a lip and the
+    /// next row in, where the cut runs close to it.
+    fn retract_from_cut(&mut self, families: &[Vec<(usize, Vec2)>]) {
         let spacing = self.materials.point_spacing;
-        for family in &families {
+        let reach = spacing * RETRACTION_REACH;
+        let mut lips = Vec::new();
+        for family in families {
             for &(member, toward) in family {
-                let retraction = match self.points[member].layer {
+                let length = hypot(toward.x, toward.y);
+                if length <= EPSILON {
+                    continue;
+                }
+                let point = self.points[member];
+                let retraction = match point.layer {
                     TissueLayer::Skin => self.materials.skin_cut_retraction,
                     TissueLayer::Muscle => self.materials.muscle_cut_retraction,
                 } * spacing;
-                let length = hypot(toward.x, toward.y);
-                if length > EPSILON {
-                    self.move_point_with_rest(member, scale(toward, retraction / length));
-                }
+                lips.push((
+                    member,
+                    point.home,
+                    point.layer,
+                    scale(toward, retraction / length),
+                ));
             }
         }
-        self.follow_rest_places(&homes_before, &origin);
+        if lips.is_empty() {
+            return;
+        }
+        let mut shifts = vec![Vec2::default(); self.points.len()];
+        for (index, point) in self.points.iter().enumerate() {
+            if point.pinned {
+                continue;
+            }
+            // The nearest lip of this sheet on this point's side of the cut
+            // sets how far it draws back.
+            let mut nearest: Option<(f64, Vec2)> = None;
+            for &(member, home, layer, shift) in &lips {
+                if layer != point.layer {
+                    continue;
+                }
+                if member == index {
+                    nearest = Some((0.0, shift));
+                    break;
+                }
+                let offset = subtract(point.home, home);
+                if point.on_cut || dot(offset, shift) <= 0.0 {
+                    continue;
+                }
+                let gap = hypot(offset.x, offset.y);
+                if gap < reach && nearest.is_none_or(|(best, _)| gap < best) {
+                    nearest = Some((gap, shift));
+                }
+            }
+            if let Some((gap, shift)) = nearest {
+                shifts[index] = scale(shift, 1.0 - gap / reach);
+            }
+        }
+        for (index, shift) in shifts.into_iter().enumerate() {
+            if shift.x != 0.0 || shift.y != 0.0 {
+                self.move_point_with_rest(index, shift);
+            }
+        }
+    }
+
+    /// Keeps the per-point state in step with points a cut added, and tells
+    /// anything built from the mesh to rebuild.
+    fn finish_topology_change(&mut self) {
         self.blunt_knock.resize(self.points.len(), 0.0);
         self.flesh.resize(self.points.len(), true);
         self.topology_version += 1;
+    }
+
+    /// Splits cut spring `index` with a new point where the blade crossed
+    /// it, `cut_at` along it, and each triangle on it into two, so the cut
+    /// can run through the crossing itself: hybrid cutting (Steinemann,
+    /// Harders, Gross, and Szekely, "Hybrid cutting of deformable solids",
+    /// IEEE VR 2006), as Bullet's `btSoftBody::refine` inserts nodes at
+    /// crossings. The spring becomes the half from its `a` end, both halves
+    /// crossed at the new point; returns the other half, or `None` for a
+    /// fiber no triangle uses.
+    fn insert_cut_point(&mut self, index: usize) -> Option<usize> {
+        let spring = self.springs[index];
+        let holders: Vec<usize> = (0..self.triangles.len())
+            .filter(|&triangle| triangle_edges(&self.triangles[triangle]).contains(&index))
+            .collect();
+        if holders.is_empty() {
+            return None;
+        }
+        let holder_areas: Vec<Option<usize>> = holders
+            .iter()
+            .map(|&triangle| self.area_of_triangle(triangle))
+            .collect();
+        let t = spring.cut_at;
+        let (a, b) = (spring.a, spring.b);
+        let (pa, pb) = (self.points[a], self.points[b]);
+        // The new point takes an eighth of each end's mass.
+        let mass = (pa.mass + pb.mass) * INSERTED_MASS_SHARE;
+        self.points[a].mass *= 1.0 - INSERTED_MASS_SHARE;
+        self.points[b].mass *= 1.0 - INSERTED_MASS_SHARE;
+        let near = if t < 0.5 { a } else { b };
+        self.points.push(Point {
+            position: lerp(pa.position, pb.position, t),
+            previous: lerp(pa.previous, pb.previous, t),
+            home: lerp(pa.home, pb.home, t),
+            mass,
+            surface_depth: pa.surface_depth + (pb.surface_depth - pa.surface_depth) * t,
+            pinned: false,
+            on_cut: true,
+            ..self.points[near]
+        });
+        let p = self.points.len() - 1;
+
+        let mut far = spring;
+        far.a = p;
+        far.rest = spring.rest * (1.0 - t);
+        far.rest_reference = spring.rest_reference * (1.0 - t);
+        far.cut_at = 0.0;
+        far.lambda = 0.0;
+        self.springs.push(far);
+        let far_index = self.springs.len() - 1;
+        let near_half = &mut self.springs[index];
+        near_half.b = p;
+        near_half.rest = spring.rest * t;
+        near_half.rest_reference = spring.rest_reference * t;
+        near_half.cut_at = 1.0;
+
+        for (&triangle_index, &area_index) in holders.iter().zip(&holder_areas) {
+            let triangle = self.triangles[triangle_index];
+            let Some(c) = corners(&triangle)
+                .into_iter()
+                .find(|&corner| corner != a && corner != b)
+            else {
+                continue;
+            };
+            let (edge_ac, edge_bc) = (
+                triangle_edge(&triangle, a, c).unwrap_or(MISSING_SPRING),
+                triangle_edge(&triangle, b, c).unwrap_or(MISSING_SPRING),
+            );
+            // The spring from the new point to the far corner takes after
+            // the side of the triangle it lies nearest in direction, as the
+            // body's muscle springs take fiber, cross, or shear properties
+            // from their direction.
+            let (home_p, home_c) = (self.points[p].home, self.points[c].home);
+            let direction = normalized(subtract(home_c, home_p), Vec2 { x: 1.0, y: 0.0 });
+            let alignment = |edge: usize| {
+                self.springs.get(edge).map_or(-1.0, |side| {
+                    let along = subtract(self.points[side.b].home, self.points[side.a].home);
+                    dot(normalized(along, direction), direction).abs()
+                })
+            };
+            let model = if alignment(edge_ac) >= alignment(edge_bc) {
+                edge_ac
+            } else {
+                edge_bc
+            };
+            let mut across = self.springs.get(model).copied().unwrap_or(spring);
+            let rest = distance(home_p, home_c);
+            across = Spring {
+                a: p,
+                b: c,
+                rest,
+                rest_reference: rest,
+                broken: false,
+                stress: 0.0,
+                fatigue: 0.0,
+                plastic_strain: 0.0,
+                lambda: 0.0,
+                cut: false,
+                cut_at: 0.5,
+                parted: false,
+                twin: MISSING_SPRING,
+                ..across
+            };
+            self.springs.push(across);
+            let across_index = self.springs.len() - 1;
+
+            // (a, b, c) becomes (a, p, c) in place and (p, b, c) after it,
+            // keeping the corners' order, so each turns the same way.
+            let edge_of = |x: usize, y: usize| {
+                let pair = |u: usize, v: usize| (x == u && y == v) || (x == v && y == u);
+                if pair(a, p) {
+                    index
+                } else if pair(p, b) {
+                    far_index
+                } else if pair(p, c) {
+                    across_index
+                } else if pair(a, c) {
+                    edge_ac
+                } else {
+                    edge_bc
+                }
+            };
+            let mut first = triangle;
+            replace_corner(&mut first, b, p);
+            set_edges(&mut first, &edge_of);
+            let mut second = triangle;
+            replace_corner(&mut second, a, p);
+            set_edges(&mut second, &edge_of);
+            self.triangles[triangle_index] = first;
+            self.triangles.push(second);
+            if let Some(area_index) = area_index {
+                let area = self.areas[area_index];
+                let mut first_area = area;
+                let mut second_area = area;
+                for (half, from, to, share) in [
+                    (&mut first_area, b, p, t),
+                    (&mut second_area, a, p, 1.0 - t),
+                ] {
+                    for corner in [&mut half.a, &mut half.b, &mut half.c] {
+                        if *corner == from {
+                            *corner = to;
+                        }
+                    }
+                    half.edge_ab = edge_of(half.a, half.b);
+                    half.edge_bc = edge_of(half.b, half.c);
+                    half.edge_ca = edge_of(half.c, half.a);
+                    half.rest_area *= share;
+                    half.lambda = 0.0;
+                }
+                self.areas[area_index] = first_area;
+                self.areas.push(second_area);
+                let second_index = self.areas.len() - 1;
+                for cavity in &mut self.cavities {
+                    if cavity.area_indices.contains(&area_index) {
+                        cavity.area_indices.push(second_index);
+                    }
+                }
+            }
+        }
+
+        // The new point is tied down as the end nearer it is: skin to the
+        // muscle under it, muscle to the bone.
+        let spacing = self.materials.point_spacing;
+        let home_p = self.points[p].home;
+        let skin_ties: Vec<Attachment> = self
+            .attachments
+            .iter()
+            .filter(|attachment| attachment.skin_point == near && !attachment.broken)
+            .copied()
+            .collect();
+        if spring.layer == TissueLayer::Skin {
+            for tie in skin_ties {
+                let muscle_home = self.points[tie.muscle_point].home;
+                self.attachments.push(Attachment {
+                    skin_point: p,
+                    rest: distance(home_p, muscle_home).max(spacing * 0.34),
+                    stress: 0.0,
+                    ..tie
+                });
+            }
+        }
+        let bone_ties: Vec<BoneAttachment> = self
+            .bone_attachments
+            .iter()
+            .filter(|attachment| attachment.point == near && !attachment.broken)
+            .copied()
+            .collect();
+        for tie in bone_ties {
+            let offset = add(tie.offset, subtract(home_p, self.points[near].home));
+            self.bone_attachments.push(BoneAttachment {
+                point: p,
+                offset,
+                rest: hypot(offset.x, offset.y).max(spacing * 0.42),
+                stress: 0.0,
+                ..tie
+            });
+        }
+        self.follow_inserted_outline(a, b, p, index, far_index);
+        Some(far_index)
     }
 
     /// The end of cut spring `index` the cut runs through, and where the
@@ -586,6 +877,17 @@ impl World {
 
 fn corners(triangle: &Triangle) -> [usize; 3] {
     [triangle.a, triangle.b, triangle.c]
+}
+
+fn triangle_edges(triangle: &Triangle) -> [usize; 3] {
+    [triangle.edge_ab, triangle.edge_bc, triangle.edge_ca]
+}
+
+/// Sets each edge of `triangle` to the spring `edge_of` gives its corners.
+fn set_edges(triangle: &mut Triangle, edge_of: &impl Fn(usize, usize) -> usize) {
+    triangle.edge_ab = edge_of(triangle.a, triangle.b);
+    triangle.edge_bc = edge_of(triangle.b, triangle.c);
+    triangle.edge_ca = edge_of(triangle.c, triangle.a);
 }
 
 /// The spring along the edge of `triangle` between corners `a` and `b`.

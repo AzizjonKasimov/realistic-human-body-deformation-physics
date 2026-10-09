@@ -108,6 +108,36 @@ impl World {
         }
     }
 
+    /// Puts point `p`, which a cut inserted on the outline edge between `a`
+    /// and `b`, into the loops running along that edge: spring `from_a` now
+    /// joins `a` to `p` and `to_b` joins `p` to `b`.
+    pub(super) fn follow_inserted_outline(
+        &mut self,
+        a: usize,
+        b: usize,
+        p: usize,
+        from_a: usize,
+        to_b: usize,
+    ) {
+        for outline in &mut self.outlines {
+            let count = outline.points.len();
+            let Some(position) = (0..count).find(|&k| {
+                let (x, y) = (outline.points[k], outline.points[(k + 1) % count]);
+                (x == a && y == b) || (x == b && y == a)
+            }) else {
+                continue;
+            };
+            let (first, second) = if outline.points[position] == a {
+                (from_a, to_b)
+            } else {
+                (to_b, from_a)
+            };
+            outline.edge_springs[position] = Some(first);
+            outline.points.insert(position + 1, p);
+            outline.edge_springs.insert(position + 1, Some(second));
+        }
+    }
+
     /// Finds the points and stretches of outline close enough to touch on
     /// this step, so each solver pass checks only those.
     pub(super) fn gather_outline_pairs(&mut self) {
