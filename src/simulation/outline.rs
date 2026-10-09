@@ -195,6 +195,13 @@ impl World {
                 continue;
             };
             let along = subtract(b.position, a.position);
+            // A stretch of outline turned over in a crease, as the skin of
+            // the armpit folds under an arm pressed to the chest, faces into
+            // the body: it is no surface to press against, and a point in
+            // front of it would read as deep behind it.
+            if dot(along, subtract(b.home, a.home)) <= 0.0 {
+                continue;
+            }
             let t = dot(subtract(p.position, a.position), along) / dot(along, along);
             if !(0.0..=1.0).contains(&t) {
                 continue;
