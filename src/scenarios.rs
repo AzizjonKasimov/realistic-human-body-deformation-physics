@@ -80,7 +80,7 @@ impl Strike {
     /// heights. Small moves show how much an outcome hangs on exact aim.
     pub fn shifted(&self, along: f64, across: f64) -> Strike {
         let (du, dv) = (self.end.0 - self.start.0, self.end.1 - self.start.1);
-        let length = du.hypot(dv).max(1.0e-9);
+        let length = libm::hypot(du, dv).max(1.0e-9);
         let (au, av) = (du / length, dv / length);
         let shift = (au * along - av * across, av * along + au * across);
         Strike {
@@ -1157,13 +1157,13 @@ pub fn tool_axis(world: &World) -> Option<Vec2> {
 pub fn turn_degrees(from: Vec2, to: Vec2) -> f64 {
     let cross = from.x * to.y - from.y * to.x;
     let dot = from.x * to.x + from.y * to.y;
-    cross.atan2(dot).abs().to_degrees()
+    libm::atan2(cross, dot).abs().to_degrees()
 }
 
 /// How far the tool's driven point is from the hand, in pixels.
 pub fn tool_lag(world: &World, input: &InputState) -> f64 {
     let tool = world.tool_position();
-    (input.x - tool.x).hypot(input.y - tool.y)
+    libm::hypot(input.x - tool.x, input.y - tool.y)
 }
 
 /// The tool touched tissue or bone on the last step.
@@ -1182,7 +1182,7 @@ pub fn fastest_point_speed(world: &World, last_positions: &[Vec2]) -> f64 {
         .iter()
         .zip(last_positions)
         .filter(|(point, _)| !point.pinned)
-        .map(|(point, last)| (point.position.x - last.x).hypot(point.position.y - last.y))
+        .map(|(point, last)| libm::hypot(point.position.x - last.x, point.position.y - last.y))
         .fold(0.0, f64::max)
         / dt
 }

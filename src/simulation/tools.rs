@@ -376,12 +376,12 @@ fn cutting_edge(shape: &ToolContactShape) -> (Vec2, Vec2) {
 }
 
 fn rotate_toward(from: Vec2, to: Vec2, max_angle: f64) -> Vec2 {
-    let angle = wrap_angle(to.y.atan2(to.x) - from.y.atan2(from.x));
+    let angle = wrap_angle(libm::atan2(to.y, to.x) - libm::atan2(from.y, from.x));
     if angle.abs() <= max_angle {
         return to;
     }
     let step = max_angle * angle.signum();
-    let (sin, cos) = step.sin_cos();
+    let (sin, cos) = (libm::sin(step), libm::cos(step));
     Vec2 {
         x: from.x * cos - from.y * sin,
         y: from.x * sin + from.y * cos,

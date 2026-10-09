@@ -315,7 +315,7 @@ fn figure_distance(p: Landmark, torso: &TorsoOutline) -> f64 {
 
 fn hand(p: Landmark) -> f64 {
     let (along_u, along_v) = (FINGERTIPS.0 - WRIST.0, FINGERTIPS.1 - WRIST.1);
-    let length = along_u.hypot(along_v);
+    let length = libm::hypot(along_u, along_v);
     let tip = (
         FINGERTIPS.0 - along_u / length * FINGERTIP_RADIUS,
         FINGERTIPS.1 - along_v / length * FINGERTIP_RADIUS,
@@ -409,7 +409,7 @@ impl TorsoOutline {
     fn distance(&self, p: Landmark) -> f64 {
         let past_u = (p.0 - self.max_u).max(0.0);
         let past_v = (self.v_range.0 - p.1).max(p.1 - self.v_range.1).max(0.0);
-        let box_distance = past_u.hypot(past_v);
+        let box_distance = libm::hypot(past_u, past_v);
         if box_distance > TORSO_EXACT_MARGIN {
             return box_distance;
         }

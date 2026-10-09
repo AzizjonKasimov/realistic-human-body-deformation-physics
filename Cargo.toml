@@ -29,6 +29,9 @@ name = "contact_sheet"
 path = "src/bin/contact_sheet.rs"
 
 [dependencies]
+# Trigonometry that comes out the same natively and in the browser; see
+# "Check Browser Parity" in README.md.
+libm = "0.2.16"
 # "audio" plays the game's sound through quad-snd.
 macroquad = { version = "0.4", features = ["audio"] }
 

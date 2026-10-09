@@ -10192,7 +10192,7 @@ fn constrain_fragment_endpoint_to_floor(
 }
 
 fn bone_angle(bone: BoneSegment) -> f64 {
-    (bone.b.y - bone.a.y).atan2(bone.b.x - bone.a.x)
+    libm::atan2(bone.b.y - bone.a.y, bone.b.x - bone.a.x)
 }
 
 fn free_bone_fragment(bone: BoneSegment) -> bool {
@@ -10298,7 +10298,7 @@ fn wrap_angle(mut angle: f64) -> f64 {
 }
 
 fn rotate_around(point: Vec2, pivot: Vec2, angle: f64) -> Vec2 {
-    let (s, c) = angle.sin_cos();
+    let (s, c) = (libm::sin(angle), libm::cos(angle));
     let dx = point.x - pivot.x;
     let dy = point.y - pivot.y;
     Vec2 {

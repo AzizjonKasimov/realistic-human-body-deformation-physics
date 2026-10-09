@@ -132,7 +132,7 @@ Then build and serve it:
 .\tools\build_web.ps1 -Serve
 ```
 
-Open <http://localhost:8080>, or <http://localhost:8080/?stats> to show the frame rate and how long each frame takes. <http://localhost:8080/?selftest> runs a self-test instead: the browser build plays every tuned strike scenario at fixed simulation steps, checks each against its injury bands, and reports how long a simulation step takes in WebAssembly, on screen, in the status line, and as `window.__selftest`. It does not depend on the frame rate, so it also works while the browser throttles a hidden or covered tab; it takes about 15 seconds. `realistic_physics.exe --selftest` runs the same natively and prints the report as JSON, so the two can be compared (they give the same injuries). `.\tools\serve_web.ps1` serves the last build again without rebuilding. The site is assembled in `target\web`: the page from `web\index.html`, the wasm module, the `gl.js` loader copied from the miniquad version in `Cargo.lock`, and the sound plugin `audio.js` from the patched quad-snd in `vendor\quad-snd`. Browsers start sound only after a click or tap, which the start button provides.
+Open <http://localhost:8080>, or <http://localhost:8080/?stats> to show the frame rate and how long each frame takes. <http://localhost:8080/?selftest> runs a self-test instead: the browser build plays every tuned strike scenario at fixed simulation steps, checks each against its injury bands, and reports how long a simulation step takes in WebAssembly, on screen, in the status line, and as `window.__selftest`. It needs only a frame per scenario, so it works at any frame rate, though not in a hidden tab, which gets no frames at all; it takes about 15 seconds. `realistic_physics.exe --selftest` runs the same natively and prints the report as JSON, and `.\tools\parity.ps1` compares the two (see [Check Browser Parity](#check-browser-parity)). `.\tools\serve_web.ps1` serves the last build again without rebuilding. The site is assembled in `target\web`: the page from `web\index.html`, the wasm module, the `gl.js` loader copied from the miniquad version in `Cargo.lock`, and the sound plugin `audio.js` from the patched quad-snd in `vendor\quad-snd`. Browsers start sound only after a click or tap, which the start button provides.
 
 ## Controls
 
@@ -173,6 +173,18 @@ To see how a change moves the simulation, compare the working tree with a commit
 ```
 
 It plays the strike scenarios and the visual damage and anatomy diagnostics on both sides and lists every changed number per scenario, tuning warnings that appeared or went away, and changed mesh counts. The commit is built in a git worktree under `target\compare` and its results are cached by commit, so repeated comparisons only replay the working tree. `-Sweep` also compares how often each scenario stays in band when its swing moves slightly, and `-Capture NAME` puts app screenshots of that scenario from both sides into one contact sheet; both need a commit that already has those features. The full report is `output\compare\report.txt`, with each side's raw outputs in `output\compare\base` and `output\compare\current`. `-Clean` removes the cached worktrees and results.
+
+## Check Browser Parity
+
+The browser build simulates exactly like the desktop app, to the last bit, so scenarios tuned natively hold on the website. To check it after a change:
+
+```powershell
+.\tools\parity.ps1
+```
+
+It builds the native app and the web version, runs `realistic_physics.exe --selftest`, plays `?selftest` in headless Edge (or Chrome), and lists every scenario whose injuries, blood loss, tool turn, or tissue speed differ between the two, with each build's step time. It exits 1 on any difference and writes both reports and `report.txt` to `output\parity`. `-SkipBuild` reuses the last builds, `-Port` changes the local port the page is served on (8090), and `-Browser` takes another Chromium browser.
+
+Float arithmetic and square roots come out the same in both builds, but the standard library's trigonometry, `hypot`, `exp`, `ln`, and `powf` do not: natively they call the platform's C runtime (Microsoft's on Windows), in WebAssembly a port of musl's libm, and the two disagree in the last bit on many inputs. So the simulation calls the [`libm`](https://crates.io/crates/libm) crate, that same port, instead, and the `library_math_is_the_same_in_every_build` test fails on any standard-library call of those in code the simulation runs.
 
 ## Screenshots
 
@@ -300,7 +312,7 @@ The visual diagnostic exits nonzero if the captures no longer include expected w
 - `src/bin/strike_scenarios.rs` writes deterministic strike telemetry and tuning summaries, sweeps scenarios over small swing offsets, and plays custom swings.
 - `src/bin/visual_damage_diagnostics.rs` writes deterministic SVG damage captures and visual primitive metrics.
 - `src/bin/contact_sheet.rs` lays PNG screenshots out in one image.
-- `tools/verify.ps1`, `tools/compare.ps1`, `tools/capture.ps1`, and `tools/sound_check.ps1` are the checking workflows described above.
+- `tools/verify.ps1`, `tools/compare.ps1`, `tools/parity.ps1`, `tools/capture.ps1`, and `tools/sound_check.ps1` are the checking workflows described above.
 - `tests/simulation_tests.rs` contains focused Rust simulation checks, including mirror symmetry of the body and skin covering the muscle at rest in several window sizes.
 - `src/silhouette.rs` defines the mannequin figure (torso outline, limb joints and radii, head, hands, feet) for one side and mirrors it into a signed distance field; `src/simulation/body.rs` meshes the body from it, builds the limb bones on the same joints, and places the rest of the anatomy. `body_frame` maps body coordinates (fractions of body height) to the window, which the strike scenarios use to aim at anatomy; the app moves and shrinks the body with `body_frame_between` when that placement would run under its status chips or control buttons.
 
@@ -315,7 +327,7 @@ The next Rust simulation milestones are:
 
 ## Toolchain
 
-The primary build now uses Rust and Cargo. The app frontend uses `macroquad` for a cross-platform window, input, sound, and 2D drawing path while the simulation stays in a reusable Rust library. The browser version is the same app compiled for `wasm32-unknown-unknown`, drawn with WebGL and heard through Web Audio.
+The primary build now uses Rust and Cargo. The app frontend uses `macroquad` for a cross-platform window, input, sound, and 2D drawing path while the simulation stays in a reusable Rust library. The browser version is the same app compiled for `wasm32-unknown-unknown`, drawn with WebGL and heard through Web Audio. The library also depends on `libm`, for trigonometry that gives the same bits in both builds (see [Check Browser Parity](#check-browser-parity)).
 
 ## License
 
