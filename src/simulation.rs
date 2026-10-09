@@ -2073,6 +2073,29 @@ impl World {
         }
         self.finish_tool_step(dt);
         self.timed("tears open", Self::open_tears);
+        if self.debug.impact > 0.0 {
+            for spring in &self.springs {
+                if spring.broken {
+                    continue;
+                }
+                let a = self.points[spring.a];
+                let b = self.points[spring.b];
+                let stretch = distance(a.position, b.position) / spring.rest.max(EPSILON);
+                if stretch > 1.04 || spring.lambda.abs() > 0.4 {
+                    eprintln!(
+                        "PROBE {} {:.4} {:.4} {:.1}",
+                        if spring.layer == TissueLayer::Skin {
+                            "skin"
+                        } else {
+                            "muscle"
+                        },
+                        stretch,
+                        spring.lambda,
+                        a.load.max(b.load)
+                    );
+                }
+            }
+        }
 
         self.timed("anchors", |world| {
             world.update_vessel_anchors();
@@ -4365,6 +4388,22 @@ impl World {
                     x: -tangent.y,
                     y: tangent.x - 0.35,
                 };
+                eprintln!(
+                    "TEAR {} {:.4} {:.4} {:.1} {}",
+                    if spring.layer == TissueLayer::Skin {
+                        "skin"
+                    } else {
+                        "muscle"
+                    },
+                    stretch_ratio,
+                    self.springs[i].lambda,
+                    endpoint_load,
+                    if stretch_ratio > tear_stretch {
+                        "stretch"
+                    } else {
+                        "loaded"
+                    }
+                );
                 self.break_spring(i);
                 // Tissue a fast blow tears by stretching alone splits open
                 // across the fiber once the solver is done, as a laceration
