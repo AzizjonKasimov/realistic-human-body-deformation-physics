@@ -9,7 +9,7 @@ use std::fmt;
 
 use crate::{
     body_frame, create_layered_body, swing_power, BodyFrame, BonePart, BoneSegment, InputState,
-    Materials, TissueLayer, ToolMode, Vec2, World, BONE_PARTS, MISSING_SPRING,
+    Materials, TissueLayer, ToolMode, Vec2, World, BONE_PARTS,
 };
 
 /// Window size the tuned scenarios are played in.
@@ -1525,22 +1525,16 @@ impl ScenarioResult {
     /// where the cut ran in the rest shape, between the two lips' rest
     /// places, and how far apart they are now.
     fn measure_cut(&mut self, world: &World) {
-        let points = world.points();
-        let springs = world.springs();
         let path = &self.blade_path;
         self.blade_path_length = path.iter().map(|&(a, b)| span(a, b)).sum();
         let mut lines = Vec::new();
-        for (index, lip) in springs.iter().enumerate() {
-            if lip.twin == MISSING_SPRING || lip.twin < index {
-                continue;
-            }
-            let twin = springs[lip.twin];
-            let start = midpoint(points[lip.a].home, points[twin.a].home);
-            let end = midpoint(points[lip.b].home, points[twin.b].home);
-            let gap = (span(points[lip.a].position, points[twin.a].position)
-                + span(points[lip.b].position, points[twin.b].position))
-                * 0.5;
-            lines.push((lip.layer, start, end, gap));
+        for cut in world.opened_cuts() {
+            let [(lip_start, lip_end), (twin_start, twin_end)] = cut.lips;
+            let [(rest_start, rest_end), (rest_twin_start, rest_twin_end)] = cut.rest_lips;
+            let start = midpoint(rest_start, rest_twin_start);
+            let end = midpoint(rest_end, rest_twin_end);
+            let gap = (span(lip_start, twin_start) + span(lip_end, twin_end)) * 0.5;
+            lines.push((cut.layer, start, end, gap));
         }
         let widest = |layer: TissueLayer| {
             lines

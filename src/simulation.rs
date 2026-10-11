@@ -16,6 +16,7 @@ pub use blood::{BloodTrail, SkinSpot};
 pub use body::{
     body_frame, body_frame_between, create_layered_body, create_layered_body_in, BodyFrame,
 };
+pub use cuts::{OpenedCut, Piece, TriangleCut};
 pub use motion::MotionSnapshot;
 pub use phases::{PhaseClock, PhaseTime, PhaseTimes};
 pub use tools::{swing_power, tool_geometry, tool_pose, ToolGeometry, ToolPose, ToolReach};
@@ -45,6 +46,7 @@ const WOUND_REOPEN_ACTIVE_CLOT: f64 = 0.42;
 const WOUND_REOPEN_INACTIVE_CLOT: f64 = 0.18;
 pub const MISSING_ANCHOR: usize = usize::MAX;
 pub const MISSING_SPRING: usize = usize::MAX;
+pub const MISSING_POINT: usize = usize::MAX;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vec2 {
@@ -646,9 +648,24 @@ pub struct Point {
     pub mass: f64,
     /// Rest distance below the body outline in pixels, used for shading.
     pub surface_depth: f64,
-    /// A cut runs through this point: its rest place was moved onto a
-    /// blade's path, or it was split to open the cut (see `cuts.rs`).
+    /// A tear runs through this point: it was split to open the tear (see
+    /// `cuts.rs`).
     pub on_cut: bool,
+    /// For a ghost, the point it was copied from; `MISSING_POINT` for a point
+    /// of flesh. A knife's cut splits each triangle it crosses into two
+    /// pieces that each hold the flesh on one side of the cut, and a piece's
+    /// corners on the far side are ghosts: they carry the piece's shape
+    /// across the cut but hold no flesh, so nothing touches them, nothing is
+    /// attached to them, and only the flesh of their pieces is drawn (see
+    /// `cuts.rs`).
+    pub ghost_of: usize,
+}
+
+impl Point {
+    /// A cut's ghost of a point rather than flesh (see `ghost_of`).
+    pub fn is_ghost(&self) -> bool {
+        self.ghost_of != MISSING_POINT
+    }
 }
 
 impl Default for Point {
@@ -668,6 +685,7 @@ impl Default for Point {
             mass: 1.0,
             surface_depth: 0.0,
             on_cut: false,
+            ghost_of: MISSING_POINT,
         }
     }
 }
@@ -689,16 +707,13 @@ pub struct Spring {
     pub plastic_strain: f64,
     pub lambda: f64,
     /// A blade cut through this fiber. A fiber of a tissue sheet stays
-    /// whole: the cut opens along the sheet's edges nearest the blade's path
-    /// instead (see `cuts.rs`). A lone fiber breaks.
+    /// whole: the cut opens through the triangles the blade crossed instead
+    /// (see `cuts.rs`). A lone fiber breaks.
     pub cut: bool,
     /// Where along the fiber, as a share of the way from `a` to `b`, the
     /// blade crossed it.
     pub cut_at: f64,
-    /// A cut runs along this edge: the tissue on its two sides has parted,
-    /// or will once its ends can split.
-    pub parted: bool,
-    /// This edge is a lip of an opened cut, and `twin` is the edge across
+    /// This edge is a lip of an opened tear, and `twin` is the edge across
     /// the opening from it; `MISSING_SPRING` otherwise.
     pub twin: usize,
 }
@@ -722,7 +737,6 @@ impl Default for Spring {
             lambda: 0.0,
             cut: false,
             cut_at: 0.5,
-            parted: false,
             twin: MISSING_SPRING,
         }
     }
@@ -779,6 +793,9 @@ pub struct Triangle {
     pub layer: TissueLayer,
     pub failed: bool,
     pub damage: f64,
+    /// The knife's cut through this triangle, once it has split it into two
+    /// pieces; this piece holds only the flesh on its side (see `cuts.rs`).
+    pub cut: Option<TriangleCut>,
 }
 
 impl Default for Triangle {
@@ -793,6 +810,7 @@ impl Default for Triangle {
             layer: TissueLayer::Skin,
             failed: false,
             damage: 0.0,
+            cut: None,
         }
     }
 }
@@ -2161,8 +2179,9 @@ impl World {
                 flesh[index] |= alive;
             }
         }
-        for (flesh, meshed) in flesh.iter_mut().zip(meshed) {
-            *flesh |= !meshed;
+        for ((flesh, meshed), point) in flesh.iter_mut().zip(meshed).zip(&self.points) {
+            // A cut's ghosts hold no flesh.
+            *flesh = (*flesh || !meshed) && !point.is_ghost();
         }
     }
 
@@ -2877,7 +2896,7 @@ impl World {
         let mut best_index = MISSING_ANCHOR;
         let mut best_distance_sq = f64::INFINITY;
         for (index, point) in self.points.iter().enumerate() {
-            if same_layer_only && point.layer != layer {
+            if (same_layer_only && point.layer != layer) || point.is_ghost() {
                 continue;
             }
             let d = distance_sq(point.position, center);
@@ -4214,13 +4233,21 @@ impl World {
             let mut stretch_ratio = len / spring.rest.max(EPSILON);
             let endpoint_load = a.load.max(b.load);
             let contusion = a.contusion.max(b.contusion).clamp(0.0, 1.0);
-            let fatigue_delta = tissue_fatigue_delta(
-                self.materials,
-                spring,
-                stretch_ratio,
-                endpoint_load,
-                contusion,
-            );
+            // A fiber to a cut's ghost only holds a piece of a cut triangle in
+            // shape; the flesh it crosses tears, tires, and sets through the
+            // real fibers around it.
+            let real = !a.is_ghost() && !b.is_ghost();
+            let fatigue_delta = if real {
+                tissue_fatigue_delta(
+                    self.materials,
+                    spring,
+                    stretch_ratio,
+                    endpoint_load,
+                    contusion,
+                )
+            } else {
+                0.0
+            };
             let fatigue = if fatigue_delta > 0.0 {
                 (self.springs[i].fatigue + fatigue_delta).min(1.35)
             } else {
@@ -4246,7 +4273,7 @@ impl World {
                 contusion,
                 fatigue,
             );
-            if self.debug.impact <= EPSILON && plastic_delta.abs() > EPSILON {
+            if real && self.debug.impact <= EPSILON && plastic_delta.abs() > EPSILON {
                 let reference = self.springs[i].rest_reference.max(EPSILON);
                 let limit = self.materials.tissue_plastic_limit.clamp(0.0, 0.45);
                 let min_rest = reference * (1.0 - limit * 0.62);
@@ -4303,6 +4330,7 @@ impl World {
             self.springs[i].stress =
                 (self.springs[i].stress * 0.9).max((stretch_ratio - 1.0).max(0.0));
             if self.tearing_pass
+                && real
                 && (stretch_ratio > tear_stretch
                     || (endpoint_load > tear_impulse && stretch_ratio > load_tear_stretch))
             {
@@ -4441,6 +4469,8 @@ impl World {
                 || spring.layer != TissueLayer::Skin
                 || spring.a >= self.points.len()
                 || spring.b >= self.points.len()
+                || self.points[spring.a].is_ghost()
+                || self.points[spring.b].is_ghost()
             {
                 continue;
             }

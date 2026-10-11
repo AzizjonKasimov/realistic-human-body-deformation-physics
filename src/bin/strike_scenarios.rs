@@ -760,20 +760,43 @@ fn steadiness(result: &ScenarioResult) -> String {
 }
 
 /// How the skin and muscle were opened: fibers a blade cut, fibers torn by
-/// stretching or load, and the lips of cuts that opened.
+/// stretching or load, and the stretches of cut or tear that opened.
 fn skin_openings(world: &rp::World) -> String {
+    let points = world.points();
+    // A cut fiber's copies on the two sides of its cut count once.
+    let flesh_of = |point: usize| {
+        let ghost_of = points[point].ghost_of;
+        if ghost_of == rp::MISSING_POINT {
+            point
+        } else {
+            ghost_of
+        }
+    };
+    let opened = world.opened_cuts();
     let count = |layer: rp::TissueLayer| {
-        let (mut cut, mut torn, mut lips) = (0, 0, 0);
+        let mut cut = Vec::new();
+        let mut torn = 0;
         for spring in world
             .springs()
             .iter()
             .filter(|spring| spring.layer == layer)
         {
-            cut += usize::from(spring.cut);
+            if spring.cut {
+                let (a, b) = (flesh_of(spring.a), flesh_of(spring.b));
+                cut.push((a.min(b), a.max(b)));
+            }
             torn += usize::from(spring.broken && !spring.cut);
-            lips += usize::from(spring.twin != rp::MISSING_SPRING);
         }
-        format!("fibers cut {cut}, torn {torn}; cut lips {lips}")
+        cut.sort_unstable();
+        cut.dedup();
+        let lips = opened
+            .iter()
+            .filter(|opening| opening.layer == layer)
+            .count();
+        format!(
+            "fibers cut {}, torn {torn}; stretches opened {lips}",
+            cut.len()
+        )
     };
     format!(
         "skin {}; muscle {}",

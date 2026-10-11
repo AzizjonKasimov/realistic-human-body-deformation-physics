@@ -650,8 +650,8 @@ fn draw_muscle_layer(ctx: &RenderContext) {
         } else {
             (0.08 + exposure as f32 * 0.18).min(0.24)
         };
-        fill_triangle(world, triangle, shadow);
-        fill_triangle(world, triangle, fill);
+        fill_piece(world, triangle, shadow);
+        fill_piece(world, triangle, fill);
     }
 }
 
@@ -660,6 +660,18 @@ fn draw_muscle_layer(ctx: &RenderContext) {
 fn draw_muscle_flesh(ctx: &RenderContext) {
     let world = &ctx.app.world;
     let points = world.points();
+    let color_of = |index: usize| {
+        let point = shown_point(points, index);
+        let heat = (point.load / 900.0 + point.exposure * 0.35).clamp(0.0, 1.0) as f32;
+        let mut color = mix(ctx.palette.muscle_base, ctx.palette.muscle_hot, heat);
+        color = mix(
+            color,
+            ctx.palette.muscle_contusion,
+            (point.contusion * 0.48).clamp(0.0, 0.62) as f32,
+        );
+        color.a = 0.94;
+        color
+    };
     let mut vertex_of = vec![u16::MAX; points.len()];
     let mut mesh = Mesh {
         vertices: Vec::new(),
@@ -670,17 +682,14 @@ fn draw_muscle_flesh(ctx: &RenderContext) {
         if triangle.layer != rp::TissueLayer::Muscle || !world.triangle_alive(triangle) {
             continue;
         }
+        if triangle.cut.is_some() {
+            let colors = [triangle.a, triangle.b, triangle.c].map(color_of);
+            push_piece(&mut mesh, world, triangle, colors);
+            continue;
+        }
         for index in [triangle.a, triangle.b, triangle.c] {
             if vertex_of[index] == u16::MAX {
                 let point = &points[index];
-                let heat = (point.load / 900.0 + point.exposure * 0.35).clamp(0.0, 1.0) as f32;
-                let mut color = mix(ctx.palette.muscle_base, ctx.palette.muscle_hot, heat);
-                color = mix(
-                    color,
-                    ctx.palette.muscle_contusion,
-                    (point.contusion * 0.48).clamp(0.0, 0.62) as f32,
-                );
-                color.a = 0.94;
                 vertex_of[index] = mesh.vertices.len() as u16;
                 mesh.vertices.push(Vertex::new(
                     point.position.x as f32,
@@ -688,7 +697,7 @@ fn draw_muscle_flesh(ctx: &RenderContext) {
                     0.0,
                     0.0,
                     0.0,
-                    color,
+                    color_of(index),
                 ));
             }
             mesh.indices.push(vertex_of[index]);
@@ -701,22 +710,17 @@ fn draw_muscle_flesh(ctx: &RenderContext) {
 /// raw flesh. It lies beneath the bones and muscle, so it shows only where
 /// the cut has opened.
 fn draw_cut_insides(ctx: &RenderContext) {
-    let world = &ctx.app.world;
-    let points = world.points();
     let color = with_alpha(
         mix(ctx.palette.wound_core, ctx.palette.wound_edge, 0.32),
         0.96,
     );
-    for (index, lip) in world.springs().iter().enumerate() {
-        if lip.layer != rp::TissueLayer::Muscle
-            || lip.twin == rp::MISSING_SPRING
-            || lip.twin < index
-        {
+    for cut in ctx.app.world.opened_cuts() {
+        if cut.layer != rp::TissueLayer::Muscle {
             continue;
         }
-        let twin = world.springs()[lip.twin];
-        // The twin was made from this lip, so their ends correspond in order.
-        let corners = [lip.a, lip.b, twin.b, twin.a].map(|point| to_mq(points[point].position));
+        // The two lips' ends correspond in order.
+        let [(a, b), (twin_a, twin_b)] = cut.lips;
+        let corners = [a, b, twin_b, twin_a].map(to_mq);
         draw_triangle(corners[0], corners[1], corners[2], color);
         draw_triangle(corners[0], corners[2], corners[3], color);
     }
@@ -724,8 +728,6 @@ fn draw_cut_insides(ctx: &RenderContext) {
 
 /// A thin dark line along each lip of the open cuts through `layer`.
 fn draw_cut_lips(ctx: &RenderContext, layer: rp::TissueLayer) {
-    let world = &ctx.app.world;
-    let points = world.points();
     let (width, color) = match layer {
         rp::TissueLayer::Skin => (
             1.3,
@@ -736,11 +738,13 @@ fn draw_cut_lips(ctx: &RenderContext, layer: rp::TissueLayer) {
         ),
         rp::TissueLayer::Muscle => (1.0, with_alpha(ctx.palette.wound_shadow, 0.55)),
     };
-    for lip in world.springs() {
-        if lip.layer != layer || lip.twin == rp::MISSING_SPRING || lip.broken {
+    for cut in ctx.app.world.opened_cuts() {
+        if cut.layer != layer {
             continue;
         }
-        draw_line_vec(points[lip.a].position, points[lip.b].position, width, color);
+        for (a, b) in cut.lips {
+            draw_line_vec(a, b, width, color);
+        }
     }
 }
 
@@ -761,7 +765,7 @@ fn draw_crushed_flesh(ctx: &RenderContext) {
         texture: None,
     };
     for triangle in world.triangles() {
-        if world.triangle_alive(triangle) || mesh.vertices.len() + 3 > u16::MAX as usize {
+        if world.triangle_alive(triangle) || mesh.vertices.len() + 4 > u16::MAX as usize {
             continue;
         }
         let corners = [triangle.a, triangle.b, triangle.c];
@@ -780,9 +784,8 @@ fn draw_crushed_flesh(ctx: &RenderContext) {
         if opacity <= 0.02 {
             continue;
         }
-        let base = mesh.vertices.len() as u16;
-        for index in corners {
-            let point = &points[index];
+        let colors = corners.map(|index| {
+            let point = shown_point(points, index);
             // Pulp is uneven, darker where the flesh is most crushed; each
             // point keeps its own shade, so the mottling holds still.
             let pulped = (point.exposure * 0.3 + point.contusion * 0.3).clamp(0.0, 0.6) as f32;
@@ -793,16 +796,9 @@ fn draw_crushed_flesh(ctx: &RenderContext) {
                 (pulped + mottle as f32 * 0.004).min(1.0),
             );
             color.a *= opacity;
-            mesh.vertices.push(Vertex::new(
-                point.position.x as f32,
-                point.position.y as f32,
-                0.0,
-                0.0,
-                0.0,
-                color,
-            ));
-        }
-        mesh.indices.extend_from_slice(&[base, base + 1, base + 2]);
+            color
+        });
+        push_piece(&mut mesh, world, triangle, colors);
     }
     draw_mesh(&mesh);
 }
@@ -828,9 +824,9 @@ fn draw_skin_layer(ctx: &RenderContext) {
             (contusion * 0.42).clamp(0.0, 0.55) as f32,
         );
         veil.a = (0.08 + heat * 0.08).min(0.17);
-        fill_triangle(world, triangle, veil);
+        fill_piece(world, triangle, veil);
         let wire = mix(ctx.palette.skin_wire, ctx.palette.skin_heat, heat * 0.65);
-        outline_triangle(world, triangle, wire, 1.0);
+        outline_piece(world, triangle, wire, 1.0);
     }
 }
 
@@ -848,6 +844,12 @@ fn draw_shaded_skin(ctx: &RenderContext) {
     };
     for triangle in world.triangles() {
         if triangle.layer != rp::TissueLayer::Skin || !world.triangle_alive(triangle) {
+            continue;
+        }
+        if triangle.cut.is_some() {
+            let colors = [triangle.a, triangle.b, triangle.c]
+                .map(|index| skin_point_color(ctx, shown_point(points, index)));
+            push_piece(&mut mesh, world, triangle, colors);
             continue;
         }
         for index in [triangle.a, triangle.b, triangle.c] {
@@ -916,24 +918,16 @@ fn draw_closed_cut_skin(ctx: &RenderContext) {
             continue;
         }
         let closed = 1.0 - skin_opening(world, triangle);
-        if closed <= 0.02 || mesh.vertices.len() + 3 > u16::MAX as usize {
+        if closed <= 0.02 || mesh.vertices.len() + 4 > u16::MAX as usize {
             continue;
         }
-        let base = mesh.vertices.len() as u16;
-        for index in [triangle.a, triangle.b, triangle.c] {
-            let point = &points[index];
+        let colors = [triangle.a, triangle.b, triangle.c].map(|index| {
+            let point = shown_point(points, index);
             let mut color = mix(skin_point_color(ctx, point), ctx.palette.blood_mid, 0.18);
             color.a *= closed;
-            mesh.vertices.push(Vertex::new(
-                point.position.x as f32,
-                point.position.y as f32,
-                0.0,
-                0.0,
-                0.0,
-                color,
-            ));
-        }
-        mesh.indices.extend_from_slice(&[base, base + 1, base + 2]);
+            color
+        });
+        push_piece(&mut mesh, world, triangle, colors);
     }
     draw_mesh(&mesh);
 }
@@ -1090,12 +1084,18 @@ fn skin_rim(world: &rp::World) -> SkinRim {
             }
         }
     }
-    // A cut's lips border one triangle too, but they are wound, not outline.
+    // A tear's lips border one triangle too, but they are wound, not
+    // outline, and so is a side of a cut's piece that runs to a ghost.
     let edges: Vec<OutlineEdge> = owners
         .iter()
         .enumerate()
         .filter_map(|(spring, &(count, inner_point))| {
-            (count == 1 && springs[spring].twin == rp::MISSING_SPRING).then_some(OutlineEdge {
+            let spring_of = springs[spring];
+            (count == 1
+                && spring_of.twin == rp::MISSING_SPRING
+                && !points[spring_of.a].is_ghost()
+                && !points[spring_of.b].is_ghost())
+            .then_some(OutlineEdge {
                 spring,
                 inner_point,
             })
@@ -1401,7 +1401,11 @@ fn draw_skin_wounds(ctx: &RenderContext) {
     let line_color = mix(ctx.palette.wound_shadow, ctx.palette.wound_edge, 0.35);
 
     for (index, triangle) in triangles.iter().enumerate() {
-        if triangle.layer != rp::TissueLayer::Skin || opening[index] >= 0.98 {
+        // A cut that opened shows its lips instead (`draw_cut_lips`).
+        if triangle.layer != rp::TissueLayer::Skin
+            || opening[index] >= 0.98
+            || triangle.cut.is_some()
+        {
             continue;
         }
         let mut cut = [(rp::Vec2 { x: 0.0, y: 0.0 }, 0.0f32); 3];
@@ -2473,24 +2477,82 @@ fn draw_chip(x: f32, y: f32, label: &str, accent: Color, text: Color, back: Colo
     draw_text(label, x + 10.0, y + 17.0, 17.0, text);
 }
 
-fn fill_triangle(world: &rp::World, triangle: &rp::Triangle, color: Color) {
-    let points = world.points();
-    draw_triangle(
-        to_mq(points[triangle.a].position),
-        to_mq(points[triangle.b].position),
-        to_mq(points[triangle.c].position),
-        color,
-    );
+/// The point whose flesh a mesh point shows: a cut's ghost carries a piece's
+/// shape but holds no flesh, so it shows the flesh of the point it copies.
+fn shown_point(points: &[rp::Point], index: usize) -> &rp::Point {
+    let point = &points[index];
+    if point.is_ghost() {
+        &points[point.ghost_of]
+    } else {
+        point
+    }
 }
 
-fn outline_triangle(world: &rp::World, triangle: &rp::Triangle, color: Color, width: f32) {
+/// The corners of the flesh `triangle` holds, where they are now, with their
+/// weights on the triangle's corners: the whole triangle, or a piece's side
+/// of a knife's cut through it.
+fn piece_corners(world: &rp::World, triangle: &rp::Triangle) -> Vec<(rp::Vec2, [f64; 3])> {
     let points = world.points();
-    let a = points[triangle.a].position;
-    let b = points[triangle.b].position;
-    let c = points[triangle.c].position;
-    draw_line_vec(a, b, width, color);
-    draw_line_vec(b, c, width, color);
-    draw_line_vec(c, a, width, color);
+    let [a, b, c] = [triangle.a, triangle.b, triangle.c].map(|index| points[index].position);
+    triangle
+        .piece()
+        .corners()
+        .iter()
+        .map(|&weights| {
+            let at = rp::Vec2 {
+                x: a.x * weights[0] + b.x * weights[1] + c.x * weights[2],
+                y: a.y * weights[0] + b.y * weights[1] + c.y * weights[2],
+            };
+            (at, weights)
+        })
+        .collect()
+}
+
+/// Adds the flesh `triangle` holds to `mesh`, its color blended from
+/// `colors` at the triangle's corners.
+fn push_piece(mesh: &mut Mesh, world: &rp::World, triangle: &rp::Triangle, colors: [Color; 3]) {
+    let corners = piece_corners(world, triangle);
+    let base = mesh.vertices.len() as u16;
+    for &(at, weights) in &corners {
+        let blend = |channel: fn(&Color) -> f32| {
+            (0..3)
+                .map(|corner| channel(&colors[corner]) * weights[corner] as f32)
+                .sum::<f32>()
+        };
+        let color = Color::new(
+            blend(|color| color.r),
+            blend(|color| color.g),
+            blend(|color| color.b),
+            blend(|color| color.a),
+        );
+        mesh.vertices
+            .push(Vertex::new(at.x as f32, at.y as f32, 0.0, 0.0, 0.0, color));
+    }
+    for corner in 1..corners.len().saturating_sub(1) as u16 {
+        mesh.indices
+            .extend_from_slice(&[base, base + corner, base + corner + 1]);
+    }
+}
+
+/// Fills the flesh `triangle` holds with one color.
+fn fill_piece(world: &rp::World, triangle: &rp::Triangle, color: Color) {
+    let corners = piece_corners(world, triangle);
+    for corner in 1..corners.len().saturating_sub(1) {
+        draw_triangle(
+            to_mq(corners[0].0),
+            to_mq(corners[corner].0),
+            to_mq(corners[corner + 1].0),
+            color,
+        );
+    }
+}
+
+/// Outlines the flesh `triangle` holds.
+fn outline_piece(world: &rp::World, triangle: &rp::Triangle, color: Color, width: f32) {
+    let corners = piece_corners(world, triangle);
+    for (index, &(at, _)) in corners.iter().enumerate() {
+        draw_line_vec(at, corners[(index + 1) % corners.len()].0, width, color);
+    }
 }
 
 fn triangle_point_metrics(world: &rp::World, triangle: &rp::Triangle) -> (f64, f64) {

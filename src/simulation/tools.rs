@@ -968,12 +968,19 @@ impl World {
             .iter()
             .filter_map(|&index| {
                 let spring = self.springs[index];
-                if spring.broken || spring.cut || spring.parted {
+                if spring.broken || spring.cut {
                     return None;
                 }
-                let a = self.points[spring.a].position;
-                let b = self.points[spring.b].position;
-                if let Some((cut_at, along)) = segment_crossing(a, b, from.axis_end, to.axis_end) {
+                // The tip crosses a fiber where the fiber lies now or where
+                // it lay when the step began: the blade nudges the tissue
+                // ahead of it, so a fiber it is about to cross can run ahead
+                // of the tip by the time the step's motion is judged.
+                let (a, b) = (self.points[spring.a], self.points[spring.b]);
+                let crossing = segment_crossing(a.position, b.position, from.axis_end, to.axis_end)
+                    .or_else(|| {
+                        segment_crossing(a.previous, b.previous, from.axis_end, to.axis_end)
+                    });
+                if let Some((cut_at, along)) = crossing {
                     return (!self.crosses_at_cut(spring, cut_at))
                         .then_some((index, along, true, cut_at));
                 }

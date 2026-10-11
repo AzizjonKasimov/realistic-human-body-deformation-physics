@@ -203,11 +203,11 @@ fn visual_scenarios() -> Vec<VisualScenario> {
             strike: tuned_strike("arm_sharp"),
             // A knife drawn down the inside of the arm opens the artery that
             // runs under the skin there, which spurts, then bleeds steadily
-            // down the arm; no bone breaks.
+            // down the arm; no bone breaks. The cut runs along the arm's
+            // muscle fibers, so it parts them rather than severing them.
             expectations: VisualExpectations {
                 min_skin_wound_edges: 8,
                 min_incision_segments: 15,
-                min_muscle_fiber_tears: 4,
                 min_opened_cut_insides: 2,
                 min_lacerated_vessels: 1,
                 max_fractured_bones: Some(0),
@@ -255,14 +255,17 @@ fn inspect_visual_damage(world: &rp::World) -> VisualMetrics {
         }
     }
 
-    // Skin that broke, or the lips of a cut that opened.
-    for spring in world.springs() {
-        if spring.layer == rp::TissueLayer::Skin
-            && (spring.broken || spring.twin != rp::MISSING_SPRING)
-        {
-            metrics.skin_wound_edges += 1;
-        }
-    }
+    // Skin that broke, or the lips of a cut or tear that opened.
+    let opened = world.opened_cuts();
+    metrics.skin_wound_edges = world
+        .springs()
+        .iter()
+        .filter(|spring| spring.layer == rp::TissueLayer::Skin && spring.broken)
+        .count()
+        + 2 * opened
+            .iter()
+            .filter(|cut| cut.layer == rp::TissueLayer::Skin)
+            .count();
     let wound_lines = skin_wound_lines(world);
     metrics.incision_segments = wound_lines.incisions.len();
     metrics.wound_rim_edges = wound_lines.rims.len();
@@ -282,15 +285,9 @@ fn inspect_visual_damage(world: &rp::World) -> VisualMetrics {
     }
     // Each pair of an opened muscle cut's lips frames one stretch of its
     // inside.
-    metrics.opened_cut_insides = world
-        .springs()
+    metrics.opened_cut_insides = opened
         .iter()
-        .enumerate()
-        .filter(|(index, spring)| {
-            spring.layer == rp::TissueLayer::Muscle
-                && spring.twin != rp::MISSING_SPRING
-                && *index < spring.twin
-        })
+        .filter(|cut| cut.layer == rp::TissueLayer::Muscle)
         .count();
 
     for wound in world.wounds() {
@@ -678,17 +675,12 @@ fn draw_tissue_layers(out: &mut String, world: &rp::World) {
 /// The inside of each opened cut through muscle, as the app draws it: the
 /// gap between the cut's two lips, filled as deep raw flesh.
 fn draw_cut_insides(out: &mut String, world: &rp::World) {
-    let points = world.points();
-    let springs = world.springs();
-    for (index, lip) in springs.iter().enumerate() {
-        if lip.layer != rp::TissueLayer::Muscle
-            || lip.twin == rp::MISSING_SPRING
-            || lip.twin < index
-        {
+    for cut in world.opened_cuts() {
+        if cut.layer != rp::TissueLayer::Muscle {
             continue;
         }
-        let twin = springs[lip.twin];
-        let corners = [lip.a, lip.b, twin.b, twin.a].map(|point| points[point].position);
+        let [(a, b), (twin_a, twin_b)] = cut.lips;
+        let corners = [a, b, twin_b, twin_a];
         writeln!(
             out,
             "<polygon points=\"{:.2},{:.2} {:.2},{:.2} {:.2},{:.2} {:.2},{:.2}\" fill=\"#4a0910\" fill-opacity=\"0.92\"/>",
@@ -851,7 +843,8 @@ fn skin_wound_lines(world: &rp::World) -> SkinWoundLines {
                 side[free] = index;
             }
         }
-        if opening[index] >= 0.98 {
+        // A cut that opened shows its lips instead, below.
+        if opening[index] >= 0.98 || triangle.cut.is_some() {
             continue;
         }
         let cut: Vec<(rp::Vec2, f64)> = edges
@@ -897,11 +890,11 @@ fn skin_wound_lines(world: &rp::World) -> SkinWoundLines {
             _ => {}
         }
     }
-    for lip in springs {
-        if lip.layer == rp::TissueLayer::Skin && lip.twin != rp::MISSING_SPRING && !lip.broken {
-            lines
-                .incisions
-                .push((points[lip.a].position, points[lip.b].position, 1.0));
+    for cut in world.opened_cuts() {
+        if cut.layer == rp::TissueLayer::Skin {
+            for (a, b) in cut.lips {
+                lines.incisions.push((a, b, 1.0));
+            }
         }
     }
     for (spring_index, side) in sides.iter().enumerate() {
@@ -1218,14 +1211,25 @@ fn write_triangle(
     stroke: &str,
     stroke_opacity: f64,
 ) {
+    // The flesh the triangle holds: a piece of a cut one holds its side only.
     let points = world.points();
-    let a = points[triangle.a].position;
-    let b = points[triangle.b].position;
-    let c = points[triangle.c].position;
+    let [a, b, c] = [triangle.a, triangle.b, triangle.c].map(|index| points[index].position);
+    let corners: Vec<String> = triangle
+        .piece()
+        .corners()
+        .iter()
+        .map(|weights| {
+            format!(
+                "{:.2},{:.2}",
+                a.x * weights[0] + b.x * weights[1] + c.x * weights[2],
+                a.y * weights[0] + b.y * weights[1] + c.y * weights[2]
+            )
+        })
+        .collect();
     writeln!(
         out,
-        "<polygon points=\"{:.2},{:.2} {:.2},{:.2} {:.2},{:.2}\" fill=\"{}\" fill-opacity=\"{:.3}\" stroke=\"{}\" stroke-opacity=\"{:.3}\" stroke-width=\"1\"/>",
-        a.x, a.y, b.x, b.y, c.x, c.y, fill, opacity, stroke, stroke_opacity
+        "<polygon points=\"{}\" fill=\"{}\" fill-opacity=\"{:.3}\" stroke=\"{}\" stroke-opacity=\"{:.3}\" stroke-width=\"1\"/>",
+        corners.join(" "), fill, opacity, stroke, stroke_opacity
     )
     .expect("write triangle");
 }

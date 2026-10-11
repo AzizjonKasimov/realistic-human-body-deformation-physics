@@ -671,7 +671,10 @@ impl World {
         let wc = (ab.x * ap.y - ab.y * ap.x) / doubled_area;
         let wa = 1.0 - wb - wc;
         let slack = -1.0e-9;
-        (wa >= slack && wb >= slack && wc >= slack).then_some([wa, wb, wc])
+        // A piece of a cut triangle holds skin on its own side of the cut
+        // only.
+        (wa >= slack && wb >= slack && wc >= slack && triangle.holds([wa, wb, wc]))
+            .then_some([wa, wb, wc])
     }
 
     fn spot_position(&self, spot: SkinSpot) -> Vec2 {

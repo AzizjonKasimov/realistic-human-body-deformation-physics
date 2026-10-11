@@ -1,23 +1,29 @@
-//! Cuts that open. A blade does not break the fibers it crosses: it opens the
-//! tissue along the mesh edges nearest its path, so the two sides part and
-//! the cut gapes, showing what lies beneath, while every triangle stays whole.
+//! Cuts that open. A blade does not break the fibers it crosses: each
+//! triangle it passes through splits into two pieces along its path, and the
+//! two sides part, so the cut gapes exactly where the blade went and shows
+//! what lies beneath, while no flesh is lost.
 //!
-//! Rebuilt from two published techniques:
+//! Rebuilt from the virtual node algorithm (Molino, Bao, and Fedkiw, "A
+//! virtual node algorithm for changing mesh topology during simulation",
+//! SIGGRAPH 2004), as PhysBAM's 2D version builds it
+//! (`VIRTUAL_NODE_ALGORITHM.cpp`, BSD), with the cut embedded in each piece
+//! as Sifakis, Der, and Fedkiw do ("Arbitrary cutting of deformable
+//! tetrahedralized objects", 2007). Each triangle the blade crosses becomes
+//! two copies of itself, each holding the flesh on one side of the blade's
+//! path through it ([`TriangleCut`]). A corner where a piece holds no flesh
+//! gets a ghost, a copy of the point shared with the pieces beside it on the
+//! same side, so the two sides come apart while every piece keeps its whole
+//! triangle's shape and no piece is too small to stay steady. Points share
+//! their mass by the flesh each copy holds, as Koschier, Bender, and Thuerey
+//! advise ("Robust eXtended finite elements for complex cutting of
+//! deformables", 2017), so ghosts are light.
 //!
-//! - Splitting points, as Rapier's soft bodies cut and tear (rapier2d 0.36,
-//!   `tearing_cut.rs` and `tearing_particle_split.rs`, Apache-2.0), after the
-//!   tearing in Müller et al., "Position Based Dynamics" (2007): each group of
-//!   a point's triangles that no longer shares an edge with the others gets
-//!   its own copy of the point, the point's mass is shared by area, and the
-//!   springs follow their triangles.
-//! - Node snapping, from Nienhuys and van der Stappen, "A surgery simulation
-//!   supporting cuts and finite element deformation" (MICCAI 2001): the points
-//!   nearest the blade's path move onto it in the rest shape, so a cut runs
-//!   straight along the path instead of zigzagging through the mesh as
-//!   Rapier's cuts do.
+//! Tears open by splitting points instead, as Rapier's soft bodies tear
+//! (rapier2d 0.36, `tearing_crack.rs`, Apache-2.0), after the tearing in
+//! Müller et al., "Position Based Dynamics" (2007).
 //!
-//! Skin and muscle are under tension in a living body and pull back when cut,
-//! so each lip's rest shape draws back from the cut, and the cut gapes.
+//! Skin and muscle are under tension in a living body and pull back when
+//! cut, so each side of a cut draws back from it, and the cut gapes.
 
 use super::*;
 
@@ -26,9 +32,169 @@ use super::*;
 /// which a blow should tear nothing much.
 pub(super) const TEAR_OPENING_SPEED: f64 = 800.0;
 
-/// The farthest a point's rest place moves onto a blade's path, in point
-/// spacings, so a stray crossing cannot drag the mesh.
-const MAX_SNAP: f64 = 0.6;
+/// The nearest a cut crosses a side to either of its corners, as a share of
+/// the side, so no piece is a sliver and no cut runs through a point.
+const CROSSING_MARGIN: f64 = 0.1;
+
+/// The least share of a point's mass a ghost of it gets, so a piece's far
+/// corners never weigh nothing.
+const GHOST_MASS_SHARE: f64 = 0.1;
+
+/// Where a knife's cut crosses a triangle, and which side of it this piece of
+/// the triangle holds. The cut runs straight between its crossings of two of
+/// the triangle's sides, which meet at the corner they share.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TriangleCut {
+    /// The sides the cut crosses: 0 runs from corner `a` to `b`, 1 from `b`
+    /// to `c`, and 2 from `c` to `a`.
+    pub sides: [usize; 2],
+    /// How far along each of those sides, from its first corner, the cut
+    /// crosses it.
+    pub at: [f64; 2],
+    /// This piece holds the corner the two sides share, rather than the
+    /// other two.
+    pub holds_shared_corner: bool,
+    /// The triangle's other piece, across the cut.
+    pub partner: usize,
+}
+
+impl TriangleCut {
+    /// The corner (0 for `a`, 1 for `b`, 2 for `c`) the two cut sides share.
+    fn shared_corner(&self) -> usize {
+        (0..3)
+            .find(|&corner| self.sides.iter().all(|&side| side_has(side, corner)))
+            .unwrap_or(0)
+    }
+
+    /// Whether this piece holds the flesh at its corner `corner`.
+    pub fn holds_corner(&self, corner: usize) -> bool {
+        (corner == self.shared_corner()) == self.holds_shared_corner
+    }
+
+    /// The cut's two ends, in weights on the triangle's corners.
+    pub fn ends(&self) -> [[f64; 3]; 2] {
+        [0, 1].map(|end| along_side(self.sides[end], self.at[end]))
+    }
+
+    /// The stretch of side `side`, from its first corner, this piece holds.
+    fn holds_along(&self, side: usize) -> Option<(f64, f64)> {
+        let first = self.holds_corner(side);
+        match self.sides.iter().position(|&cut| cut == side) {
+            Some(end) if first => Some((0.0, self.at[end])),
+            Some(end) => Some((self.at[end], 1.0)),
+            None => first.then_some((0.0, 1.0)),
+        }
+    }
+
+    /// Whether this piece holds the flesh at `weights`.
+    fn holds(&self, weights: [f64; 3]) -> bool {
+        let [from, to] = self.ends();
+        let side = |weights: [f64; 3]| {
+            (to[1] - from[1]) * (weights[2] - from[2]) - (to[2] - from[2]) * (weights[1] - from[1])
+        };
+        let mut corner = [0.0; 3];
+        corner[self.shared_corner()] = 1.0;
+        let here = side(weights) * side(corner);
+        if self.holds_shared_corner {
+            here >= -1.0e-9
+        } else {
+            here <= 1.0e-9
+        }
+    }
+}
+
+/// The flesh one triangle holds, as the corners of the polygon it covers, in
+/// weights on the triangle's corners `a`, `b`, and `c`: the whole triangle,
+/// or, for a piece of a cut one, its side of the cut.
+#[derive(Clone, Copy, Debug)]
+pub struct Piece {
+    corners: [[f64; 3]; 4],
+    count: usize,
+}
+
+impl Piece {
+    pub fn corners(&self) -> &[[f64; 3]] {
+        &self.corners[..self.count]
+    }
+
+    /// The share of the triangle the piece covers, and its centroid.
+    fn share_and_centroid(&self) -> (f64, [f64; 3]) {
+        let corners = self.corners();
+        let mut doubled = 0.0;
+        let (mut cx, mut cy) = (0.0, 0.0);
+        for (index, here) in corners.iter().enumerate() {
+            let next = corners[(index + 1) % corners.len()];
+            let cross = here[1] * next[2] - next[1] * here[2];
+            doubled += cross;
+            cx += (here[1] + next[1]) * cross;
+            cy += (here[2] + next[2]) * cross;
+        }
+        if doubled.abs() <= 1.0e-12 {
+            return (0.0, [1.0 / 3.0; 3]);
+        }
+        let (cx, cy) = (cx / (3.0 * doubled), cy / (3.0 * doubled));
+        (doubled.abs(), [1.0 - cx - cy, cx, cy])
+    }
+}
+
+impl Triangle {
+    /// The flesh this triangle holds (see [`Piece`]).
+    pub fn piece(&self) -> Piece {
+        let mut corners = [[0.0; 3]; 4];
+        let Some(cut) = self.cut else {
+            for (corner, weights) in corners.iter_mut().take(3).enumerate() {
+                weights[corner] = 1.0;
+            }
+            return Piece { corners, count: 3 };
+        };
+        // Round the triangle's corners, with the cut's crossings on the
+        // sides it crosses; the piece is the run from one crossing to the
+        // other that holds its own corners.
+        let ends = cut.ends();
+        let mut round = Vec::with_capacity(5);
+        for corner in 0..3 {
+            let mut weights = [0.0; 3];
+            weights[corner] = 1.0;
+            round.push((weights, Some(corner)));
+            if let Some(end) = cut.sides.iter().position(|&side| side == corner) {
+                round.push((ends[end], None));
+            }
+        }
+        let crossings: Vec<usize> = (0..round.len())
+            .filter(|&index| round[index].1.is_none())
+            .collect();
+        let (first, second) = (crossings[0], crossings[1]);
+        let inside: Vec<usize> = (first..=second).collect();
+        let held_inside = round[first + 1]
+            .1
+            .is_some_and(|corner| cut.holds_corner(corner));
+        let run: Vec<usize> = if held_inside {
+            inside
+        } else {
+            (second..round.len()).chain(0..=first).collect()
+        };
+        let mut count = 0;
+        for index in run.into_iter().take(4) {
+            corners[count] = round[index].0;
+            count += 1;
+        }
+        Piece { corners, count }
+    }
+
+    /// Whether this triangle holds flesh at `weights` on its corners.
+    pub fn holds(&self, weights: [f64; 3]) -> bool {
+        self.cut.map_or(true, |cut| cut.holds(weights))
+    }
+}
+
+/// An opened cut or tear, as its two lips, where each lies now and in the
+/// rest shape, their ends in matching order.
+#[derive(Clone, Copy, Debug)]
+pub struct OpenedCut {
+    pub layer: TissueLayer,
+    pub lips: [(Vec2, Vec2); 2],
+    pub rest_lips: [(Vec2, Vec2); 2],
+}
 
 impl World {
     /// The blade crossed spring `index`, `cut_at` of the way from its `a`
@@ -47,114 +213,527 @@ impl World {
         self.pending_cuts.push(index);
     }
 
+    /// The cuts and tears that have opened, each as its two lips: a knife's
+    /// cut by the two pieces of each triangle it split, a tear by the twin
+    /// springs along its lips. Pieces or lips torn away since are left out.
+    pub fn opened_cuts(&self) -> Vec<OpenedCut> {
+        let mut opened = Vec::new();
+        for (index, triangle) in self.triangles.iter().enumerate() {
+            let Some(cut) = triangle.cut else {
+                continue;
+            };
+            let partner = &self.triangles[cut.partner];
+            if cut.partner < index
+                || !self.triangle_alive(triangle)
+                || !self.triangle_alive(partner)
+            {
+                continue;
+            }
+            let [from, to] = cut.ends();
+            let lip = |piece: &Triangle, rest: bool| {
+                (
+                    self.piece_position(piece, from, rest),
+                    self.piece_position(piece, to, rest),
+                )
+            };
+            opened.push(OpenedCut {
+                layer: triangle.layer,
+                lips: [lip(triangle, false), lip(partner, false)],
+                rest_lips: [lip(triangle, true), lip(partner, true)],
+            });
+        }
+        for (index, lip) in self.springs.iter().enumerate() {
+            if lip.twin == MISSING_SPRING || lip.twin < index || lip.broken {
+                continue;
+            }
+            let twin = self.springs[lip.twin];
+            let points = &self.points;
+            opened.push(OpenedCut {
+                layer: lip.layer,
+                lips: [
+                    (points[lip.a].position, points[lip.b].position),
+                    (points[twin.a].position, points[twin.b].position),
+                ],
+                rest_lips: [
+                    (points[lip.a].home, points[lip.b].home),
+                    (points[twin.a].home, points[twin.b].home),
+                ],
+            });
+        }
+        opened
+    }
+
+    /// Where `weights` on triangle `triangle`'s corners lies now, or in the
+    /// rest shape.
+    fn piece_position(&self, triangle: &Triangle, weights: [f64; 3], rest: bool) -> Vec2 {
+        let at = |point: usize| {
+            let point = &self.points[point];
+            if rest {
+                point.home
+            } else {
+                point.position
+            }
+        };
+        let (a, b, c) = (at(triangle.a), at(triangle.b), at(triangle.c));
+        Vec2 {
+            x: a.x * weights[0] + b.x * weights[1] + c.x * weights[2],
+            y: a.y * weights[0] + b.y * weights[1] + c.y * weights[2],
+        }
+    }
+
     /// Opens the cuts the blade made this step. Each triangle the blade has
-    /// passed through, two of its edges cut, adds to the cut the edge between
-    /// the points nearest its two crossings, and those points move onto the
-    /// blade's path in the rest shape. Every point on the cut is then split,
-    /// and each lip draws back from the cut. A cut fiber that no triangle
-    /// uses, such as a lone test fiber, breaks instead.
+    /// passed through, two of its sides cut, splits into two pieces, each
+    /// holding the flesh on its side of the blade's path; the points around
+    /// it split where the flesh on the two sides no longer meets, ghosts
+    /// carrying each piece's far corners; and each side draws back from the
+    /// cut. A cut fiber that no triangle uses, such as a lone test fiber,
+    /// breaks instead.
     pub(super) fn open_blade_cuts(&mut self) {
         if self.pending_cuts.is_empty() {
             return;
         }
         let pending = std::mem::take(&mut self.pending_cuts);
-        let mut fresh = vec![false; self.springs.len()];
-        for &index in &pending {
-            fresh[index] = true;
-        }
-        // How many triangles use each spring: none for a lone fiber, one on
-        // the sheet's outline or a cut's lip.
-        let mut sides = vec![0u8; self.springs.len()];
-        let mut touched = Vec::new();
-        for (index, triangle) in self.triangles.iter().enumerate() {
-            let edges = [triangle.edge_ab, triangle.edge_bc, triangle.edge_ca];
-            for &edge in &edges {
-                if let Some(sides) = sides.get_mut(edge) {
-                    *sides = sides.saturating_add(1);
+        let mut used = vec![false; self.springs.len()];
+        for triangle in &self.triangles {
+            for edge in [triangle.edge_ab, triangle.edge_bc, triangle.edge_ca] {
+                if let Some(used) = used.get_mut(edge) {
+                    *used = true;
                 }
             }
-            if edges.iter().any(|&edge| fresh.get(edge) == Some(&true)) {
-                touched.push(index);
-            }
         }
         for &index in &pending {
-            if sides[index] == 0 {
+            if !used[index] {
                 self.break_spring(index);
             }
         }
-        // Points on the sheet's outline, where tissue lies on one side only.
-        // A cut's own lips do not count, so a cut keeps running through the
-        // points it has opened.
-        let mut on_edge = vec![false; self.points.len()];
-        for (spring, &count) in self.springs.iter().zip(&sides) {
-            if count == 1 && spring.twin == MISSING_SPRING {
-                on_edge[spring.a] = true;
-                on_edge[spring.b] = true;
-            }
-        }
 
-        let homes_before: Vec<Vec2> = self.points.iter().map(|point| point.home).collect();
-        let mut opened = Vec::new();
-        for index in touched {
+        let mut split = Vec::new();
+        for index in 0..self.triangles.len() {
             let triangle = self.triangles[index];
-            let cut: Vec<usize> = [triangle.edge_ab, triangle.edge_bc, triangle.edge_ca]
-                .into_iter()
-                .filter(|&edge| {
-                    self.springs
-                        .get(edge)
-                        .is_some_and(|spring| spring.cut && !spring.broken)
-                })
-                .collect();
-            for i in 0..cut.len() {
-                for j in i + 1..cut.len() {
-                    let (a, crossing_i) = self.cut_end(cut[i], &on_edge);
-                    let (b, crossing_j) = self.cut_end(cut[j], &on_edge);
-                    self.snap_to_cut(a, crossing_i, crossing_j);
-                    self.snap_to_cut(b, crossing_i, crossing_j);
-                    if a != b {
-                        if let Some(edge) = triangle_edge(&triangle, a, b) {
-                            opened.push(edge);
-                        }
-                    }
+            if triangle.cut.is_some() || !self.triangle_alive(&triangle) {
+                continue;
+            }
+            if let Some(crossings) = self.blade_crossings(&triangle) {
+                split.push((index, crossings));
+            }
+        }
+        if split.is_empty() {
+            return;
+        }
+
+        // The triangles around each corner of a split triangle, and the area
+        // constraint over each, found before the pieces share corners.
+        let mut nodes: Vec<usize> = split
+            .iter()
+            .flat_map(|&(index, _)| corners(&self.triangles[index]))
+            .collect();
+        nodes.sort_unstable();
+        nodes.dedup();
+        let mut fans = vec![Vec::new(); nodes.len()];
+        for (index, triangle) in self.triangles.iter().enumerate() {
+            for corner in corners(triangle) {
+                if let Ok(node) = nodes.binary_search(&corner) {
+                    fans[node].push(index);
                 }
             }
         }
-        if opened.is_empty() {
-            self.follow_rest_places(&homes_before, &[]);
-            return;
-        }
-        opened.sort_unstable();
-        opened.dedup();
-        let mut ends = Vec::with_capacity(opened.len() * 2);
-        for &edge in &opened {
-            self.springs[edge].parted = true;
-            ends.push(self.springs[edge].a);
-            ends.push(self.springs[edge].b);
-        }
-        ends.sort_unstable();
-        ends.dedup();
+        let mut around: Vec<usize> = fans.iter().flatten().copied().collect();
+        around.sort_unstable();
+        around.dedup();
+        let mut area_of: HashMap<usize, usize> = around
+            .iter()
+            .filter_map(|&index| self.area_of_triangle(index).map(|area| (index, area)))
+            .collect();
 
-        let first_copy = self.points.len();
+        // Each triangle the blade crossed becomes two pieces.
+        let mut pairs = Vec::with_capacity(split.len());
+        for &(index, (sides, at)) in &split {
+            let partner = self.triangles.len();
+            let mut piece = self.triangles[index];
+            piece.cut = Some(TriangleCut {
+                sides,
+                at,
+                holds_shared_corner: false,
+                partner: index,
+            });
+            self.triangles[index].cut = Some(TriangleCut {
+                sides,
+                at,
+                holds_shared_corner: true,
+                partner,
+            });
+            self.triangles.push(piece);
+            if let Some(&area) = area_of.get(&index) {
+                self.areas.push(AreaConstraint {
+                    lambda: 0.0,
+                    ..self.areas[area]
+                });
+                area_of.insert(partner, self.areas.len() - 1);
+            }
+            for fan in fans.iter_mut() {
+                if fan.contains(&index) {
+                    fan.push(partner);
+                }
+            }
+            around.push(partner);
+            pairs.push((index, partner));
+        }
+        self.rehome_blood_on_split_skin(&pairs);
+
+        // Each corner splits into one point for each group of the pieces
+        // around it whose flesh still meets along a side: the group holding
+        // the flesh at the corner keeps it, and every other gets a ghost.
+        let homes_before: Vec<Vec2> = self.points.iter().map(|point| point.home).collect();
+        let before: Vec<[usize; 3]> = around
+            .iter()
+            .map(|&index| corners(&self.triangles[index]))
+            .collect();
         let mut origin = Vec::new();
-        let mut families = Vec::new();
-        for point in ends {
-            if let Some(family) = self.split_point(point) {
-                for &(member, _) in &family {
-                    if member >= first_copy {
-                        origin.push(point);
+        let mut moves: Vec<(usize, usize, usize)> = Vec::new();
+        for (node, fan) in nodes.iter().zip(&fans) {
+            let (groups, group_of) = self.flesh_groups(*node, fan);
+            if groups.len() < 2 || self.points[*node].pinned {
+                continue;
+            }
+            let source = self.points[*node];
+            let total: f64 = groups.iter().map(|group| group.1).sum::<f64>().max(EPSILON);
+            let mut kept = source.mass;
+            for (group, &(holds_node, share)) in groups.iter().enumerate() {
+                if holds_node {
+                    continue;
+                }
+                let mass = (source.mass * share / total).max(source.mass * GHOST_MASS_SHARE);
+                kept -= mass;
+                self.points.push(Point {
+                    mass,
+                    ghost_of: *node,
+                    on_cut: false,
+                    ..source
+                });
+                origin.push(*node);
+                let ghost = self.points.len() - 1;
+                for (&triangle, &member) in fan.iter().zip(&group_of) {
+                    if member == Some(group) {
+                        moves.push((triangle, *node, ghost));
                     }
                 }
-                families.push(family);
+            }
+            self.points[*node].mass = kept.max(source.mass * GHOST_MASS_SHARE);
+        }
+        for &(triangle, from, to) in &moves {
+            replace_corner(&mut self.triangles[triangle], from, to);
+            if let Some(&area) = area_of.get(&triangle) {
+                let area = &mut self.areas[area];
+                for corner in [&mut area.a, &mut area.b, &mut area.c] {
+                    if *corner == from {
+                        *corner = to;
+                    }
+                }
             }
         }
-        if families.is_empty() {
-            self.follow_rest_places(&homes_before, &origin);
-            return;
-        }
+        self.rejoin_piece_springs(&around, &before, &area_of);
 
-        self.retract_lips(&families);
+        self.retract_cut_sides(&pairs);
         self.follow_rest_places(&homes_before, &origin);
+        self.stats.cut_openings += origin.len() as i32;
         self.finish_topology_change();
+    }
+
+    /// Where the blade crossed two sides of `triangle`, if it did: the sides
+    /// and how far along each, moved in from the corners. Of three crossed
+    /// sides, the two crossings farthest apart.
+    fn blade_crossings(&self, triangle: &Triangle) -> Option<([usize; 2], [f64; 2])> {
+        let corners = corners(triangle);
+        let edges = [triangle.edge_ab, triangle.edge_bc, triangle.edge_ca];
+        let mut crossed = Vec::with_capacity(3);
+        for side in 0..3 {
+            let Some(spring) = self.springs.get(edges[side]) else {
+                continue;
+            };
+            if !spring.cut || spring.broken {
+                continue;
+            }
+            let at = if spring.a == corners[side] {
+                spring.cut_at
+            } else {
+                1.0 - spring.cut_at
+            };
+            crossed.push((side, at.clamp(CROSSING_MARGIN, 1.0 - CROSSING_MARGIN)));
+        }
+        if crossed.len() < 2 {
+            return None;
+        }
+        let rest = |&(side, at): &(usize, f64)| {
+            let weights = along_side(side, at);
+            self.piece_position(triangle, weights, true)
+        };
+        let mut best = (0, 1, -1.0);
+        for i in 0..crossed.len() {
+            for j in i + 1..crossed.len() {
+                let gap = distance(rest(&crossed[i]), rest(&crossed[j]));
+                if gap > best.2 {
+                    best = (i, j, gap);
+                }
+            }
+        }
+        let (first, second) = (crossed[best.0], crossed[best.1]);
+        Some(([first.0, second.0], [first.1, second.1]))
+    }
+
+    /// Groups the living triangles of `fan` around point `node` by whether
+    /// their flesh meets along a side through it, the way the flesh of two
+    /// pieces of cut triangles beside each other does on the same side of
+    /// the cut and not across it. Returns, for each group, whether it holds
+    /// the flesh at the point itself (all that do are one group, which keeps
+    /// the point) and its share of the point's mass, and each triangle's
+    /// group (none for a dead one, which stays with the point).
+    fn flesh_groups(&self, node: usize, fan: &[usize]) -> (Vec<(bool, f64)>, Vec<Option<usize>>) {
+        let count = fan.len();
+        let alive: Vec<bool> = fan
+            .iter()
+            .map(|&index| self.triangle_alive(&self.triangles[index]))
+            .collect();
+        let mut parent: Vec<usize> = (0..count).collect();
+        for i in 0..count {
+            for j in i + 1..count {
+                if !alive[i] || !alive[j] {
+                    continue;
+                }
+                let (first, second) = (&self.triangles[fan[i]], &self.triangles[fan[j]]);
+                let meets = corners(first)
+                    .into_iter()
+                    .filter(|&other| other != node && corners(second).contains(&other))
+                    .any(|other| {
+                        let held = |triangle: &Triangle| held_between(triangle, node, other);
+                        match (held(first), held(second)) {
+                            (Some(a), Some(b)) => a.1.min(b.1) - a.0.max(b.0) > 1.0e-6,
+                            _ => false,
+                        }
+                    });
+                if meets {
+                    let (root_i, root_j) = (find_root(&mut parent, i), find_root(&mut parent, j));
+                    parent[root_i.max(root_j)] = root_i.min(root_j);
+                }
+            }
+        }
+        // The flesh at the point itself joins all that hold it.
+        let holders: Vec<usize> = (0..count)
+            .filter(|&i| alive[i] && holds_node(&self.triangles[fan[i]], node))
+            .collect();
+        for pair in holders.windows(2) {
+            let (root_i, root_j) = (
+                find_root(&mut parent, pair[0]),
+                find_root(&mut parent, pair[1]),
+            );
+            parent[root_i.max(root_j)] = root_i.min(root_j);
+        }
+        let mut group_of_root = vec![usize::MAX; count];
+        let mut groups: Vec<(bool, f64)> = Vec::new();
+        let mut group_of = vec![None; count];
+        for i in 0..count {
+            if !alive[i] {
+                continue;
+            }
+            let root = find_root(&mut parent, i);
+            if group_of_root[root] == usize::MAX {
+                group_of_root[root] = groups.len();
+                groups.push((false, 0.0));
+            }
+            let group = group_of_root[root];
+            group_of[i] = Some(group);
+            let triangle = &self.triangles[fan[i]];
+            groups[group].0 |= holds_node(triangle, node);
+            groups[group].1 += self.mass_share(triangle, node);
+        }
+        // With no group holding the point's flesh, the first keeps it.
+        if !groups.iter().any(|group| group.0) {
+            if let Some(first) = groups.first_mut() {
+                first.0 = true;
+            }
+        }
+        (groups, group_of)
+    }
+
+    /// How much of the flesh `triangle` holds weighs on its corner `node`:
+    /// its area in the rest shape times the share of its flesh nearest that
+    /// corner, as a triangle's mass is lumped onto its corners.
+    fn mass_share(&self, triangle: &Triangle, node: usize) -> f64 {
+        let Some(corner) = corners(triangle).iter().position(|&point| point == node) else {
+            return 0.0;
+        };
+        let [a, b, c] = corners(triangle).map(|point| self.points[point].home);
+        let (share, centroid) = triangle.piece().share_and_centroid();
+        signed_area(a, b, c).abs() * share * centroid[corner]
+    }
+
+    /// Gives every side of the triangles `around` a spring between its
+    /// corners as they are now, after a cut split points: a side whose
+    /// corners are unchanged keeps its spring, and every other side gets a
+    /// copy of the spring it had, which a piece beside it on the same side
+    /// of the cut shares. `before` holds each triangle's corners before the
+    /// split; `area_of` the area constraint over each.
+    fn rejoin_piece_springs(
+        &mut self,
+        around: &[usize],
+        before: &[[usize; 3]],
+        area_of: &HashMap<usize, usize>,
+    ) {
+        // The ends each user of a spring wants, in the spring's own order.
+        let mut wants: Vec<(usize, usize, usize, (usize, usize))> = Vec::new();
+        for (slot, &index) in around.iter().enumerate() {
+            let now = corners(&self.triangles[index]);
+            let was = before.get(slot).copied().unwrap_or(now);
+            let edges = edge_slots(&self.triangles[index]);
+            for side in 0..3 {
+                let edge = edges[side];
+                let Some(spring) = self.springs.get(edge) else {
+                    continue;
+                };
+                let next = (side + 1) % 3;
+                let ends = if spring.a == was[side] && spring.b == was[next] {
+                    (now[side], now[next])
+                } else if spring.a == was[next] && spring.b == was[side] {
+                    (now[next], now[side])
+                } else {
+                    continue;
+                };
+                wants.push((edge, index, side, ends));
+            }
+        }
+        wants.sort_unstable_by_key(|&(edge, index, side, _)| (edge, index, side));
+        let mut start = 0;
+        while start < wants.len() {
+            let edge = wants[start].0;
+            let mut end = start;
+            while end < wants.len() && wants[end].0 == edge {
+                end += 1;
+            }
+            let spring = self.springs[edge];
+            let mut pairs: Vec<(usize, usize)> = Vec::new();
+            for want in &wants[start..end] {
+                if !pairs.contains(&want.3) {
+                    pairs.push(want.3);
+                }
+            }
+            let keeper = pairs
+                .iter()
+                .position(|&pair| pair == (spring.a, spring.b))
+                .unwrap_or(0);
+            let mut index_of = Vec::with_capacity(pairs.len());
+            for (number, &(a, b)) in pairs.iter().enumerate() {
+                if number == keeper {
+                    self.springs[edge].a = a;
+                    self.springs[edge].b = b;
+                    index_of.push(edge);
+                } else {
+                    self.springs.push(Spring {
+                        a,
+                        b,
+                        lambda: 0.0,
+                        twin: MISSING_SPRING,
+                        ..spring
+                    });
+                    index_of.push(self.springs.len() - 1);
+                }
+            }
+            for want in &wants[start..end] {
+                let number = pairs.iter().position(|&pair| pair == want.3).unwrap_or(0);
+                set_edge_slot(&mut self.triangles[want.1], want.2, index_of[number]);
+            }
+            start = end;
+        }
+        // Each area constraint takes its triangle's sides.
+        for &index in around {
+            let Some(&area) = area_of.get(&index) else {
+                continue;
+            };
+            let triangle = self.triangles[index];
+            let edges = edge_slots(&triangle);
+            let corners = corners(&triangle);
+            let edge_between = |x: usize, y: usize| {
+                (0..3)
+                    .find(|&side| {
+                        let (p, q) = (corners[side], corners[(side + 1) % 3]);
+                        (p == x && q == y) || (p == y && q == x)
+                    })
+                    .map_or(MISSING_SPRING, |side| edges[side])
+            };
+            let area = &mut self.areas[area];
+            area.edge_ab = edge_between(area.a, area.b);
+            area.edge_bc = edge_between(area.b, area.c);
+            area.edge_ca = edge_between(area.c, area.a);
+        }
+    }
+
+    /// Each side of the cuts through `pairs` draws back from the cut in the
+    /// rest shape, as cut skin and muscle do: every corner of a piece moves
+    /// away from the cut into its piece's side, so the two lips part evenly
+    /// along the cut. A point holding both sides together at the end of a
+    /// cut stays.
+    fn retract_cut_sides(&mut self, pairs: &[(usize, usize)]) {
+        let spacing = self.materials.point_spacing;
+        let mut pull = vec![(Vec2::default(), 0.0); self.points.len()];
+        for &(first, second) in pairs {
+            for index in [first, second] {
+                let triangle = self.triangles[index];
+                let Some(cut) = triangle.cut else {
+                    continue;
+                };
+                let [from, to] = cut.ends();
+                let middle = midpoint(
+                    self.piece_position(&triangle, from, true),
+                    self.piece_position(&triangle, to, true),
+                );
+                let (_, centroid) = triangle.piece().share_and_centroid();
+                let away = subtract(self.piece_position(&triangle, centroid, true), middle);
+                let length = hypot(away.x, away.y);
+                if length <= EPSILON {
+                    continue;
+                }
+                for corner in corners(&triangle) {
+                    pull[corner].0 = add(pull[corner].0, scale(away, 1.0 / length));
+                    pull[corner].1 += 1.0;
+                }
+            }
+        }
+        for (index, &(direction, count)) in pull.iter().enumerate() {
+            let length = hypot(direction.x, direction.y);
+            // Pulled both ways, the point is where the cut ends.
+            if count <= 0.0 || length < count * 0.35 || self.points[index].pinned {
+                continue;
+            }
+            let retraction = match self.points[index].layer {
+                TissueLayer::Skin => self.materials.skin_cut_retraction,
+                TissueLayer::Muscle => self.materials.muscle_cut_retraction,
+            } * spacing;
+            self.move_point_with_rest(index, scale(direction, retraction / length));
+        }
+    }
+
+    /// Blood on skin a cut split goes with the piece holding the skin it
+    /// lies on.
+    fn rehome_blood_on_split_skin(&mut self, pairs: &[(usize, usize)]) {
+        let triangles = &self.triangles;
+        let rehome = |spot: &mut SkinSpot| {
+            if let Some(&(first, second)) = pairs.iter().find(|&&(first, _)| first == spot.triangle)
+            {
+                if !triangles[first].holds(spot.weights) {
+                    spot.triangle = second;
+                }
+            }
+        };
+        for fluid in &mut self.fluids {
+            if let Some(spot) = fluid.on_skin.as_mut() {
+                rehome(spot);
+            }
+            if let Some(spot) = fluid.trail_from.as_mut() {
+                rehome(spot);
+            }
+        }
+        for trail in &mut self.blood_trails {
+            rehome(&mut trail.from);
+            rehome(&mut trail.to);
+        }
     }
 
     /// Opens the tears stretching made this step: each fiber torn by
@@ -212,96 +791,17 @@ impl World {
         self.finish_topology_change();
     }
 
-    /// Each lip of `families` draws back into its own side of the opening.
-    fn retract_lips(&mut self, families: &[Vec<(usize, Vec2)>]) {
-        let spacing = self.materials.point_spacing;
-        for family in families {
-            for &(member, toward) in family {
-                let retraction = match self.points[member].layer {
-                    TissueLayer::Skin => self.materials.skin_cut_retraction,
-                    TissueLayer::Muscle => self.materials.muscle_cut_retraction,
-                } * spacing;
-                let length = hypot(toward.x, toward.y);
-                if length > EPSILON {
-                    self.move_point_with_rest(member, scale(toward, retraction / length));
-                }
-            }
-        }
-    }
-
-    /// Keeps the per-point state in step with points a cut added, and tells
-    /// anything built from the mesh to rebuild.
+    /// Keeps the per-point state in step with points a cut or tear added,
+    /// and tells anything built from the mesh to rebuild. A ghost holds no
+    /// flesh from the start.
     fn finish_topology_change(&mut self) {
         self.blunt_knock.resize(self.points.len(), 0.0);
+        let known = self.flesh.len();
         self.flesh.resize(self.points.len(), true);
+        for index in known..self.points.len() {
+            self.flesh[index] = !self.points[index].is_ghost();
+        }
         self.topology_version += 1;
-    }
-
-    /// The end of cut spring `index` the cut runs through, and where the
-    /// blade crossed it in the rest shape. That is the end nearest the
-    /// crossing, unless it lies on the sheet's outline (`on_edge`) and the
-    /// other does not: a cut running just inside a limb's outline then opens along
-    /// the first points inside it, cutting off a strip, rather than along the
-    /// outline itself, which has tissue on one side only. A pinned end cannot
-    /// open, so the other end stands in for it.
-    fn cut_end(&self, index: usize, on_edge: &[bool]) -> (usize, Vec2) {
-        let spring = self.springs[index];
-        let (a, b) = (self.points[spring.a], self.points[spring.b]);
-        let (near, far) = if spring.cut_at <= 0.5 {
-            (spring.a, spring.b)
-        } else {
-            (spring.b, spring.a)
-        };
-        let edge = |point: usize| on_edge.get(point).copied().unwrap_or(false);
-        let end = if a.pinned != b.pinned {
-            if a.pinned {
-                spring.b
-            } else {
-                spring.a
-            }
-        } else if edge(near) && !edge(far) {
-            far
-        } else {
-            near
-        };
-        (end, lerp(a.home, b.home, spring.cut_at))
-    }
-
-    /// Moves point `index`'s rest place onto the line through two of a
-    /// cut's crossings, unless it is pinned, already on a cut, or too far
-    /// off; its cut springs then cross the cut at the point itself.
-    fn snap_to_cut(&mut self, index: usize, from: Vec2, to: Vec2) {
-        let point = self.points[index];
-        if point.pinned || point.on_cut {
-            return;
-        }
-        let line = subtract(to, from);
-        let length_sq = dot(line, line);
-        let target = if length_sq > EPSILON {
-            add(
-                from,
-                scale(line, dot(subtract(point.home, from), line) / length_sq),
-            )
-        } else {
-            from
-        };
-        if distance(target, point.home) > self.materials.point_spacing * MAX_SNAP {
-            return;
-        }
-        self.move_point_with_rest(index, subtract(target, point.home));
-        self.points[index].on_cut = true;
-        // The blade's path now runs through the point, so a cut spring
-        // ending there is crossed there, whichever end the blade was nearer.
-        for spring in &mut self.springs {
-            if !spring.cut {
-                continue;
-            }
-            if spring.a == index {
-                spring.cut_at = 0.0;
-            } else if spring.b == index {
-                spring.cut_at = 1.0;
-            }
-        }
     }
 
     /// Moves point `index` and its rest place by `offset`, keeping its
@@ -314,27 +814,18 @@ impl World {
         point.previous = add(point.previous, offset);
     }
 
-    /// Splits point `point` along the parted edges through it: its triangles
-    /// fall into groups that still share an unparted edge through it, and
-    /// every group but the one with the most area gets its own copy of the
-    /// point (see `split_fan`).
-    fn split_point(&mut self, point: usize) -> Option<Vec<(usize, Vec2)>> {
-        let fan = self.fan_of(point)?;
-        let springs = &self.springs;
-        let (group, groups) = self.group_fan(point, &fan, |first, _, other| {
-            triangle_edge(first, point, other).is_some_and(|edge| !springs[edge].parted)
-        });
-        self.split_fan(point, fan, group, groups)
-    }
-
     /// Splits point `point` across the line through its rest place normal to
     /// `normal`: each of its triangles goes to the side its rest centroid is
     /// on, and the triangles of each side that share edges through the point
     /// stay together. A fiber torn by stretching opens this way, across
     /// itself, as Müller et al.'s position-based tearing and Rapier's
-    /// `crack_across_edge` open a crack (see `split_fan`).
+    /// `crack_across_edge` open a crack (see `split_fan`). A point among the
+    /// pieces of a knife's cut does not split this way.
     fn split_point_across(&mut self, point: usize, normal: Vec2) -> Option<Vec<(usize, Vec2)>> {
         let fan = self.fan_of(point)?;
+        if fan.iter().any(|&index| self.triangles[index].cut.is_some()) {
+            return None;
+        }
         let home = self.points[point].home;
         let side = |triangle: &Triangle| {
             let [a, b, c] = corners(triangle);
@@ -353,10 +844,10 @@ impl World {
     }
 
     /// The triangles of point `point`'s sheet around it, unless it is pinned
-    /// or has fewer than two.
+    /// or a ghost, or has fewer than two.
     fn fan_of(&self, point: usize) -> Option<Vec<usize>> {
         let source = self.points[point];
-        if source.pinned {
+        if source.pinned || source.is_ghost() {
             return None;
         }
         let fan: Vec<usize> = (0..self.triangles.len())
@@ -579,7 +1070,7 @@ impl World {
         }
 
         // Skin stays tied to the muscle on its own side, and both sides of
-        // cut muscle stay tied to the bone.
+        // torn muscle stay tied to the bone.
         for index in 0..self.attachments.len() {
             let attachment = self.attachments[index];
             let (own, other) = match source.layer {
@@ -719,19 +1210,58 @@ fn corners(triangle: &Triangle) -> [usize; 3] {
     [triangle.a, triangle.b, triangle.c]
 }
 
-/// The spring along the edge of `triangle` between corners `a` and `b`.
-fn triangle_edge(triangle: &Triangle, a: usize, b: usize) -> Option<usize> {
-    let pair = |x: usize, y: usize| (x == a && y == b) || (x == b && y == a);
-    let edge = if pair(triangle.a, triangle.b) {
-        triangle.edge_ab
-    } else if pair(triangle.b, triangle.c) {
-        triangle.edge_bc
-    } else if pair(triangle.c, triangle.a) {
-        triangle.edge_ca
-    } else {
-        return None;
+fn edge_slots(triangle: &Triangle) -> [usize; 3] {
+    [triangle.edge_ab, triangle.edge_bc, triangle.edge_ca]
+}
+
+fn set_edge_slot(triangle: &mut Triangle, side: usize, edge: usize) {
+    match side {
+        0 => triangle.edge_ab = edge,
+        1 => triangle.edge_bc = edge,
+        _ => triangle.edge_ca = edge,
+    }
+}
+
+/// Whether side `side` of a triangle (0 from `a` to `b`, 1 from `b` to `c`,
+/// 2 from `c` to `a`) ends at corner `corner`.
+fn side_has(side: usize, corner: usize) -> bool {
+    corner == side || corner == (side + 1) % 3
+}
+
+/// The weights on a triangle's corners of the place `at` of the way along
+/// its side `side`.
+fn along_side(side: usize, at: f64) -> [f64; 3] {
+    let mut weights = [0.0; 3];
+    weights[side] = 1.0 - at;
+    weights[(side + 1) % 3] = at;
+    weights
+}
+
+/// Whether `triangle` holds the flesh at its corner `node`.
+fn holds_node(triangle: &Triangle, node: usize) -> bool {
+    corners(triangle)
+        .iter()
+        .position(|&corner| corner == node)
+        .is_some_and(|corner| triangle.cut.map_or(true, |cut| cut.holds_corner(corner)))
+}
+
+/// The stretch of `triangle`'s side from `from` to `to` that its flesh
+/// covers, as shares of the way from `from`.
+fn held_between(triangle: &Triangle, from: usize, to: usize) -> Option<(f64, f64)> {
+    let corners = corners(triangle);
+    let side = (0..3).find(|&side| {
+        let (p, q) = (corners[side], corners[(side + 1) % 3]);
+        (p == from && q == to) || (p == to && q == from)
+    })?;
+    let (start, end) = match triangle.cut {
+        Some(cut) => cut.holds_along(side)?,
+        None => (0.0, 1.0),
     };
-    (edge != MISSING_SPRING).then_some(edge)
+    if corners[side] == from {
+        Some((start, end))
+    } else {
+        Some((1.0 - end, 1.0 - start))
+    }
 }
 
 fn replace_corner(triangle: &mut Triangle, from: usize, to: usize) {
@@ -884,6 +1414,14 @@ mod tests {
                 [t.a, t.b, t.c],
                 [t.edge_ab, t.edge_bc, t.edge_ca],
             );
+            if let Some(cut) = t.cut {
+                let partner = world.triangles[cut.partner];
+                assert_eq!(
+                    partner.cut.map(|other| other.partner),
+                    Some(index),
+                    "triangle {index}'s partner"
+                );
+            }
         }
         for (index, area) in world.areas.iter().enumerate() {
             check(
@@ -902,41 +1440,27 @@ mod tests {
         }
     }
 
-    #[test]
-    fn knife_just_inside_the_edge_cuts_off_a_strip() {
-        let mut world = skin_patch(12, 10);
-        // A free edge, held only by the rest of the patch.
-        let top_row: Vec<usize> = (0..12).collect();
-        for &point in &top_row {
-            world.points[point].pinned = false;
-        }
-        // The blade runs three pixels inside the patch's top edge, nearer the
-        // edge's own points than the next row in.
-        slash(&mut world, 83.0);
-        assert!(
-            world.stats.cut_openings > 0,
-            "a cut just inside the edge should open along the first row inside it"
-        );
-        assert_mesh_consistent(&world);
-        // The edge itself is not what opened: only where the knife came in
-        // and went out through the patch's sides does the cut reach it.
-        let edge_split = top_row
+    /// How far each opened cut's lips lie from the line `y` in the rest
+    /// shape, taking the middle between the two lips.
+    fn farthest_off(world: &World, y: f64) -> f64 {
+        world
+            .opened_cuts()
             .iter()
-            .filter(|&&point| world.points[point].on_cut)
-            .count();
-        assert!(
-            edge_split < top_row.len() / 2,
-            "the cut should run inside the edge, not along it: {edge_split} edge points on it"
-        );
+            .flat_map(|cut| {
+                let [first, second] = cut.rest_lips;
+                [midpoint(first.0, second.0).y, midpoint(first.1, second.1).y]
+            })
+            .map(|lip_y| (lip_y - y).abs())
+            .fold(0.0, f64::max)
     }
 
     #[test]
-    fn knife_cut_opens_a_straight_gap_and_keeps_the_skin_whole() {
+    fn knife_cut_opens_along_the_blades_path_and_keeps_the_skin_whole() {
         let mut world = skin_patch(12, 10);
         let points_before = world.points.len();
         let mass_before: f64 = world.points.iter().map(|point| point.mass).sum();
-        // The blade runs nearer the fifth row than the sixth, so the cut
-        // opens along the fifth row, moved onto the blade's path.
+        // The blade runs between rows, nearer the fifth than the sixth: the
+        // cut runs where it went, not along either row.
         let cut_y = 124.0;
         slash(&mut world, cut_y);
 
@@ -956,33 +1480,99 @@ mod tests {
         );
         assert_mesh_consistent(&world);
 
-        let lips: Vec<(usize, usize)> = world
-            .springs
+        let cuts = world.opened_cuts();
+        assert!(!cuts.is_empty(), "the cut should have lips");
+        let off = farthest_off(&world, cut_y);
+        assert!(
+            off < PATCH_SPACING * 0.15,
+            "the cut should run along the blade's path, not {off:.2} px off it"
+        );
+        let widest = cuts
             .iter()
-            .enumerate()
-            .filter(|(index, spring)| spring.twin != MISSING_SPRING && *index < spring.twin)
-            .map(|(index, spring)| (index, spring.twin))
-            .collect();
-        assert!(!lips.is_empty(), "the cut should have lips");
-        let mut widest: f64 = 0.0;
-        for &(lip, twin) in &lips {
-            let (lip, twin) = (world.springs[lip], world.springs[twin]);
-            for (here, there) in [(lip.a, twin.a), (lip.b, twin.b)] {
-                let (here, there) = (world.points[here], world.points[there]);
-                widest = widest.max(distance(here.position, there.position));
-                // Both lips' rest places straddle the blade's path.
-                let middle = midpoint(here.home, there.home);
-                assert!(
-                    (middle.y - cut_y).abs() < 2.5,
-                    "the cut should run along the blade's path, not {:.1} px off it",
-                    middle.y - cut_y
-                );
-            }
-        }
+            .flat_map(|cut| {
+                let [first, second] = cut.lips;
+                [distance(first.0, second.0), distance(first.1, second.1)]
+            })
+            .fold(0.0, f64::max);
         let spacing = world.materials.point_spacing;
         assert!(
             widest > world.materials.skin_cut_retraction * spacing,
             "the cut should gape once the knife has gone: widest {widest:.2} px"
         );
+    }
+
+    #[test]
+    fn knife_just_inside_the_edge_opens_there() {
+        let mut world = skin_patch(12, 10);
+        // A free edge, held only by the rest of the patch.
+        for point in 0..12 {
+            world.points[point].pinned = false;
+        }
+        // The blade runs three pixels inside the patch's top edge.
+        let cut_y = 83.0;
+        slash(&mut world, cut_y);
+        assert!(
+            world.stats.cut_openings > 0,
+            "a cut just inside the edge should open"
+        );
+        assert_mesh_consistent(&world);
+        let off = farthest_off(&world, cut_y);
+        assert!(
+            off < PATCH_SPACING * 0.15,
+            "the cut should open where the blade went, not {off:.2} px off it"
+        );
+    }
+
+    #[test]
+    fn ghosts_hold_no_flesh_and_nothing_is_tied_to_them() {
+        let mut world = skin_patch(12, 10);
+        slash(&mut world, 124.0);
+        let ghosts: Vec<usize> = (0..world.points.len())
+            .filter(|&index| world.points[index].is_ghost())
+            .collect();
+        assert!(!ghosts.is_empty(), "the cut should make ghosts");
+        let flesh = world.flesh_points();
+        for &ghost in &ghosts {
+            assert!(!flesh[ghost], "ghost {ghost} should hold no flesh");
+            assert!(
+                world.points[ghost].mass < world.points[world.points[ghost].ghost_of].mass,
+                "ghost {ghost} should weigh less than its point"
+            );
+            assert!(
+                world
+                    .attachments
+                    .iter()
+                    .all(|a| a.skin_point != ghost && a.muscle_point != ghost),
+                "nothing should be tied to ghost {ghost}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_piece_holds_only_its_side_of_the_cut() {
+        let mut triangle = Triangle::default();
+        let cut = TriangleCut {
+            sides: [0, 2],
+            at: [0.5, 0.5],
+            holds_shared_corner: true,
+            partner: 1,
+        };
+        triangle.cut = Some(cut);
+        // Corner `a` is shared by sides 0 and 2: this piece is the corner's
+        // triangle, half the triangle's sides across.
+        assert_eq!(triangle.piece().corners().len(), 3);
+        assert!(triangle.holds([0.9, 0.05, 0.05]));
+        assert!(!triangle.holds([0.1, 0.45, 0.45]));
+        let (share, _) = triangle.piece().share_and_centroid();
+        assert!((share - 0.25).abs() < 1.0e-12);
+        triangle.cut = Some(TriangleCut {
+            holds_shared_corner: false,
+            ..cut
+        });
+        assert_eq!(triangle.piece().corners().len(), 4);
+        assert!(!triangle.holds([0.9, 0.05, 0.05]));
+        assert!(triangle.holds([0.1, 0.45, 0.45]));
+        let (share, _) = triangle.piece().share_and_centroid();
+        assert!((share - 0.75).abs() < 1.0e-12);
     }
 }
