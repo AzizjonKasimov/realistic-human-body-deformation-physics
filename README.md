@@ -4,6 +4,8 @@ A no-engine 2D physics sandbox rewritten in Rust. The simulation is kept separat
 
 **[Play it in your browser](https://azizjonkasimov.github.io/realistic-human-body-deformation-physics/)**: no install, and the simulation runs entirely on your own device.
 
+**[How it was made](https://azizjonkasimov.github.io/work/body-physics/)**: the story on the author's site, of building it with AI coding agents and checking its injuries against published research.
+
 See [docs/VISION.md](docs/VISION.md) for the original project description and agreed direction.
 See [docs/DESTRUCTION_ARCHITECTURE.md](docs/DESTRUCTION_ARCHITECTURE.md) for the research-backed simulation architecture the Rust prototype is moving toward.
 
@@ -144,6 +146,7 @@ Open <http://localhost:8080>, or <http://localhost:8080/?stats> to show the fram
 - `R` resets the body.
 - `Space` pauses or resumes.
 - `M`, or the speaker button, turns the sound off and on.
+- `I`, or the about button, tells what the simulation is and who made it, with links to how it was made, the video, and the source code. In the browser it opens the start screen again as an about card over the paused simulation; the button on the card, `Escape`, or a click beside the card goes back, and the simulation runs again unless it was paused before. The desktop app opens the write-up in your browser instead.
 - The control chips along the bottom are also buttons: click or tap them for the same actions.
 - On touch screens, drag a finger to strike. The chips grow to finger size after the first touch. A finger put down somewhere new takes the tool up there rather than flinging it across the screen, and a tool taken up on the body passes through it until clear.
 
@@ -317,10 +320,10 @@ The visual diagnostic exits nonzero if the captures no longer include expected w
 
 - `Cargo.toml` defines the Rust library, app, diagnostics, strike scenario, and contact sheet binaries.
 - `src/simulation.rs` contains the physics data model, integration, constraints, tearing, bone fracture, major vessels, wounds, and fluid particles; `src/simulation/body.rs` generates the layered body; `src/simulation/tools.rs` holds the tools: their shapes, the hand that drives them, and their contact with tissue and bone; `src/simulation/cuts.rs` opens the cuts a blade makes by splitting the tissue's points along them; `src/simulation/blood.rs` runs blood down the skin; `src/simulation/outline.rs` keeps body parts from passing through each other; `src/simulation/grid.rs` is the spatial grid the bone fragment contacts and the outline contact search use (rebuilt with a counting sort into reused arrays, and searched in a fixed order, since the contact passes resolve contacts one after another); `src/simulation/phases.rs` times each phase of a step for `strike_scenarios --phases`.
-- `src/bin/realistic_physics/main.rs` owns the `macroquad` app shell, input, timing, and rendering. It also runs in the browser, so the app and simulation must avoid file I/O, threads, and `std::time`, none of which work on `wasm32-unknown-unknown`. `src/bin/realistic_physics/capture.rs` is the native-only screenshot mode, and `src/bin/realistic_physics/selftest.rs` the self-test mode, which runs in both builds (the page hands it a clock and takes its report through a small gl.js plugin).
+- `src/bin/realistic_physics/main.rs` owns the `macroquad` app shell, input, timing, and rendering. It also runs in the browser, so the app and simulation must avoid file I/O, threads, and `std::time`, none of which work on `wasm32-unknown-unknown`. `src/bin/realistic_physics/capture.rs` is the native-only screenshot mode, and `src/bin/realistic_physics/selftest.rs` the self-test mode, which runs in both builds (the page hands it a clock and takes its report through a small gl.js plugin). `src/bin/realistic_physics/about.rs` shows the about card through the same plugin, or natively opens the write-up in the default browser.
 - `src/scenarios.rs` holds the scripted strikes and gestures and the tuned scenarios with their injury and steadiness bands, shared by the strike runner, the visual damage diagnostic, the capture mode, and the self-test, which also ships in the browser build.
 - `src/sound.rs` hears what each simulation step sounded like and picks the clip and volume for each sound; `src/sound/synth.rs` synthesizes the clips and `src/sound/mixdown.rs` mixes a run offline the way the app plays it. `src/bin/realistic_physics/audio.rs` plays the sound in the app, and `tests/sound_tests.rs` checks it. `vendor/quad-snd` is the patched sound backend.
-- `web/index.html` is the browser page: start screen with a content warning, loader, error messages, and the `?stats` frame-time overlay (also exposed as `window.__perf` for automated checks).
+- `web/index.html` is the browser page: start screen with a content warning and an About section with links (the same card opens again as the about card), loader, error messages, and the `?stats` frame-time overlay (also exposed as `window.__perf` for automated checks).
 - `tools/build_web.ps1` builds the browser version into `target\web`; `tools/serve_web.ps1` serves it locally with the `application/wasm` content type browsers require.
 - `tools/bench.ps1` times the simulation against a commit (see [Measure Speed](#measure-speed)).
 - `.cargo/config.toml` lets the wasm linker leave miniquad's WebGL functions as imports for `gl.js` to provide; recent Rust versions no longer do that by default.

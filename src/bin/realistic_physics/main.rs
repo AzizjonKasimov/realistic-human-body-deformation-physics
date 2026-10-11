@@ -1,6 +1,7 @@
 use macroquad::prelude::*;
 use realistic_physics as rp;
 
+mod about;
 mod audio;
 #[cfg(not(target_arch = "wasm32"))]
 mod capture;
@@ -23,9 +24,11 @@ enum ControlAction {
     TogglePause,
     Reset,
     ToggleMute,
+    /// What this is, who made it, and links to read more (`about`).
+    About,
 }
 
-const KEY_CONTROLS: [(KeyCode, ControlAction); 7] = [
+const KEY_CONTROLS: [(KeyCode, ControlAction); 8] = [
     (KeyCode::H, ControlAction::Tool(rp::ToolMode::Heavy)),
     (KeyCode::B, ControlAction::Tool(rp::ToolMode::Blunt)),
     (KeyCode::S, ControlAction::Tool(rp::ToolMode::Sharp)),
@@ -33,6 +36,7 @@ const KEY_CONTROLS: [(KeyCode, ControlAction); 7] = [
     (KeyCode::Space, ControlAction::TogglePause),
     (KeyCode::R, ControlAction::Reset),
     (KeyCode::M, ControlAction::ToggleMute),
+    (KeyCode::I, ControlAction::About),
 ];
 
 const FLOOR_HEIGHT: f32 = 38.0;
@@ -79,6 +83,12 @@ struct AppState {
     seen_fluid: i32,
     /// Draw only the scene, without the HUD, control buttons, and pointer ring.
     hide_ui: bool,
+    /// The about card was asked for. It opens once no button is held: in the
+    /// browser it covers the app, which would then miss the button's release.
+    about_requested: bool,
+    /// While the browser's about card covers the app: whether the simulation
+    /// ran before it opened, so it runs again once the card closes.
+    about_open: Option<bool>,
 }
 
 /// A skin spring on the body's outline, with the third corner of its triangle
@@ -133,6 +143,8 @@ impl AppState {
             tool_blood: 0.0,
             seen_fluid: 0,
             hide_ui: false,
+            about_requested: false,
+            about_open: None,
         };
         app.rebuild_body(width as f32, height as f32);
         app
@@ -335,7 +347,27 @@ fn handle_input(app: &mut AppState) -> bool {
             used_control = true;
         }
     }
+    update_about(app, mouse_down);
     used_control
+}
+
+/// Opens the about card once it was asked for and no button is held, pausing
+/// the simulation while the card covers the app, and resumes it when the card
+/// closes, unless it was paused before.
+fn update_about(app: &mut AppState, mouse_down: bool) {
+    if app.about_requested && !mouse_down {
+        app.about_requested = false;
+        if about::show() {
+            app.about_open = Some(app.running);
+            app.running = false;
+        }
+    }
+    if let Some(was_running) = app.about_open {
+        if !about::is_open() {
+            app.about_open = None;
+            app.running = was_running;
+        }
+    }
 }
 
 fn apply_control(app: &mut AppState, action: ControlAction) {
@@ -350,6 +382,7 @@ fn apply_control(app: &mut AppState, action: ControlAction) {
         ControlAction::TogglePause => app.running = !app.running,
         ControlAction::Reset => app.rebuild_body(screen_width(), screen_height()),
         ControlAction::ToggleMute => app.muted = !app.muted,
+        ControlAction::About => app.about_requested = true,
     }
 }
 
@@ -1973,7 +2006,7 @@ impl ControlLayout {
     }
 }
 
-fn control_hints(app: &AppState, palette: &RenderPalette) -> [ControlHint; 8] {
+fn control_hints(app: &AppState, palette: &RenderPalette) -> [ControlHint; 9] {
     [
         ControlHint {
             key: "DRAG",
@@ -2030,6 +2063,13 @@ fn control_hints(app: &AppState, palette: &RenderPalette) -> [ControlHint; 8] {
             accent: rgba(211, 93, 70, 230),
             active: app.muted,
             action: Some(ControlAction::ToggleMute),
+        },
+        ControlHint {
+            key: "I",
+            label: HintLabel::Text("about"),
+            accent: rgba(96, 156, 220, 230),
+            active: app.about_open.is_some(),
+            action: Some(ControlAction::About),
         },
     ]
 }

@@ -4,10 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Realistic Physics</title>
-<meta name="description" content="A 2D body-destruction sandbox where skin, muscle and bone stretch, tear, fracture and bleed through real simulation. Runs in your browser.">
+<meta name="description" content="A 2D simulation of realistic injuries: skin, muscle and bone stretch, tear, break and bleed through real physics, checked against published injury research. Runs in your browser.">
 <meta property="og:type" content="website">
-<meta property="og:title" content="Realistic Physics: body destruction sandbox">
-<meta property="og:description" content="Strike a layered soft-body human with blunt, sharp or heavy tools. Skin tears, bones fracture and blood flows from real simulation, right in your browser.">
+<meta property="og:title" content="Realistic Physics: a realistic injury simulation">
+<meta property="og:description" content="Strike a layered human figure with a sledgehammer, a bat or a knife. Skin, muscle and bone respond through real physics, and the injuries are checked against published research. Runs in your browser.">
 <meta name="theme-color" content="#0f0f11">
 <link rel="icon" href="data:,">
 <style>
@@ -51,6 +51,8 @@
     box-sizing: border-box;
     background: radial-gradient(ellipse at center, #1d1a1b 0%, var(--bg) 70%);
   }
+  /* Opened again as the about card, it lets the paused simulation show through. */
+  #gate.paused { background: rgba(15, 15, 17, 0.8); }
   #gate[hidden], #status[hidden], #perf[hidden] { display: none; }
   .card {
     width: 100%;
@@ -92,8 +94,30 @@
   }
   .controls dt { color: var(--text); font-weight: 600; white-space: nowrap; }
   .controls dd { margin: 0; }
+  .about {
+    margin: 20px 0 0;
+    padding: 16px 0 0;
+    border-top: 1px solid rgba(118, 97, 83, 0.5);
+  }
+  .about h2 {
+    margin: 0 0 6px;
+    font-size: 13px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .about p { margin: 0 0 8px; }
+  .about a { color: var(--accent); }
+  .links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 20px;
+    margin: 12px 0 0;
+    padding: 0;
+    list-style: none;
+    font-weight: 600;
+  }
   .footer { margin: 18px 0 0; font-size: 13px; color: var(--muted); }
-  .footer a { color: var(--accent); }
   #status {
     position: fixed;
     left: 50%;
@@ -120,10 +144,10 @@
 <body>
 <canvas id="glcanvas" tabindex="1"></canvas>
 
-<div id="gate">
+<div id="gate" role="dialog" aria-modal="true" aria-labelledby="title">
   <div class="card">
-    <h1>Realistic Physics</h1>
-    <p class="tagline">A 2D body-destruction sandbox where skin, muscle and bone stretch, tear, fracture and bleed through real simulation, not canned animations.</p>
+    <h1 id="title">Realistic Physics</h1>
+    <p class="tagline">A 2D simulation of realistic injuries: skin, muscle and bone stretch, tear, break and bleed through real physics, not canned animations.</p>
     <p class="warning"><strong>Content warning:</strong> graphic simulated injury, including blood, torn tissue and broken bones.</p>
     <button id="start" type="button">Start simulation</button>
     <dl class="controls">
@@ -131,11 +155,20 @@
       <dt>H / B / S</dt><dd>Sledgehammer, bat or knife</dd>
       <dt>Space / R</dt><dd>Pause / reset the body</dd>
       <dt>M</dt><dd>Sound on or off</dd>
+      <dt>I</dt><dd>Show this page again</dd>
       <dt>Touch</dt><dd>Drag a finger to strike; tap the buttons along the bottom</dd>
     </dl>
-    <p class="footer">Runs entirely on your device; nothing is uploaded.
-      <a href="https://github.com/AzizjonKasimov/realistic-human-body-deformation-physics" target="_blank" rel="noopener">Source code</a> ·
-      <a href="https://www.youtube.com/watch?v=hCXVPSU6etE" target="_blank" rel="noopener">Demo video</a></p>
+    <section class="about" aria-labelledby="about-title">
+      <h2 id="about-title">About</h2>
+      <p>The injuries are checked against published injury research, so a slow push only bruises and a hard swing can break a bone.</p>
+      <p>Made by <a href="https://azizjonkasimov.github.io/" target="_blank" rel="noopener">Azizjon Kasimov</a> with AI coding agents.</p>
+      <ul class="links">
+        <li><a href="https://azizjonkasimov.github.io/work/body-physics/" target="_blank" rel="noopener">How it was made</a></li>
+        <li><a href="https://www.youtube.com/watch?v=YSuN8D9t4ZI" target="_blank" rel="noopener">Video</a></li>
+        <li><a href="https://github.com/AzizjonKasimov/realistic-human-body-deformation-physics" target="_blank" rel="noopener">Source code</a></li>
+      </ul>
+    </section>
+    <p class="footer">Runs entirely on your device; nothing is uploaded.</p>
   </div>
 </div>
 
@@ -156,6 +189,10 @@
     const status = document.getElementById("status");
     const glCanvas = document.getElementById("glcanvas");
     let started = false;
+    // Once the simulation runs, the start screen doubles as the about card
+    // (the app's about button or the I key). The app pauses while it is open
+    // and asks through `rp_about_open` whether it has closed.
+    let aboutOpen = false;
 
     // gl.js focuses the canvas as soon as it loads, which also blocks `autofocus`.
     startButton.focus();
@@ -218,10 +255,20 @@
             !report.passed
           );
         };
+        importObject.env.rp_show_about = function () {
+          showAbout();
+        };
+        importObject.env.rp_about_open = function () {
+          return aboutOpen ? 1 : 0;
+        };
       }
     });
 
     startButton.addEventListener("click", function () {
+      if (aboutOpen) {
+        closeAbout();
+        return;
+      }
       if (started) {
         return;
       }
@@ -231,6 +278,7 @@
       }
       started = true;
       gate.hidden = true;
+      startButton.textContent = "Back to the simulation";
       showStatus("Loading simulation…");
       glCanvas.focus();
       load("realistic_physics.wasm");
@@ -250,6 +298,38 @@
     if (selftest) {
       startButton.click();
     }
+
+    // On a short screen the About section starts below the fold, so it is
+    // scrolled up into view, as little as needed to keep the button in view.
+    function showAbout() {
+      aboutOpen = true;
+      gate.classList.add("paused");
+      gate.hidden = false;
+      gate.scrollTop = 0;
+      startButton.focus({ preventScroll: true });
+      document.getElementById("about-title").parentElement.scrollIntoView({ block: "nearest" });
+    }
+
+    // gl.js listens for keys and the mouse on the canvas, so the simulation
+    // gets them again once the canvas has the focus back.
+    function closeAbout() {
+      aboutOpen = false;
+      gate.hidden = true;
+      glCanvas.focus();
+    }
+
+    document.addEventListener("keydown", function (event) {
+      if (aboutOpen && event.key === "Escape") {
+        closeAbout();
+      }
+    });
+
+    // A click beside the card closes it too.
+    gate.addEventListener("click", function (event) {
+      if (aboutOpen && event.target === gate) {
+        closeAbout();
+      }
+    });
 
     function installPerfOverlay() {
       const perf = document.getElementById("perf");
