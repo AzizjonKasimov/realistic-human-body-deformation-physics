@@ -18,7 +18,8 @@
 //! --every N                  also save the screen every N steps, as OUT-STEP.png,
 //!                            to see how things move
 //! --no-ui                    leave out the HUD, control buttons, and pointer ring
-//! --label TEXT               write TEXT in the bottom right corner
+//! --no-tool                  leave out the tool, to see what lies under it
+//! --label TEXT              write TEXT in the bottom right corner
 //! --no-label                 write no label or step number, for frames that
 //!                            become a video (`--every 1` saves every step)
 //! --body-frame X,Y,H         put the top of the head at X,Y and make the body
@@ -53,6 +54,7 @@ pub struct CaptureRequest {
     frames: Option<i32>,
     every: Option<i32>,
     hide_ui: bool,
+    hide_tool: bool,
     label: Option<String>,
     show_label: bool,
     body_frame: Option<rp::BodyFrame>,
@@ -88,6 +90,7 @@ pub fn request() -> Option<CaptureRequest> {
         frames: None,
         every: None,
         hide_ui: false,
+        hide_tool: false,
         label: None,
         show_label: true,
         body_frame: None,
@@ -129,6 +132,7 @@ pub fn request() -> Option<CaptureRequest> {
             "--frames" => request.frames = Some(steps(&value("--frames"))),
             "--every" => request.every = Some(steps(&value("--every")).max(1)),
             "--no-ui" => request.hide_ui = true,
+            "--no-tool" => request.hide_tool = true,
             "--label" => request.label = Some(value("--label")),
             "--no-label" => request.show_label = false,
             "--body-frame" => {
@@ -157,6 +161,7 @@ pub async fn run(request: CaptureRequest) {
         app.place_body(frame, width as f32, height as f32);
     }
     app.hide_ui = request.hide_ui;
+    app.hide_tool = request.hide_tool;
     let dt = app.world.materials().fixed_dt;
     let frames = request
         .frames

@@ -28,6 +28,10 @@ path = "src/bin/visual_damage_diagnostics.rs"
 name = "contact_sheet"
 path = "src/bin/contact_sheet.rs"
 
+[[bin]]
+name = "see_through"
+path = "src/bin/see_through.rs"
+
 [dependencies]
 # Trigonometry that comes out the same natively and in the browser; see
 # "Check Browser Parity" in README.md.

@@ -84,6 +84,8 @@ struct AppState {
     seen_fluid: i32,
     /// Draw only the scene, without the HUD, control buttons, and pointer ring.
     hide_ui: bool,
+    /// Leave the tool out of the picture, to see what lies under it.
+    hide_tool: bool,
     /// The about card was asked for. It opens once no button is held: in the
     /// browser it covers the app, which would then miss the button's release.
     about_requested: bool,
@@ -144,6 +146,7 @@ impl AppState {
             tool_blood: 0.0,
             seen_fluid: 0,
             hide_ui: false,
+            hide_tool: false,
             about_requested: false,
             about_open: None,
         };
@@ -224,6 +227,10 @@ struct RenderPalette {
     muscle_hot: Color,
     muscle_contusion: Color,
     muscle_shadow: Color,
+    /// Flesh crushed or torn away from the sheets, and where it is most
+    /// pulped.
+    crushed_flesh: Color,
+    crushed_flesh_deep: Color,
     bone: Color,
     bone_fractured: Color,
     bone_shadow: Color,
@@ -485,6 +492,8 @@ fn render_palette() -> RenderPalette {
         muscle_hot: rgba(190, 35, 47, 225),
         muscle_contusion: rgba(49, 13, 61, 215),
         muscle_shadow: rgba(47, 8, 13, 150),
+        crushed_flesh: rgba(116, 20, 28, 248),
+        crushed_flesh_deep: rgba(66, 7, 13, 248),
         bone: rgba(222, 211, 181, 240),
         bone_fractured: rgba(255, 245, 218, 255),
         bone_shadow: rgba(53, 43, 35, 160),
@@ -547,17 +556,17 @@ fn draw_body_layers(ctx: &RenderContext) {
 
     if ctx.anatomy {
         draw_muscle_layer(ctx);
-        draw_muscle_voids(ctx);
+        draw_crushed_flesh(ctx);
         draw_cut_insides(ctx);
         draw_major_vessels(ctx);
         draw_skin_layer(ctx);
         draw_bone_attachments(ctx);
         draw_bones(ctx, BonePass::Anatomy);
     } else {
-        // Inside out: a cavity where muscle is torn away, the bones, the
-        // muscle, then the skin. Bone shows only through openings in the
-        // flesh, or where a broken end sticks out of the body.
-        draw_muscle_voids(ctx);
+        // Inside out: crushed flesh where the sheets are torn away, the
+        // bones, the muscle, then the skin. Bone shows only through openings
+        // in the flesh, or where a broken end sticks out of the body.
+        draw_crushed_flesh(ctx);
         draw_cut_insides(ctx);
         draw_bones(ctx, BonePass::Buried);
         draw_muscle_layer(ctx);
@@ -735,22 +744,67 @@ fn draw_cut_lips(ctx: &RenderContext, layer: rp::TissueLayer) {
     }
 }
 
-/// Torn-through muscle as a dark cavity. It is drawn beneath the skin, so it
-/// shows only where the skin over it is open.
-fn draw_muscle_voids(ctx: &RenderContext) {
+/// Flesh torn away from the sheets, crushed or torn through, as the pulped,
+/// bloodied flesh it is. The sheets are the body seen from the front, and a
+/// real body keeps its depth under a wound: a crushed arm shows pulped
+/// muscle and broken bone, never a hole through to what lies behind it. It
+/// lies beneath the bones and the living muscle and skin, so it shows only
+/// where they have gone, and it fades where tissue is pulled far apart, as
+/// across a flap torn loose, where no flesh is left between.
+fn draw_crushed_flesh(ctx: &RenderContext) {
     let world = &ctx.app.world;
+    let points = world.points();
+    let springs = world.springs();
+    let mut mesh = Mesh {
+        vertices: Vec::new(),
+        indices: Vec::new(),
+        texture: None,
+    };
     for triangle in world.triangles() {
-        if triangle.layer != rp::TissueLayer::Muscle || world.triangle_alive(triangle) {
+        if world.triangle_alive(triangle) || mesh.vertices.len() + 3 > u16::MAX as usize {
             continue;
         }
-        let (load, exposure) = triangle_point_metrics(world, triangle);
-        let depth = (exposure * 0.55 + triangle.damage * 0.45 + load / 2200.0).clamp(0.0, 1.0);
-        fill_triangle(
-            world,
-            triangle,
-            with_alpha(ctx.palette.wound_shadow, 0.45 + depth as f32 * 0.30),
-        );
+        let corners = [triangle.a, triangle.b, triangle.c];
+        let edges = [triangle.edge_ab, triangle.edge_bc, triangle.edge_ca];
+        let mut stretch: f64 = 0.0;
+        for (side, &edge) in edges.iter().enumerate() {
+            let (a, b) = (corners[side], corners[(side + 1) % 3]);
+            let rest = match springs.get(edge) {
+                Some(spring) => spring.rest,
+                None => length(sub(points[b].home, points[a].home)),
+            };
+            let now = length(sub(points[b].position, points[a].position));
+            stretch = stretch.max(now / rest.max(1.0));
+        }
+        let opacity = 1.0 - smoothstep(1.8, 3.0, stretch as f32);
+        if opacity <= 0.02 {
+            continue;
+        }
+        let base = mesh.vertices.len() as u16;
+        for index in corners {
+            let point = &points[index];
+            // Pulp is uneven, darker where the flesh is most crushed; each
+            // point keeps its own shade, so the mottling holds still.
+            let pulped = (point.exposure * 0.3 + point.contusion * 0.3).clamp(0.0, 0.6) as f32;
+            let mottle = ((index as u32).wrapping_mul(2_654_435_761) >> 7) % 100;
+            let mut color = mix(
+                ctx.palette.crushed_flesh,
+                ctx.palette.crushed_flesh_deep,
+                (pulped + mottle as f32 * 0.004).min(1.0),
+            );
+            color.a *= opacity;
+            mesh.vertices.push(Vertex::new(
+                point.position.x as f32,
+                point.position.y as f32,
+                0.0,
+                0.0,
+                0.0,
+                color,
+            ));
+        }
+        mesh.indices.extend_from_slice(&[base, base + 1, base + 2]);
     }
+    draw_mesh(&mesh);
 }
 
 fn draw_skin_layer(ctx: &RenderContext) {
@@ -1580,7 +1634,7 @@ fn draw_fluids(ctx: &RenderContext) {
 fn draw_striker(ctx: &RenderContext) {
     let app = ctx.app;
     // The same pose and geometry the simulation collides with.
-    if let Some(pose) = app.world.current_tool_pose() {
+    if let Some(pose) = app.world.current_tool_pose().filter(|_| !app.hide_tool) {
         let geometry = rp::tool_geometry(pose.tool);
         match pose.tool {
             rp::ToolMode::Sharp => draw_knife(ctx, &pose, &geometry),

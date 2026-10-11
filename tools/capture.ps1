@@ -40,6 +40,8 @@ param(
     [int]$Every = 0,
     # Leave out the HUD, control buttons, and pointer ring.
     [switch]$NoUi,
+    # Leave out the tool, to see what lies under it.
+    [switch]$NoTool,
     # Leave out the name and step label, for images to publish.
     [switch]$NoLabel,
     [string]$Out = "",
@@ -82,6 +84,7 @@ foreach ($size in ($Sizes -split "," | ForEach-Object { $_.Trim() } | Where-Obje
     if ($Frames -gt 0) { $arguments += @("--frames", "$Frames") }
     if ($Every -gt 0) { $arguments += @("--every", "$Every") }
     if ($NoUi) { $arguments += "--no-ui" }
+    if ($NoTool) { $arguments += "--no-tool" }
     if ($NoLabel) { $arguments += "--no-label" }
     Invoke-Checked -Label "Capture $Name at $size" -Command { & $Exe @arguments }
     if ($Every -gt 0) {

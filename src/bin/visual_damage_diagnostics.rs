@@ -667,7 +667,8 @@ fn draw_tissue_layers(out: &mut String, world: &rp::World) {
                 0.18 + heat * 0.24,
             );
         } else {
-            write_triangle(out, world, triangle, "#150105", 0.62, "#150105", 0.0);
+            // Crushed or torn-out flesh, drawn as the pulp the app shows.
+            write_triangle(out, world, triangle, "#5c0f17", 0.92, "#5c0f17", 0.0);
         }
     }
     draw_cut_insides(out, world);
