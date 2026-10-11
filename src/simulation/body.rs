@@ -33,9 +33,9 @@ const CROSS_ALIGNMENT: f64 = 0.45;
 
 const SKULL: [Landmark; 2] = [(0.0, 0.030), (0.0, 0.118)];
 const SPINE: [Landmark; 2] = [(0.0, 0.150), (0.0, 0.495)];
-// The girdle and pelvis stop short of the shoulder and hip joints by about the
-// gap a bone joint holds at rest (0.7 point spacings); a joint whose bone ends
-// start together shoves them apart as soon as the body moves.
+// The collarbones and pelvis stop short of the shoulder and hip joints by
+// about the gap a bone joint holds at rest (0.7 point spacings); a joint whose
+// bone ends start together shoves them apart as soon as the body moves.
 const SHOULDER_GIRDLE: [Landmark; 2] = [(-0.103, 0.203), (0.103, 0.203)];
 const PELVIS: [Landmark; 2] = [(-0.072, 0.487), (0.072, 0.487)];
 const LEFT_SHOULDER: Landmark = mirrored(SHOULDER);
@@ -56,10 +56,10 @@ const RIGHT_ANKLE: Landmark = ANKLE;
 const RIGHT_TOES: Landmark = TOES;
 /// (root height, lateral reach, strength scale) for each rib pair.
 const RIBS: [(f64, f64, f64); 4] = [
-    (0.240, 0.062, 0.62),
-    (0.275, 0.072, 0.58),
-    (0.310, 0.070, 0.55),
-    (0.343, 0.058, 0.52),
+    (0.240, 0.062, 0.74),
+    (0.275, 0.072, 0.70),
+    (0.310, 0.070, 0.66),
+    (0.343, 0.058, 0.62),
 ];
 const RIB_DROP: f64 = 0.022;
 /// The aorta lies deep, against the spine and behind the organs, so it takes
@@ -214,6 +214,7 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
     );
 
     add_skeleton(&mut world, frame, materials);
+    cover::measure_bone_covers(&mut world, frame, field);
 
     for &muscle_point in &muscle.points {
         let position = world.points[muscle_point].position;
@@ -293,16 +294,19 @@ fn fiber_guide_landmarks() -> [(Landmark, Landmark); 16] {
     ]
 }
 
+/// How strong a forearm is, against `Materials::bone_fracture_impulse`.
+pub(super) const FOREARM_STRENGTH: f64 = 0.72;
+
 /// How strong each part of the skeleton is, against
 /// `Materials::bone_fracture_impulse`. In fracture tests the collarbone takes
 /// about half the force that breaks a forearm, and the upper arm, shin, and
 /// thigh about 2.1, 2.25, and 2.5 times it (`docs/INJURY_REFERENCE.md`);
 /// parts the research does not cover keep their earlier tuned strength. The
 /// forearm is set 30% stronger than its share, within the spread of the
-/// forearm studies, so a 10 J bat swing rarely breaks it. How hard a tool's
-/// blow bears toward a break is each tool's `break_scale`.
+/// forearm studies, so a 10 J bat swing rarely breaks it. How hard a blow
+/// presses on a bone is in `cover.rs`.
 fn bone_strength(part: BonePart) -> f64 {
-    const FOREARM: f64 = 0.72;
+    const FOREARM: f64 = FOREARM_STRENGTH;
     match part {
         BonePart::Forearm => FOREARM * 1.3,
         BonePart::Collarbone => FOREARM * 0.53,
@@ -347,13 +351,33 @@ fn add_skeleton(world: &mut World, frame: BodyFrame, materials: Materials) {
         BoneKind::Spine,
     );
     world.bones[spine].part = BonePart::Spine;
-    let shoulders = bone(
-        world,
-        SHOULDER_GIRDLE[0],
-        SHOULDER_GIRDLE[1],
-        6.2,
-        BonePart::Collarbone,
-    );
+    // Joints never rest closer than 0.7 point spacings, so a bone hanging from an
+    // elbow, wrist, knee, or ankle starts that far past the joint. Starting it
+    // flush makes the joint shove it away as soon as the body settles and
+    // overshoot into a subluxation while the body is still at rest.
+    let joint_gap = materials.point_spacing * 0.70;
+    // Each collarbone runs from the breastbone, beside the top of the spine,
+    // out to its shoulder, so a broken one leaves the other shoulder be. It
+    // starts a joint's rest gap off the spine's line.
+    let collarbone = |world: &mut World, lateral: Landmark| {
+        let medial = at((0.0, lateral.1));
+        let end = at(lateral);
+        let gap = scale(
+            normalized(subtract(end, medial), Vec2 { x: 1.0, y: 0.0 }),
+            joint_gap,
+        );
+        let index = world.add_bone_segment(
+            add(medial, gap),
+            end,
+            6.2,
+            strength * bone_strength(BonePart::Collarbone),
+            false,
+        );
+        world.bones[index].part = BonePart::Collarbone;
+        index
+    };
+    let left_collarbone = collarbone(world, SHOULDER_GIRDLE[0]);
+    let right_collarbone = collarbone(world, SHOULDER_GIRDLE[1]);
     let pelvis = bone(world, PELVIS[0], PELVIS[1], 6.4, BonePart::Pelvis);
     let spine_t = |v: f64| ((v - SPINE[0].1) / (SPINE[1].1 - SPINE[0].1)).clamp(0.0, 1.0);
 
@@ -372,11 +396,6 @@ fn add_skeleton(world: &mut World, frame: BodyFrame, materials: Materials) {
             ribs.push((rib, root_v));
         }
     }
-    // Joints never rest closer than 0.7 point spacings, so a bone hanging from an
-    // elbow, wrist, knee, or ankle starts that far past the joint. Starting it
-    // flush makes the joint shove it away as soon as the body settles and
-    // overshoot into a subluxation while the body is still at rest.
-    let joint_gap = materials.point_spacing * 0.70;
     let below_joint =
         |world: &mut World, joint: Landmark, tip: Landmark, radius: f64, part: BonePart| {
             let start = at(joint);
@@ -409,14 +428,21 @@ fn add_skeleton(world: &mut World, frame: BodyFrame, materials: Materials) {
     let right_foot = below_joint(world, RIGHT_ANKLE, RIGHT_TOES, 4.0, BonePart::Foot);
 
     world.add_bone_joint(head, 1.0, spine, 0.0, -0.45, 0.45);
-    world.add_bone_joint(
-        spine,
-        spine_t(SHOULDER_GIRDLE[0].1),
-        shoulders,
-        0.5,
-        -0.55,
-        0.55,
-    );
+    // A collarbone lifts about 45 degrees at the breastbone but drops only
+    // about 10.
+    for (collarbone, (min, max)) in [
+        (left_collarbone, (-0.2, 0.55)),
+        (right_collarbone, (-0.55, 0.2)),
+    ] {
+        world.add_bone_joint(
+            spine,
+            spine_t(SHOULDER_GIRDLE[0].1),
+            collarbone,
+            0.0,
+            min,
+            max,
+        );
+    }
     world.add_bone_joint(spine, 1.0, pelvis, 0.5, -0.45, 0.45);
     for (rib, root_v) in ribs {
         world.add_bone_joint(spine, spine_t(root_v), rib, 0.0, -0.40, 0.40);
@@ -424,24 +450,10 @@ fn add_skeleton(world: &mut World, frame: BodyFrame, materials: Materials) {
     let along = |segment: [Landmark; 2], u: f64| {
         ((u - segment[0].0) / (segment[1].0 - segment[0].0)).clamp(0.0, 1.0)
     };
-    world.add_bone_joint(
-        shoulders,
-        along(SHOULDER_GIRDLE, LEFT_SHOULDER.0),
-        left_upper_arm,
-        0.0,
-        -1.25,
-        1.05,
-    );
+    world.add_bone_joint(left_collarbone, 1.0, left_upper_arm, 0.0, -1.25, 1.05);
     world.add_bone_joint(left_upper_arm, 1.0, left_forearm, 0.0, -1.10, 1.10);
     world.add_bone_joint(left_forearm, 1.0, left_hand, 0.0, -0.90, 0.90);
-    world.add_bone_joint(
-        shoulders,
-        along(SHOULDER_GIRDLE, RIGHT_SHOULDER.0),
-        right_upper_arm,
-        0.0,
-        -1.05,
-        1.25,
-    );
+    world.add_bone_joint(right_collarbone, 1.0, right_upper_arm, 0.0, -1.05, 1.25);
     world.add_bone_joint(right_upper_arm, 1.0, right_forearm, 0.0, -1.10, 1.10);
     world.add_bone_joint(right_forearm, 1.0, right_hand, 0.0, -0.90, 0.90);
     world.add_bone_joint(

@@ -5,6 +5,7 @@ mod bending;
 mod blood;
 mod body;
 mod bruises;
+mod cover;
 mod cuts;
 mod grid;
 mod motion;
@@ -16,6 +17,7 @@ pub use blood::{BloodTrail, SkinSpot};
 pub use body::{
     body_frame, body_frame_between, create_layered_body, create_layered_body_in, BodyFrame,
 };
+pub use cover::Cover;
 pub use cuts::{OpenedCut, Piece, TriangleCut};
 pub use motion::MotionSnapshot;
 pub use phases::{PhaseClock, PhaseTime, PhaseTimes};
@@ -47,6 +49,10 @@ const WOUND_REOPEN_INACTIVE_CLOT: f64 = 0.18;
 pub const MISSING_ANCHOR: usize = usize::MAX;
 pub const MISSING_SPRING: usize = usize::MAX;
 pub const MISSING_POINT: usize = usize::MAX;
+pub const MISSING_COVER: usize = usize::MAX;
+/// How hard a bone must be loaded to break, before `bone_strength` scales it
+/// for each part.
+const BONE_FRACTURE_IMPULSE: f64 = 2400.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vec2 {
@@ -525,9 +531,9 @@ impl Default for Materials {
             attachment_stiffness: 0.46,
             attachment_break_stretch: 2.40,
             attachment_break_impulse: 980.0,
-            bone_fracture_impulse: 2400.0,
+            bone_fracture_impulse: BONE_FRACTURE_IMPULSE,
             max_bone_fracture_depth: 4,
-            min_bone_fragment_length: 26.0,
+            min_bone_fragment_length: 24.0,
             min_rib_fragment_length: 12.0,
             secondary_bone_fracture_impulse_scale: 0.76,
             bone_damping: 0.984,
@@ -876,10 +882,11 @@ pub struct BoneSegment {
     /// What the bone carries from blows, fragments, joints, and the flesh
     /// on it, which strains its joints and muscle anchors.
     pub load: f64,
-    /// What bears toward breaking the bone: blows, scaled by each tool's
-    /// `break_scale`, pieces of bone striking it, and flesh pressed onto it.
-    /// What a joint passes on strains the joint but breaks no bone. Each
-    /// counts by how hard it bends the bone where it lands (`bending.rs`).
+    /// What bears toward breaking the bone: blows, by their force through
+    /// the flesh over it (`cover.rs`), pieces of bone striking it, and flesh
+    /// pressed onto it. What a joint passes on strains the joint but breaks
+    /// no bone. Each counts by how hard it bends or crushes the bone where it
+    /// lands (`bending.rs`).
     pub break_load: f64,
     /// Where along the bone, from `a` to `b`, the load behind `break_load`
     /// bent it: where it breaks.
@@ -898,6 +905,12 @@ pub struct BoneSegment {
     pub pinned: bool,
     pub sleeping: bool,
     pub sleep_frames: i32,
+    /// Which of the world's measures of the flesh over its bones holds this
+    /// bone's (`cover.rs`), and the stretch of the bone it was measured on,
+    /// from `cover_from` to `cover_to`, that this piece spans.
+    pub cover: usize,
+    pub cover_from: f64,
+    pub cover_to: f64,
 }
 
 impl Default for BoneSegment {
@@ -929,6 +942,9 @@ impl Default for BoneSegment {
             pinned: false,
             sleeping: false,
             sleep_frames: 0,
+            cover: MISSING_COVER,
+            cover_from: 0.0,
+            cover_to: 1.0,
         }
     }
 }
@@ -1464,10 +1480,6 @@ struct ToolProfile {
     /// the broken ends out through the skin, against
     /// `Materials::open_fracture_overload`.
     open_fracture_scale: f64,
-    /// How hard a blow of this tool bears toward breaking bone, against its
-    /// load on the bone: set so each tool breaks bones as often as blows of
-    /// its energy do in real life (`docs/INJURY_REFERENCE.md`).
-    break_scale: f64,
     fluid_scale: f64,
     drag_scale: f64,
     rebound_scale: f64,
@@ -1486,7 +1498,6 @@ impl Default for ToolProfile {
             cut_pressure_scale: 0.0,
             crush_tear_scale: 0.0,
             open_fracture_scale: 1.0,
-            break_scale: 1.0,
             fluid_scale: 1.0,
             drag_scale: 1.0,
             rebound_scale: 1.0,
@@ -1560,6 +1571,8 @@ pub struct World {
     attachments: Vec<Attachment>,
     triangles: Vec<Triangle>,
     bones: Vec<BoneSegment>,
+    /// The flesh over each bone of the body as built (`BoneSegment::cover`).
+    bone_covers: Vec<cover::BoneCover>,
     bone_attachments: Vec<BoneAttachment>,
     bone_joints: Vec<BoneJoint>,
     vessels: Vec<VesselSegment>,
@@ -1634,6 +1647,7 @@ impl World {
             attachments: Vec::new(),
             triangles: Vec::new(),
             bones: Vec::new(),
+            bone_covers: Vec::new(),
             bone_attachments: Vec::new(),
             bone_joints: Vec::new(),
             vessels: Vec::new(),
@@ -6322,6 +6336,8 @@ impl World {
         };
         first.fracture_generation += 1;
         first.fracture_impulse = secondary_fracture_impulse;
+        let cover_break = old.cover_from + (old.cover_to - old.cover_from) * break_t;
+        first.cover_to = cover_break;
         first.load = old.load * 0.28;
         first.break_load = old.break_load * 0.28;
         first.break_t = 0.5;
@@ -6366,6 +6382,9 @@ impl World {
             fracture_generation: first.fracture_generation,
             open_break: first.open_break,
             pinned: old.pinned,
+            cover: old.cover,
+            cover_from: cover_break,
+            cover_to: old.cover_to,
             ..BoneSegment::default()
         };
         second.rest_length = distance(second.a, second.b).max(EPSILON);
@@ -9933,7 +9952,6 @@ fn tool_profile(tool: ToolMode) -> ToolProfile {
             cut_pressure_scale: 1.0,
             crush_tear_scale: 0.0,
             open_fracture_scale: 1.0,
-            break_scale: 1.0,
             fluid_scale: 1.35,
             drag_scale: 0.72,
             rebound_scale: 0.58,
@@ -9946,35 +9964,26 @@ fn tool_profile(tool: ToolMode) -> ToolProfile {
             bone_push_scale: 1.46,
             bone_load_scale: 1.0,
             fracture_scale: 1.0,
-            // Set, with the bat's, for blows that bend the bone as they land
-            // on it (`bending.rs`).
-            break_scale: 3.08,
             cut_pressure_scale: 0.0,
             crush_tear_scale: 0.10,
             // About half its hardest breaks come out open, as from clubs and
             // iron bars (Nolan et al. 2000; Eames et al. 1997); a break it only
             // just makes stays closed.
-            open_fracture_scale: 4.5,
+            open_fracture_scale: 0.8,
             fluid_scale: 0.92,
             drag_scale: 0.82,
             rebound_scale: 1.42,
         },
-        // A bat's broad barrel bruises far more than it tears. How hard it
-        // presses on bone is set so a bat breaks bones as often as blows of
-        // its energy do in real life (`docs/INJURY_REFERENCE.md`): an
-        // ordinary man's hard swing, about 112 J, usually breaks an upper
-        // arm, and a 10 J swing breaks nothing. Swung at a hanging arm, the
-        // barrel lies along the bone and spreads its blow over it, which
-        // bends the bone about half as hard as a blow across it would
-        // (`bending.rs`).
-        // A bat's smooth, rounded barrel rarely drives a broken bone out
-        // through the skin: a fifth of fractures from bat blows were open
-        // (Bryant et al. 1992), against 44% from clubs and 70% of iron-bar
-        // victims (Nolan et al. 2000; Eames et al. 1997).
+        // A bat's broad barrel bruises far more than it tears. Swung at a
+        // hanging arm, the barrel lies along the bone and spreads its blow
+        // over it, which bends the bone about half as hard as a blow across
+        // it would (`bending.rs`). Its smooth, rounded barrel rarely drives
+        // a broken bone out through the skin: a fifth of fractures from bat
+        // blows were open (Bryant et al. 1992), against 44% from clubs and
+        // 70% of iron-bar victims (Nolan et al. 2000; Eames et al. 1997).
         ToolMode::Blunt => ToolProfile {
             tissue_load_scale: 0.05,
-            break_scale: 2.47,
-            open_fracture_scale: 6.0,
+            open_fracture_scale: 1.5,
             ..ToolProfile::default()
         },
     }

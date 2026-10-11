@@ -40,6 +40,8 @@ fn main() {
         validation.bone_samples_outside_muscle
     );
 
+    print_bone_covers(&world);
+
     if let Some(parent) = output.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent).expect("create output directory");
@@ -52,6 +54,59 @@ fn main() {
         std::process::exit(0);
     }
     std::process::exit(2);
+}
+
+/// The flesh over each bone on the figure's right (the screen's left) and
+/// down the middle, in millimetres: what the figure draws out to its outline,
+/// against what lies over a real bone, on each face a blow can strike.
+fn print_bone_covers(world: &rp::World) {
+    let mm = world.mm_per_px();
+    let middle = world.bones()[0].a.x;
+    println!("flesh over the bones, mm (drawn / real), at the middle of each bone:");
+    println!(
+        "  {:<12} {:>13} {:>13} {:>13} {:>13}",
+        "bone", "outer", "inner", "top", "bottom"
+    );
+    for (index, bone) in world.bones().iter().enumerate() {
+        let center = (bone.a.x + bone.b.x) * 0.5;
+        let on_left = center < middle - 1.0;
+        let on_middle = (center - middle).abs() <= 1.0;
+        if !(on_left || on_middle) || bone.part == rp::BonePart::Spine {
+            continue;
+        }
+        if bone.part == rp::BonePart::Rib && !bone_is_first_of_its_part(world, index) {
+            continue;
+        }
+        let outward = if on_middle { 1.0 } else { -1.0 };
+        let faces = [
+            rp::Vec2 { x: outward, y: 0.0 },
+            rp::Vec2 {
+                x: -outward,
+                y: 0.0,
+            },
+            rp::Vec2 { x: 0.0, y: -1.0 },
+            rp::Vec2 { x: 0.0, y: 1.0 },
+        ];
+        // A bat brought down on the shoulder lands on the outer collarbone.
+        let t = if bone.part == rp::BonePart::Collarbone {
+            0.75
+        } else {
+            0.5
+        };
+        let cells: Vec<String> = faces
+            .iter()
+            .map(|&toward| {
+                let cover = world.bone_cover(index, t, toward);
+                format!("{:>5.0} / {:<5.0}", cover.figure * mm, cover.real)
+            })
+            .collect();
+        println!("  {:<12} {}", bone.part.name(), cells.join(" "));
+    }
+}
+
+fn bone_is_first_of_its_part(world: &rp::World, index: usize) -> bool {
+    let part = world.bones()[index].part;
+    world.bones().iter().position(|bone| bone.part == part) == Some(index)
 }
 
 fn build_svg(world: &rp::World, width: f64, height: f64) -> String {

@@ -25,6 +25,14 @@ use super::*;
 /// How far past its strength a bending break must go to break out a
 /// butterfly wedge too, as a share of the strength.
 const BUTTERFLY_OVERLOAD: f64 = 1.0;
+/// A bone's end beside a joint breaks under a direct blow about 1.7 times as
+/// hard as one that breaks its shaft across the middle: side impacts at the
+/// knee broke the joint's surfaces at 2.4 kN where thigh bones broke at 1.4
+/// (Kajzer et al. 1997, 1999).
+const END_CRUSH_SHARE: f64 = 0.6;
+/// How far past a bone's end zone a blow still crushes the end, as a share
+/// of the bone's length, so the end's hold fades rather than stops.
+const END_ZONE_FADE: f64 = 0.05;
 /// A butterfly wedge's length and thickness, in bone radii.
 const BUTTERFLY_LENGTH: f64 = 2.6;
 const BUTTERFLY_RADIUS: f64 = 0.5;
@@ -55,9 +63,96 @@ impl World {
     /// the bone's inertia holds it, so it bends less; a bone held nowhere
     /// bends less still.
     pub(super) fn bending(&self, index: usize, from: f64, to: f64) -> (f64, f64) {
-        let bone = &self.bones[index];
         let (from, to) = (from.min(to).clamp(0.0, 1.0), from.max(to).clamp(0.0, 1.0));
         let t = (from + to) * 0.5;
+        match self.supports_around(index, t) {
+            (Some(low), Some(high)) => {
+                let span = high - low;
+                if span <= EPSILON {
+                    return (0.0, t);
+                }
+                // The load F spread evenly over [u1, u2] of a span from 0 to
+                // 1, its middle at m, bends the span most at u1 + (1 - m) c,
+                // by F (1 - m) (u1 + (1 - m) c / 2), where c = u2 - u1: the
+                // three-point F m (1 - m) when the load is at one point.
+                let u1 = ((from - low) / span).clamp(0.0, 1.0);
+                let u2 = ((to - low) / span).clamp(0.0, 1.0);
+                let (spread, middle) = (u2 - u1, (u1 + u2) * 0.5);
+                let share = 4.0 * (1.0 - middle) * (u1 + (1.0 - middle) * spread * 0.5);
+                (share, low + (u1 + (1.0 - middle) * spread) * span)
+            }
+            (Some(low), None) => (overhang_share((t - low) / (1.0 - low).max(EPSILON)), t),
+            (None, Some(high)) => (overhang_share((high - t) / high.max(EPSILON)), t),
+            (None, None) => (8.0 * t * t * (1.0 - t) * (1.0 - t), t),
+        }
+    }
+
+    /// How hard a blow pressing bone `index` along `push`, a unit direction,
+    /// over the stretch from `from` to `to` bears toward breaking it, against
+    /// the same blow across the middle of a span held at both ends, and where
+    /// it breaks it. Across a bone a blow bends it (`bending`); along it the
+    /// bone takes several times the force (`along_share`); and at a long
+    /// bone's end beside a joint the whole blow crushes the end
+    /// (`END_CRUSH_SHARE`).
+    pub(super) fn break_share(&self, index: usize, from: f64, to: f64, push: Vec2) -> (f64, f64) {
+        let (bend, worst) = self.bending(index, from, to);
+        let bone = &self.bones[index];
+        let Some(along_share) = along_share(bone.part) else {
+            return (bend, worst);
+        };
+        let direction = normalized(subtract(bone.b, bone.a), push);
+        let across = cross(direction, push).abs() * bend;
+        let along = dot(direction, push).abs() * along_share;
+        let t = ((from + to) * 0.5).clamp(0.0, 1.0);
+        let mut at = if across >= along {
+            worst
+        } else {
+            // Pressed along its length, a bone gives way in the middle of
+            // its span, as a collarbone buckles under a fall on the shoulder.
+            match self.supports_around(index, t) {
+                (Some(low), Some(high)) => (low + high) * 0.5,
+                _ => 0.5,
+            }
+        };
+        let mut share = across + along;
+        let (crush, end) = self.end_crush(index, t);
+        if crush > share {
+            share = crush;
+            at = end;
+        }
+        (share, at)
+    }
+
+    /// How much of a blow at `t` along bone `index` crushes its end, and
+    /// where the end breaks off: within `end_zones` of the bone's ends as
+    /// built, `END_CRUSH_SHARE` of the blow, fading out just past it.
+    fn end_crush(&self, index: usize, t: f64) -> (f64, f64) {
+        let bone = &self.bones[index];
+        let (start_zone, end_zone) = end_zones(bone.part);
+        let span = bone.cover_to - bone.cover_from;
+        let built = bone.cover_from + span * t;
+        let (zone, from_end, end) = if built < 0.5 {
+            (start_zone, built, start_zone)
+        } else {
+            (end_zone, 1.0 - built, 1.0 - end_zone)
+        };
+        if zone <= 0.0 {
+            return (0.0, t);
+        }
+        let weight = ((zone + END_ZONE_FADE - from_end) / END_ZONE_FADE).clamp(0.0, 1.0);
+        let at = if span.abs() > EPSILON {
+            ((end - bone.cover_from) / span).clamp(0.0, 1.0)
+        } else {
+            t
+        };
+        (END_CRUSH_SHARE * weight, at)
+    }
+
+    /// The nearest supports at or below and at or above `t` along bone
+    /// `index`: its joints, the pinned ends of a pinned bone, and a rib's far
+    /// support past its outer end.
+    fn supports_around(&self, index: usize, t: f64) -> (Option<f64>, Option<f64>) {
+        let bone = &self.bones[index];
         let mut below: Option<f64> = None;
         let mut above: Option<f64> = None;
         let mut support = |at: f64| {
@@ -90,26 +185,7 @@ impl World {
                 support(joint.t_b);
             }
         }
-        match (below, above) {
-            (Some(low), Some(high)) => {
-                let span = high - low;
-                if span <= EPSILON {
-                    return (0.0, t);
-                }
-                // The load F spread evenly over [u1, u2] of a span from 0 to
-                // 1, its middle at m, bends the span most at u1 + (1 - m) c,
-                // by F (1 - m) (u1 + (1 - m) c / 2), where c = u2 - u1: the
-                // three-point F m (1 - m) when the load is at one point.
-                let u1 = ((from - low) / span).clamp(0.0, 1.0);
-                let u2 = ((to - low) / span).clamp(0.0, 1.0);
-                let (spread, middle) = (u2 - u1, (u1 + u2) * 0.5);
-                let share = 4.0 * (1.0 - middle) * (u1 + (1.0 - middle) * spread * 0.5);
-                (share, low + (u1 + (1.0 - middle) * spread) * span)
-            }
-            (Some(low), None) => (overhang_share((t - low) / (1.0 - low).max(EPSILON)), t),
-            (None, Some(high)) => (overhang_share((high - t) / high.max(EPSILON)), t),
-            (None, None) => (8.0 * t * t * (1.0 - t) * (1.0 - t), t),
-        }
+        (below, above)
     }
 
     /// Breaks a wedge out of the struck side of a bending break at `crack`
@@ -213,6 +289,37 @@ pub(super) fn butterfly_cap(normal: Vec2, dir: Vec2, side: f64) -> Vec2 {
         add(normal, scale(dir, side * BUTTERFLY_LENGTH * 0.25)),
         normal,
     )
+}
+
+/// How much of a load along a bone, rather than across it, bears toward
+/// breaking it. Long bones take several times the force along their length
+/// that breaks them across (the lower leg 4.3-11.4 kN, Yoganandan et al.
+/// 1996, against 1-4 kN across); the curved collarbone about twice (1.5-2.4
+/// kN, Duprey et al. 2008 and Arregui-Dalmases et al. 2010, against
+/// 0.73-1.16, Kemper et al. 2006 and Untaroiu et al. 2009). Other bones take
+/// any blow as one across them: the figure's rib is the half of a real one
+/// from the spine round to the side, so a blow along it strikes the side of
+/// the chest across the real rib.
+fn along_share(part: BonePart) -> Option<f64> {
+    match part {
+        BonePart::UpperArm | BonePart::Forearm | BonePart::Thigh | BonePart::Shin => Some(0.25),
+        BonePart::Collarbone => Some(0.5),
+        _ => None,
+    }
+}
+
+/// How much of a bone at its start and at its end, as shares of its length
+/// as built, is an end a blow beside the joint can crush: each end of a long
+/// bone about as long as it is wide, 15% (the AO/OTA square rule, Meinberg
+/// et al. 2018); the outer fifth of a collarbone, which runs out from the
+/// breastbone, where 28% of collarbones break against 3% at its inner end
+/// (Robinson 1998).
+fn end_zones(part: BonePart) -> (f64, f64) {
+    match part {
+        BonePart::UpperArm | BonePart::Forearm | BonePart::Thigh | BonePart::Shin => (0.15, 0.15),
+        BonePart::Collarbone => (0.0, 0.2),
+        _ => (0.0, 0.0),
+    }
 }
 
 /// How hard a load `u` of the way from a bone's last support toward its free

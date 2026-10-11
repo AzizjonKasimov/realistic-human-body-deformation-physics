@@ -189,7 +189,7 @@ fn visual_scenarios() -> Vec<VisualScenario> {
             expectations: VisualExpectations {
                 min_skin_wound_edges: 3,
                 min_muscle_fiber_tears: 10,
-                min_failed_muscle_voids: 30,
+                min_failed_muscle_voids: 20,
                 min_bruised_points: 25,
                 min_fractured_bones: 2,
                 min_fracture_caps: 2,

@@ -180,6 +180,21 @@ pub fn swing_power(tool: ToolMode) -> f64 {
     }
 }
 
+/// The mass, in kilograms, with which each tool's striking part meets what it
+/// hits (`cover.rs`). A bat turns about the hands on its handle, so its barrel
+/// strikes with less than the whole bat: 1 / (1 / M + b^2 / I), about 0.6 kg
+/// of a 0.8 kg bat (Guo et al. 2026's weighed 0.79 kg) struck 15 cm past its
+/// centre of mass, where I is about 0.045 kg m^2. A sledgehammer's 4.5 kg
+/// (10 lb) head strikes with all of its mass. A knife's blade does not break
+/// bone by its blow.
+fn tool_mass_kg(tool: ToolMode) -> f64 {
+    match tool {
+        ToolMode::Sharp => 0.2,
+        ToolMode::Blunt => 0.6,
+        ToolMode::Heavy => 4.5,
+    }
+}
+
 /// Dimensions of a tool in world pixels, measured from the point the hand drives.
 #[derive(Clone, Copy, Debug)]
 pub struct ToolGeometry {
@@ -366,6 +381,9 @@ struct ToolStrike {
     power: f64,
     /// The tool's mass, which sets how hard it hits.
     mass: f64,
+    /// The tool's mass in kilograms, which sets the force of its blows on
+    /// bone (`cover.rs`).
+    mass_kg: f64,
     /// The mass that carries momentum into the body: the tool and the arm
     /// swinging it.
     inertia: f64,
@@ -609,6 +627,7 @@ impl World {
             profile,
             power: input.power,
             mass,
+            mass_kg: tool_mass_kg(input.tool) * input.power / swing_power(input.tool),
             inertia: mass * self.materials.tool_inertia_scale.max(EPSILON),
         };
         // A hand carries and swings any tool closely, but presses one into the
@@ -1034,9 +1053,8 @@ impl World {
                 load
             };
             bone.load = bone.load.max(load);
-            let cut = load * strike.profile.break_scale;
-            if cut > bone.break_load {
-                bone.bear_break_load(cut * self.bending_share(index, after.t_b), after.t_b);
+            if load > bone.break_load {
+                bone.bear_break_load(load * self.bending_share(index, after.t_b), after.t_b);
             }
             if load > self.materials.fragment_wake_load {
                 self.wake_fragment(&mut bone);
@@ -1412,9 +1430,6 @@ impl World {
             }
             let pair = closest_segment_points(shape.axis_start, shape.axis_end, bone.a, bone.b);
             let mut dist = pair.distance;
-            if dist > shape.influence + bone.radius {
-                continue;
-            }
             let t = pair.t_b;
             let closest = pair.point_b;
             let mut normal = normalized(subtract(closest, pair.point_a), shape.direction);
@@ -1422,31 +1437,57 @@ impl World {
                 normal = shape.direction;
                 dist = 1.0;
             }
-            let depth = (shape.influence + bone.radius - dist).max(0.0);
-            let contact = (1.0 - ((dist - bone.radius) / shape.influence).clamp(0.0, 1.0)).max(0.0);
-            let direct_load = impact * contact * strike.profile.bone_load_scale;
-            // The bone solver fractures any bone whose load exceeds its strength,
-            // so the tool's fracture resistance is applied to the load itself.
-            bone.load = bone
-                .load
-                .max(direct_load / strike.profile.fracture_scale.max(EPSILON));
+            if dist > shape.influence + bone.radius + self.max_figure_cover() {
+                continue;
+            }
+            // The tool meets the bone once it presses the skin over it, and
+            // the flesh there softens the blow by what lies over a real bone
+            // (`cover.rs`).
+            let cover = self.bone_cover(i, t, scale(normal, -1.0));
+            let padding = (shape.influence - shape.radius).max(EPSILON);
+            let gap = dist - shape.radius - bone.radius;
+            let meets = ((cover.figure + padding - gap) / padding).clamp(0.0, 1.0);
+            let touches = dist <= shape.influence + bone.radius;
+            if meets <= 0.0 && !touches {
+                continue;
+            }
+            let blow = self.blow_on_bone(
+                bone.part,
+                strike.mass_kg,
+                dot(velocity, normal).max(0.0),
+                cover.real,
+            );
+            let force = meets * blow.force;
+            bone.load = bone.load.max(force);
             // The blow bends the bone by its lever on the bone's joints, and
             // the bone breaks where it is bent hardest (see `bending.rs`).
             // A tool lying along a bone presses a stretch of it rather than
-            // one point, which bends it less.
+            // one point, which bends it less: the stretch it presses when the
+            // blow peaks, pressed in as far as the flesh and bone give.
             let (from, to) = pressed_stretch(
                 shape.axis_start,
                 shape.axis_end,
-                shape.influence + bone.radius,
+                shape.influence + bone.radius + cover.figure + blow.press,
                 &bone,
                 t,
             );
-            let (bending, worst) = self.bending(i, from, to);
-            let blow = direct_load / strike.profile.fracture_scale.max(EPSILON)
-                * strike.profile.break_scale;
-            if blow > bone.break_load {
-                bone.bear_break_load(blow * bending, worst);
+            let (share, worst) = self.break_share(i, from, to, normal);
+            let blow = force * share;
+            bone.bear_break_load(blow, worst);
+            self.debug.max_bone_load = self.debug.max_bone_load.max(bone.load);
+            if !touches {
+                let should_fracture =
+                    self.can_fracture_bone(bone) && bone.break_load > bone.fracture_impulse;
+                self.bones[i] = bone;
+                if should_fracture {
+                    self.fracture_bone(i, bone.break_t, normal, blow);
+                }
+                continue;
             }
+            let depth = (shape.influence + bone.radius - dist).max(0.0);
+            let contact = (1.0 - ((dist - bone.radius) / shape.influence).clamp(0.0, 1.0)).max(0.0);
+            // How hard the tool shoves and turns the bone it touches.
+            let direct_load = impact * contact * strike.profile.bone_load_scale;
             if direct_load > self.materials.fragment_wake_load
                 || speed > self.materials.fragment_sleep_speed * 2.0
             {
@@ -1457,7 +1498,6 @@ impl World {
                 self.debug.max_depth = depth;
                 self.debug.strongest_contact = closest;
             }
-            self.debug.max_bone_load = self.debug.max_bone_load.max(bone.load);
             if bone.pinned {
                 // A fixed bone stops whatever of the swing drives into it.
                 let into = dot(velocity, normal).max(0.0);
@@ -1507,7 +1547,7 @@ impl World {
                 self.can_fracture_bone(bone) && bone.break_load > bone.fracture_impulse;
             self.bones[i] = bone;
             if should_fracture {
-                self.fracture_bone(i, bone.break_t, normal, direct_load * bending);
+                self.fracture_bone(i, bone.break_t, normal, blow);
             }
         }
         given
