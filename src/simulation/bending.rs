@@ -155,6 +155,7 @@ impl World {
         };
         wedge.rest_length = distance(wedge.a, wedge.b).max(EPSILON);
         self.bones.push(wedge);
+        self.hold_piece_in_flesh(self.bones.len() - 1);
         self.stats.butterfly_fragments += 1;
     }
 

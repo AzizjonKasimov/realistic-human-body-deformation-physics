@@ -1099,15 +1099,9 @@ impl World {
         } else {
             blade_normal
         };
-        // A blade's cut wells blood onto the skin rather than spattering it.
-        self.well_fresh_blood(
-            center,
-            normal,
-            if skin { 6 } else { 4 },
-            120.0 + pressure * self.materials.fluid_impact_scale * 0.42,
-            if skin { 2.1 } else { 1.8 },
-            strike.profile.fluid_scale,
-        );
+        // The cut's blood wells out of the wound it opens, at the rate of
+        // what it cut (`update_wounds`).
+        self.bleed_fresh_injury(center, if skin { 6 } else { 4 }, strike.profile.fluid_scale);
         self.open_wound(
             center,
             normal,
@@ -1620,14 +1614,7 @@ impl World {
         }
         for (center, normal, layer, pressure) in events {
             let skin = layer == TissueLayer::Skin;
-            self.emit_fluid(
-                center,
-                normal,
-                if skin { 6 } else { 4 },
-                120.0 + pressure * self.materials.fluid_impact_scale * 0.42,
-                if skin { 2.1 } else { 1.8 },
-                profile.fluid_scale,
-            );
+            self.bleed_fresh_injury(center, if skin { 6 } else { 4 }, profile.fluid_scale);
             self.open_wound(
                 center,
                 normal,

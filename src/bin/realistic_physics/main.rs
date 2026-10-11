@@ -214,6 +214,8 @@ struct RenderPalette {
     skin_mid: Color,
     skin_shade: Color,
     skin_heat: Color,
+    /// Skin reddened by a blow.
+    skin_flush: Color,
     skin_contusion: Color,
     skin_outline: Color,
     skin_wire: Color,
@@ -473,6 +475,7 @@ fn render_palette() -> RenderPalette {
         skin_mid: rgba(184, 130, 105, 250),
         skin_shade: rgba(92, 54, 44, 255),
         skin_heat: rgba(223, 77, 55, 246),
+        skin_flush: rgba(206, 88, 78, 246),
         skin_contusion: rgba(55, 31, 86, 235),
         skin_outline: rgba(69, 40, 36, 220),
         skin_wire: rgba(136, 86, 75, 130),
@@ -567,7 +570,11 @@ fn draw_body_layers(ctx: &RenderContext) {
     if !ctx.anatomy {
         draw_major_vessels(ctx);
     }
-    draw_wound_sources(ctx);
+    // Where each wound bleeds from is the simulation's bookkeeping, not
+    // something an onlooker sees: its blood shows only once it is out.
+    if ctx.app.debug_overlay {
+        draw_wound_sources(ctx);
+    }
 
     // Where the tool presses hardest; a debugging aid, so only with the panel.
     let debug = world.debug();
@@ -977,6 +984,10 @@ fn inward_normal(
     }
 }
 
+/// Skin as it looks: shaded toward the outline, warmer where pressed now,
+/// red where a blow landed, and bruised as far as the bruise shows yet (see
+/// `bruises.rs`: a bruise darkens over hours, so a fresh blow leaves a red
+/// mark).
 fn skin_point_color(ctx: &RenderContext, point: &rp::Point) -> Color {
     let depth = smoothstep(0.0, 22.0, point.surface_depth as f32);
     let heat = (point.load / 1300.0).clamp(0.0, 1.0) as f32;
@@ -984,10 +995,17 @@ fn skin_point_color(ctx: &RenderContext, point: &rp::Point) -> Color {
     color = mix(color, ctx.palette.skin_heat, heat * 0.85);
     color = mix(
         color,
-        ctx.palette.skin_contusion,
-        (point.contusion as f32 * 0.56).clamp(0.0, 0.72),
+        ctx.palette.skin_flush,
+        (point.flush as f32 * 0.5).clamp(0.0, 0.55),
     );
-    color.a = (0.98 - point.exposure as f32 * 0.24).clamp(0.68, 0.98);
+    color = mix(
+        color,
+        ctx.palette.skin_contusion,
+        (point.bruise_shown as f32 * 0.56).clamp(0.0, 0.72),
+    );
+    // Whole skin hides what lies under it, however the flesh beneath is hurt;
+    // only an opening in it shows the muscle or bone.
+    color.a = 0.98;
     color
 }
 
@@ -1097,7 +1115,13 @@ fn draw_major_vessels(ctx: &RenderContext) {
                     with_alpha(ctx.palette.blood_fresh, 0.18),
                 );
             }
-        } else if vessel.lacerated {
+        } else if vessel.lacerated
+            && ctx
+                .app
+                .world
+                .open_to_air(point_along(vessel.a, vessel.b, vessel.laceration_t))
+        {
+            // A vessel torn under unbroken skin bleeds into the flesh unseen.
             draw_severed_vessel(ctx, vessel);
         }
     }
@@ -1432,34 +1456,33 @@ fn draw_effects(ctx: &RenderContext) {
 /// a thin film.
 const BLOOD_DRYING_SECONDS: f64 = 240.0;
 
-/// Pools of blood on the floor, seen from in front: wide and flat, lying
-/// just in front of the foot of the wall. Fresh blood is red and glossy; it
-/// dries dark.
+/// Pools of blood on the floor, seen from in front: as wide as the floor
+/// they cover and flat, lying just in front of the foot of the wall. Fresh
+/// blood is red and glossy; it dries dark.
 fn draw_blood_stains(ctx: &RenderContext) {
     for stain in ctx.app.world.blood_stains() {
-        if stain.intensity <= 0.025 {
+        if stain.volume <= 0.0 {
             continue;
         }
-        let intensity = stain.intensity.clamp(0.0, 1.75) as f32;
-        let radius = stain.radius.max(1.0) as f32;
-        let (x, y) = (stain.position.x as f32, ctx.floor_y + 2.0 + radius * 0.1);
-        let (wide, deep) = (radius * 1.2, radius * 0.26);
+        let half = (stain.width * 0.5) as f32;
+        // A low view squashes the round pool into a flat ellipse.
+        let deep = half * 0.22;
+        let (x, y) = (stain.position.x as f32, ctx.floor_y + 1.5 + deep * 0.4);
         let dry = (stain.age / BLOOD_DRYING_SECONDS).clamp(0.0, 1.0) as f32;
-        let alpha = (0.42 + intensity * 0.32).min(0.9);
         let body = mix(rgba(118, 6, 16, 255), ctx.palette.blood_stain, dry);
         draw_ellipse(
             x,
             y,
-            wide + 1.2,
-            deep + 0.8,
+            half,
+            deep,
             0.0,
-            with_alpha(ctx.palette.blood_dark, alpha * 0.7),
+            with_alpha(ctx.palette.blood_dark, 0.62),
         );
-        draw_ellipse(x, y, wide, deep, 0.0, with_alpha(body, alpha));
+        draw_ellipse(x, y, half * 0.9, deep * 0.85, 0.0, with_alpha(body, 0.88));
         draw_ellipse(
-            x - wide * 0.25,
+            x - half * 0.25,
             y - deep * 0.35,
-            wide * 0.35,
+            half * 0.35,
             deep * 0.22,
             0.0,
             rgba(255, 190, 190, (36.0 * (1.0 - dry)) as u8),
@@ -1468,7 +1491,7 @@ fn draw_blood_stains(ctx: &RenderContext) {
 }
 
 /// Blood on the skin: the trails it left running down, then the drops still
-/// on it, all carried by the skin.
+/// on it, all carried by the skin, each as wide as its blood wets the skin.
 fn draw_skin_blood(ctx: &RenderContext) {
     let world = &ctx.app.world;
     let mut stretches = Vec::new();
@@ -1479,15 +1502,15 @@ fn draw_skin_blood(ctx: &RenderContext) {
         // Wet blood is bright; it darkens to brown as it dries.
         let dry = (trail.age / BLOOD_DRYING_SECONDS).clamp(0.0, 1.0) as f32;
         let color = mix(rgba(146, 10, 20, 235), rgba(86, 20, 17, 225), dry);
-        stretches.push((from, to, trail.width.max(0.7) as f32, color));
+        stretches.push((from, to, trail.width as f32, color));
     }
     let edge = with_alpha(ctx.palette.blood_dark, 0.22);
     for &(from, to, width, _) in &stretches {
-        draw_line_vec(from, to, width + 1.0, edge);
+        draw_line_vec(from, to, width, edge);
     }
     for &(from, to, width, color) in &stretches {
-        draw_line_vec(from, to, width, color);
-        draw_circle(to.x as f32, to.y as f32, width * 0.5, color);
+        draw_line_vec(from, to, width * 0.75, color);
+        draw_circle(to.x as f32, to.y as f32, width * 0.375, color);
     }
     for fluid in world.fluids() {
         let Some(spot) = fluid.on_skin else {
@@ -1501,71 +1524,49 @@ fn draw_skin_blood(ctx: &RenderContext) {
         };
         // The head of a trickle, joined to the trail behind it, with a dark
         // rim and a glint.
-        let radius = (fluid.radius * 0.5).max(0.7) as f32;
+        let radius = world.drop_radius(fluid) as f32;
         let body = rgba(156, 12, 22, 245);
         let behind = fluid
             .trail_from
             .and_then(|from| world.skin_spot_position(from));
         if let Some(behind) = behind {
-            let width = (fluid.radius * 0.6) as f32;
-            draw_line_vec(behind, center, width + 1.0, edge);
-            draw_line_vec(behind, center, width, body);
+            // The trail is most of the bead's width (see `blood.rs`).
+            let width = radius * 1.2;
+            draw_line_vec(behind, center, width, edge);
+            draw_line_vec(behind, center, width * 0.75, body);
         }
         let (x, y) = (center.x as f32, center.y as f32);
-        draw_circle(x, y, radius + 0.6, with_alpha(ctx.palette.blood_dark, 0.5));
-        draw_circle(x, y, radius, body);
+        draw_circle(x, y, radius, with_alpha(ctx.palette.blood_dark, 0.5));
+        draw_circle(x, y, radius * 0.82, body);
         draw_circle(
             x - radius * 0.3,
             y - radius * 0.3,
-            radius * 0.3,
+            radius * 0.25,
             rgba(255, 200, 200, 70),
         );
     }
 }
 
+/// Drops of blood in the air, each the sphere its blood makes. A fast drop
+/// smears along its path within a frame, as it would on camera.
 fn draw_fluids(ctx: &RenderContext) {
-    for fluid in ctx.app.world.fluids() {
+    let world = &ctx.app.world;
+    for fluid in world.fluids() {
         if fluid.life <= 0.0 || fluid.on_skin.is_some() {
             continue;
         }
-        let fade = (fluid.life / fluid.max_life.max(0.1)).clamp(0.0, 1.0);
-        let fade_f = fade as f32;
-        if fluid.settled {
-            // A drop come to rest spreads flat on the floor.
-            let radius = fluid.radius.max(1.0) as f32;
-            draw_ellipse(
-                fluid.position.x as f32,
-                ctx.floor_y + 1.5,
-                radius * 1.4,
-                radius * 0.32,
-                0.0,
-                with_alpha(rgba(96, 6, 14, 255), 0.35 + 0.5 * fade_f),
-            );
-            continue;
-        }
+        let radius = world.drop_radius(fluid) as f32;
         let travel = sub(fluid.position, fluid.previous);
-        let speed_alpha = (length(travel) / 18.0).clamp(0.0, 1.0) as f32;
-        let color = Color::new(
-            0.22 + 0.54 * fluid.intensity as f32 * fade_f,
-            0.015 + 0.04 * fade_f,
-            0.025 + 0.06 * fade_f,
-            (0.30 + 0.58 * fade_f).min(0.92),
-        );
-        if speed_alpha > 0.08 {
+        let smear = (length(travel) / 18.0).clamp(0.0, 1.0) as f32;
+        let color = Color::new(0.22 + 0.54 * fluid.intensity as f32, 0.055, 0.085, 0.92);
+        if smear > 0.08 {
             draw_line_vec(
                 fluid.previous,
                 fluid.position,
-                (fluid.radius * (0.72 + speed_alpha as f64 * 0.55)).max(1.0) as f32,
-                with_alpha(ctx.palette.blood_dark, 0.20 + speed_alpha * 0.34),
+                radius * 2.0,
+                with_alpha(color, 0.25 + smear * 0.35),
             );
         }
-        let radius = (fluid.radius * (0.82 + 0.32 * fade)).max(1.0) as f32;
-        draw_circle(
-            fluid.position.x as f32,
-            fluid.position.y as f32,
-            radius + 1.0,
-            with_alpha(ctx.palette.blood_dark, color.a * 0.50),
-        );
         draw_circle(
             fluid.position.x as f32,
             fluid.position.y as f32,
@@ -1574,7 +1575,6 @@ fn draw_fluids(ctx: &RenderContext) {
         );
     }
 }
-
 fn draw_striker(ctx: &RenderContext) {
     let app = ctx.app;
     // The same pose and geometry the simulation collides with.

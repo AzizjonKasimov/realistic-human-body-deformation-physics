@@ -133,6 +133,7 @@ pub fn create_layered_body(width: f64, height: f64, materials: Materials) -> Wor
 pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
     let field = human_silhouette();
     let mut world = World::new(materials);
+    world.body_height = frame.height;
     let spacing = materials.point_spacing;
     let at = |landmark: Landmark| frame.point(landmark.0, landmark.1);
 

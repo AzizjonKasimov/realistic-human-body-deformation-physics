@@ -87,12 +87,29 @@ In the engine a break comes out open only when the blow goes far enough past the
 
 Source: the validated intraoperative bleeding scale, Lewis et al. 2017, as tabled in Smith et al. 2025 ([PMC11571751](https://pmc.ncbi.nlm.nih.gov/articles/PMC11571751/)). *Checked.* Losing over 15% of blood (about 735 ml here) raises the pulse; over 40% is life-threatening (trauma-care hemorrhage classes).
 
-**In the engine.** Each wound bleeds by what it cut (`WoundKind`): torn skin and muscle ooze about 6 ml a minute (grades 1-2), an open fracture's marrow about 25 (grade 3), and a cut artery about 250 (grade 4), each more or less with the pressure the wound opened with, and less as it clots and as the body runs short of blood. The blood drawn follows what is lost, about 0.05 ml a drop (`BLOOD_DROP_ML`), and only a cut artery sprays.
+**In the engine.** Each wound bleeds by what it cut (`WoundKind`): torn skin and muscle ooze about 6 ml a minute (grades 1-2), an open fracture's marrow about 25 (grade 3), and a cut artery about 250 (grade 4), each more or less with the pressure the wound opened with, and less as it clots and as the body runs short of blood. The blood drawn is the blood lost outside the body, about 0.05 ml a drop (`BLOOD_DROP_ML`), and only a cut artery sprays. A cut artery's blood comes out of the nearest opening in the skin (as up a knife's track), and blood that cannot get out bruises the flesh.
+
+## How injuries look
+
+The engine draws an injury the way it would look on a real person, neither toned down nor exaggerated: no more blood than was lost and no larger than it would be, a bruise as it develops, and broken bone where it would be.
+
+| What | Figure | Source |
+|---|---|---|
+| A drop of blood | About 0.05 ml (0.0495-0.0516 ml), 4.6 mm across as it falls, at most 7.65 m/s | MacDonell 1971, ["Flight characteristics and stain patterns of human blood"](https://ojp.gov/pdffiles1/Digitization/1747NCJRS.pdf), Table I. *Checked.* |
+| The spot a drop leaves | On a smooth, hard surface a 0.05 ml drop leaves a spot about 15 mm wide after falling 0.5 m, 17 mm after 1 m, 17.5 mm after 1.5 m, and 18-19 mm from about 2 m on; tile and glass gave similar spots | MacDonell 1971, Fig. 3 (read off the graph, about ±0.5 mm). *Checked.* |
+| A pool | Pools of up to 31 g poured on floor tile average 1.44 ± 0.19 mm deep, about 7 cm² for each millilitre: 40 ml makes a pool about 19 cm across | Smith, Nicloux, and Brutin 2020, ["A new forensic tool to date human blood pools"](https://doi.org/10.1038/s41598-020-65465-4). *Checked.* |
+| Blood on surfaces | Blood meets plastics and card at about 87-120 degrees, and its surface tension is about 60 mN/m; no one has measured blood on skin | Attinger 2016, [NIJ report 249851](https://www.ojp.gov/pdffiles1/nij/grants/249851.pdf). *Checked.* |
+| When a bruise shows | A paintball's bruise on the upper arm was visible at once in all 157 adults; a fast, light blow's bruise is fully developed within 15-20 minutes (pig skin); a deep blow's may take days to show, and a 3.9 J blow left a visible bruise in only 53% of people | Scafide et al. 2020, [*J Forensic Sci* 65:1191](https://doi.org/10.1111/1556-4029.14294); Randeberg et al. 2007, [*Lasers Surg Med* 39:403](https://doi.org/10.1002/lsm.20494); Nijs et al. 2019, [*Forensic Sci Int* 294:34](https://doi.org/10.1016/j.forsciint.2018.10.029). *Checked (the last two from their abstracts).* |
+| A bruise's colour | Red shows at any age; yellow only after about 18 hours | Langlois and Gresham 1991, [*Forensic Sci Int* 50:227](https://doi.org/10.1016/0379-0738(91)90154-B). *Checked (abstract).* |
+| Broken bone leaving the body | A bone segment thrown clear of a limb is rare, reported in high-energy injuries such as a motorcycle hitting a car | Hu et al. 2024, [*Front Pediatr* 12:1333575](https://doi.org/10.3389/fped.2024.1333575). *Checked.* |
+
+**In the engine.** Each drop of blood holds its volume and is drawn at the size that blood would have on a person the body's size (`src/simulation/blood.rs`): a falling drop as its sphere, about 4.6 mm across, a bead on the skin as wide as the skin it wets (a cap meeting the skin at 90 degrees), a trail as the film a running bead leaves, a landing drop as MacDonell's spot for how fast it lands, and spots that touch as one pool, as wide as their spots or as that much blood spreads 1.44 mm deep, whichever is wider. No blood shows that the wounds did not lose. A blow reddens the skin at once and its bruise shows over the next quarter hour, fully developed in about 17 minutes, then stays (`src/simulation/bruises.rs`); the skin shows every bruise as a shallow one would. A piece of broken bone is held by the flesh around it and moves with it (`hold_piece_in_flesh`); the flesh lets go only once it is torn away. Not measured, and set by judgement: how big a bead on skin must be to run (more than one drop's worth), and the film a running bead leaves (a tenth of a millimetre).
 
 ## Rules for every play
 
 - **Bleeding follows what was cut.** Wounds that miss arteries bleed at most 10 ml a minute each (grades 1-2), an open fracture's marrow at most 50, and a cut artery at least 10. The rate is the average since the body first lost blood (`ScenarioResult::bleeding_ml_per_min`), shared among the wounds open at once unless an artery is cut, since the scale grades each bleeding site.
 - **A knife never breaks a long bone** (collarbone, upper arm, forearm, thigh, shin).
+- **Broken bone stays in the body.** No piece of broken bone may end up more than three point spacings (about 11 cm) from all flesh (`bone_pieces_out`); at worst a broken end pokes out through the skin. A segment thrown clear of a limb comes only from high-energy injuries (Hu et al. 2024).
 - **Struck flesh moves at most twice as fast as the tool that hit it,** the limit of a perfectly elastic collision; faster flesh means the simulation flung it.
 
 ## How the scenarios use this

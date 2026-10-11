@@ -2,8 +2,9 @@
 //!
 //! [`Foley`] listens to the world after each step and hears what happened: a
 //! thud as loud as the blow was fast when a bat or hammer lands, a crack for
-//! each break, a wet tear for flesh torn by a blow, a spatter when fresh blood
-//! lands, air rushing past a swung tool, and a slice while the knife cuts.
+//! each break, a wet tear for flesh torn by a blow, a spatter when blood a cut
+//! artery spurts lands, air rushing past a swung tool, and a slice while the
+//! knife cuts.
 //! [`SoundBank`] synthesizes those sounds once (`synth.rs`) and [`Voices`]
 //! says which clip plays for each and how loud. The app plays them through
 //! macroquad; [`Mixdown`] mixes the same thing offline, so tools and tests can
@@ -47,7 +48,7 @@ const RUSH_SPAN: f64 = 2600.0;
 const SLICE_FIBERS: f32 = 6.0;
 /// Fibers a blow tears in one step for a full-strength tear.
 const TEAR_FIBERS: f32 = 30.0;
-/// Fresh blood drops landing together within this long make one spatter...
+/// Spurted blood drops landing together within this long make one spatter...
 const SPATTER_WINDOW: f64 = 0.12;
 /// ...if there are at least this many...
 const SPATTER_MIN_DROPS: i32 = 12;
@@ -67,7 +68,7 @@ pub enum CueKind {
     Crack,
     /// Skin or muscle torn by a blow.
     Tear,
-    /// Fresh blood landing.
+    /// Spurted blood landing.
     Spatter,
 }
 
@@ -125,9 +126,9 @@ struct Tally {
     speed: f64,
     fractures: i32,
     torn: i32,
-    /// Blood drops fresh injuries threw out: not those leaking from wounds,
-    /// nor those welling from a cut onto the skin, which land nowhere.
-    fresh_blood: i32,
+    /// Blood drops that flew out of a wound, as a cut artery spurts, rather
+    /// than welling onto the skin and running down it quietly.
+    sprayed_blood: i32,
 }
 
 impl Tally {
@@ -138,9 +139,7 @@ impl Tally {
             speed: world.debug().striker_speed,
             fractures: stats.fractured_bones,
             torn: stats.broken_skin + stats.broken_muscle,
-            fresh_blood: stats.emitted_fluid_particles
-                - stats.wound_fluid_particles
-                - stats.fresh_blood_welled,
+            sprayed_blood: stats.sprayed_blood_drops,
         }
     }
 
@@ -148,7 +147,7 @@ impl Tally {
     fn restarted_from(&self, last: &Tally) -> bool {
         self.fractures < last.fractures
             || self.torn < last.torn
-            || self.fresh_blood < last.fresh_blood
+            || self.sprayed_blood < last.sprayed_blood
     }
 }
 
@@ -159,7 +158,7 @@ pub struct Foley {
     /// Seconds since each kind of cue last sounded, and how strong it was.
     since: [f64; 4],
     last_strength: [f32; 4],
-    /// Fresh blood drops gathered for the next spatter, and for how long.
+    /// Spurted blood drops gathered for the next spatter, and for how long.
     blood: Option<(i32, f64)>,
 }
 
@@ -228,7 +227,7 @@ impl Foley {
 
         // Drops land a moment after they fly, so a spatter sounds when its
         // window closes; a wound's slow leak stays quiet.
-        let fresh = (now.fresh_blood - last.fresh_blood).max(0);
+        let fresh = (now.sprayed_blood - last.sprayed_blood).max(0);
         self.blood = match self.blood {
             Some((drops, age)) => Some((drops + fresh, age + dt)),
             None if fresh > 0 => Some((fresh, 0.0)),

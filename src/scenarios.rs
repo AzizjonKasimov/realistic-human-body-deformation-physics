@@ -891,6 +891,16 @@ impl Scenario {
                 }
             }
         }
+        // Broken bone stays in the limb, and at worst a broken end pokes out
+        // through the skin: a segment thrown clear of a limb is rare, and comes
+        // from high-energy injuries such as a motorcycle hitting a car (Hu et
+        // al. 2024), not from a blow or a cut.
+        if r.bone_pieces_out > 0 {
+            problems.push(format!(
+                "bone_pieces_out={}, but broken bone stays in the limb ({BONE_STAYS})",
+                r.bone_pieces_out
+            ));
+        }
         // Struck flesh moves at most twice as fast as the tool that hit it,
         // the limit of a perfectly elastic collision; faster flesh is the
         // simulation flinging it.
@@ -1233,6 +1243,8 @@ pub struct ScenarioResult {
     pub max_tissue_plasticity: f64,
     pub max_bone_angular_speed: f64,
     pub final_free_fragments: i32,
+    /// Pieces of broken bone that ended outside the body (`bone_pieces_out`).
+    pub bone_pieces_out: i32,
     pub final_spinning_fragments: i32,
     pub final_sleeping_fragments: i32,
     pub max_active_fragments: i32,
@@ -1504,6 +1516,7 @@ impl ScenarioResult {
         self.final_free_fragments = free_fragment_count(world);
         self.final_spinning_fragments = spinning_fragment_count(world);
         self.final_sleeping_fragments = sleeping_fragment_count(world);
+        self.bone_pieces_out = bone_pieces_out(world);
         self.measure_cut(world);
     }
 
@@ -1734,6 +1747,31 @@ pub fn spinning_fragment_count(world: &World) -> i32 {
         .count() as i32
 }
 
+/// How far, in point spacings, a piece of broken bone may lie from all
+/// flesh and still be in the body, as in an open wound.
+const BONE_OUT_REACH: f64 = 3.0;
+
+/// Pieces of broken bone that have left the body: pieces whose middle lies
+/// farther than `BONE_OUT_REACH` point spacings from all flesh, as one flung
+/// out onto the floor.
+pub fn bone_pieces_out(world: &World) -> i32 {
+    let flesh = world.flesh_points();
+    let points = world.points();
+    let reach = world.materials().point_spacing * BONE_OUT_REACH;
+    world
+        .bones()
+        .iter()
+        .filter(|bone| bone.fractured || bone.splinter)
+        .filter(|bone| {
+            let middle = midpoint(bone.a, bone.b);
+            !points
+                .iter()
+                .zip(&flesh)
+                .any(|(point, &flesh)| flesh && span(point.position, middle) <= reach)
+        })
+        .count() as i32
+}
+
 pub fn sleeping_fragment_count(world: &World) -> i32 {
     world
         .bones()
@@ -1957,6 +1995,8 @@ const SHIN_BAT: &str = "Levy et al. 1994: bat blows break the shin";
 const SKIN_CUT: &str =
     "Bleetman et al. 2003: slashes press up to 212 N; skin gives way far below that";
 const SHALLOW_SLASH: &str = "Steel et al. 2021: most slash wounds are shallow";
+const BONE_STAYS: &str =
+    "Hu et al. 2024: a bone segment thrown out of a limb is rare, from high-energy crashes";
 const BAT_OPEN: &str = "Bryant et al. 1992: a fifth of fractures from bat blows were open";
 const IRON_OPEN: &str =
     "Nolan et al. 2000: 44% of fractures from clubs were open; Eames et al. 1997: 70% of iron-bar victims had open fractures";
@@ -2123,11 +2163,13 @@ pub fn scenarios() -> Vec<Scenario> {
             // The belly is narrow between the hanging arms, and the blade
             // trails about 20 cm behind the hand, so a slash straight across
             // would cut the arm's artery; this one trails up toward the
-            // chest. The cut opens rather than leaving a line of torn skin,
-            // and its blood wells out and runs down the skin.
+            // chest. The cut opens rather than leaving a line of torn skin.
+            // It misses the big vessels, so in its first second its blood
+            // only wells out along it in beads, a few drops' worth; trickles
+            // come once more has bled.
             expectations: ScenarioExpectations {
                 cut_openings: IntBand::at_least(2),
-                blood_trail_length: DoubleBand::range(150.0, f64::INFINITY),
+                fluid_emitted: IntBand::at_least(1),
                 ..e
             },
             real: &[
@@ -2167,10 +2209,11 @@ pub fn scenarios() -> Vec<Scenario> {
                 None,
             ),
             // A knife drawn slowly from the armpit down the inside of the arm,
-            // over the artery there; the blood runs down the arm.
+            // over the artery there; the artery's blood comes out of the cut
+            // and runs down the arm, some 20 cm within the second.
             expectations: ScenarioExpectations {
                 cut_openings: IntBand::at_least(1),
-                blood_trail_length: DoubleBand::range(80.0, f64::INFINITY),
+                blood_trail_length: DoubleBand::range(60.0, f64::INFINITY),
                 ..e
             },
             real: &[check!(OpensSkin, Always, SKIN_CUT)],
@@ -2229,8 +2272,8 @@ pub fn scenarios() -> Vec<Scenario> {
             expectations: ScenarioExpectations {
                 // A fresh clot is weak, so the blow makes the cut bleed again.
                 wound_reopens: IntBand::range(1, 30),
-                // The cut's blood runs down the leg.
-                blood_trail_length: DoubleBand::range(150.0, f64::INFINITY),
+                // The cut's blood beads and starts to run down the leg.
+                blood_trail_length: DoubleBand::range(30.0, f64::INFINITY),
                 ..e
             },
             real: &[

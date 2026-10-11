@@ -1,5 +1,7 @@
 use realistic_physics as rp;
-use rp::scenarios::{scenario, Play, Strike, SCENARIO_HEIGHT, SCENARIO_WIDTH};
+use rp::scenarios::{
+    bone_pieces_out, scenario, Play, Strike, BLOOD_VOLUME_ML, SCENARIO_HEIGHT, SCENARIO_WIDTH,
+};
 use std::env;
 use std::fmt::Write as FmtWrite;
 use std::fs::{self, File};
@@ -27,12 +29,8 @@ struct VisualExpectations {
     min_failed_muscle_voids: usize,
     /// Gaps between the lips of opened muscle cuts, drawn as raw flesh.
     min_opened_cut_insides: usize,
-    min_visible_contusions: usize,
-    min_visible_wound_sources: usize,
-    min_visible_fluid_particles: usize,
-    /// Stretches of trail blood left running down the skin.
-    min_visible_blood_trails: usize,
-    min_visible_blood_stains: usize,
+    /// Points of flesh the blow bruised, whether or not the bruise shows yet.
+    min_bruised_points: usize,
     min_lacerated_vessels: usize,
     min_fragment_vessel_lacerations: usize,
     min_fractured_bones: usize,
@@ -46,7 +44,6 @@ struct VisualExpectations {
     min_rib_organ_punctures: usize,
     min_organ_ruptures: usize,
     min_organ_damage: f64,
-    min_damage_primitives: usize,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -59,9 +56,12 @@ struct VisualMetrics {
     joint_ligament_damage_events: usize,
     failed_muscle_voids: usize,
     opened_cut_insides: usize,
-    visible_contusions: usize,
+    bruised_points: usize,
     active_wound_sources: usize,
-    visible_wound_sources: usize,
+    /// Wounds that have bled where the skin is open, and so can be seen, and
+    /// those under unbroken skin, which bleed into the flesh unseen.
+    open_wound_sources: usize,
+    sealed_wound_sources: usize,
     active_fluid_particles: usize,
     visible_fluid_particles: usize,
     visible_blood_trails: usize,
@@ -72,7 +72,6 @@ struct VisualMetrics {
     rib_fractures: usize,
     fracture_caps: usize,
     exposed_points: usize,
-    damage_primitives: usize,
     final_free_fragments: usize,
     final_sleeping_fragments: usize,
     cavity_ruptures: usize,
@@ -86,6 +85,14 @@ struct VisualMetrics {
     max_point_exposure: f64,
     max_contusion: f64,
     max_muscle_damage: f64,
+    /// Blood the body lost, in millilitres, out of it or into the flesh.
+    blood_lost_ml: f64,
+    /// Blood let out of the body as drops, and how much of that still shows.
+    blood_shed_ml: f64,
+    blood_shown_ml: f64,
+    blood_unshown_ml: f64,
+    /// Pieces of broken bone outside the body (`scenarios::bone_pieces_out`).
+    bone_pieces_out: usize,
 }
 
 struct VisualCapture {
@@ -129,7 +136,7 @@ fn main() {
     println!("wrote {}", svg_path.display());
     println!("wrote {}", summary_path.display());
     if warnings.is_empty() {
-        println!("PASS: visual damage diagnostics include expected wound and fracture detail");
+        println!("PASS: visual damage diagnostics show what the simulation did, with the expected wound and fracture detail");
     } else {
         for warning in warnings {
             eprintln!("WARN: {warning}");
@@ -163,13 +170,9 @@ fn visual_scenarios() -> Vec<VisualScenario> {
                 min_incision_segments: 8,
                 min_muscle_fiber_tears: 4,
                 min_opened_cut_insides: 3,
-                min_visible_wound_sources: 3,
-                min_visible_fluid_particles: 10,
-                min_visible_blood_trails: 60,
                 min_organ_penetrations: 1,
                 min_organ_damage: 0.4,
                 max_fractured_bones: Some(0),
-                min_damage_primitives: 120,
                 ..VisualExpectations::default()
             },
         },
@@ -181,22 +184,16 @@ fn visual_scenarios() -> Vec<VisualScenario> {
             // the upper arm breaks (ribs only sometimes), with deep bruising
             // and torn muscle. The skin mostly holds over a closed break, so
             // it bleeds a little, and that runs down the skin. Breaking the
-            // arm takes much of the blow, so the organs behind it are only
-            // bruised.
+            // arm takes much of the blow, so the organs behind it are at most
+            // bruised, in some swings and not others (the sweep's organ damage).
             expectations: VisualExpectations {
                 min_skin_wound_edges: 3,
                 min_muscle_fiber_tears: 10,
                 min_failed_muscle_voids: 30,
-                min_visible_contusions: 25,
-                min_visible_wound_sources: 4,
-                min_visible_fluid_particles: 15,
-                min_visible_blood_trails: 20,
-                min_visible_blood_stains: 4,
+                min_bruised_points: 25,
                 min_fractured_bones: 2,
                 min_fracture_caps: 2,
                 min_cavity_pressure: 0.1,
-                min_organ_damage: 0.05,
-                min_damage_primitives: 120,
                 ..VisualExpectations::default()
             },
         },
@@ -212,12 +209,8 @@ fn visual_scenarios() -> Vec<VisualScenario> {
                 min_incision_segments: 15,
                 min_muscle_fiber_tears: 4,
                 min_opened_cut_insides: 2,
-                min_visible_wound_sources: 1,
-                min_visible_fluid_particles: 12,
-                min_visible_blood_trails: 30,
                 min_lacerated_vessels: 1,
                 max_fractured_bones: Some(0),
-                min_damage_primitives: 100,
                 ..VisualExpectations::default()
             },
         },
@@ -258,7 +251,7 @@ fn inspect_visual_damage(world: &rp::World) -> VisualMetrics {
             metrics.exposed_points += 1;
         }
         if point.contusion > 0.05 {
-            metrics.visible_contusions += 1;
+            metrics.bruised_points += 1;
         }
     }
 
@@ -302,7 +295,11 @@ fn inspect_visual_damage(world: &rp::World) -> VisualMetrics {
 
     for wound in world.wounds() {
         if wound.age > 0.0 || wound.pressure > 0.0 || wound.clot > 0.0 {
-            metrics.visible_wound_sources += 1;
+            if world.open_to_air(wound.position) {
+                metrics.open_wound_sources += 1;
+            } else {
+                metrics.sealed_wound_sources += 1;
+            }
         }
         if wound.active {
             metrics.active_wound_sources += 1;
@@ -312,7 +309,7 @@ fn inspect_visual_damage(world: &rp::World) -> VisualMetrics {
     for fluid in world.fluids() {
         if fluid.life > 0.0 {
             metrics.active_fluid_particles += 1;
-            if fluid.intensity > 0.02 && fluid.radius > 0.2 {
+            if fluid.volume > 0.0 {
                 metrics.visible_fluid_particles += 1;
             }
         }
@@ -327,7 +324,7 @@ fn inspect_visual_damage(world: &rp::World) -> VisualMetrics {
     metrics.visible_blood_stains = world
         .blood_stains()
         .iter()
-        .filter(|stain| stain.intensity > 0.025)
+        .filter(|stain| stain.volume > 0.0)
         .count();
 
     metrics.lacerated_vessels = world
@@ -359,19 +356,12 @@ fn inspect_visual_damage(world: &rp::World) -> VisualMetrics {
         }
     }
 
-    metrics.damage_primitives = metrics.skin_wound_edges
-        + metrics.incision_segments
-        + metrics.wound_rim_edges
-        + metrics.failed_muscle_voids
-        + metrics.opened_cut_insides
-        + metrics.visible_contusions
-        + metrics.visible_wound_sources
-        + metrics.visible_fluid_particles
-        + metrics.visible_blood_trails
-        + metrics.visible_blood_stains
-        + metrics.lacerated_vessels
-        + metrics.fractured_bones
-        + metrics.fracture_caps;
+    let stats = world.stats();
+    metrics.blood_lost_ml = stats.blood_loss * BLOOD_VOLUME_ML;
+    metrics.blood_shed_ml = stats.blood_shed_ml;
+    metrics.blood_shown_ml = world.blood_shown_ml();
+    metrics.blood_unshown_ml = stats.blood_unshown_ml;
+    metrics.bone_pieces_out = bone_pieces_out(world).max(0) as usize;
     metrics.cavity_ruptures = world.stats().cavity_ruptures.max(0) as usize;
     metrics.cavity_pressure = max_cavity_pressure(world);
     metrics.cavity_collapse = max_cavity_collapse(world);
@@ -431,37 +421,9 @@ fn validate_visual_metrics(
     );
     check_min(
         scenario,
-        "visible_contusions",
-        metrics.visible_contusions,
-        scenario.expectations.min_visible_contusions,
-        warnings,
-    );
-    check_min(
-        scenario,
-        "visible_wound_sources",
-        metrics.visible_wound_sources,
-        scenario.expectations.min_visible_wound_sources,
-        warnings,
-    );
-    check_min(
-        scenario,
-        "visible_fluid_particles",
-        metrics.visible_fluid_particles,
-        scenario.expectations.min_visible_fluid_particles,
-        warnings,
-    );
-    check_min(
-        scenario,
-        "visible_blood_trails",
-        metrics.visible_blood_trails,
-        scenario.expectations.min_visible_blood_trails,
-        warnings,
-    );
-    check_min(
-        scenario,
-        "visible_blood_stains",
-        metrics.visible_blood_stains,
-        scenario.expectations.min_visible_blood_stains,
+        "bruised_points",
+        metrics.bruised_points,
+        scenario.expectations.min_bruised_points,
         warnings,
     );
     check_min(
@@ -549,13 +511,45 @@ fn validate_visual_metrics(
         scenario.expectations.min_organ_damage,
         warnings,
     );
-    check_min(
-        scenario,
-        "damage_primitives",
-        metrics.damage_primitives,
-        scenario.expectations.min_damage_primitives,
-        warnings,
-    );
+    check_drawn_matches_physics(scenario, metrics, warnings);
+}
+
+/// What is drawn must match what the simulation says happened, neither more
+/// nor larger: no more blood shows than the wounds let out, every drop's
+/// blood is accounted for, and broken bone stays in the body. The sizes
+/// blood is drawn at come from its volume (`blood.rs`, whose tests check
+/// them against measured drops and pools).
+fn check_drawn_matches_physics(
+    scenario: &VisualScenario,
+    metrics: &VisualMetrics,
+    warnings: &mut Vec<String>,
+) {
+    let slack = 1.0e-6 * metrics.blood_shed_ml.max(1.0);
+    if metrics.blood_shed_ml > metrics.blood_lost_ml + slack {
+        warnings.push(format!(
+            "{}: {:.3} ml of blood let out, more than the {:.3} ml the wounds lost",
+            scenario.name, metrics.blood_shed_ml, metrics.blood_lost_ml
+        ));
+    }
+    if metrics.blood_shown_ml > metrics.blood_shed_ml + slack {
+        warnings.push(format!(
+            "{}: {:.3} ml of blood shown, more than the {:.3} ml let out",
+            scenario.name, metrics.blood_shown_ml, metrics.blood_shed_ml
+        ));
+    }
+    let accounted = metrics.blood_shown_ml + metrics.blood_unshown_ml;
+    if (accounted - metrics.blood_shed_ml).abs() > slack {
+        warnings.push(format!(
+            "{}: {:.4} ml of blood shown or gone from view, but {:.4} ml let out",
+            scenario.name, accounted, metrics.blood_shed_ml
+        ));
+    }
+    if metrics.bone_pieces_out > 0 {
+        warnings.push(format!(
+            "{}: {} pieces of broken bone outside the body; broken bone stays in the limb",
+            scenario.name, metrics.bone_pieces_out
+        ));
+    }
 }
 
 fn check_min_f64(
@@ -957,6 +951,9 @@ fn smoothstep(edge0: f64, edge1: f64, x: f64) -> f64 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// Where each wound bleeds from, for checking; the app shows these only in
+/// its debug view. Wounds under unbroken skin, which bleed into the flesh
+/// unseen, are drawn as outlines.
 fn draw_wound_sources(out: &mut String, world: &rp::World) {
     for wound in world.wounds() {
         if wound.age <= 0.0 && wound.pressure <= 0.0 && wound.clot <= 0.0 {
@@ -965,14 +962,10 @@ fn draw_wound_sources(out: &mut String, world: &rp::World) {
         let pressure = (wound.pressure / 6.0).clamp(0.0, 1.0);
         let clot = wound.clot.clamp(0.0, 1.0);
         let radius = wound.radius * (1.5 + wound.depth * 0.38);
-        write_circle(
-            out,
-            wound.position,
-            radius + 7.0 + pressure * 7.0,
-            "#3d020b",
-            0.22 + pressure * 0.18,
-        );
-        write_circle(out, wound.position, radius + 2.0, "#220005", 0.58);
+        if !world.open_to_air(wound.position) {
+            write_ring(out, wound.position, radius, "#ba1022", 0.6);
+            continue;
+        }
         write_circle(out, wound.position, radius, "#ba1022", 0.84 - clot * 0.28);
         let dir = normalized(wound.direction, rp::Vec2 { x: 0.0, y: 1.0 });
         write_line(
@@ -986,35 +979,31 @@ fn draw_wound_sources(out: &mut String, world: &rp::World) {
     }
 }
 
+/// Pools on the floor, as wide as the floor their blood covers.
 fn draw_blood_stains(out: &mut String, world: &rp::World) {
     for stain in world.blood_stains() {
-        if stain.intensity <= 0.025 {
+        if stain.volume <= 0.0 {
             continue;
         }
-        let intensity = stain.intensity.clamp(0.0, 1.75);
-        write_circle(
+        let half = stain.width * 0.5;
+        writeln!(
             out,
-            stain.position,
-            stain.radius * (1.16 + intensity * 0.10),
-            "#260007",
-            0.16 + intensity * 0.14,
-        );
-        write_circle(
-            out,
-            stain.position,
-            stain.radius * (0.58 + intensity * 0.08),
-            "#2b0207",
-            0.20 + intensity * 0.18,
-        );
+            "<ellipse cx=\"{:.2}\" cy=\"{:.2}\" rx=\"{:.2}\" ry=\"{:.2}\" fill=\"#5b0611\" fill-opacity=\"0.85\"/>",
+            stain.position.x,
+            stain.position.y,
+            half,
+            (half * 0.22).max(0.4)
+        )
+        .expect("write blood pool");
     }
 }
 
 /// Blood on the skin: the trails it left running down, then the drops still
-/// on it.
+/// on it, each as wide as its blood wets the skin.
 fn draw_skin_blood(out: &mut String, world: &rp::World) {
     for trail in world.blood_trails() {
         if let Some((from, to)) = world.blood_trail_ends(trail) {
-            write_line(out, from, to, trail.width.max(0.7), "#920a14", 0.9);
+            write_line(out, from, to, trail.width, "#920a14", 0.9);
         }
     }
     for fluid in world.fluids() {
@@ -1025,24 +1014,23 @@ fn draw_skin_blood(out: &mut String, world: &rp::World) {
             continue;
         }
         if let Some(center) = world.skin_spot_position(spot) {
-            write_circle(out, center, (fluid.radius * 0.5).max(0.7), "#9c0c16", 0.95);
+            write_circle(out, center, world.drop_radius(fluid), "#9c0c16", 0.95);
         }
     }
 }
 
+/// Drops in the air, each the sphere its blood makes.
 fn draw_fluids(out: &mut String, world: &rp::World) {
     for fluid in world.fluids() {
         if fluid.life <= 0.0 || fluid.on_skin.is_some() {
             continue;
         }
-        let age = 1.0 - (fluid.life / fluid.max_life.max(0.01)).clamp(0.0, 1.0);
-        let opacity = (0.22 + fluid.intensity * 0.42) * (1.0 - age * 0.30);
         write_circle(
             out,
             fluid.position,
-            fluid.radius * (0.86 + fluid.intensity * 0.20),
-            if fluid.settled { "#5b0611" } else { "#b70d20" },
-            opacity.clamp(0.10, 0.78),
+            world.drop_radius(fluid),
+            "#b70d20",
+            (0.30 + fluid.intensity * 0.42).clamp(0.10, 0.85),
         );
     }
 }
@@ -1072,8 +1060,8 @@ fn draw_label(out: &mut String, capture: &VisualCapture) {
         metrics.muscle_fiber_tears,
         metrics.failed_muscle_voids,
         metrics.opened_cut_insides,
-        metrics.visible_contusions,
-        metrics.visible_wound_sources,
+        metrics.bruised_points,
+        metrics.open_wound_sources,
         metrics.visible_fluid_particles,
         metrics.visible_blood_trails,
         metrics.visible_blood_stains
@@ -1121,7 +1109,7 @@ fn write_summary(path: &Path, captures: &[VisualCapture]) -> std::io::Result<()>
     let mut out = BufWriter::new(File::create(path)?);
     writeln!(
         out,
-        "scenario,intent,tool,skin_wound_edges,incision_segments,wound_rim_edges,exposed_muscle_triangles,stats_muscle_fiber_tears,stats_joint_ligament_damage_events,failed_muscle_voids,opened_cut_insides,visible_contusions,visible_wound_sources,active_wound_sources,visible_fluid_particles,active_fluid_particles,visible_blood_stains,lacerated_vessels,fractured_bones,rib_fractures,fracture_caps,final_free_fragments,final_sleeping_fragments,damage_primitives,max_point_load,max_point_exposure,max_contusion,max_muscle_damage,stats_skin_tears,stats_muscle_tears,stats_muscle_crush_ruptures,stats_cavity_pressure_events,stats_cavity_ruptures,peak_cavity_pressure,peak_cavity_collapse,stats_organ_damage_events,stats_organ_penetrations,stats_rib_organ_punctures,stats_organ_ruptures,peak_organ_damage,stats_skin_flap_detachments,stats_vessel_lacerations,stats_fragment_vessel_lacerations,stats_fragment_skin_punctures,stats_bone_joint_subluxations,stats_fracture_marrow_sources,stats_contusion_events,stats_opened_wounds,stats_emitted_fluid,stats_wound_fluid,stats_blood_loss,final_blood_volume,final_blood_turgor,stats_blood_stain_deposits,visible_blood_trails,stats_skin_blood_drops,stats_blood_drips,stats_blood_trail_length"
+        "scenario,intent,tool,skin_wound_edges,incision_segments,wound_rim_edges,exposed_muscle_triangles,stats_muscle_fiber_tears,stats_joint_ligament_damage_events,failed_muscle_voids,opened_cut_insides,bruised_points,open_wound_sources,sealed_wound_sources,active_wound_sources,visible_fluid_particles,active_fluid_particles,visible_blood_stains,lacerated_vessels,fractured_bones,rib_fractures,fracture_caps,final_free_fragments,final_sleeping_fragments,bone_pieces_out,max_point_load,max_point_exposure,max_contusion,max_muscle_damage,stats_skin_tears,stats_muscle_tears,stats_muscle_crush_ruptures,stats_cavity_pressure_events,stats_cavity_ruptures,peak_cavity_pressure,peak_cavity_collapse,stats_organ_damage_events,stats_organ_penetrations,stats_rib_organ_punctures,stats_organ_ruptures,peak_organ_damage,stats_skin_flap_detachments,stats_vessel_lacerations,stats_fragment_vessel_lacerations,stats_fragment_skin_punctures,stats_bone_joint_subluxations,stats_fracture_marrow_sources,stats_contusion_events,stats_opened_wounds,stats_emitted_fluid,stats_wound_fluid,stats_blood_loss,final_blood_volume,final_blood_turgor,stats_blood_stain_deposits,visible_blood_trails,stats_skin_blood_drops,stats_blood_drips,stats_blood_trail_length,blood_lost_ml,blood_shed_ml,blood_shown_ml,blood_unshown_ml"
     )?;
     for capture in captures {
         let metrics = capture.metrics;
@@ -1138,8 +1126,9 @@ fn write_summary(path: &Path, captures: &[VisualCapture]) -> std::io::Result<()>
             metrics.joint_ligament_damage_events.to_string(),
             metrics.failed_muscle_voids.to_string(),
             metrics.opened_cut_insides.to_string(),
-            metrics.visible_contusions.to_string(),
-            metrics.visible_wound_sources.to_string(),
+            metrics.bruised_points.to_string(),
+            metrics.open_wound_sources.to_string(),
+            metrics.sealed_wound_sources.to_string(),
             metrics.active_wound_sources.to_string(),
             metrics.visible_fluid_particles.to_string(),
             metrics.active_fluid_particles.to_string(),
@@ -1150,7 +1139,7 @@ fn write_summary(path: &Path, captures: &[VisualCapture]) -> std::io::Result<()>
             metrics.fracture_caps.to_string(),
             metrics.final_free_fragments.to_string(),
             metrics.final_sleeping_fragments.to_string(),
-            metrics.damage_primitives.to_string(),
+            metrics.bone_pieces_out.to_string(),
             format!("{:.3}", metrics.max_point_load),
             format!("{:.3}", metrics.max_point_exposure),
             format!("{:.3}", metrics.max_contusion),
@@ -1185,6 +1174,10 @@ fn write_summary(path: &Path, captures: &[VisualCapture]) -> std::io::Result<()>
             stats.skin_blood_drops.to_string(),
             stats.blood_drips.to_string(),
             format!("{:.1}", stats.blood_trail_length),
+            format!("{:.4}", metrics.blood_lost_ml),
+            format!("{:.4}", metrics.blood_shed_ml),
+            format!("{:.4}", metrics.blood_shown_ml),
+            format!("{:.4}", metrics.blood_unshown_ml),
         ];
         writeln!(out, "{}", fields.join(","))?;
     }
@@ -1243,6 +1236,19 @@ fn write_line(out: &mut String, a: rp::Vec2, b: rp::Vec2, width: f64, stroke: &s
         a.x, a.y, b.x, b.y, stroke, opacity.clamp(0.0, 1.0), width
     )
     .expect("write line");
+}
+
+fn write_ring(out: &mut String, center: rp::Vec2, radius: f64, stroke: &str, opacity: f64) {
+    writeln!(
+        out,
+        "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"{:.2}\" fill=\"none\" stroke=\"{}\" stroke-width=\"1\" stroke-opacity=\"{:.3}\"/>",
+        center.x,
+        center.y,
+        radius.max(0.0),
+        stroke,
+        opacity.clamp(0.0, 1.0)
+    )
+    .expect("write ring");
 }
 
 fn write_circle(out: &mut String, center: rp::Vec2, radius: f64, fill: &str, opacity: f64) {

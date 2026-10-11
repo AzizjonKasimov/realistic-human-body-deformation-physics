@@ -21,7 +21,7 @@ The end product is a free standalone download that someone can install, play wit
 - Start one system at a time, beginning with soft-body skin tearing.
 - Prioritize real simulation behavior over scripted decals or canned animations.
 - Sound follows the simulation too: what the physics does at each step (how fast a blow lands, a bone breaking, flesh tearing, blood landing, a blade cutting) is synthesized into sound, not picked from canned recordings, and the player can mute it.
-- Aim as close as practical to real-life body destruction physics.
-- Treat graphic injury detail as part of the simulation target: gore, exposed tissue, blood, tearing, fracture, and body deformation should be shown when the physics state supports them.
+- Aim as close as practical to how real bodies are injured: what a blow, a cut, or a break does to a person, checked against published injury research.
+- Show injuries as they really are. Blood, exposed tissue, torn skin and muscle, broken bones, bruises, and deformation appear whenever the simulation produces them, and they are not toned down. Nor are they exaggerated: the goal is realistic injury, not gore for its own sake, so nothing is drawn bigger, bloodier, or sooner than the injury would really look.
+- Draw what the simulation says happened, no more and no larger. Blood shows as much as the wounds have lost, at the size that blood would really be; a fresh blow leaves a red mark and its bruise darkens over the next quarter hour; broken bone stays in the limb. Checks compare what is drawn with the simulation, as the injuries themselves are checked against research.
 - Keep the figure itself presentable: a neutral, mirror-symmetric, front-facing mannequin without anatomical surface detail. The realism lives in the layered tissue and the damage, not in the body's outline.
-- Do not ask whether the app should be less gory by default; assume a darker, more realistic destruction model unless a later product decision explicitly says otherwise.

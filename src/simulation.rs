@@ -4,6 +4,7 @@ use std::f64::consts::PI;
 mod bending;
 mod blood;
 mod body;
+mod bruises;
 mod cuts;
 mod grid;
 mod motion;
@@ -374,16 +375,12 @@ pub struct Materials {
     pub fluid_lifetime: f64,
     /// How much of its speed a drop keeps bouncing off a side of the world.
     pub fluid_wall_bounce: f64,
-    pub fluid_impact_scale: f64,
     pub blood_volume_capacity: f64,
     pub blood_pressure_min_scale: f64,
     pub blood_turgor_min_scale: f64,
     pub max_blood_stains: usize,
     /// Most stretches of blood trail the skin keeps; the oldest go first.
     pub max_blood_trails: usize,
-    pub blood_stain_merge_radius: f64,
-    pub blood_stain_decay: f64,
-    pub blood_stain_spread: f64,
     pub max_wound_sources: usize,
     /// How fast wounds bleed against the real rates in `WoundKind`; 1 is real.
     pub wound_leak_rate: f64,
@@ -577,15 +574,11 @@ impl Default for Materials {
             fluid_gravity_scale: 1.0,
             fluid_lifetime: 4.8,
             fluid_wall_bounce: 0.48,
-            fluid_impact_scale: 0.03,
             blood_volume_capacity: 1.0,
             blood_pressure_min_scale: 0.34,
             blood_turgor_min_scale: 0.55,
             max_blood_stains: 320,
             max_blood_trails: 2400,
-            blood_stain_merge_radius: 18.0,
-            blood_stain_decay: 0.008,
-            blood_stain_spread: 2.4,
             max_wound_sources: 160,
             wound_leak_rate: 1.0,
             wound_pressure_decay: 0.20,
@@ -644,6 +637,12 @@ pub struct Point {
     pub load: f64,
     pub exposure: f64,
     pub contusion: f64,
+    /// How red the skin here is from a blow, how much bruise the blood let
+    /// into the flesh under it will make, and how much of that shows yet.
+    /// They only colour the skin (see `bruises.rs`).
+    pub flush: f64,
+    pub bruise: f64,
+    pub bruise_shown: f64,
     pub mass: f64,
     /// Rest distance below the body outline in pixels, used for shading.
     pub surface_depth: f64,
@@ -663,6 +662,9 @@ impl Default for Point {
             load: 0.0,
             exposure: 0.0,
             contusion: 0.0,
+            flush: 0.0,
+            bruise: 0.0,
+            bruise_shown: 0.0,
             mass: 1.0,
             surface_depth: 0.0,
             on_cut: false,
@@ -922,6 +924,10 @@ pub struct BoneAttachment {
     pub rest: f64,
     pub stress: f64,
     pub broken: bool,
+    /// It holds a small piece broken off a bone in the flesh: the piece
+    /// follows the flesh rather than the flesh the piece, and only flesh
+    /// torn away lets it go (`hold_piece_in_flesh`).
+    pub holds_piece: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -967,16 +973,18 @@ impl Default for BoneJoint {
     }
 }
 
+/// A drop of blood out of the body: flying, or on the skin. Its size comes
+/// from how much blood it holds (`World::drop_radius`), so it is drawn as
+/// large as that blood would be on a person the body's size.
 #[derive(Clone, Copy, Debug)]
 pub struct FluidParticle {
     pub position: Vec2,
     pub previous: Vec2,
-    pub radius: f64,
+    /// How much blood it holds, in millilitres.
+    pub volume: f64,
     pub life: f64,
     pub max_life: f64,
     pub intensity: f64,
-    pub settled: bool,
-    pub stained: bool,
     /// Where the drop sits on the skin while it clings to it and runs down
     /// it; `None` while it flies or lies on the floor (see `blood.rs`).
     pub on_skin: Option<SkinSpot>,
@@ -992,12 +1000,10 @@ impl Default for FluidParticle {
         Self {
             position: Vec2::default(),
             previous: Vec2::default(),
-            radius: 2.0,
+            volume: BLOOD_DROP_ML,
             life: 0.0,
             max_life: 1.0,
             intensity: 1.0,
-            settled: false,
-            stained: false,
             on_skin: None,
             trail_from: None,
             drift: 0.0,
@@ -1005,23 +1011,19 @@ impl Default for FluidParticle {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+/// Blood on the floor: the spots where drops landed, run together into one
+/// pool as more lands. Seen from in front, it is as wide as the floor it
+/// covers (see `blood.rs`).
+#[derive(Clone, Copy, Debug, Default)]
 pub struct BloodStain {
+    /// Its middle, on the floor.
     pub position: Vec2,
-    pub radius: f64,
-    pub intensity: f64,
+    /// How wide it is, in pixels.
+    pub width: f64,
+    /// How much blood it holds, in millilitres.
+    pub volume: f64,
+    /// Seconds since blood last landed in it: blood darkens as it dries.
     pub age: f64,
-}
-
-impl Default for BloodStain {
-    fn default() -> Self {
-        Self {
-            position: Vec2::default(),
-            radius: 2.0,
-            intensity: 0.0,
-            age: 0.0,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1106,6 +1108,17 @@ impl WoundKind {
 /// Blood one particle stands for, in ml: about a drop. Particles show the
 /// blood a wound loses; they no longer decide how much it loses.
 const BLOOD_DROP_ML: f64 = 0.05;
+/// How far from a new piece of bone, in point spacings, the flesh that holds
+/// it may lie (the reach the body's own muscle-to-bone anchors have).
+const PIECE_HOLD_REACH: f64 = 2.7;
+/// How many muscle points hold a new piece of bone.
+const PIECE_HOLD_POINTS: usize = 4;
+/// How far a hold stretches, against its length at rest, before it lets the
+/// piece go; the flesh holding it lets go sooner only if it is torn away.
+const PIECE_HOLD_BREAK_STRETCH: f64 = 12.0;
+/// How far, in point spacings, a cut artery's blood finds its way to an
+/// opening in the skin: about a knife blade's length.
+const ARTERY_OUTLET_REACH: f64 = 3.0;
 
 /// Blood in the 70 kg adult the figure stands for, in ml: about 70 ml per kg
 /// (Gutierrez et al. 2004). The world's blood volume is a share of it.
@@ -1163,11 +1176,18 @@ pub struct Stats {
     pub skin_blood_drops: i32,
     /// Drops of it that ran off the body's edge and dripped.
     pub blood_drips: i32,
-    /// The part of `skin_blood_drops` that welled from fresh cuts rather
-    /// than leaking from open wounds.
-    pub fresh_blood_welled: i32,
+    /// Blood drops that flew out of a wound instead of welling onto the
+    /// skin: a cut artery's spurts, and blood with no skin below it.
+    pub sprayed_blood_drops: i32,
     /// How far blood on the skin has run, in pixels of trail.
     pub blood_trail_length: f64,
+    /// Blood let out of the body as drops, in millilitres: what can be seen
+    /// of the blood lost.
+    pub blood_shed_ml: f64,
+    /// The part of `blood_shed_ml` no longer shown: drops, trails, or pools
+    /// that gave way to newer ones when the budgets were full, or that dried
+    /// on skin torn away.
+    pub blood_unshown_ml: f64,
     pub contusion_events: i32,
     pub tissue_fatigue_events: i32,
     pub tissue_plastic_events: i32,
@@ -1559,6 +1579,9 @@ pub struct World {
     /// Which points belonged to flesh at the start of this step (see
     /// [`World::flesh_points`]); flesh torn away is not there to touch.
     flesh: Vec<bool>,
+    /// How tall the body is drawn, in pixels; blood is drawn to the same
+    /// scale (see `blood.rs`).
+    body_height: f64,
     /// Fibers a blade cut this step, whose cut opens when the knife's step
     /// ends.
     pending_cuts: Vec<usize>,
@@ -1618,6 +1641,7 @@ impl World {
             outline_pairs: Vec::new(),
             blunt_knock: Vec::new(),
             flesh: Vec::new(),
+            body_height: blood::STANDARD_BODY_HEIGHT,
             pending_cuts: Vec::new(),
             pending_tears: Vec::new(),
             topology_version: 0,
@@ -1938,6 +1962,7 @@ impl World {
             rest: distance(point_position, anchor).max(self.materials.point_spacing * 0.42),
             stress: 0.0,
             broken: false,
+            holds_piece: false,
         });
     }
 
@@ -2082,7 +2107,9 @@ impl World {
         self.timed("skin flaps", Self::delaminate_skin_flaps_from_cut_edges);
         self.timed("fragment tips", Self::collide_bone_fragments);
         self.timed("triangle damage", Self::update_triangle_damage);
+        self.timed("loose pieces", Self::hold_loose_pieces);
         self.timed("blood on skin", |world| world.run_blood_on_skin(dt));
+        self.timed("bruise colour", |world| world.colour_bruises(dt));
         self.timed("fragment sleep", Self::update_fragment_sleep_states);
         self.timed("metrics", |world| {
             world.debug.active_fluids = world.active_fluid_count() as i32;
@@ -2221,7 +2248,7 @@ impl World {
     fn active_blood_stain_count(&self) -> usize {
         self.blood_stains
             .iter()
-            .filter(|stain| stain.intensity > 0.025)
+            .filter(|stain| stain.volume > 0.0)
             .count()
     }
 
@@ -2431,6 +2458,38 @@ impl World {
             })
     }
 
+    /// Where blood from a cut artery at `position` comes out. An artery's
+    /// pressure drives its blood along any way out, as up a stab's track or
+    /// out of an open fracture, so under unbroken skin it comes out of the
+    /// nearest opening within `ARTERY_OUTLET_REACH` point spacings; with none
+    /// that near it stays where it is and bleeds into the flesh.
+    fn artery_outlet(&self, position: Vec2) -> Vec2 {
+        if !self.sealed_under_skin(position) {
+            return position;
+        }
+        let reach = self.materials.point_spacing * ARTERY_OUTLET_REACH;
+        self.open_skin
+            .iter()
+            .map(|&index| {
+                let spring = self.springs[index];
+                midpoint(
+                    self.points[spring.a].position,
+                    self.points[spring.b].position,
+                )
+            })
+            .map(|opening| (distance(opening, position), opening))
+            .filter(|&(gap, _)| gap <= reach)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map_or(position, |(_, opening)| opening)
+    }
+
+    /// Whether something at `position` can be seen from outside the body: no
+    /// unbroken skin covers it, so blood there gets out (see
+    /// `sealed_under_skin`).
+    pub fn open_to_air(&self, position: Vec2) -> bool {
+        !self.sealed_under_skin(position)
+    }
+
     /// Blood that cannot get out pools in the tissue around `center` and
     /// shows as a darker bruise in the skin over it.
     fn bleed_under_skin(&mut self, center: Vec2, count: i32, intensity: f64) {
@@ -2460,34 +2519,34 @@ impl World {
         }
     }
 
-    /// Blood from a fresh tear, break, or rupture, up to what fresh injuries
-    /// may throw out this step.
-    fn emit_fluid(
-        &mut self,
-        center: Vec2,
-        direction: Vec2,
-        count: i32,
-        speed: f64,
-        radius: f64,
-        intensity: f64,
-    ) {
+    /// The first bleeding of a fresh tear, break, or rupture, up to what fresh
+    /// injuries may bleed this step, in drops. Under unbroken skin it bruises
+    /// the flesh there. Where the skin is open nothing extra comes out: the
+    /// wound the injury opens bleeds at the rate of what was cut
+    /// (`update_wounds`), so no more blood shows than the body loses.
+    fn bleed_fresh_injury(&mut self, center: Vec2, count: i32, intensity: f64) {
         let count = count.min(self.materials.max_fresh_blood_per_step - self.fresh_blood_used);
         if count <= 0 {
             return;
         }
         self.fresh_blood_used += count;
-        self.release_blood(center, direction, count, speed, radius, intensity);
+        if self.sealed_under_skin(center) {
+            self.bleed_under_skin(center, count, intensity);
+        }
     }
 
-    /// Blood at `center`: out of the body as particles where the skin over it
-    /// is broken, and under unbroken skin into the tissue as a bruise.
+    /// Blood at `center`: out of the body as drops, a drop's worth
+    /// (`BLOOD_DROP_ML`) each, flying off along `direction` at about `speed`
+    /// pixels a second from up to about `spread` pixels either way along the
+    /// wound, where the skin over it is broken; under unbroken skin it goes
+    /// into the tissue as a bruise.
     fn release_blood(
         &mut self,
         center: Vec2,
         direction: Vec2,
         count: i32,
         speed: f64,
-        radius: f64,
+        spread: f64,
         intensity: f64,
     ) {
         if self.materials.max_fluid_particles == 0 || count <= 0 {
@@ -2506,15 +2565,14 @@ impl World {
         // Blood wells out and spatters; only a cut artery spurts far, and even
         // that is far slower than the blow that opened it.
         let clamped_speed = speed.clamp(55.0, MAX_BLOOD_SPEED);
-        let clamped_radius = radius.clamp(1.35, 4.8);
         let clamped_intensity = intensity.clamp(0.35, 1.35);
         let dt = self.materials.fixed_dt;
 
         for _ in 0..count {
-            let spread = (self.next_fluid_random() - 0.5) * 1.35;
+            let sideways = (self.next_fluid_random() - 0.5) * 1.35;
             let launch = clamped_speed * (0.44 + self.next_fluid_random() * 0.74);
-            let jitter = radius * (self.next_fluid_random() - 0.5) * 2.4;
-            let velocity = add(scale(dir, launch), scale(tangent, spread * launch));
+            let jitter = spread * (self.next_fluid_random() - 0.5) * 2.4;
+            let velocity = add(scale(dir, launch), scale(tangent, sideways * launch));
             let position = add(center, scale(tangent, jitter));
             let max_life = self.materials.fluid_lifetime * (0.62 + self.next_fluid_random() * 0.76);
             let particle = FluidParticle {
@@ -2523,100 +2581,44 @@ impl World {
                     x: position.x - velocity.x * dt,
                     y: position.y - velocity.y * dt,
                 },
-                radius: clamped_radius * (0.72 + self.next_fluid_random() * 0.58),
+                volume: BLOOD_DROP_ML,
                 max_life,
                 life: max_life,
                 intensity: clamped_intensity,
                 ..FluidParticle::default()
             };
             self.add_fluid(particle);
+            self.stats.sprayed_blood_drops += 1;
         }
     }
 
-    /// Adds a blood particle, in place of the one after the last replaced
-    /// when the budget is full.
+    /// Adds a drop of blood just let out of the body, in place of the one
+    /// after the last replaced when the budget is full.
     fn add_fluid(&mut self, particle: FluidParticle) {
         if self.fluids.len() < self.materials.max_fluid_particles {
             self.fluids.push(particle);
         } else if !self.fluids.is_empty() {
             let index = self.fluid_write_cursor % self.fluids.len();
+            let replaced = self.fluids[index];
+            if replaced.life > 0.0 {
+                self.stats.blood_unshown_ml += replaced.volume;
+            }
             self.fluids[index] = particle;
             self.fluid_write_cursor = (self.fluid_write_cursor + 1) % self.fluids.len();
             self.debug.fluid_budget_replacements += 1;
         }
+        self.stats.blood_shed_ml += particle.volume;
         self.stats.emitted_fluid_particles += 1;
         self.debug.fluid_emitted += 1;
     }
 
+    /// Blood on the floor dries where it lies; it does not go away.
     fn update_blood_stains(&mut self, dt: f64) {
         for stain in &mut self.blood_stains {
-            if stain.intensity <= 0.0 {
-                continue;
+            if stain.volume > 0.0 {
+                stain.age += dt;
             }
-            stain.age += dt;
-            stain.intensity = (stain.intensity - dt * self.materials.blood_stain_decay).max(0.0);
         }
-    }
-
-    fn deposit_blood_stain(&mut self, center: Vec2, radius: f64, intensity: f64) {
-        if self.materials.max_blood_stains == 0 || intensity <= 0.0 {
-            return;
-        }
-
-        let clamped_radius = radius.clamp(2.0, 38.0);
-        let clamped_intensity = intensity.clamp(0.05, 1.55);
-        let merge_radius = self.materials.blood_stain_merge_radius + clamped_radius * 0.35;
-
-        if let Some(stain) = self
-            .blood_stains
-            .iter_mut()
-            .filter(|stain| stain.intensity > 0.025)
-            .find(|stain| distance(stain.position, center) <= merge_radius + stain.radius * 0.40)
-        {
-            let existing_weight = stain.intensity.max(0.05) * stain.radius.max(1.0);
-            let added_weight = clamped_intensity * clamped_radius.max(1.0);
-            let weight = existing_weight + added_weight;
-            stain.position = Vec2 {
-                x: (stain.position.x * existing_weight + center.x * added_weight) / weight,
-                y: (stain.position.y * existing_weight + center.y * added_weight) / weight,
-            };
-            stain.radius = (stain.radius * stain.radius + clamped_radius * clamped_radius * 0.52)
-                .sqrt()
-                .min(52.0);
-            stain.intensity = (stain.intensity + clamped_intensity * 0.42).min(1.75);
-            stain.age = 0.0;
-            self.stats.blood_stain_deposits += 1;
-            self.debug.blood_stain_deposits += 1;
-            self.debug.active_blood_stains = self.active_blood_stain_count() as i32;
-            return;
-        }
-
-        let stain = BloodStain {
-            position: center,
-            radius: clamped_radius,
-            intensity: clamped_intensity,
-            age: 0.0,
-        };
-
-        if let Some(index) = self
-            .blood_stains
-            .iter()
-            .position(|stain| stain.intensity <= 0.025)
-        {
-            self.blood_stains[index] = stain;
-        } else if self.blood_stains.len() < self.materials.max_blood_stains {
-            self.blood_stains.push(stain);
-        } else if !self.blood_stains.is_empty() {
-            let index = self.blood_stain_write_cursor % self.blood_stains.len();
-            self.blood_stains[index] = stain;
-            self.blood_stain_write_cursor =
-                (self.blood_stain_write_cursor + 1) % self.blood_stains.len();
-            self.debug.blood_stain_budget_replacements += 1;
-        }
-
-        self.stats.blood_stain_deposits += 1;
-        self.debug.blood_stain_deposits += 1;
-        self.debug.active_blood_stains = self.active_blood_stain_count() as i32;
     }
 
     fn open_wound(
@@ -3194,66 +3196,46 @@ impl World {
         }
 
         self.update_blood_stains(dt);
-        let mut stain_deposits = Vec::new();
+        let mm = self.mm_per_px();
+        let mut landings = Vec::new();
         for fluid in &mut self.fluids {
             if fluid.life <= 0.0 {
                 continue;
             }
             fluid.life = (fluid.life - dt).max(0.0);
-            if fluid.life <= 0.0 {
-                continue;
-            }
             if fluid.on_skin.is_some() {
-                // The skin carries it (see `blood.rs`).
+                // The skin carries it, and it dries there (see `blood.rs`).
                 continue;
             }
-            if fluid.settled {
-                fluid.life = (fluid.life - dt * 0.45).max(0.0);
+            if fluid.life <= 0.0 {
+                self.stats.blood_unshown_ml += fluid.volume;
+                fluid.volume = 0.0;
                 continue;
             }
+            let radius = blood::falling_drop_radius_mm(fluid.volume) / mm;
             let vx = (fluid.position.x - fluid.previous.x) * self.materials.fluid_damping;
             let vy = (fluid.position.y - fluid.previous.y) * self.materials.fluid_damping;
             fluid.previous = fluid.position;
             fluid.position.x += vx;
             fluid.position.y +=
                 vy + self.materials.gravity * self.materials.fluid_gravity_scale * dt * dt;
-            let margin = fluid.radius + 1.0;
-            if fluid.position.x < margin {
-                fluid.position.x = margin;
+            if fluid.position.x < radius {
+                fluid.position.x = radius;
                 fluid.previous.x = fluid.position.x + vx * self.materials.fluid_wall_bounce;
-            } else if fluid.position.x > width - margin {
-                fluid.position.x = width - margin;
+            } else if fluid.position.x > width - radius {
+                fluid.position.x = width - radius;
                 fluid.previous.x = fluid.position.x + vx * self.materials.fluid_wall_bounce;
             }
-            if fluid.position.y > floor_y - fluid.radius {
+            if fluid.position.y > floor_y - radius {
                 // Blood that lands spreads where it falls into the pool there;
                 // it neither bounces nor slides.
-                fluid.position.y = floor_y - fluid.radius;
-                fluid.previous = fluid.position;
-                let floor_hit_speed = vy.abs() + vx.abs() * 0.32;
-                if !fluid.stained {
-                    let stain_radius = fluid.radius
-                        * (self.materials.blood_stain_spread
-                            + fluid.intensity * 0.78
-                            + floor_hit_speed.min(18.0) * 0.035);
-                    let stain_intensity = (fluid.intensity
-                        * (0.72 + floor_hit_speed.min(22.0) * 0.018))
-                        .clamp(0.08, 1.45);
-                    stain_deposits.push((
-                        Vec2 {
-                            x: fluid.position.x,
-                            y: floor_y - fluid.radius * 0.18,
-                        },
-                        stain_radius,
-                        stain_intensity,
-                    ));
-                    fluid.stained = true;
-                }
-                fluid.settled = true;
+                landings.push((fluid.position.x, fluid.volume, hypot(vx, vy) / dt));
+                fluid.life = 0.0;
+                fluid.volume = 0.0;
             }
         }
-        for (position, radius, intensity) in stain_deposits {
-            self.deposit_blood_stain(position, radius, intensity);
+        for (x, volume, speed) in landings {
+            self.land_blood(x, floor_y, volume, speed);
         }
     }
 
@@ -3315,16 +3297,9 @@ impl World {
                 * layer_scale.min(1.0);
             let shed_ml = flow_ml_per_min * dt / 60.0;
             drained_ml += shed_ml;
+            // Each drop shown stands for blood the wound has lost.
             wound.accumulator += shed_ml / BLOOD_DROP_ML;
             let effective_pressure = wound.pressure * systemic_pressure;
-            // Only a cut artery spurts.
-            if wound.kind == WoundKind::Artery
-                && wound.age < 0.42
-                && effective_pressure > self.materials.wound_spray_pressure
-            {
-                wound.accumulator +=
-                    dt * (effective_pressure - self.materials.wound_spray_pressure) * 2.1;
-            }
             let count = (wound.accumulator.floor() as i32).min(4);
             if count > 0 {
                 wound.accumulator -= f64::from(count);
@@ -3351,6 +3326,7 @@ impl World {
                     wound.radius * (0.64 + wound.depth * 0.18),
                     0.58 + wound.depth * 0.42 + spray * 0.18,
                     spray,
+                    wound.kind,
                 ));
             }
             wound.pressure = (wound.pressure
@@ -3378,12 +3354,17 @@ impl World {
         // it.
         self.drain_blood_ml(drained_ml);
         let mut leak_left = self.materials.max_wound_leak_per_step;
-        for (position, direction, count, speed, radius, intensity, spray) in emissions {
+        for (position, direction, count, speed, radius, intensity, spray, kind) in emissions {
             let count = count.min(leak_left);
             if count <= 0 {
                 break;
             }
             leak_left -= count;
+            let position = if kind == WoundKind::Artery {
+                self.artery_outlet(position)
+            } else {
+                position
+            };
             let before = self.stats.emitted_fluid_particles;
             // A fresh wound under pressure spurts; otherwise blood wells out
             // onto the skin and runs down it.
@@ -3478,20 +3459,15 @@ impl World {
                 && rupture_events.len() < self.materials.max_cavity_ruptures_per_step
             {
                 self.cavities[index].ruptured = true;
-                let (site, normal, site_load) =
-                    self.cavity_rupture_site(&area_indices, metrics.centroid);
-                rupture_events.push((site, normal, pressure, stored_collapse, site_load));
+                let (site, normal) = self.cavity_rupture_site(&area_indices, metrics.centroid);
+                rupture_events.push((site, normal, pressure, stored_collapse));
             }
         }
 
-        for (position, normal, pressure, collapse, site_load) in rupture_events {
-            let drive = site_load.max(self.materials.cavity_load_threshold * pressure);
-            self.emit_fluid(
+        for (position, normal, pressure, collapse) in rupture_events {
+            self.bleed_fresh_injury(
                 position,
-                normal,
                 2 + (pressure * 3.0).clamp(0.0, 6.0) as i32,
-                76.0 + drive * self.materials.fluid_impact_scale * 0.32,
-                2.0 + collapse * 0.55,
                 0.82 + pressure.min(1.4) * 0.12,
             );
             self.open_wound(
@@ -3604,15 +3580,10 @@ impl World {
         }
     }
 
-    fn cavity_rupture_site(
-        &self,
-        area_indices: &[usize],
-        fallback_centroid: Vec2,
-    ) -> (Vec2, Vec2, f64) {
+    fn cavity_rupture_site(&self, area_indices: &[usize], fallback_centroid: Vec2) -> (Vec2, Vec2) {
         let mut best_score = f64::NEG_INFINITY;
         let mut best_site = fallback_centroid;
         let mut best_normal = Vec2 { x: 0.0, y: -1.0 };
-        let mut best_load = 0.0;
         for &area_index in area_indices {
             if area_index >= self.areas.len() {
                 continue;
@@ -3655,9 +3626,8 @@ impl World {
             best_score = score;
             best_site = site;
             best_normal = normal;
-            best_load = load;
         }
-        (best_site, best_normal, best_load)
+        (best_site, best_normal)
     }
 
     fn update_organs(&mut self, dt: f64) {
@@ -3732,32 +3702,21 @@ impl World {
                     direction,
                     self.organs[index].damage,
                     pressure,
-                    local_load.max(fragment_load),
                 ));
             }
         }
 
-        for (position, direction, damage, pressure, load) in rupture_events {
-            self.open_organ_rupture(position, direction, damage, pressure, load);
+        for (position, direction, damage, pressure) in rupture_events {
+            self.open_organ_rupture(position, direction, damage, pressure);
         }
     }
 
-    fn open_organ_rupture(
-        &mut self,
-        position: Vec2,
-        direction: Vec2,
-        damage: f64,
-        pressure: f64,
-        load: f64,
-    ) {
+    fn open_organ_rupture(&mut self, position: Vec2, direction: Vec2, damage: f64, pressure: f64) {
         let bleed_pressure = self.materials.organ_bleed_pressure
             * (0.82 + pressure.max(0.0) * 0.28 + damage.min(1.5) * 0.22);
-        self.emit_fluid(
+        self.bleed_fresh_injury(
             position,
-            direction,
             3 + (damage * 3.0).clamp(0.0, 5.0) as i32,
-            68.0 + load * self.materials.fluid_impact_scale * 0.22,
-            2.0 + damage.min(1.5) * 0.42,
             0.92 + damage.min(1.5) * 0.16,
         );
         self.open_wound(
@@ -3935,18 +3894,12 @@ impl World {
                     add(scale(travel_dir, 0.72), scale(tip_normal, 0.28)),
                     travel_dir,
                 );
-                rupture_events.push((
-                    path_point,
-                    direction,
-                    new_damage,
-                    0.0,
-                    drive * (0.34 + severity * 0.10),
-                ));
+                rupture_events.push((path_point, direction, new_damage, 0.0));
             }
         }
 
-        for (position, direction, damage, pressure, load) in rupture_events {
-            self.open_organ_rupture(position, direction, damage, pressure, load);
+        for (position, direction, damage, pressure) in rupture_events {
+            self.open_organ_rupture(position, direction, damage, pressure);
         }
     }
 
@@ -4233,20 +4186,14 @@ impl World {
                 if dot(direction, shape.direction) < -0.25 {
                     direction = normalized(add(direction, scale(shape.direction, 0.30)), direction);
                 }
-                rupture_events.push((
-                    site,
-                    direction,
-                    new_damage,
-                    0.0,
-                    drive * (0.42 + severity * 0.12),
-                ));
+                rupture_events.push((site, direction, new_damage, 0.0));
             }
 
             penetrations += 1;
         }
 
-        for (position, direction, damage, pressure, load) in rupture_events {
-            self.open_organ_rupture(position, direction, damage, pressure, load);
+        for (position, direction, damage, pressure) in rupture_events {
+            self.open_organ_rupture(position, direction, damage, pressure);
         }
     }
 
@@ -4387,7 +4334,6 @@ impl World {
                         endpoint_load,
                         5,
                         900.0,
-                        110.0,
                         2.3,
                         1.12,
                         1350.0,
@@ -4406,7 +4352,6 @@ impl World {
                         endpoint_load,
                         3,
                         1050.0,
-                        85.0,
                         1.9,
                         0.86,
                         1250.0,
@@ -4448,19 +4393,15 @@ impl World {
             load,
             base_count,
             load_div,
-            base_speed,
             radius,
             intensity,
             pressure_div,
             depth,
         ) in events
         {
-            self.emit_fluid(
+            self.bleed_fresh_injury(
                 midpoint,
-                normal,
                 base_count + (load / load_div).clamp(0.0, 8.0) as i32,
-                base_speed + load * self.materials.fluid_impact_scale,
-                radius,
                 intensity,
             );
             self.open_wound(midpoint, normal, layer, load / pressure_div, radius, depth);
@@ -4568,14 +4509,7 @@ impl World {
         self.open_blade_cuts();
 
         for (midpoint, normal, load) in events {
-            self.emit_fluid(
-                midpoint,
-                normal,
-                2 + (load / 1250.0).clamp(0.0, 4.0) as i32,
-                70.0 + load * self.materials.fluid_impact_scale * 0.58,
-                1.55,
-                0.48,
-            );
+            self.bleed_fresh_injury(midpoint, 2 + (load / 1250.0).clamp(0.0, 4.0) as i32, 0.48);
             self.open_wound(
                 midpoint,
                 normal,
@@ -4716,14 +4650,7 @@ impl World {
         }
 
         for (point, normal, load) in events {
-            self.emit_fluid(
-                point,
-                normal,
-                1 + (load / 1450.0).clamp(0.0, 3.0) as i32,
-                68.0 + load * self.materials.fluid_impact_scale * 0.44,
-                1.5,
-                0.62,
-            );
+            self.bleed_fresh_injury(point, 1 + (load / 1450.0).clamp(0.0, 3.0) as i32, 0.62);
             self.open_wound(point, normal, TissueLayer::Muscle, load / 1750.0, 1.5, 0.62);
         }
     }
@@ -4795,14 +4722,7 @@ impl World {
             }
         }
         for (point, normal, impulse) in events {
-            self.emit_fluid(
-                point,
-                normal,
-                3 + (impulse / 1200.0).clamp(0.0, 5.0) as i32,
-                80.0 + impulse * self.materials.fluid_impact_scale * 0.60,
-                1.8,
-                0.78,
-            );
+            self.bleed_fresh_injury(point, 3 + (impulse / 1200.0).clamp(0.0, 5.0) as i32, 0.78);
             self.open_wound(
                 point,
                 normal,
@@ -4846,9 +4766,15 @@ impl World {
             let impulse = point.load.max(bone.load);
             self.bone_attachments[i].stress =
                 (self.bone_attachments[i].stress * 0.9).max((stretch_ratio - 1.0).max(0.0));
-            if stretch_ratio > self.materials.bone_attachment_break_stretch
-                || (impulse > self.materials.bone_attachment_break_impulse && stretch_ratio > 1.45)
-            {
+            let torn_loose = if attachment.holds_piece {
+                // Flesh lets go of a piece only once it is torn away.
+                !is_flesh(&self.flesh, attachment.point) || stretch_ratio > PIECE_HOLD_BREAK_STRETCH
+            } else {
+                stretch_ratio > self.materials.bone_attachment_break_stretch
+                    || (impulse > self.materials.bone_attachment_break_impulse
+                        && stretch_ratio > 1.45)
+            };
+            if torn_loose {
                 self.bone_attachments[i].broken = true;
                 self.stats.broken_bone_attachments += 1;
                 self.bump_point_exposure_load(attachment.point, 0.85, impulse * 0.2);
@@ -4868,12 +4794,20 @@ impl World {
                 subtract(target, point.position),
                 self.materials.bone_attachment_stiffness,
             );
+            // A whole bone carries the flesh on it; a piece of broken bone is
+            // carried by the flesh around it and does not drag the flesh.
+            let (point_share, bone_share) = if attachment.holds_piece {
+                (0.0, 1.0)
+            } else {
+                (1.0, 0.10)
+            };
             if !self.points[attachment.point].pinned {
-                self.points[attachment.point].position =
-                    add(self.points[attachment.point].position, correction);
+                self.points[attachment.point].position = add(
+                    self.points[attachment.point].position,
+                    scale(correction, point_share),
+                );
             }
             if !bone.pinned {
-                let bone_share = 0.10;
                 bone.a.x -= correction.x * bone_share * (1.0 - attachment.t);
                 bone.a.y -= correction.y * bone_share * (1.0 - attachment.t);
                 bone.b.x -= correction.x * bone_share * attachment.t;
@@ -4882,14 +4816,7 @@ impl World {
             self.bones[attachment.bone] = bone;
         }
         for (point, normal, impulse) in events {
-            self.emit_fluid(
-                point,
-                normal,
-                4 + (impulse / 1050.0).clamp(0.0, 7.0) as i32,
-                95.0 + impulse * self.materials.fluid_impact_scale * 0.72,
-                2.0,
-                0.94,
-            );
+            self.bleed_fresh_injury(point, 4 + (impulse / 1050.0).clamp(0.0, 7.0) as i32, 0.94);
             self.open_wound(
                 point,
                 normal,
@@ -5991,12 +5918,9 @@ impl World {
         }
 
         for (position, direction, layer, impulse, radius, depth) in emissions {
-            self.emit_fluid(
+            self.bleed_fresh_injury(
                 position,
-                direction,
                 1 + (impulse / 1200.0).clamp(0.0, 4.0) as i32,
-                80.0 + impulse * self.materials.fluid_impact_scale * 0.28,
-                radius,
                 if layer == TissueLayer::Muscle {
                     0.72
                 } else {
@@ -6022,12 +5946,9 @@ impl World {
                 x: mid.x - tip.x + tip_normal.x * 0.5,
                 y: mid.y - tip.y + tip_normal.y * 0.5 - 0.18,
             };
-            self.emit_fluid(
+            self.bleed_fresh_injury(
                 mid,
-                direction,
                 if layer == TissueLayer::Skin { 4 } else { 3 },
-                115.0 + impulse * self.materials.fluid_impact_scale * 0.36,
-                if layer == TissueLayer::Skin { 2.1 } else { 1.8 },
                 if layer == TissueLayer::Skin {
                     1.02
                 } else {
@@ -6234,12 +6155,9 @@ impl World {
         }
 
         for (position, normal, load, damage) in rupture_events {
-            self.emit_fluid(
+            self.bleed_fresh_injury(
                 position,
-                normal,
                 2 + (load / 1200.0).clamp(0.0, 5.0) as i32,
-                84.0 + load * self.materials.fluid_impact_scale * 0.36,
-                1.85 + damage.min(1.35) * 0.35,
                 0.76 + damage.min(1.35) * 0.18,
             );
             self.open_wound(
@@ -6558,14 +6476,7 @@ impl World {
             return;
         }
 
-        self.emit_fluid(
-            crack,
-            blood_direction,
-            10 + (load / 720.0).clamp(0.0, 16.0) as i32,
-            180.0 + load * self.materials.fluid_impact_scale,
-            2.7,
-            1.28,
-        );
+        self.bleed_fresh_injury(crack, 10 + (load / 720.0).clamp(0.0, 16.0) as i32, 1.28);
         self.open_wound(
             crack,
             blood_direction,
@@ -6656,6 +6567,70 @@ impl World {
             .max_bone_angular_speed
             .max(splinter.angular_velocity.abs());
         self.bones.push(splinter);
+        self.hold_piece_in_flesh(self.bones.len() - 1);
+    }
+
+    /// Holds a piece just broken off a bone in the flesh around it, as a real
+    /// fragment stays in the limb (a segment thrown clear is rare, from
+    /// high-energy crashes; Hu et al. 2024): the muscle points nearest it that
+    /// are still flesh are attached to it where they lie along it. Torn far
+    /// enough, they let it go as other attachments do.
+    pub(super) fn hold_piece_in_flesh(&mut self, bone_index: usize) {
+        let Some(&bone) = self.bones.get(bone_index) else {
+            return;
+        };
+        let reach = self.materials.point_spacing * PIECE_HOLD_REACH;
+        let mut near = Vec::new();
+        for (index, point) in self.points.iter().enumerate() {
+            if point.layer != TissueLayer::Muscle || !is_flesh(&self.flesh, index) {
+                continue;
+            }
+            let t = segment_t(point.position, bone.a, bone.b);
+            let gap = distance(point.position, bone_point(bone, t));
+            if gap <= reach {
+                near.push((gap, index, t));
+            }
+        }
+        near.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        // Holds this piece lost before make room for the new ones, so a piece
+        // held again and again does not lengthen the list.
+        let spent: Vec<usize> = (0..self.bone_attachments.len())
+            .filter(|&index| {
+                let hold = self.bone_attachments[index];
+                hold.bone == bone_index && hold.holds_piece && hold.broken
+            })
+            .take(PIECE_HOLD_POINTS)
+            .collect();
+        for (n, &(_, point, t)) in near.iter().take(PIECE_HOLD_POINTS).enumerate() {
+            self.add_bone_attachment(point, bone_index, t);
+            let Some(mut hold) = self.bone_attachments.pop() else {
+                continue;
+            };
+            hold.holds_piece = true;
+            match spent.get(n) {
+                Some(&slot) => self.bone_attachments[slot] = hold,
+                None => self.bone_attachments.push(hold),
+            }
+        }
+    }
+
+    /// Every piece of broken bone that nothing holds any more, such as a half
+    /// whose muscle anchors all tore at the break, is held by the flesh around
+    /// it, as a real fragment stays in the limb (`hold_piece_in_flesh`); one
+    /// lying where the flesh is torn away stays loose until flesh is near.
+    fn hold_loose_pieces(&mut self) {
+        let mut held = vec![false; self.bones.len()];
+        for attachment in &self.bone_attachments {
+            if !attachment.broken && attachment.bone < held.len() {
+                held[attachment.bone] = true;
+            }
+        }
+        for index in 0..self.bones.len() {
+            let bone = self.bones[index];
+            if !held[index] && !bone.pinned && (bone.fractured || bone.splinter) {
+                self.hold_piece_in_flesh(index);
+            }
+        }
     }
 
     fn count_fracture(&mut self, part: BonePart, kind: BoneKind, load: f64) {
@@ -6743,7 +6718,6 @@ impl World {
                     impulse,
                     3,
                     900.0,
-                    90.0,
                     2.2,
                     1.05,
                     1050.0,
@@ -6769,7 +6743,6 @@ impl World {
                     impulse,
                     5,
                     780.0,
-                    120.0,
                     2.4,
                     1.18,
                     1250.0,
@@ -6802,7 +6775,6 @@ impl World {
                     impulse,
                     2,
                     1200.0,
-                    75.0,
                     1.8,
                     0.78,
                     1500.0,
@@ -6841,7 +6813,6 @@ impl World {
                     impulse,
                     2,
                     1600.0,
-                    70.0,
                     1.7,
                     0.72,
                     1750.0,
@@ -6849,26 +6820,12 @@ impl World {
                 ));
             }
         }
-        for (
-            pos,
-            dir,
-            layer,
-            impulse,
-            base_count,
-            div,
-            base_speed,
-            radius,
-            intensity,
-            pressure_div,
-            depth,
-        ) in events
+        for (pos, dir, layer, impulse, base_count, div, radius, intensity, pressure_div, depth) in
+            events
         {
-            self.emit_fluid(
+            self.bleed_fresh_injury(
                 pos,
-                dir,
                 base_count + (impulse / div).clamp(0.0, 9.0) as i32,
-                base_speed + impulse * self.materials.fluid_impact_scale,
-                radius,
                 intensity,
             );
             self.open_wound(pos, dir, layer, impulse / pressure_div, radius, depth);
@@ -7817,7 +7774,9 @@ mod tests {
                 .any(|wound| wound.layer == TissueLayer::Muscle),
             "cavity rupture should use the persistent muscle wound path"
         );
-        // Under whole skin the blood stays in the body as a bruise.
+        // The wound it opened bleeds at the rate of what tore; with no skin
+        // over it, out of the body.
+        world.update_wounds(1.0);
         assert!(world.stats.emitted_fluid_particles + world.stats.internal_bleeding > 0);
     }
 
@@ -7932,7 +7891,9 @@ mod tests {
                 .any(|wound| wound.layer == TissueLayer::Muscle),
             "organ rupture should reuse persistent internal muscle wound sources"
         );
-        // Under whole skin the blood stays in the body as a bruise.
+        // The wound it opened bleeds at the rate of what tore; with no skin
+        // over it, out of the body.
+        world.update_wounds(1.0);
         assert!(world.stats.emitted_fluid_particles + world.stats.internal_bleeding > 0);
     }
 
@@ -9216,7 +9177,9 @@ mod tests {
         assert!(world.triangles[0].failed);
         assert_eq!(world.stats.muscle_crush_ruptures, 1);
         assert_eq!(world.debug.muscle_crush_ruptures, 1);
-        // Under whole skin the blood stays in the body as a bruise.
+        // The wound it opened bleeds at the rate of what tore; with no skin
+        // over it, out of the body.
+        world.update_wounds(1.0);
         assert!(world.stats.emitted_fluid_particles + world.stats.internal_bleeding > 0);
         assert_eq!(world.stats.opened_wounds, 1);
     }
@@ -9767,36 +9730,34 @@ mod tests {
     }
 
     #[test]
-    fn settled_fluid_deposits_blood_stain() {
+    fn landed_blood_lies_on_the_floor() {
         let mut materials = Materials::default();
         materials.gravity = 920.0;
         materials.max_fluid_particles = 4;
         materials.max_blood_stains = 8;
         let mut world = World::new(materials);
 
-        world.emit_fluid(
-            Vec2 { x: 100.0, y: 108.0 },
+        world.release_blood(
+            Vec2 { x: 100.0, y: 60.0 },
             Vec2 { x: 0.0, y: 1.0 },
             1,
             90.0,
             3.0,
             1.0,
         );
-        for _ in 0..24 {
+        for _ in 0..60 {
             world.integrate(world.materials.fixed_dt, 220.0, 120.0);
         }
 
+        assert_eq!(world.stats.blood_stain_deposits, 1, "the drop should land");
         assert!(
-            world.stats.blood_stain_deposits > 0,
-            "fluid floor impact should leave a persistent stain deposit"
+            world.fluids.iter().all(|fluid| fluid.life <= 0.0),
+            "a drop that landed is part of the spot it made"
         );
+        let pooled: f64 = world.blood_stains.iter().map(|stain| stain.volume).sum();
         assert!(
-            world.blood_stains.iter().any(|stain| stain.intensity > 0.0),
-            "deposited blood stain should remain inspectable after the particle settles"
-        );
-        assert!(
-            world.fluids.iter().any(|fluid| fluid.stained),
-            "each fluid particle should remember that it has already deposited a stain"
+            (pooled - BLOOD_DROP_ML).abs() < 1.0e-12,
+            "the floor holds the drop's blood: {pooled}"
         );
     }
 
@@ -9808,7 +9769,7 @@ mod tests {
         materials.max_blood_stains = 1;
         let mut world = World::new(materials);
 
-        world.emit_fluid(
+        world.release_blood(
             Vec2 { x: 100.0, y: 100.0 },
             Vec2 { x: 0.0, y: -1.0 },
             3,
@@ -9820,6 +9781,10 @@ mod tests {
         assert!(
             world.debug.fluid_budget_replacements > 0,
             "fluid ring buffer replacements should be visible in debug telemetry"
+        );
+        assert!(
+            (world.stats.blood_unshown_ml - 2.0 * BLOOD_DROP_ML).abs() < 1.0e-12,
+            "the drops replaced no longer show"
         );
 
         world.open_wound(
@@ -9841,8 +9806,8 @@ mod tests {
         assert_eq!(world.wounds.len(), 1);
         assert_eq!(world.debug.wound_budget_replacements, 1);
 
-        world.deposit_blood_stain(Vec2 { x: 10.0, y: 120.0 }, 4.0, 1.0);
-        world.deposit_blood_stain(Vec2 { x: 110.0, y: 120.0 }, 4.0, 1.0);
+        world.land_blood(10.0, 120.0, BLOOD_DROP_ML, 300.0);
+        world.land_blood(110.0, 120.0, BLOOD_DROP_ML, 300.0);
         assert_eq!(world.blood_stains.len(), 1);
         assert_eq!(world.debug.blood_stain_budget_replacements, 1);
     }
