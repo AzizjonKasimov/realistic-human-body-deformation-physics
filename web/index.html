@@ -168,7 +168,7 @@
         <li><a href="https://github.com/AzizjonKasimov/realistic-human-body-deformation-physics" target="_blank" rel="noopener">Source code</a></li>
       </ul>
     </section>
-    <p class="footer">Runs entirely on your device; nothing is uploaded.</p>
+    <p class="footer">The simulation runs entirely on your device. Visits are counted anonymously with GoatCounter, without cookies.</p>
   </div>
 </div>
 
@@ -178,6 +178,7 @@
 
 <script src="gl.js"></script>
 <script src="audio.js"></script>
+<script src="analytics.js"></script>
 <script>
   // Everything stays inside this function: gl.js already declares global names
   // such as `canvas` and `version`.
@@ -236,6 +237,14 @@
       name: "rp",
       version: 1,
       register_plugin: function (importObject) {
+        // The app reports the first blow with each tool for analytics.js to
+        // count. Defined here rather than there, so the app finds it even
+        // when an ad blocker stops analytics.js or it sits out ?selftest.
+        importObject.env.rp_tool_used = function (ptr, len) {
+          if (window.rpAnalytics) {
+            window.rpAnalytics.toolUsed(UTF8ToString(ptr, len));
+          }
+        };
         importObject.env.rp_selftest_requested = function () {
           return selftest ? 1 : 0;
         };

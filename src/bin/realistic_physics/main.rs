@@ -2,6 +2,7 @@ use macroquad::prelude::*;
 use realistic_physics as rp;
 
 mod about;
+mod analytics;
 mod audio;
 #[cfg(not(target_arch = "wasm32"))]
 mod capture;
@@ -389,7 +390,7 @@ fn apply_control(app: &mut AppState, action: ControlAction) {
 }
 
 /// Runs the simulation steps this frame's time covers, letting `audio` hear
-/// each one.
+/// each one and the page count the tools used.
 fn step_simulation(app: &mut AppState, frame_dt: f64, audio: &mut audio::Audio) {
     if !app.running {
         return;
@@ -416,6 +417,7 @@ fn step_simulation(app: &mut AppState, frame_dt: f64, audio: &mut audio::Audio) 
         app.world.capture_motion(&mut app.earlier);
         step_world(app, &input, screen_width() as f64, screen_height() as f64);
         audio.hear(&app.world);
+        analytics::step(&app.world);
         app.accumulator -= fixed_dt;
     }
     if steps > 0 {

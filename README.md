@@ -139,6 +139,24 @@ Then build and serve it:
 
 Open <http://localhost:8080>, or <http://localhost:8080/?stats> to show the frame rate and how long each frame takes. <http://localhost:8080/?selftest> runs a self-test instead: the browser build plays every tuned strike scenario at fixed simulation steps, checks each against its injury bands, and reports how long a simulation step takes in WebAssembly, on screen, in the status line, and as `window.__selftest`. It needs only a frame per scenario, so it works at any frame rate, though not in a hidden tab, which gets no frames at all; it takes about 15 seconds. `realistic_physics.exe --selftest` runs the same natively and prints the report as JSON, and `.\tools\parity.ps1` compares the two (see [Check Browser Parity](#check-browser-parity)). `.\tools\serve_web.ps1` serves the last build again without rebuilding. The site is assembled in `target\web`: the page from `web\index.html`, the wasm module, the `gl.js` loader copied from the miniquad version in `Cargo.lock`, and the sound plugin `audio.js` from the patched quad-snd in `vendor\quad-snd`. Browsers start sound only after a click or tap, which the start button provides.
 
+### Visit Counts
+
+The live page counts visits with [GoatCounter](https://www.goatcounter.com), which sets no cookies and stores nothing on the visitor's device, so it needs no consent banner. The counts are on the `realistic-physics` site's dashboard, <https://realistic-physics.goatcounter.com> (sign-in required). `web/analytics.js` sends the visit and these events, each under its own name on the dashboard:
+
+| Event | Counted when |
+| --- | --- |
+| `start` | the visitor presses Start simulation (once a visit) |
+| `loaded` | the simulation has loaded and runs |
+| `no-webgl`, `load-failed` | it could not start: WebGL is off or unsupported, or the download or startup failed |
+| `crashed` | it stopped with an error after loading |
+| `hit` | the first blow with any tool |
+| `tool-sledgehammer`, `tool-bat`, `tool-knife` | the first blow with each tool, which the app reports through the page |
+| `played-1min`, `played-5min`, `played-15min` | that much play: time with the simulation on screen, the tab in front, and a pointer move, touch, or key press within the last minute |
+| `fps-smooth-*`, `fps-uneven-*`, `fps-choppy-*` | after 20 seconds of play, the typical frame rate: 50 fps or more, 30-49, or under 30, on a touch screen (`-touch`) or with a mouse or touchpad (`-mouse`) |
+| `link-*` | a link on the page was followed, named after its text (`link-source-code`) |
+
+It sends only from `azizjonkasimov.github.io`, so local builds, copies published elsewhere, and `?selftest` runs count nothing. Every event still lands in `window.__analytics`, and the play time counted so far in `window.rpAnalytics.playedSeconds()`, for checks. To leave your own visits out, open the page once in each browser you use with `#toggle-goatcounter` at the end of its address. To see which post brought visitors when the referrer is missing (apps' built-in browsers often drop it), add `?campaign=NAME` to the links you share; GoatCounter lists them under Campaigns.
+
 ## Controls
 
 - Left-drag to swing the selected tool into the body. The tool moves with your pointer like a tool held firmly in hand: swing from outside the body for a hard hit, or hold the tool against the body and keep dragging past it to press harder. The ring marks where your hand is. Damage comes from the tool's shape and weight, its speed when it lands, and how hard you press; it grows steeply with speed, so slow moves only bruise.
@@ -324,7 +342,7 @@ The visual diagnostic exits nonzero if what is drawn stops matching what the sim
 - `src/bin/realistic_physics/main.rs` owns the `macroquad` app shell, input, timing, and rendering. It also runs in the browser, so the app and simulation must avoid file I/O, threads, and `std::time`, none of which work on `wasm32-unknown-unknown`. `src/bin/realistic_physics/capture.rs` is the native-only screenshot mode, and `src/bin/realistic_physics/selftest.rs` the self-test mode, which runs in both builds (the page hands it a clock and takes its report through a small gl.js plugin). `src/bin/realistic_physics/about.rs` shows the about card through the same plugin, or natively opens the write-up in the default browser.
 - `src/scenarios.rs` holds the scripted strikes and gestures and the tuned scenarios with their injury and steadiness bands, shared by the strike runner, the visual damage diagnostic, the capture mode, and the self-test, which also ships in the browser build.
 - `src/sound.rs` hears what each simulation step sounded like and picks the clip and volume for each sound; `src/sound/synth.rs` synthesizes the clips and `src/sound/mixdown.rs` mixes a run offline the way the app plays it. `src/bin/realistic_physics/audio.rs` plays the sound in the app, and `tests/sound_tests.rs` checks it. `vendor/quad-snd` is the patched sound backend.
-- `web/index.html` is the browser page: start screen with a content warning and an About section with links (the same card opens again as the about card), loader, error messages, and the `?stats` frame-time overlay (also exposed as `window.__perf` for automated checks).
+- `web/index.html` is the browser page: start screen with a content warning and an About section with links (the same card opens again as the about card), loader, error messages, and the `?stats` frame-time overlay (also exposed as `window.__perf` for automated checks). `web/analytics.js` counts visits on the live site (see [Visit Counts](#visit-counts)); `src/bin/realistic_physics/analytics.rs` tells it the first blow with each tool, through an import the page's gl.js plugin defines.
 - `tools/build_web.ps1` builds the browser version into `target\web`; `tools/serve_web.ps1` serves it locally with the `application/wasm` content type browsers require.
 - `tools/bench.ps1` times the simulation against a commit (see [Measure Speed](#measure-speed)).
 - `.cargo/config.toml` lets the wasm linker leave miniquad's WebGL functions as imports for `gl.js` to provide; recent Rust versions no longer do that by default.

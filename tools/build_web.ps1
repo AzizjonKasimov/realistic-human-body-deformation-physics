@@ -56,6 +56,9 @@ if (Test-Path -LiteralPath $siteDir) {
 New-Item -ItemType Directory -Force -Path $siteDir | Out-Null
 Copy-Item -LiteralPath $wasm -Destination $siteDir
 Copy-Item -LiteralPath (Get-CrateScripts) -Destination $siteDir
+# The page's own visit counting (web/analytics.js), which sends only from the
+# published site.
+Copy-Item -LiteralPath (Join-Path $repoRoot "web/analytics.js") -Destination $siteDir
 
 # GitHub Pages lets browsers cache every file for ten minutes, so a returning
 # visitor could get a new page with the previous simulation. Stamping the wasm
@@ -67,10 +70,12 @@ function Get-ContentStamp([string]$Path) {
 $wasmStamp = Get-ContentStamp (Join-Path $siteDir "realistic_physics.wasm")
 $loaderStamp = Get-ContentStamp (Join-Path $siteDir "gl.js")
 $audioStamp = Get-ContentStamp (Join-Path $siteDir "audio.js")
+$analyticsStamp = Get-ContentStamp (Join-Path $siteDir "analytics.js")
 $page = [IO.File]::ReadAllText((Join-Path $repoRoot "web/index.html"))
 $references = @(
     @{ From = 'src="gl.js"'; To = "src=`"gl.js?v=$loaderStamp`"" },
     @{ From = 'src="audio.js"'; To = "src=`"audio.js?v=$audioStamp`"" },
+    @{ From = 'src="analytics.js"'; To = "src=`"analytics.js?v=$analyticsStamp`"" },
     @{ From = 'load("realistic_physics.wasm")'; To = "load(`"realistic_physics.wasm?v=$wasmStamp`")" }
 )
 foreach ($reference in $references) {
