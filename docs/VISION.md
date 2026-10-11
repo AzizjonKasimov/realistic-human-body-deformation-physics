@@ -14,6 +14,7 @@ The end product is a free standalone download that someone can install, play wit
 
 ## Agreed Direction
 
+- The ultimate goal is a simple fighting game built on this engine, which replaces the original description's "no game around it" and "no opponent". Until the game exists, the sandbox stays the product, and the engine grows toward the game one step at a time, each step still playable in the sandbox.
 - Build on the best existing work instead of reinventing it. Where open-source projects or published research already solve a problem better, study how they do it and rebuild those techniques in the project's own engine. Use a library directly only where it does a whole job well, and without lock-in: the body, the injury model, and the tests stay the project's own, and any library we use must be one we can fork and change at its core.
 - Use the Rust implementation as the main path, with `macroquad` for the cross-platform desktop renderer.
 - Target Windows first while keeping the renderer and simulation portable enough for macOS.
