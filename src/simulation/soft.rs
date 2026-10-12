@@ -1,0 +1,1196 @@
+//! The solver that moves the body's tissue and bones, rebuilt from Box2D v3's
+//! soft step (Erin Catto, MIT: `b2MakeSoft` in `solver.h`, the stages of
+//! `solver.c`, the spring of `distance_joint.c`). Each step splits into
+//! substeps. Each substep integrates velocities, warm starts every soft
+//! constraint with the impulse it carried last, and solves each against the
+//! error it had when the substep began, in passes between which the body's
+//! contacts and bones' lengths are still projected by position. Box2D then
+//! relaxes its constraints once more to take out the speed their position
+//! correction added; here the projections would cancel that speed again
+//! every step, and leave it hidden in a body at rest, so there is no relax.
+//!
+//! A soft constraint is a spring and damper solved implicitly (Catto, "Soft
+//! Constraints", GDC 2011): given its stiffness as a frequency and its damping
+//! ratio, `Softness` says how much of its error it closes each substep, how
+//! much of its effective mass it pushes with, and how much the impulse it has
+//! already given softens the next. Tissue (`tissue.rs`) sets each spring's
+//! stiffness from what the real tissue measures, so the body is as stiff with
+//! any number of substeps, unlike the share of the error each pass closed
+//! before.
+//!
+//! The tissue and bones keep their positions as now and a step ago, as the
+//! rest of the engine reads them. While the substeps run, `previous` is where
+//! a point was when the substep began, and a point's velocity is how far it
+//! moves in a substep over the substep's length, so a velocity change moves
+//! `position`.
+
+use super::*;
+
+/// The engine's unit of mass, in kilograms. The tools' inertia was set in it
+/// and a muscle point of the old mesh weighed 1.25 of it; tissue weighs what
+/// it does in a body (`tissue.rs`), in the same unit.
+pub(super) const KG_PER_MASS: f64 = 0.1;
+
+/// Share of its speed past the flesh it hangs from a cut's ghost keeps each
+/// substep.
+const GHOST_SPEED_KEPT: f64 = 0.5;
+
+/// How a soft constraint closes its error over a substep of length `h`, from
+/// its angular frequency `omega` and damping ratio `zeta` (`b2MakeSoft`).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Softness {
+    bias_rate: f64,
+    mass_scale: f64,
+    impulse_scale: f64,
+}
+
+impl Softness {
+    pub(super) fn new(omega: f64, zeta: f64, h: f64) -> Self {
+        let a1 = 2.0 * zeta + h * omega;
+        let a2 = h * omega * a1;
+        let a3 = 1.0 / (1.0 + a2);
+        Self {
+            bias_rate: omega / a1.max(EPSILON),
+            mass_scale: a2 * a3,
+            impulse_scale: a3,
+        }
+    }
+
+    /// The softness of a spring of stiffness `stiffness` (in newtons per
+    /// metre) on a constraint of effective mass `mass` (in the engine's unit).
+    pub(super) fn of_spring(stiffness: f64, mass: f64, zeta: f64, h: f64) -> Self {
+        Self::new(
+            (stiffness / (mass * KG_PER_MASS).max(1.0e-12)).sqrt(),
+            zeta,
+            h,
+        )
+    }
+
+    /// The impulse to add to a constraint with effective mass `mass`, moving
+    /// at `speed` along it with error `error`, that has given `given` already.
+    fn impulse(&self, mass: f64, speed: f64, error: f64, given: f64) -> f64 {
+        -self.mass_scale * mass * (speed + self.bias_rate * error) - self.impulse_scale * given
+    }
+}
+
+/// Where a point was when the substep began, which a constraint is judged
+/// from.
+fn place(point: &Point) -> Vec2 {
+    point.previous
+}
+
+fn velocity(point: &Point, h: f64) -> Vec2 {
+    scale(subtract(point.position, point.previous), 1.0 / h)
+}
+
+/// Changes a point's velocity by `change`, over a substep `h` long.
+fn speed_up(point: &mut Point, change: Vec2, h: f64) {
+    point.position = add(point.position, scale(change, h));
+}
+
+fn bone_place(bone: &BoneSegment) -> (Vec2, Vec2) {
+    (bone.previous_a, bone.previous_b)
+}
+
+fn speed_up_bone(bone: &mut BoneSegment, change_a: Vec2, change_b: Vec2, h: f64) {
+    bone.a = add(bone.a, scale(change_a, h));
+    bone.b = add(bone.b, scale(change_b, h));
+}
+
+/// A quarter turn counterclockwise.
+fn perpendicular(value: Vec2) -> Vec2 {
+    Vec2 {
+        x: -value.y,
+        y: value.x,
+    }
+}
+
+impl Point {
+    /// One over the point's mass; nothing moves a pinned point.
+    pub(super) fn inverse_mass(&self) -> f64 {
+        if self.pinned {
+            0.0
+        } else {
+            1.0 / self.mass.max(EPSILON)
+        }
+    }
+}
+
+impl BoneSegment {
+    /// One over the mass at each end of the bone, which carries half of it;
+    /// nothing moves a pinned bone.
+    pub(super) fn inverse_end_mass(&self) -> f64 {
+        if self.pinned {
+            0.0
+        } else {
+            2.0 / self.mass.max(EPSILON)
+        }
+    }
+}
+
+impl World {
+    /// Solves this step's motion: the body's soft constraints in substeps, and
+    /// its contacts and joints in passes within each. The tissue and bones come
+    /// in where the step will carry them, as the step's prediction and the
+    /// tool's shoves left them; each moves from where it began the step at
+    /// that velocity instead, and ends with `previous` a step behind again.
+    pub(super) fn solve_motion(&mut self, dt: f64, width: f64, floor_y: f64) {
+        let substeps = self.materials.substeps.max(1);
+        let h = dt / substeps as f64;
+        self.split_step_into_substeps(substeps);
+        for substep in 0..substeps {
+            self.solver_dt = h;
+            self.solver_progress = (substep + 1) as f64 / substeps as f64;
+            self.timed("integrate", |world| {
+                world.integrate_substep(h, substeps, width, floor_y)
+            });
+            // What tears this substep tears before the rest are warm started:
+            // a tie that let go gives none of the pull it carried, which
+            // nothing would take back.
+            self.timed("bone attachments", Self::judge_bone_attachments);
+            self.timed("attachments", Self::judge_attachments);
+            self.timed("bone joints", Self::judge_bone_joints);
+            if self.materials.warm_starting {
+                self.timed("warm start", |world| world.warm_start_soft(h));
+            } else {
+                self.forget_soft_impulses();
+            }
+            for _ in 0..self.materials.contact_passes.max(1) {
+                self.timed("soft solve", |world| world.solve_soft(h));
+                self.timed("tool contact", Self::solve_tool_contact);
+                self.timed("bones", Self::solve_bones);
+                self.timed("broken joints", Self::solve_post_fracture_joints);
+                self.timed("fragment-bone", Self::solve_bone_fragment_bone_contacts);
+                self.timed("fragment-tissue", Self::solve_bone_fragment_tissue_contacts);
+                self.timed("fragment pairs", Self::solve_bone_fragment_repulsion);
+                self.timed("outline contact", Self::solve_outline_contacts);
+                self.timed("world bounds", |world| {
+                    world.constrain_to_world(width, floor_y)
+                });
+            }
+        }
+        self.join_substeps(substeps);
+        self.solver_dt = dt;
+        self.solver_progress = 1.0;
+    }
+
+    /// Puts each point and bone back where it began the step, moving at the
+    /// velocity the step gave it: `previous` one substep behind.
+    fn split_step_into_substeps(&mut self, substeps: usize) {
+        let share = 1.0 / substeps as f64;
+        for point in &mut self.points {
+            if point.pinned {
+                point.position = point.home;
+                point.previous = point.home;
+                continue;
+            }
+            let travel = subtract(point.position, point.previous);
+            point.position = point.previous;
+            point.previous = subtract(point.position, scale(travel, share));
+        }
+        for bone in &mut self.bones {
+            if bone.pinned || (bone.sleeping && free_bone_fragment(*bone)) {
+                bone.previous_a = bone.a;
+                bone.previous_b = bone.b;
+                continue;
+            }
+            let (travel_a, travel_b) = (
+                subtract(bone.a, bone.previous_a),
+                subtract(bone.b, bone.previous_b),
+            );
+            bone.a = bone.previous_a;
+            bone.b = bone.previous_b;
+            bone.previous_a = subtract(bone.a, scale(travel_a, share));
+            bone.previous_b = subtract(bone.b, scale(travel_b, share));
+        }
+    }
+
+    /// Sets `previous` back to a whole step behind, at the velocity the last
+    /// substep ended with.
+    fn join_substeps(&mut self, substeps: usize) {
+        let steps = substeps as f64;
+        for point in &mut self.points {
+            let travel = subtract(point.position, point.previous);
+            point.previous = subtract(point.position, scale(travel, steps));
+        }
+        for bone in &mut self.bones {
+            let (travel_a, travel_b) = (
+                subtract(bone.a, bone.previous_a),
+                subtract(bone.b, bone.previous_b),
+            );
+            bone.previous_a = subtract(bone.a, scale(travel_a, steps));
+            bone.previous_b = subtract(bone.b, scale(travel_b, steps));
+        }
+    }
+
+    /// Moves every point and bone through one substep at its velocity, under
+    /// gravity and a little drag, and spins loose pieces of bone.
+    fn integrate_substep(&mut self, h: f64, substeps: usize, width: f64, floor_y: f64) {
+        let _ = width;
+        let keep = 1.0 / (1.0 + h * self.materials.linear_drag);
+        let fall = self.materials.gravity * h * h;
+        let floor_keep = libm::pow(self.materials.floor_friction, 1.0 / substeps as f64);
+        for point in &mut self.points {
+            if point.pinned {
+                point.position = point.home;
+                point.previous = point.home;
+                continue;
+            }
+            let travel = scale(subtract(point.position, point.previous), keep);
+            point.previous = point.position;
+            point.position = add(point.position, travel);
+            point.position.y += fall;
+            if point.position.y > floor_y {
+                point.position.y = floor_y;
+                point.previous.x =
+                    point.position.x + (point.previous.x - point.position.x) * floor_keep;
+            }
+        }
+        self.pull_outline_round(h);
+        self.carry_ghosts_with_their_flesh();
+        let bone_keep = libm::pow(self.materials.bone_damping, 1.0 / substeps as f64);
+        let spin_keep = libm::pow(self.materials.bone_angular_damping, 1.0 / substeps as f64);
+        for index in 0..self.bones.len() {
+            let mut bone = self.bones[index];
+            if bone.pinned {
+                bone.a = bone.home_a;
+                bone.b = bone.home_b;
+                bone.previous_a = bone.a;
+                bone.previous_b = bone.b;
+                self.bones[index] = bone;
+                continue;
+            }
+            let free_fragment = bone.fractured || bone.splinter;
+            if bone.sleeping && free_bone_fragment(bone) {
+                bone.angular_velocity = 0.0;
+                bone.previous_a = bone.a;
+                bone.previous_b = bone.b;
+                self.bones[index] = bone;
+                continue;
+            }
+            let travel_a = scale(subtract(bone.a, bone.previous_a), bone_keep);
+            let travel_b = scale(subtract(bone.b, bone.previous_b), bone_keep);
+            bone.previous_a = bone.a;
+            bone.previous_b = bone.b;
+            bone.a = add(bone.a, travel_a);
+            bone.b = add(bone.b, travel_b);
+            bone.a.y += fall;
+            bone.b.y += fall;
+            bone.angular_velocity *= spin_keep;
+            if !free_fragment && bone.angular_velocity.abs() < 0.01 {
+                bone.angular_velocity = 0.0;
+            }
+            if free_fragment {
+                self.debug.max_bone_angular_speed = self
+                    .debug
+                    .max_bone_angular_speed
+                    .max(bone.angular_velocity.abs());
+                let turn = bone.angular_velocity * h;
+                rotate_bone_around_center(&mut bone, turn);
+            }
+            self.bones[index] = bone;
+        }
+    }
+
+    /// A cut's ghost carries its piece's shape across the cut but holds no
+    /// flesh (`cuts.rs`), so nothing but its piece's springs moves it: a
+    /// piece hinged on a single point of flesh could spin there freely. Each
+    /// ghost keeps half of how fast it moves past the flesh its springs tie
+    /// it to, each substep.
+    fn carry_ghosts_with_their_flesh(&mut self) {
+        let mut flesh_velocity: Vec<(Vec2, f64)> = Vec::new();
+        for spring in &self.springs {
+            if spring.broken {
+                continue;
+            }
+            let (a, b) = (&self.points[spring.a], &self.points[spring.b]);
+            for (ghost, flesh, index) in [(a, b, spring.a), (b, a, spring.b)] {
+                if !ghost.is_ghost() || flesh.is_ghost() {
+                    continue;
+                }
+                if flesh_velocity.is_empty() {
+                    flesh_velocity = vec![(Vec2::default(), 0.0); self.points.len()];
+                }
+                let travel = subtract(flesh.position, flesh.previous);
+                let entry = &mut flesh_velocity[index];
+                entry.0 = add(entry.0, travel);
+                entry.1 += 1.0;
+            }
+        }
+        for (index, &(sum, count)) in flesh_velocity.iter().enumerate() {
+            if count <= 0.0 {
+                continue;
+            }
+            let point = &mut self.points[index];
+            let travel = subtract(point.position, point.previous);
+            let flesh = scale(sum, 1.0 / count);
+            let kept = add(flesh, scale(subtract(travel, flesh), GHOST_SPEED_KEPT));
+            point.position = add(point.previous, kept);
+        }
+    }
+
+    /// Gives every soft constraint the impulse it ended the last substep with,
+    /// as Box2D's warm start does, so a held load is carried from the start.
+    fn warm_start_soft(&mut self, h: f64) {
+        for index in 0..self.springs.len() {
+            let spring = self.springs[index];
+            if spring.broken || spring.impulse == 0.0 {
+                continue;
+            }
+            let (a, b) = (self.points[spring.a], self.points[spring.b]);
+            let along = subtract(b.previous, a.previous);
+            let length = hypot(along.x, along.y);
+            if length < EPSILON {
+                continue;
+            }
+            let push = scale(along, spring.impulse / length);
+            let (wa, wb) = (a.inverse_mass(), b.inverse_mass());
+            speed_up(&mut self.points[spring.a], scale(push, -wa), h);
+            speed_up(&mut self.points[spring.b], scale(push, wb), h);
+        }
+        for index in 0..self.areas.len() {
+            let area = self.areas[index];
+            if area.impulse == 0.0 || !self.area_alive(&area) {
+                continue;
+            }
+            let gradients = area_gradients(&self.points, &area);
+            for (corner, gradient) in [area.a, area.b, area.c].into_iter().zip(gradients) {
+                let w = self.points[corner].inverse_mass();
+                speed_up(
+                    &mut self.points[corner],
+                    scale(gradient, w * area.impulse),
+                    h,
+                );
+            }
+        }
+        for index in 0..self.attachments.len() {
+            let attachment = self.attachments[index];
+            if attachment.broken || attachment.impulse == 0.0 {
+                continue;
+            }
+            let (skin, muscle) = (
+                self.points[attachment.skin_point],
+                self.points[attachment.muscle_point],
+            );
+            let along = subtract(muscle.previous, skin.previous);
+            let length = hypot(along.x, along.y);
+            if length < EPSILON {
+                continue;
+            }
+            let push = scale(along, attachment.impulse / length);
+            speed_up(
+                &mut self.points[attachment.skin_point],
+                scale(push, -skin.inverse_mass()),
+                h,
+            );
+            speed_up(
+                &mut self.points[attachment.muscle_point],
+                scale(push, muscle.inverse_mass()),
+                h,
+            );
+        }
+        for index in 0..self.bone_attachments.len() {
+            let attachment = self.bone_attachments[index];
+            if attachment.broken
+                || attachment.point >= self.points.len()
+                || attachment.bone >= self.bones.len()
+            {
+                continue;
+            }
+            self.apply_bone_tie(index, attachment.impulse, h);
+        }
+        for index in 0..self.points.len() {
+            let point = self.points[index];
+            if point.pinned {
+                continue;
+            }
+            let change = scale(point.posture_impulse, point.inverse_mass());
+            speed_up(&mut self.points[index], change, h);
+        }
+        for bone in &mut self.bones {
+            let w = bone.inverse_end_mass();
+            if w <= 0.0 {
+                continue;
+            }
+            let (change_a, change_b) = (
+                scale(bone.posture_impulse_a, w),
+                scale(bone.posture_impulse_b, w),
+            );
+            speed_up_bone(bone, change_a, change_b, h);
+        }
+        for index in 0..self.bone_joints.len() {
+            let joint = self.bone_joints[index];
+            if !self.joint_holds(&joint) {
+                continue;
+            }
+            if joint.impulse != 0.0 {
+                let link = JointLink::of(&joint, &self.bones);
+                self.apply_joint_link(&joint, &link, joint.impulse, h);
+            }
+            if joint.angular_impulse != 0.0 {
+                let turn = JointTurn::of(&joint, &self.bones);
+                self.apply_joint_turn(&joint, &turn, joint.angular_impulse, h);
+            }
+        }
+    }
+
+    /// Starts every soft constraint afresh, with no impulse carried over.
+    fn forget_soft_impulses(&mut self) {
+        for spring in &mut self.springs {
+            spring.impulse = 0.0;
+        }
+        for area in &mut self.areas {
+            area.impulse = 0.0;
+        }
+        for attachment in &mut self.attachments {
+            attachment.impulse = 0.0;
+        }
+        for attachment in &mut self.bone_attachments {
+            attachment.impulse = Vec2::default();
+        }
+        for point in &mut self.points {
+            point.posture_impulse = Vec2::default();
+        }
+        for bone in &mut self.bones {
+            bone.posture_impulse_a = Vec2::default();
+            bone.posture_impulse_b = Vec2::default();
+        }
+        for joint in &mut self.bone_joints {
+            joint.impulse = 0.0;
+            joint.angular_impulse = 0.0;
+        }
+    }
+
+    /// Starts every soft constraint on a point `marked` afresh, with no
+    /// impulse carried over.
+    pub(super) fn forget_soft_impulses_at(&mut self, marked: &[bool]) {
+        let touches = |point: usize| marked.get(point).copied().unwrap_or(false);
+        for spring in &mut self.springs {
+            if touches(spring.a) || touches(spring.b) {
+                spring.impulse = 0.0;
+            }
+        }
+        for area in &mut self.areas {
+            if touches(area.a) || touches(area.b) || touches(area.c) {
+                area.impulse = 0.0;
+            }
+        }
+        for attachment in &mut self.attachments {
+            if touches(attachment.skin_point) || touches(attachment.muscle_point) {
+                attachment.impulse = 0.0;
+            }
+        }
+        for attachment in &mut self.bone_attachments {
+            if touches(attachment.point) {
+                attachment.impulse = Vec2::default();
+            }
+        }
+        for (index, point) in self.points.iter_mut().enumerate() {
+            if touches(index) {
+                point.posture_impulse = Vec2::default();
+            }
+        }
+    }
+
+    /// One pass over every soft constraint.
+    fn solve_soft(&mut self, h: f64) {
+        self.solve_soft_springs(h);
+        self.solve_soft_attachments(h);
+        self.solve_soft_bone_ties(h);
+        self.solve_soft_areas(h);
+        self.solve_posture(h);
+        self.solve_soft_joints(h);
+    }
+
+    /// A whole joint holds its bones together and within their range, as
+    /// Box2D's joints do: stiff, but soft enough to stay steady, at most a
+    /// quarter of the substep rate, and heavily damped. A joint slipped out of
+    /// place holds more loosely, and only against pulling further apart.
+    fn solve_soft_joints(&mut self, h: f64) {
+        let cap = 0.25 / h;
+        let zeta = self.materials.bone_joint_damping_ratio;
+        for index in 0..self.bone_joints.len() {
+            let joint = self.bone_joints[index];
+            if !self.joint_holds(&joint) {
+                continue;
+            }
+            let loosened = if joint.subluxated {
+                self.materials.bone_joint_subluxation_stiffness_scale.sqrt()
+            } else {
+                1.0
+            };
+            let link = JointLink::of(&joint, &self.bones);
+            let rest = joint.rest + self.materials.bone_joint_subluxation_slack * joint.subluxation;
+            let error = link.length - rest;
+            if link.inverse_mass > EPSILON && !(joint.subluxated && error < 0.0) {
+                let hertz = (self.materials.bone_joint_hertz * loosened).min(cap);
+                let softness = Softness::new(2.0 * PI * hertz, zeta, h);
+                let speed = link.speed(&self.bones, h);
+                let impulse =
+                    softness.impulse(1.0 / link.inverse_mass, speed, error, joint.impulse);
+                self.bone_joints[index].impulse += impulse;
+                self.apply_joint_link(&joint, &link, impulse, h);
+            } else {
+                self.bone_joints[index].impulse = 0.0;
+            }
+            let turn = JointTurn::of(&joint, &self.bones);
+            let slack = self.materials.bone_joint_subluxation_angular * joint.subluxation * 0.55;
+            let angle = wrap_angle(turn.angle - joint.rest_angle);
+            let past = angle - angle.clamp(joint.min_angle - slack, joint.max_angle + slack);
+            let given = self.bone_joints[index].angular_impulse;
+            if past == 0.0 || turn.inverse_mass <= EPSILON {
+                self.bone_joints[index].angular_impulse = 0.0;
+                continue;
+            }
+            let hertz = (self.materials.bone_joint_angle_hertz * loosened).min(cap);
+            let softness = Softness::new(2.0 * PI * hertz, zeta, h);
+            let speed = turn.speed(&self.bones, h);
+            let mut impulse = softness.impulse(1.0 / turn.inverse_mass, speed, past, given);
+            // A limit only pushes back toward the range.
+            let total = if past > 0.0 {
+                (given + impulse).min(0.0)
+            } else {
+                (given + impulse).max(0.0)
+            };
+            impulse = total - given;
+            self.bone_joints[index].angular_impulse = total;
+            self.apply_joint_turn(&joint, &turn, impulse, h);
+        }
+    }
+
+    /// A joint whose bones the soft solver holds: whole, between two bones,
+    /// and not a break's loose hinge (`solve_post_fracture_joints`).
+    fn joint_holds(&self, joint: &BoneJoint) -> bool {
+        !joint.broken
+            && !joint.post_fracture_limited
+            && joint.a < self.bones.len()
+            && joint.b < self.bones.len()
+    }
+
+    /// Gives joint `joint`'s bones `impulse` along `link`, pulling their
+    /// anchors together.
+    fn apply_joint_link(&mut self, joint: &BoneJoint, link: &JointLink, impulse: f64, h: f64) {
+        let push = scale(link.normal, impulse);
+        for (bone, t, sign) in [(joint.a, joint.t_a, -1.0), (joint.b, joint.t_b, 1.0)] {
+            let w = self.bones[bone].inverse_end_mass() * sign;
+            speed_up_bone(
+                &mut self.bones[bone],
+                scale(push, w * (1.0 - t)),
+                scale(push, w * t),
+                h,
+            );
+        }
+    }
+
+    /// Turns joint `joint`'s bones by angular impulse `impulse`, the second
+    /// bone one way and the first the other.
+    fn apply_joint_turn(&mut self, joint: &BoneJoint, turn: &JointTurn, impulse: f64, h: f64) {
+        for (bone, gradient, sign) in [
+            (joint.a, turn.gradient_a, -1.0),
+            (joint.b, turn.gradient_b, 1.0),
+        ] {
+            let w = self.bones[bone].inverse_end_mass() * sign * impulse;
+            speed_up_bone(
+                &mut self.bones[bone],
+                scale(gradient, -w),
+                scale(gradient, w),
+                h,
+            );
+        }
+    }
+
+    /// Each fiber pulls and pushes its ends by its stiffness at its stretch
+    /// (`tissue.rs`), damped along its length.
+    fn solve_soft_springs(&mut self, h: f64) {
+        for index in 0..self.springs.len() {
+            let spring = self.springs[index];
+            if spring.broken {
+                continue;
+            }
+            let (a, b) = (self.points[spring.a], self.points[spring.b]);
+            let (wa, wb) = (a.inverse_mass(), b.inverse_mass());
+            let w = wa + wb;
+            if w <= EPSILON {
+                continue;
+            }
+            let along = subtract(place(&b), place(&a));
+            let length = hypot(along.x, along.y);
+            if length < EPSILON {
+                continue;
+            }
+            let normal = scale(along, 1.0 / length);
+            let (stiffness, rest) = self.spring_stiffness_at(&spring, length);
+            if stiffness <= 0.0 {
+                continue;
+            }
+            let mass = 1.0 / w;
+            let softness = Softness::of_spring(stiffness, mass, self.spring_damping(&spring), h);
+            let speed = dot(normal, subtract(velocity(&b, h), velocity(&a, h)));
+            let impulse = softness.impulse(mass, speed, length - rest, spring.impulse);
+            self.springs[index].impulse += impulse;
+            let push = scale(normal, impulse);
+            speed_up(&mut self.points[spring.a], scale(push, -wa), h);
+            speed_up(&mut self.points[spring.b], scale(push, wb), h);
+        }
+    }
+
+    /// The fat under the skin holds each skin point to the muscle beneath it,
+    /// softly.
+    fn solve_soft_attachments(&mut self, h: f64) {
+        let zeta = self.materials.fat_damping_ratio;
+        for index in 0..self.attachments.len() {
+            let attachment = self.attachments[index];
+            if attachment.broken || attachment.stiffness <= 0.0 {
+                continue;
+            }
+            let (skin, muscle) = (
+                self.points[attachment.skin_point],
+                self.points[attachment.muscle_point],
+            );
+            let (ws, wm) = (skin.inverse_mass(), muscle.inverse_mass());
+            let w = ws + wm;
+            if w <= EPSILON {
+                continue;
+            }
+            let along = subtract(place(&muscle), place(&skin));
+            let length = hypot(along.x, along.y);
+            if length < EPSILON {
+                continue;
+            }
+            let normal = scale(along, 1.0 / length);
+            let mass = 1.0 / w;
+            let shear = self.fat_shear(&attachment, length);
+            let stiffness = attachment.stiffness * self.fat_stiffening(shear);
+            let softness = Softness::of_spring(stiffness, mass, zeta, h);
+            let speed = dot(normal, subtract(velocity(&muscle, h), velocity(&skin, h)));
+            let impulse =
+                softness.impulse(mass, speed, length - attachment.rest, attachment.impulse);
+            self.attachments[index].impulse += impulse;
+            let push = scale(normal, impulse);
+            speed_up(&mut self.points[attachment.skin_point], scale(push, -ws), h);
+            speed_up(
+                &mut self.points[attachment.muscle_point],
+                scale(push, wm),
+                h,
+            );
+        }
+    }
+
+    /// Muscle is tied to the bone in it where it lay when the body was built,
+    /// in the bone's own frame, so it turns with the bone; flesh and bone pull
+    /// each other by their masses, and a blow to the flesh moves the bone in
+    /// it. A piece of broken bone the flesh holds only follows the flesh, at
+    /// the tie's own frequency whatever it weighs, and the flesh does not
+    /// feel it.
+    fn solve_soft_bone_ties(&mut self, h: f64) {
+        let zeta = self.materials.bone_tie_damping_ratio;
+        let omega = 2.0 * PI * self.materials.bone_tie_hertz;
+        for index in 0..self.bone_attachments.len() {
+            let attachment = self.bone_attachments[index];
+            if attachment.broken
+                || attachment.point >= self.points.len()
+                || attachment.bone >= self.bones.len()
+            {
+                continue;
+            }
+            let point = self.points[attachment.point];
+            let bone = self.bones[attachment.bone];
+            let tie = BoneTie::of(&attachment, &point, &bone);
+            if tie.inverse_mass <= EPSILON {
+                continue;
+            }
+            let (a, b) = bone_place(&bone);
+            let error = subtract(place(&point), tie.target(a, b));
+            let bone_velocity = tie.anchor(
+                scale(subtract(bone.a, bone.previous_a), 1.0 / h),
+                scale(subtract(bone.b, bone.previous_b), 1.0 / h),
+            );
+            let speed = subtract(velocity(&point, h), bone_velocity);
+            let mass = 1.0 / tie.inverse_mass;
+            let softness = if attachment.holds_piece {
+                Softness::new(omega, zeta, h)
+            } else {
+                // The tie is as stiff as the flesh it holds is heavy, whatever
+                // the bone weighs.
+                let stiffness = point.mass * KG_PER_MASS * omega * omega;
+                Softness::of_spring(stiffness, mass, zeta, h)
+            };
+            let impulse = Vec2 {
+                x: softness.impulse(mass, speed.x, error.x, attachment.impulse.x),
+                y: softness.impulse(mass, speed.y, error.y, attachment.impulse.y),
+            };
+            self.bone_attachments[index].impulse = add(attachment.impulse, impulse);
+            self.apply_bone_tie(index, impulse, h);
+        }
+    }
+
+    /// Gives the flesh and bone of tie `index` the impulse `impulse`, the
+    /// flesh one way and the bone the other.
+    fn apply_bone_tie(&mut self, index: usize, impulse: Vec2, h: f64) {
+        let attachment = self.bone_attachments[index];
+        let point = self.points[attachment.point];
+        let bone = self.bones[attachment.bone];
+        let tie = BoneTie::of(&attachment, &point, &bone);
+        speed_up(
+            &mut self.points[attachment.point],
+            scale(impulse, tie.point_inverse_mass),
+            h,
+        );
+        if tie.end_inverse_mass <= 0.0 {
+            return;
+        }
+        // The anchor is (1 - tau) a + tau b + sigma times b - a turned a
+        // quarter turn, so the bone's ends take the impulse back through that.
+        let turned = perpendicular(impulse);
+        let change_a = scale(
+            add(scale(impulse, 1.0 - tie.tau), scale(turned, tie.sigma)),
+            -tie.end_inverse_mass,
+        );
+        let change_b = scale(
+            subtract(scale(impulse, tie.tau), scale(turned, tie.sigma)),
+            -tie.end_inverse_mass,
+        );
+        speed_up_bone(&mut self.bones[attachment.bone], change_a, change_b, h);
+    }
+
+    /// Each triangle of tissue resists growing or shrinking, as tissue that
+    /// keeps its volume bulges rather than squashes.
+    fn solve_soft_areas(&mut self, h: f64) {
+        let turgor = self.blood_turgor_scale_internal();
+        for index in 0..self.areas.len() {
+            let area = self.areas[index];
+            if area.stiffness <= 0.0 || !self.area_alive(&area) {
+                continue;
+            }
+            let corners = [area.a, area.b, area.c];
+            let gradients = area_gradients(&self.points, &area);
+            let mut weight = 0.0;
+            let mut speed = 0.0;
+            for (corner, gradient) in corners.into_iter().zip(gradients) {
+                let point = &self.points[corner];
+                weight += point.inverse_mass() * dot(gradient, gradient);
+                speed += dot(gradient, velocity(point, h));
+            }
+            if weight <= EPSILON {
+                continue;
+            }
+            let (pa, pb, pc) = (
+                place(&self.points[area.a]),
+                place(&self.points[area.b]),
+                place(&self.points[area.c]),
+            );
+            let error = signed_area(pa, pb, pc) - area.rest_area;
+            let mass = 1.0 / weight;
+            // Stiffness per unit area change, from the sheet's modulus over
+            // the triangle's rest area (`tissue.rs`).
+            let stiffness = area.stiffness * turgor / area.rest_area.abs().max(1.0);
+            let softness = Softness::of_spring(stiffness, mass, self.area_damping(&area), h);
+            let impulse = softness.impulse(mass, speed, error, area.impulse);
+            self.areas[index].impulse += impulse;
+            for (corner, gradient) in corners.into_iter().zip(gradients) {
+                let w = self.points[corner].inverse_mass();
+                speed_up(&mut self.points[corner], scale(gradient, w * impulse), h);
+            }
+        }
+    }
+
+    /// The body holds its pose: every point and whole bone is drawn back
+    /// toward where it rests, softly, as muscle tone holds a limb; less as the
+    /// body loses blood.
+    fn solve_posture(&mut self, h: f64) {
+        let zeta = self.materials.posture_damping_ratio;
+        let turgor = self.blood_turgor_scale_internal().max(0.0).sqrt();
+        for index in 0..self.points.len() {
+            let point = self.points[index];
+            // A ghost is not flesh of its own and has no place to keep.
+            if point.pinned || point.is_ghost() {
+                continue;
+            }
+            let hertz = match point.layer {
+                TissueLayer::Skin => self.materials.skin_posture_hertz,
+                TissueLayer::Muscle => self.materials.muscle_posture_hertz,
+            } * turgor;
+            if hertz <= 0.0 {
+                continue;
+            }
+            let softness = Softness::new(2.0 * PI * hertz, zeta, h);
+            let error = subtract(place(&point), point.home);
+            let speed = velocity(&point, h);
+            let impulse = Vec2 {
+                x: softness.impulse(point.mass, speed.x, error.x, point.posture_impulse.x),
+                y: softness.impulse(point.mass, speed.y, error.y, point.posture_impulse.y),
+            };
+            self.points[index].posture_impulse = add(point.posture_impulse, impulse);
+            let change = scale(impulse, point.inverse_mass());
+            speed_up(&mut self.points[index], change, h);
+        }
+        let hertz = self.materials.bone_posture_hertz;
+        if hertz <= 0.0 {
+            return;
+        }
+        let softness = Softness::new(2.0 * PI * hertz, zeta, h);
+        for bone in &mut self.bones {
+            let w = bone.inverse_end_mass();
+            // A broken bone's pieces have no pose of their own to keep.
+            if w <= 0.0 || bone.fractured || bone.splinter {
+                bone.posture_impulse_a = Vec2::default();
+                bone.posture_impulse_b = Vec2::default();
+                continue;
+            }
+            let end_mass = 1.0 / w;
+            let (a, b) = bone_place(bone);
+            let errors = [subtract(a, bone.home_a), subtract(b, bone.home_b)];
+            let speeds = [
+                scale(subtract(bone.a, bone.previous_a), 1.0 / h),
+                scale(subtract(bone.b, bone.previous_b), 1.0 / h),
+            ];
+            let given = [bone.posture_impulse_a, bone.posture_impulse_b];
+            let mut impulses = [Vec2::default(); 2];
+            for end in 0..2 {
+                impulses[end] = Vec2 {
+                    x: softness.impulse(end_mass, speeds[end].x, errors[end].x, given[end].x),
+                    y: softness.impulse(end_mass, speeds[end].y, errors[end].y, given[end].y),
+                };
+            }
+            bone.posture_impulse_a = add(bone.posture_impulse_a, impulses[0]);
+            bone.posture_impulse_b = add(bone.posture_impulse_b, impulses[1]);
+            speed_up_bone(bone, scale(impulses[0], w), scale(impulses[1], w), h);
+        }
+    }
+
+    /// How far the flesh of `attachment` sits off its place on its bone, in
+    /// pixels.
+    pub(super) fn bone_tie_slip(&self, attachment: &BoneAttachment) -> f64 {
+        let point = &self.points[attachment.point];
+        let bone = &self.bones[attachment.bone];
+        let tie = BoneTie::of(attachment, point, bone);
+        distance(point.position, tie.target(bone.a, bone.b))
+    }
+
+    /// A triangle's area constraint counts while two of its sides hold.
+    pub(super) fn area_alive(&self, area: &AreaConstraint) -> bool {
+        self.live_edge_count(area.edge_ab, area.edge_bc, area.edge_ca) >= 2
+    }
+}
+
+/// How a muscle point's tie to its bone reaches the bone: the anchor lies at
+/// `(1 - tau) a + tau b + sigma perp(b - a)`, so it turns and slides with the
+/// bone, and the masses each end and the flesh weigh in. A piece of broken
+/// bone is held instead at its own nearest point to the flesh, the flesh as
+/// far off it as when the flesh took it, the way the old position-based ties
+/// held it: anchored in its frame, a chip a few pixels long held by flesh
+/// many times as far away would be swung round on those long levers.
+struct BoneTie {
+    tau: f64,
+    sigma: f64,
+    /// Where the flesh lies off the anchor, for a held piece.
+    offset: Vec2,
+    point_inverse_mass: f64,
+    end_inverse_mass: f64,
+    inverse_mass: f64,
+}
+
+impl BoneTie {
+    fn of(attachment: &BoneAttachment, point: &Point, bone: &BoneSegment) -> Self {
+        let length = bone.rest_length.max(EPSILON);
+        let (tau, sigma, offset) = if attachment.holds_piece {
+            (attachment.t.clamp(0.0, 1.0), 0.0, attachment.offset)
+        } else {
+            (
+                attachment.t + attachment.along / length,
+                attachment.across / length,
+                Vec2::default(),
+            )
+        };
+        // A piece the flesh holds follows it and does not drag it.
+        let point_inverse_mass = if attachment.holds_piece {
+            0.0
+        } else {
+            point.inverse_mass()
+        };
+        let end_inverse_mass = bone.inverse_end_mass();
+        let inverse_mass = point_inverse_mass
+            + end_inverse_mass * ((1.0 - tau) * (1.0 - tau) + tau * tau + 2.0 * sigma * sigma);
+        Self {
+            tau,
+            sigma,
+            offset,
+            point_inverse_mass,
+            end_inverse_mass,
+            inverse_mass,
+        }
+    }
+
+    /// The anchor on a bone with ends `a` and `b`, or how fast it moves for
+    /// ends moving at `a` and `b`.
+    fn anchor(&self, a: Vec2, b: Vec2) -> Vec2 {
+        add(
+            lerp(a, b, self.tau),
+            scale(perpendicular(subtract(b, a)), self.sigma),
+        )
+    }
+
+    /// Where the tie holds the flesh on a bone with ends `a` and `b`.
+    fn target(&self, a: Vec2, b: Vec2) -> Vec2 {
+        add(self.anchor(a, b), self.offset)
+    }
+}
+
+/// How a joint's anchors, `t_a` along its first bone and `t_b` along its
+/// second, lie when the substep began: how far apart, along which line, and how hard
+/// they are to move apart.
+struct JointLink {
+    length: f64,
+    normal: Vec2,
+    a: usize,
+    b: usize,
+    t_a: f64,
+    t_b: f64,
+    inverse_mass: f64,
+}
+
+impl JointLink {
+    fn of(joint: &BoneJoint, bones: &[BoneSegment]) -> Self {
+        let (a, b) = (&bones[joint.a], &bones[joint.b]);
+        let (a0, a1) = bone_place(a);
+        let (b0, b1) = bone_place(b);
+        let along = subtract(lerp(b0, b1, joint.t_b), lerp(a0, a1, joint.t_a));
+        let length = hypot(along.x, along.y);
+        let normal = if length > EPSILON {
+            scale(along, 1.0 / length)
+        } else {
+            Vec2 { x: 1.0, y: 0.0 }
+        };
+        let reach = |t: f64| (1.0 - t) * (1.0 - t) + t * t;
+        Self {
+            length,
+            normal,
+            a: joint.a,
+            b: joint.b,
+            t_a: joint.t_a,
+            t_b: joint.t_b,
+            inverse_mass: a.inverse_end_mass() * reach(joint.t_a)
+                + b.inverse_end_mass() * reach(joint.t_b),
+        }
+    }
+
+    /// How fast the anchors move apart.
+    fn speed(&self, bones: &[BoneSegment], h: f64) -> f64 {
+        let anchor_velocity = |bone: &BoneSegment, t: f64| {
+            scale(
+                lerp(
+                    subtract(bone.a, bone.previous_a),
+                    subtract(bone.b, bone.previous_b),
+                    t,
+                ),
+                1.0 / h,
+            )
+        };
+        dot(
+            self.normal,
+            subtract(
+                anchor_velocity(&bones[self.b], self.t_b),
+                anchor_velocity(&bones[self.a], self.t_a),
+            ),
+        )
+    }
+}
+
+/// How a joint's second bone is turned against its first when the substep
+/// began, and
+/// how each bone's ends move it.
+struct JointTurn {
+    angle: f64,
+    a: usize,
+    b: usize,
+    gradient_a: Vec2,
+    gradient_b: Vec2,
+    inverse_mass: f64,
+}
+
+impl JointTurn {
+    fn of(joint: &BoneJoint, bones: &[BoneSegment]) -> Self {
+        let (a, b) = (&bones[joint.a], &bones[joint.b]);
+        let (a0, a1) = bone_place(a);
+        let (b0, b1) = bone_place(b);
+        let (da, db) = (subtract(a1, a0), subtract(b1, b0));
+        let (la, lb) = (dot(da, da).max(EPSILON), dot(db, db).max(EPSILON));
+        // A bone's angle turns by its far end moving across it over its
+        // length squared, and its near end the other way.
+        let gradient_a = scale(perpendicular(da), 1.0 / la);
+        let gradient_b = scale(perpendicular(db), 1.0 / lb);
+        Self {
+            angle: libm::atan2(db.y, db.x) - libm::atan2(da.y, da.x),
+            a: joint.a,
+            b: joint.b,
+            gradient_a,
+            gradient_b,
+            inverse_mass: 2.0 * a.inverse_end_mass() * dot(gradient_a, gradient_a)
+                + 2.0 * b.inverse_end_mass() * dot(gradient_b, gradient_b),
+        }
+    }
+
+    /// How fast the second bone turns against the first.
+    fn speed(&self, bones: &[BoneSegment], h: f64) -> f64 {
+        let spread = |bone: &BoneSegment| {
+            scale(
+                subtract(
+                    subtract(bone.b, bone.previous_b),
+                    subtract(bone.a, bone.previous_a),
+                ),
+                1.0 / h,
+            )
+        };
+        dot(self.gradient_b, spread(&bones[self.b])) - dot(self.gradient_a, spread(&bones[self.a]))
+    }
+}
+
+/// The gradient of a triangle's signed area with respect to each corner,
+/// where the corners were when the substep began.
+fn area_gradients(points: &[Point], area: &AreaConstraint) -> [Vec2; 3] {
+    let (a, b, c) = (
+        place(&points[area.a]),
+        place(&points[area.b]),
+        place(&points[area.c]),
+    );
+    [
+        Vec2 {
+            x: (b.y - c.y) * 0.5,
+            y: (c.x - b.x) * 0.5,
+        },
+        Vec2 {
+            x: (c.y - a.y) * 0.5,
+            y: (a.x - c.x) * 0.5,
+        },
+        Vec2 {
+            x: (a.y - b.y) * 0.5,
+            y: (b.x - a.x) * 0.5,
+        },
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A ball on a spring hanging from a pinned point, released stretched.
+    fn spring_world(stiffness: f64, zeta: f64, substeps: usize) -> World {
+        let mut materials = Materials {
+            substeps,
+            gravity: 0.0,
+            linear_drag: 0.0,
+            skin_posture_hertz: 0.0,
+            muscle_posture_hertz: 0.0,
+            skin_damping_ratio: zeta,
+            ..Materials::default()
+        };
+        materials.skin_stiffening_stretch = 10.0;
+        let mut world = World::new(materials);
+        let top = world.add_point(Vec2 { x: 100.0, y: 100.0 }, TissueLayer::Skin, true);
+        let ball = world.add_point(Vec2 { x: 100.0, y: 200.0 }, TissueLayer::Skin, false);
+        world.add_spring(
+            top,
+            ball,
+            TissueLayer::Skin,
+            stiffness / STANDARD_SPRING_STIFFNESS,
+            10.0,
+            1.0e9,
+            false,
+        );
+        world.points[ball].position.y = 210.0;
+        world.points[ball].previous.y = 210.0;
+        world
+    }
+
+    fn ball_height(world: &World) -> f64 {
+        world.points[1].position.y
+    }
+
+    /// One whole step, with no tool in play.
+    fn run(world: &mut World) {
+        let dt = world.materials.fixed_dt;
+        world.step(dt, &InputState::default(), 1000.0, 10_000.0);
+    }
+
+    #[test]
+    fn a_soft_spring_rings_at_its_own_frequency_with_any_number_of_substeps() {
+        // 10 N/m on 0.1 kg rings at sqrt(100) = 10 rad/s, 1.59 Hz: the ball
+        // comes back up past its rest after about a third of a second.
+        for substeps in [2, 4, 8] {
+            let mut world = spring_world(10.0, 0.0, substeps);
+            let mut crossed_at = None;
+            for frame in 0..60 {
+                run(&mut world);
+                if ball_height(&world) < 200.0 {
+                    crossed_at = Some(frame + 1);
+                    break;
+                }
+            }
+            // A quarter of the period is 0.157 s, between steps 9 and 10.
+            let crossed = crossed_at.expect("the spring should pull the ball back");
+            assert!(
+                (9..=11).contains(&crossed),
+                "with {substeps} substeps the ball came back after {crossed} steps"
+            );
+        }
+    }
+
+    #[test]
+    fn damping_ratio_settles_a_spring() {
+        let mut ringing = spring_world(10.0, 0.0, 4);
+        let mut damped = spring_world(10.0, 1.0, 4);
+        for _ in 0..40 {
+            run(&mut ringing);
+            run(&mut damped);
+        }
+        let ring = (ball_height(&ringing) - 200.0).abs();
+        let rest = (ball_height(&damped) - 200.0).abs();
+        assert!(
+            rest < 0.6,
+            "a critically damped spring should settle, {rest}"
+        );
+        assert!(ring > rest * 2.0, "{ring} against {rest}");
+    }
+
+    #[test]
+    fn a_blow_to_the_flesh_moves_the_bone_in_it() {
+        let mut materials = Materials {
+            gravity: 0.0,
+            muscle_posture_hertz: 0.0,
+            bone_posture_hertz: 0.0,
+            ..Materials::default()
+        };
+        materials.linear_drag = 0.0;
+        let mut world = World::new(materials);
+        let bone = world.add_bone_segment(
+            Vec2 { x: 100.0, y: 100.0 },
+            Vec2 { x: 100.0, y: 200.0 },
+            5.0,
+            1.0e9,
+            false,
+        );
+        world.bones[bone].mass = 1.0;
+        for y in [120.0, 150.0, 180.0] {
+            let point = world.add_point(Vec2 { x: 115.0, y }, TissueLayer::Muscle, false);
+            world.points[point].mass = 3.0;
+            world.add_bone_attachment(point, bone, (y - 100.0) / 100.0);
+            // Shoved sideways as a tool would.
+            world.points[point].previous.x -= 4.0;
+        }
+        for _ in 0..12 {
+            run(&mut world);
+        }
+        let middle = midpoint(world.bones[bone].a, world.bones[bone].b);
+        let flesh = world.points.iter().map(|p| p.position.x).sum::<f64>() / 3.0;
+        assert!(
+            middle.x > 115.0,
+            "the flesh should carry the bone, which moved to {:.1}",
+            middle.x
+        );
+        assert!(
+            (flesh - middle.x - 15.0).abs() < 3.0,
+            "the flesh should stay where it sits on the bone: {flesh:.1} against {:.1}",
+            middle.x
+        );
+    }
+}

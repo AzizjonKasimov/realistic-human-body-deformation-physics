@@ -186,8 +186,10 @@ fn visual_scenarios() -> Vec<VisualScenario> {
             // it bleeds a little, and that runs down the skin. Breaking the
             // arm takes much of the blow, so the organs behind it are at most
             // bruised, in some swings and not others (the sweep's organ damage).
+            // With the skin's real stiffness it splits in only a couple of
+            // places.
             expectations: VisualExpectations {
-                min_skin_wound_edges: 3,
+                min_skin_wound_edges: 2,
                 min_muscle_fiber_tears: 10,
                 min_failed_muscle_voids: 20,
                 min_bruised_points: 25,

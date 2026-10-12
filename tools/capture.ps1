@@ -30,6 +30,8 @@ param(
     [string]$Scenario = "",
     [string]$Strike = "",
     [string]$Gesture = "",
+    # One run of the strike sweep, ALONG,ACROSS,STRENGTH (strike_scenarios --variant).
+    [string]$Variant = "",
     # Comma-separated window sizes.
     [string]$Sizes = "1280x720",
     [ValidateSet("normal", "anatomy", "both")]
@@ -81,6 +83,7 @@ foreach ($size in ($Sizes -split "," | ForEach-Object { $_.Trim() } | Where-Obje
     if ($Scenario) { $arguments += @("--scenario", $Scenario) }
     if ($Strike) { $arguments += @("--strike", $Strike) }
     if ($Gesture) { $arguments += @("--gesture", $Gesture) }
+    if ($Variant) { $arguments += @("--variant", $Variant) }
     if ($Frames -gt 0) { $arguments += @("--frames", "$Frames") }
     if ($Every -gt 0) { $arguments += @("--every", "$Every") }
     if ($NoUi) { $arguments += "--no-ui" }

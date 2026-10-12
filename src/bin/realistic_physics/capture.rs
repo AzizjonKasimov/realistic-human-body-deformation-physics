@@ -59,6 +59,9 @@ pub struct CaptureRequest {
     show_label: bool,
     body_frame: Option<rp::BodyFrame>,
     events: Option<PathBuf>,
+    /// One run of the strike sweep: the play moved along and across its
+    /// path, on bones this much stronger (`strike_scenarios --variant`).
+    variant: Option<(f64, f64, f64)>,
 }
 
 /// The window size asked for with `--size`, when capturing.
@@ -95,6 +98,7 @@ pub fn request() -> Option<CaptureRequest> {
         show_label: true,
         body_frame: None,
         events: None,
+        variant: None,
     };
     while let Some(arg) = args.next() {
         let mut value = |name: &str| {
@@ -140,8 +144,25 @@ pub fn request() -> Option<CaptureRequest> {
                     Some(parse_body_frame(&value("--body-frame")).unwrap_or_else(|e| fail(&e)));
             }
             "--events" => request.events = Some(PathBuf::from(value("--events"))),
+            "--variant" => {
+                let spec = value("--variant");
+                let numbers: Vec<f64> = spec
+                    .split(',')
+                    .map(|part| part.trim().parse::<f64>())
+                    .collect::<Result<_, _>>()
+                    .unwrap_or_else(|_| {
+                        fail(&format!("--variant takes three numbers, got `{spec}`"))
+                    });
+                let [along, across, strength] = numbers[..] else {
+                    fail(&format!("--variant takes three numbers, got `{spec}`"));
+                };
+                request.variant = Some((along, across, strength));
+            }
             other => fail(&format!("unknown option `{other}`")),
         }
+    }
+    if let (Some((along, across, strength)), Some(play)) = (request.variant, request.play) {
+        request.play = Some(play.shifted(along, across).with_bone_strength(strength));
     }
     Some(request)
 }
@@ -159,6 +180,11 @@ pub async fn run(request: CaptureRequest) {
     let mut app = AppState::new(width, height);
     if let Some(frame) = request.body_frame {
         app.place_body(frame, width as f32, height as f32);
+    }
+    if let Some(play) = &request.play {
+        // Bones as strong as the play asks, for a run of the sweep.
+        app.world = rp::create_layered_body_in(app.frame, play.materials());
+        app.world.capture_motion(&mut app.earlier);
     }
     app.hide_ui = request.hide_ui;
     app.hide_tool = request.hide_tool;

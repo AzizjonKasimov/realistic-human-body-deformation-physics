@@ -11,6 +11,8 @@ mod grid;
 mod motion;
 mod outline;
 mod phases;
+mod soft;
+mod tissue;
 mod tools;
 
 pub use blood::{BloodTrail, SkinSpot};
@@ -20,7 +22,8 @@ pub use body::{
 pub use cover::Cover;
 pub use cuts::{OpenedCut, Piece, TriangleCut};
 pub use motion::MotionSnapshot;
-pub use phases::{PhaseClock, PhaseTime, PhaseTimes};
+pub use phases::{PhaseClock, PhaseTime, PhaseTimes, Traced, TracedStage};
+pub use tissue::SpringKind;
 pub use tools::{swing_power, tool_geometry, tool_pose, ToolGeometry, ToolPose, ToolReach};
 
 const EPSILON: f64 = 0.0001;
@@ -53,6 +56,16 @@ pub const MISSING_COVER: usize = usize::MAX;
 /// How hard a bone must be loaded to break, before `bone_strength` scales it
 /// for each part.
 const BONE_FRACTURE_IMPULSE: f64 = 2400.0;
+/// How hard a skin point added on its own is held to a muscle point, in
+/// newtons per metre; the body's come from the fat under its skin
+/// (`tissue.rs`).
+const DEFAULT_ATTACHMENT_STIFFNESS: f64 = 60.0;
+/// The stiffness, in newtons per metre, that `World::add_spring` scales: about
+/// a side of the body's muscle sheet.
+pub const STANDARD_SPRING_STIFFNESS: f64 = 2000.0;
+/// What `World::add_area` scales, as the newtons per metre a sheet resists
+/// growing or shrinking with.
+pub const STANDARD_AREA_STIFFNESS: f64 = 1000.0;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vec2 {
@@ -228,9 +241,17 @@ impl Default for InputState {
 #[derive(Clone, Copy, Debug)]
 pub struct Materials {
     pub fixed_dt: f64,
-    pub solver_iterations: usize,
+    /// Substeps each step is solved in (`soft.rs`), and passes of the body's
+    /// contacts and joints in each.
+    pub substeps: usize,
+    pub contact_passes: usize,
+    /// Whether each substep starts the soft constraints from the impulses they
+    /// ended the last one with, as Box2D does.
+    pub warm_starting: bool,
     pub gravity: f64,
-    pub damping: f64,
+    /// How fast moving tissue and bone slow by themselves, per second, apart
+    /// from what the tissue's own springs damp.
+    pub linear_drag: f64,
     pub point_spacing: f64,
     pub floor_friction: f64,
     pub striker_radius: f64,
@@ -247,35 +268,59 @@ pub struct Materials {
     /// out through the flesh; below it a fracture stays closed and bruised.
     pub open_fracture_overload: f64,
     pub direct_muscle_contact: f64,
-    pub skin_shape_stiffness: f64,
-    pub muscle_shape_stiffness: f64,
-    pub skin_structural_stiffness: f64,
-    pub skin_shear_stiffness: f64,
-    pub skin_area_stiffness: f64,
-    pub skin_spring_compliance: f64,
-    pub skin_area_compliance: f64,
+    /// How firmly the body holds its pose, as the frequency at which a point
+    /// or whole bone moved off where it rests springs back, in hertz, and how
+    /// fast that motion dies away, as a damping ratio: muscle tone holding
+    /// the limbs, as the body hangs from its crown.
+    pub skin_posture_hertz: f64,
+    pub muscle_posture_hertz: f64,
+    pub bone_posture_hertz: f64,
+    pub posture_damping_ratio: f64,
+    /// The dermis's shear modulus at small strain, in pascals, and its
+    /// thickness, in metres; it stiffens `skin_stiffening_ratio` times once
+    /// stretched past `skin_stiffening_stretch` of its length (`tissue.rs`).
+    pub skin_shear_modulus: f64,
+    pub skin_thickness: f64,
+    pub skin_stiffening_stretch: f64,
+    pub skin_stiffening_ratio: f64,
+    /// How far living skin is stretched past the length it would shrink to
+    /// cut free, along the body and limbs and around them.
+    pub skin_prestretch_along: f64,
+    pub skin_prestretch_across: f64,
+    pub skin_damping_ratio: f64,
+    /// How thick the fat under the skin is, in metres: it moves with the skin
+    /// and shears over the muscle with `fat_shear_modulus`, in pascals.
+    pub subcutaneous_fat_thickness: f64,
+    pub fat_shear_modulus: f64,
+    pub fat_damping_ratio: f64,
     pub skin_tear_stretch: f64,
     pub skin_tear_impulse: f64,
-    pub muscle_fiber_stiffness: f64,
-    pub muscle_cross_stiffness: f64,
-    pub muscle_shear_stiffness: f64,
-    pub muscle_area_stiffness: f64,
+    /// Relaxed muscle's shear modulus along its fibers and across them, in
+    /// pascals, and where and how much each stiffens as it stretches.
+    pub muscle_fiber_shear_modulus: f64,
+    pub muscle_cross_shear_modulus: f64,
+    pub muscle_fiber_stiffening_stretch: f64,
+    pub muscle_fiber_stiffening_ratio: f64,
+    pub muscle_cross_stiffening_stretch: f64,
+    pub muscle_cross_stiffening_ratio: f64,
+    pub muscle_damping_ratio: f64,
+    /// How fast muscle on a bone springs back to where it sits on it, in
+    /// hertz, and how fast that dies away: soft tissue on the limbs rings at
+    /// 10 to 55 Hz after a jolt and settles within a cycle or two.
+    pub bone_tie_hertz: f64,
+    pub bone_tie_damping_ratio: f64,
     pub muscle_fiber_rupture_damage_floor: f64,
-    pub muscle_spring_compliance: f64,
-    pub muscle_area_compliance: f64,
     pub muscle_tear_stretch: f64,
     pub muscle_tear_impulse: f64,
     pub muscle_exposed_tear_impulse: f64,
     pub contusion_load_threshold: f64,
     pub contusion_decay: f64,
     pub contusion_tear_weakening: f64,
-    pub contusion_stiffness_softening: f64,
     pub tissue_fatigue_stretch_threshold: f64,
     pub tissue_fatigue_load_threshold: f64,
     pub tissue_fatigue_rate: f64,
     pub tissue_fatigue_decay: f64,
     pub tissue_fatigue_tear_weakening: f64,
-    pub tissue_fatigue_stiffness_softening: f64,
     pub tissue_plastic_stretch_threshold: f64,
     pub tissue_plastic_compression_threshold: f64,
     pub tissue_plastic_rate: f64,
@@ -320,13 +365,11 @@ pub struct Materials {
     pub skin_flap_stress_threshold: f64,
     pub skin_flap_cut_radius: f64,
     pub max_skin_flap_detachments_per_step: usize,
-    /// How far each lip of a cut through skin pulls back from it, in point
-    /// spacings: skin is under tension in a living body, so a cut gapes.
-    pub skin_cut_retraction: f64,
-    /// The same for muscle, whose cut fibers retract further.
-    pub muscle_cut_retraction: f64,
-    pub attachment_stiffness: f64,
-    pub attachment_break_stretch: f64,
+    /// How far, in thicknesses of the fat under the skin, the skin can slide
+    /// over the muscle before the fat tears, and before it tears under a
+    /// crushing load (`attachment_break_impulse`).
+    pub fat_tear_shear: f64,
+    pub fat_loaded_tear_shear: f64,
     pub attachment_break_impulse: f64,
     pub bone_fracture_impulse: f64,
     pub max_bone_fracture_depth: i32,
@@ -337,12 +380,18 @@ pub struct Materials {
     pub bone_angular_damping: f64,
     pub bone_torque_scale: f64,
     pub fracture_spin_scale: f64,
-    pub bone_shape_stiffness: f64,
-    pub bone_attachment_stiffness: f64,
     pub bone_attachment_break_impulse: f64,
-    pub bone_attachment_break_stretch: f64,
-    pub bone_joint_stiffness: f64,
-    pub bone_joint_angular_stiffness: f64,
+    /// How far muscle can be pulled off its place on a bone before it tears
+    /// away from it, in millimetres, and how far under a crushing load
+    /// (`bone_attachment_break_impulse`).
+    pub bone_tie_tear_mm: f64,
+    pub bone_tie_loaded_tear_mm: f64,
+    /// How stiffly a joint holds its bones together and within their range
+    /// of motion, as frequencies in hertz (Box2D's joints, 60 Hz at most a
+    /// quarter of the substep rate), and how heavily that is damped.
+    pub bone_joint_hertz: f64,
+    pub bone_joint_angle_hertz: f64,
+    pub bone_joint_damping_ratio: f64,
     pub bone_joint_subluxation_stretch: f64,
     pub bone_joint_subluxation_impulse: f64,
     pub bone_joint_subluxation_angular: f64,
@@ -441,9 +490,12 @@ impl Default for Materials {
     fn default() -> Self {
         Self {
             fixed_dt: 1.0 / 60.0,
-            solver_iterations: 12,
+            // Box2D's default.
+            substeps: 4,
+            contact_passes: 3,
+            warm_starting: true,
             gravity: 920.0,
-            damping: 0.988,
+            linear_drag: 0.4,
             point_spacing: 11.5,
             floor_friction: 0.78,
             striker_radius: 34.0,
@@ -453,38 +505,68 @@ impl Default for Materials {
             hand_press_force: 160_000.0,
             open_fracture_overload: 1.3,
             direct_muscle_contact: 0.18,
-            skin_shape_stiffness: 0.012,
-            muscle_shape_stiffness: 0.030,
-            skin_structural_stiffness: 0.92,
-            skin_shear_stiffness: 0.58,
-            skin_area_stiffness: 0.070,
-            skin_spring_compliance: 0.0,
-            skin_area_compliance: 0.0,
+            skin_posture_hertz: 1.05,
+            muscle_posture_hertz: 1.65,
+            bone_posture_hertz: 0.85,
+            posture_damping_ratio: 0.2,
+            // Living skin's Young's modulus is about 0.5-0.6 MPa at small
+            // strain (Lakhani et al. 2021), and tissue that keeps its volume
+            // shears at a third of that; 70 times stiffer once stretched
+            // about a quarter (Ni Annaidh et al. 2012: 1.18 and 83.3 MPa); 2
+            // mm thick (Laurent et al. 2007).
+            skin_shear_modulus: 200_000.0,
+            skin_thickness: 0.002,
+            skin_stiffening_stretch: 1.25,
+            skin_stiffening_ratio: 70.0,
+            // Living skin is stretched about a fifth along the lines it is
+            // tensed in, which run round the trunk and limbs, and a twelfth
+            // across them (Deroy et al. 2017, dog skin; no human
+            // measurement), short of where it stiffens (Rausch and Kuhl
+            // 2013). The flat body takes the smaller stretch both ways: its
+            // sheet has no back to wrap round, and pulled harder round the
+            // limbs than along them it did not balance, and slid over the
+            // muscle.
+            skin_prestretch_along: 1.08,
+            skin_prestretch_across: 1.08,
+            skin_damping_ratio: 0.3,
+            subcutaneous_fat_thickness: 0.010,
+            // Fat is 1.6 kPa at first and several times that by 30% strain
+            // (Alkhouli et al. 2013), 7.5 kPa when shaken (Geerligs et al.
+            // 2008); the loose tissue under it shears at about 1-1.6 kPa
+            // (Iatridis et al. 2003).
+            fat_shear_modulus: 7500.0,
+            fat_damping_ratio: 0.5,
             skin_tear_stretch: 1.68,
             skin_tear_impulse: 820.0,
-            muscle_fiber_stiffness: 0.86,
-            muscle_cross_stiffness: 0.44,
-            muscle_shear_stiffness: 0.38,
-            muscle_area_stiffness: 0.36,
+            // Relaxed muscle shears at 3-4.5 kPa (Lacourpaille et al. 2012)
+            // and is several times stiffer stretched (Eby et al. 2015);
+            // across its fibers about 20 kPa in tension (Morrow et al. 2010).
+            muscle_fiber_shear_modulus: 4000.0,
+            muscle_cross_shear_modulus: 6000.0,
+            muscle_fiber_stiffening_stretch: 1.15,
+            muscle_fiber_stiffening_ratio: 12.0,
+            muscle_cross_stiffening_stretch: 1.10,
+            muscle_cross_stiffening_ratio: 4.0,
+            muscle_damping_ratio: 0.3,
+            bone_tie_hertz: 20.0,
+            bone_tie_damping_ratio: 0.4,
             muscle_fiber_rupture_damage_floor: 0.0,
-            muscle_spring_compliance: 0.0,
-            muscle_area_compliance: 0.0,
             muscle_tear_stretch: 1.92,
             muscle_tear_impulse: 1180.0,
             muscle_exposed_tear_impulse: 620.0,
             contusion_load_threshold: 420.0,
             contusion_decay: 0.014,
             contusion_tear_weakening: 0.10,
-            contusion_stiffness_softening: 0.0,
             tissue_fatigue_stretch_threshold: 1.18,
             tissue_fatigue_load_threshold: 520.0,
-            tissue_fatigue_rate: 0.0008,
-            tissue_fatigue_decay: 0.0012,
+            // Per step: tissue tires and sets once a step, from where the
+            // step left it.
+            tissue_fatigue_rate: 0.0096,
+            tissue_fatigue_decay: 0.0143,
             tissue_fatigue_tear_weakening: 0.10,
-            tissue_fatigue_stiffness_softening: 0.0,
             tissue_plastic_stretch_threshold: 1.08,
             tissue_plastic_compression_threshold: 0.72,
-            tissue_plastic_rate: 0.00016,
+            tissue_plastic_rate: 0.00192,
             tissue_plastic_limit: 0.12,
             tear_propagation_stress_threshold: 0.22,
             tear_propagation_fatigue_threshold: 0.22,
@@ -523,13 +605,13 @@ impl Default for Materials {
             max_organ_ruptures_per_step: 2,
             max_total_organ_ruptures: 2,
             skin_flap_load_threshold: 760.0,
-            skin_flap_stress_threshold: 0.18,
+            // The fat sheared most of its thickness: further than a cut's lips
+            // draw back.
+            skin_flap_stress_threshold: 0.8,
             skin_flap_cut_radius: 20.0,
             max_skin_flap_detachments_per_step: 5,
-            skin_cut_retraction: 0.20,
-            muscle_cut_retraction: 0.30,
-            attachment_stiffness: 0.46,
-            attachment_break_stretch: 2.40,
+            fat_tear_shear: 6.0,
+            fat_loaded_tear_shear: 1.5,
             attachment_break_impulse: 980.0,
             bone_fracture_impulse: BONE_FRACTURE_IMPULSE,
             max_bone_fracture_depth: 4,
@@ -540,12 +622,13 @@ impl Default for Materials {
             bone_angular_damping: 0.955,
             bone_torque_scale: 0.35,
             fracture_spin_scale: 1.10,
-            bone_shape_stiffness: 0.008,
-            bone_attachment_stiffness: 0.52,
             bone_attachment_break_impulse: 2100.0,
-            bone_attachment_break_stretch: 2.8,
-            bone_joint_stiffness: 0.66,
-            bone_joint_angular_stiffness: 0.22,
+            bone_tie_tear_mm: 40.0,
+            bone_tie_loaded_tear_mm: 15.0,
+            // Box2D's joint defaults.
+            bone_joint_hertz: 60.0,
+            bone_joint_angle_hertz: 30.0,
+            bone_joint_damping_ratio: 2.0,
             bone_joint_subluxation_stretch: 1.46,
             bone_joint_subluxation_impulse: 1650.0,
             bone_joint_subluxation_angular: 0.62,
@@ -651,6 +734,7 @@ pub struct Point {
     pub flush: f64,
     pub bruise: f64,
     pub bruise_shown: f64,
+    /// What the point weighs, in the engine's unit of mass (`soft.rs`).
     pub mass: f64,
     /// Rest distance below the body outline in pixels, used for shading.
     pub surface_depth: f64,
@@ -665,6 +749,12 @@ pub struct Point {
     /// attached to them, and only the flesh of their pieces is drawn (see
     /// `cuts.rs`).
     pub ghost_of: usize,
+    /// The impulse that held the point in its pose last substep (`soft.rs`).
+    pub posture_impulse: Vec2,
+    /// How hard the skin that runs on round the back, and the flesh inside,
+    /// hold this point of the outline against the stretch the skin rests at
+    /// (`outline.rs`).
+    pub wrap: Vec2,
 }
 
 impl Point {
@@ -692,6 +782,8 @@ impl Default for Point {
             surface_depth: 0.0,
             on_cut: false,
             ghost_of: MISSING_POINT,
+            posture_impulse: Vec2::default(),
+            wrap: Vec2::default(),
         }
     }
 }
@@ -700,9 +792,16 @@ impl Default for Point {
 pub struct Spring {
     pub a: usize,
     pub b: usize,
+    /// The length it pulls toward, at which it carries no load.
     pub rest: f64,
     pub rest_reference: f64,
+    /// How hard it pulls per metre it is stretched at small strain, in
+    /// newtons per metre (`tissue.rs`).
     pub stiffness: f64,
+    pub kind: SpringKind,
+    /// How far the body holds it stretched at rest past `rest`, as living
+    /// skin is (`tissue.rs`); it tires and sets only past that.
+    pub prestretch: f64,
     pub tear_stretch: f64,
     pub tear_impulse: f64,
     pub layer: TissueLayer,
@@ -711,7 +810,8 @@ pub struct Spring {
     pub stress: f64,
     pub fatigue: f64,
     pub plastic_strain: f64,
-    pub lambda: f64,
+    /// The impulse it gave last substep, which warm starts the next.
+    pub impulse: f64,
     /// A blade cut through this fiber. A fiber of a tissue sheet stays
     /// whole: the cut opens through the triangles the blade crossed instead
     /// (see `cuts.rs`). A lone fiber breaks.
@@ -732,6 +832,8 @@ impl Default for Spring {
             rest: 0.0,
             rest_reference: 0.0,
             stiffness: 0.0,
+            kind: SpringKind::Skin,
+            prestretch: 1.0,
             tear_stretch: 0.0,
             tear_impulse: 0.0,
             layer: TissueLayer::Skin,
@@ -740,7 +842,7 @@ impl Default for Spring {
             stress: 0.0,
             fatigue: 0.0,
             plastic_strain: 0.0,
-            lambda: 0.0,
+            impulse: 0.0,
             cut: false,
             cut_at: 0.5,
             twin: MISSING_SPRING,
@@ -757,9 +859,12 @@ pub struct AreaConstraint {
     pub edge_bc: usize,
     pub edge_ca: usize,
     pub rest_area: f64,
+    /// How hard the triangle resists growing or shrinking, as the newtons
+    /// per metre a sheet of its tissue adds to that (`tissue.rs`).
     pub stiffness: f64,
     pub layer: TissueLayer,
-    pub lambda: f64,
+    /// The impulse it gave last substep, which warm starts the next.
+    pub impulse: f64,
 }
 
 impl Default for AreaConstraint {
@@ -774,7 +879,7 @@ impl Default for AreaConstraint {
             rest_area: 0.0,
             stiffness: 0.0,
             layer: TissueLayer::Skin,
-            lambda: 0.0,
+            impulse: 0.0,
         }
     }
 }
@@ -786,6 +891,10 @@ pub struct Attachment {
     pub rest: f64,
     pub broken: bool,
     pub stress: f64,
+    /// How hard the fat holds the skin point to the muscle point, in newtons
+    /// per metre (`tissue.rs`), and the impulse it gave last substep.
+    pub stiffness: f64,
+    pub impulse: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -889,8 +998,10 @@ pub struct BoneSegment {
     /// lands (`bending.rs`).
     pub break_load: f64,
     /// Where along the bone, from `a` to `b`, the load behind `break_load`
-    /// bent it: where it breaks.
+    /// bent it: where it breaks; and which way that load pushed it, zero
+    /// when no one way.
     pub break_t: f64,
+    pub break_normal: Vec2,
     pub angular_velocity: f64,
     pub fractured: bool,
     pub broken_start: bool,
@@ -911,6 +1022,12 @@ pub struct BoneSegment {
     pub cover: usize,
     pub cover_from: f64,
     pub cover_to: f64,
+    /// What the bone weighs, in the engine's unit of mass, half at each end
+    /// (`tissue.rs`), and the impulses that held each end in its pose last
+    /// substep.
+    pub mass: f64,
+    pub posture_impulse_a: Vec2,
+    pub posture_impulse_b: Vec2,
 }
 
 impl Default for BoneSegment {
@@ -930,6 +1047,7 @@ impl Default for BoneSegment {
             load: 0.0,
             break_load: 0.0,
             break_t: 0.5,
+            break_normal: Vec2::default(),
             angular_velocity: 0.0,
             fractured: false,
             broken_start: false,
@@ -945,6 +1063,9 @@ impl Default for BoneSegment {
             cover: MISSING_COVER,
             cover_from: 0.0,
             cover_to: 1.0,
+            mass: 2.0,
+            posture_impulse_a: Vec2::default(),
+            posture_impulse_b: Vec2::default(),
         }
     }
 }
@@ -955,6 +1076,13 @@ pub struct BoneAttachment {
     pub bone: usize,
     pub t: f64,
     pub offset: Vec2,
+    /// Where the point sits from `t` along the bone, along it and across it
+    /// (a quarter turn counterclockwise from `a` to `b`), in pixels at the
+    /// bone's rest length, so the tie turns with the bone (`soft.rs`).
+    pub along: f64,
+    pub across: f64,
+    /// The impulse the tie gave last substep, which warm starts the next.
+    pub impulse: Vec2,
     pub rest: f64,
     pub stress: f64,
     pub broken: bool,
@@ -982,6 +1110,10 @@ pub struct BoneJoint {
     pub post_fracture_limited: bool,
     pub post_fracture_rest: f64,
     pub post_fracture_rest_angle: f64,
+    /// The impulses that held the joint together and in its range last
+    /// substep (`soft.rs`).
+    pub impulse: f64,
+    pub angular_impulse: f64,
 }
 
 impl Default for BoneJoint {
@@ -1003,6 +1135,8 @@ impl Default for BoneJoint {
             post_fracture_limited: false,
             post_fracture_rest: 0.0,
             post_fracture_rest_angle: 0.0,
+            impulse: 0.0,
+            angular_impulse: 0.0,
         }
     }
 }
@@ -1598,8 +1732,6 @@ pub struct World {
     /// Skin springs a blade severed this step; cuts deepen into the muscle
     /// right under them.
     fresh_skin_cuts: Vec<usize>,
-    /// Whether this is a step's last solver pass, which judges tearing.
-    tearing_pass: bool,
     /// The tissue sheets' outlines, and the points and stretches of them that
     /// may touch this step.
     outlines: Vec<outline::OutlineLoop>,
@@ -1626,9 +1758,20 @@ pub struct World {
     /// ([`World::time_phases`]), and what it measured.
     phase_clock: Option<PhaseClock>,
     phase_times: PhaseTimes,
+    /// What `strike_scenarios --trace` follows through each phase, and what
+    /// each phase of the last step did to it (`phases.rs`).
+    traced: Option<Traced>,
+    traced_stages: Vec<TracedStage>,
     /// The spatial grid the contact passes rebuild for each search, kept so
     /// its arrays are reused.
     grid: grid::SpatialGrid,
+    /// The time a velocity spans in the solver's passes: a substep while the
+    /// substeps run (`soft.rs`), a step otherwise; and how far through the
+    /// step the substeps have come.
+    solver_dt: f64,
+    solver_progress: f64,
+    /// Skin has torn or been cut since the outline's hold was measured.
+    outline_wrap_stale: bool,
 }
 
 impl Default for World {
@@ -1668,7 +1811,6 @@ impl World {
             fluid_seed: 0x9e3779b9,
             tool: tools::ToolBody::default(),
             fresh_skin_cuts: Vec::new(),
-            tearing_pass: true,
             outlines: Vec::new(),
             outline_pairs: Vec::new(),
             blunt_knock: Vec::new(),
@@ -1679,7 +1821,12 @@ impl World {
             topology_version: 0,
             phase_clock: None,
             phase_times: PhaseTimes::default(),
+            traced: None,
+            traced_stages: Vec::new(),
             grid: grid::SpatialGrid::default(),
+            solver_dt: materials.fixed_dt,
+            solver_progress: 1.0,
+            outline_wrap_stale: false,
         }
     }
 
@@ -1783,6 +1930,9 @@ impl World {
         index
     }
 
+    /// Adds a spring between points `a` and `b` as they lie now, `stiffness`
+    /// times as stiff as `STANDARD_SPRING_STIFFNESS`. The body's springs are
+    /// as stiff as the tissue they are in (`tissue.rs`).
     pub fn add_spring(
         &mut self,
         a: usize,
@@ -1808,7 +1958,12 @@ impl World {
             b,
             rest,
             rest_reference: rest,
-            stiffness,
+            stiffness: stiffness * STANDARD_SPRING_STIFFNESS,
+            kind: match (layer, fiber) {
+                (TissueLayer::Skin, _) => SpringKind::Skin,
+                (TissueLayer::Muscle, true) => SpringKind::Fiber,
+                (TissueLayer::Muscle, false) => SpringKind::Shear,
+            },
             tear_stretch,
             tear_impulse,
             layer,
@@ -1817,6 +1972,8 @@ impl World {
         });
     }
 
+    /// Adds a triangle's area constraint over points `a`, `b`, and `c` as
+    /// they lie now, `stiffness` times as stiff as `STANDARD_AREA_STIFFNESS`.
     pub fn add_area(&mut self, a: usize, b: usize, c: usize, layer: TissueLayer, stiffness: f64) {
         if a >= self.points.len() || b >= self.points.len() || c >= self.points.len() {
             return;
@@ -1833,9 +1990,9 @@ impl World {
                 self.points[b].position,
                 self.points[c].position,
             ),
-            stiffness,
+            stiffness: stiffness * STANDARD_AREA_STIFFNESS,
             layer,
-            lambda: 0.0,
+            impulse: 0.0,
         });
     }
 
@@ -1922,6 +2079,8 @@ impl World {
             .max(self.materials.point_spacing * 0.34),
             broken: false,
             stress: 0.0,
+            stiffness: DEFAULT_ATTACHMENT_STIFFNESS,
+            impulse: 0.0,
         });
     }
 
@@ -1986,11 +2145,15 @@ impl World {
         let t = t.clamp(0.0, 1.0);
         let anchor = bone_point(self.bones[bone], t);
         let point_position = self.points[point].position;
+        let (along, across) = bone_tie_frame(&self.bones[bone], t, point_position);
         self.bone_attachments.push(BoneAttachment {
             point,
             bone,
             t,
             offset: subtract(point_position, anchor),
+            along,
+            across,
+            impulse: Vec2::default(),
             rest: distance(point_position, anchor).max(self.materials.point_spacing * 0.42),
             stress: 0.0,
             broken: false,
@@ -2081,7 +2244,7 @@ impl World {
             striker_radius,
             tool: input.tool,
             impact: striker_speed * striker_mass,
-            solver_iterations: self.materials.solver_iterations as i32,
+            solver_iterations: (self.materials.substeps * self.materials.contact_passes) as i32,
             blood_loss: self.stats.blood_loss,
             blood_volume_fraction: self.blood_volume_fraction_internal(),
             blood_turgor_scale: self.blood_turgor_scale_internal(),
@@ -2089,7 +2252,7 @@ impl World {
         };
 
         self.timed("exposure", Self::update_exposure);
-        self.timed("integrate", |world| world.integrate(dt, width, floor_y));
+        self.timed("predict", |world| world.predict_step(dt, width, floor_y));
         self.timed("anchors", |world| {
             world.update_vessel_anchors();
             world.update_organ_anchors();
@@ -2104,30 +2267,12 @@ impl World {
             world.update_organs(dt);
         });
         self.timed("wounds", Self::disturb_wounds_from_loaded_tissue);
-        self.reset_constraint_lambdas();
         self.timed("outline pairs", Self::gather_outline_pairs);
-
-        for pass in 0..self.materials.solver_iterations {
-            // Tissue tears from how far it is stretched once a step's push
-            // has spread through it, not from the instant a tool's push lands
-            // on a few points, which the first passes are still smoothing out.
-            self.tearing_pass = pass + 1 == self.materials.solver_iterations;
-            self.timed("springs", Self::solve_springs);
-            self.timed("tool contact", Self::solve_tool_contact);
-            self.timed("attachments", Self::solve_attachments);
-            self.timed("bone attachments", Self::solve_bone_attachments);
-            self.timed("bone joints", Self::solve_bone_joints);
-            self.timed("bones", Self::solve_bones);
-            self.timed("broken joints", Self::solve_post_fracture_joints);
-            self.timed("fragment-bone", Self::solve_bone_fragment_bone_contacts);
-            self.timed("fragment-tissue", Self::solve_bone_fragment_tissue_contacts);
-            self.timed("fragment pairs", Self::solve_bone_fragment_repulsion);
-            self.timed("areas", Self::solve_areas);
-            self.timed("outline contact", Self::solve_outline_contacts);
-            self.timed("world bounds", |world| {
-                world.constrain_to_world(width, floor_y)
-            });
-        }
+        self.solve_motion(dt, width, floor_y);
+        // Tissue tears from how far it is stretched once the step's push has
+        // spread through it, not from the instant a tool's push lands on a
+        // few points.
+        self.timed("springs", Self::judge_springs);
         self.finish_tool_step(dt);
         self.timed("tears open", Self::open_tears);
 
@@ -2155,15 +2300,6 @@ impl World {
                 .max(world.free_fragment_count() as i32);
             world.debug.sleeping_fragments = world.sleeping_fragment_count() as i32;
         });
-    }
-
-    fn reset_constraint_lambdas(&mut self) {
-        for spring in &mut self.springs {
-            spring.lambda = 0.0;
-        }
-        for area in &mut self.areas {
-            area.lambda = 0.0;
-        }
     }
 
     pub fn triangle_alive(&self, triangle: &Triangle) -> bool {
@@ -2461,6 +2597,7 @@ impl World {
         spring.broken = true;
         if spring.layer == TissueLayer::Skin {
             self.open_skin.push(index);
+            self.outline_wrap_stale = true;
         }
     }
 
@@ -3139,8 +3276,11 @@ impl World {
         }
     }
 
-    fn integrate(&mut self, dt: f64, width: f64, floor_y: f64) {
-        let blood_turgor = self.blood_turgor_scale_internal();
+    /// Starts a step: loads and swelling fade, and every point and bone
+    /// moves on to where its velocity alone would carry it this step, which is
+    /// where the tool meets it; the solver then moves it there for real, under
+    /// gravity and the tissue's pull (`soft.rs`).
+    fn predict_step(&mut self, dt: f64, width: f64, floor_y: f64) {
         for point in &mut self.points {
             point.load *= 0.84;
             point.exposure *= 0.92;
@@ -3150,24 +3290,9 @@ impl World {
                 point.previous = point.position;
                 continue;
             }
-            let vx = (point.position.x - point.previous.x) * self.materials.damping;
-            let vy = (point.position.y - point.previous.y) * self.materials.damping;
+            let travel = subtract(point.position, point.previous);
             point.previous = point.position;
-            point.position.x += vx;
-            point.position.y += vy + self.materials.gravity * dt * dt;
-            let base_shape_stiffness = if point.layer == TissueLayer::Skin {
-                self.materials.skin_shape_stiffness
-            } else {
-                self.materials.muscle_shape_stiffness
-            };
-            let shape_stiffness = base_shape_stiffness * blood_turgor;
-            point.position.x += (point.home.x - point.position.x) * shape_stiffness;
-            point.position.y += (point.home.y - point.position.y) * shape_stiffness;
-            if point.position.y > floor_y {
-                point.position.y = floor_y;
-                point.previous.x = point.position.x
-                    + (point.previous.x - point.position.x) * self.materials.floor_friction;
-            }
+            point.position = add(point.position, travel);
         }
 
         for index in 0..self.bones.len() {
@@ -3191,40 +3316,14 @@ impl World {
                 self.bones[index] = bone;
                 continue;
             }
-            let avx = (bone.a.x - bone.previous_a.x) * self.materials.bone_damping;
-            let avy = (bone.a.y - bone.previous_a.y) * self.materials.bone_damping;
-            let bvx = (bone.b.x - bone.previous_b.x) * self.materials.bone_damping;
-            let bvy = (bone.b.y - bone.previous_b.y) * self.materials.bone_damping;
-            let shape_stiffness = if bone.fractured {
-                0.0
-            } else {
-                self.materials.bone_shape_stiffness
-            };
-            bone.angular_velocity *= self.materials.bone_angular_damping;
-            let free_fragment = bone.fractured || bone.splinter;
-            if !free_fragment && bone.angular_velocity.abs() < 0.01 {
-                bone.angular_velocity = 0.0;
-            }
-            if free_fragment {
-                self.debug.max_bone_angular_speed = self
-                    .debug
-                    .max_bone_angular_speed
-                    .max(bone.angular_velocity.abs());
-            }
+            let (travel_a, travel_b) = (
+                subtract(bone.a, bone.previous_a),
+                subtract(bone.b, bone.previous_b),
+            );
             bone.previous_a = bone.a;
             bone.previous_b = bone.b;
-            bone.a.x += avx + (bone.home_a.x - bone.a.x) * shape_stiffness;
-            bone.a.y += avy
-                + self.materials.gravity * dt * dt
-                + (bone.home_a.y - bone.a.y) * shape_stiffness;
-            bone.b.x += bvx + (bone.home_b.x - bone.b.x) * shape_stiffness;
-            bone.b.y += bvy
-                + self.materials.gravity * dt * dt
-                + (bone.home_b.y - bone.b.y) * shape_stiffness;
-            if free_fragment {
-                let angular_step = bone.angular_velocity * dt;
-                rotate_bone_around_center(&mut bone, angular_step);
-            }
+            bone.a = add(bone.a, travel_a);
+            bone.b = add(bone.b, travel_b);
             self.bones[index] = bone;
         }
 
@@ -4230,7 +4329,10 @@ impl World {
         }
     }
 
-    fn solve_springs(&mut self) {
+    /// Judges every spring once a step, where the step left it: how much it
+    /// tires and sets under load, and whether it tears. The solver moves the
+    /// tissue (`soft.rs`); this decides what the stretch did to it.
+    fn judge_springs(&mut self) {
         let mut events = Vec::new();
         for i in 0..self.springs.len() {
             let spring = self.springs[i];
@@ -4245,6 +4347,9 @@ impl World {
                 continue;
             }
             let mut stretch_ratio = len / spring.rest.max(EPSILON);
+            // Tissue tires, sets, and strains past how far the body holds it
+            // at rest, and tears past what it can bear.
+            let mut body_stretch = stretch_ratio / spring.prestretch.max(EPSILON);
             let endpoint_load = a.load.max(b.load);
             let contusion = a.contusion.max(b.contusion).clamp(0.0, 1.0);
             // A fiber to a cut's ghost only holds a piece of a cut triangle in
@@ -4255,7 +4360,7 @@ impl World {
                 tissue_fatigue_delta(
                     self.materials,
                     spring,
-                    stretch_ratio,
+                    body_stretch,
                     endpoint_load,
                     contusion,
                 )
@@ -4266,11 +4371,11 @@ impl World {
                 (self.springs[i].fatigue + fatigue_delta).min(1.35)
             } else {
                 (self.springs[i].fatigue
-                    * (1.0 - self.materials.tissue_fatigue_decay).clamp(0.94, 1.0))
+                    * (1.0 - self.materials.tissue_fatigue_decay).clamp(0.476, 1.0))
                 .max(0.0)
             };
             self.springs[i].fatigue = fatigue;
-            if fatigue_delta > 0.0004 {
+            if fatigue_delta > 0.0048 {
                 self.stats.tissue_fatigue_events += 1;
                 self.debug.tissue_fatigue_events += 1;
             }
@@ -4282,7 +4387,7 @@ impl World {
             let plastic_delta = tissue_plastic_rest_delta(
                 self.materials,
                 spring,
-                stretch_ratio,
+                body_stretch,
                 endpoint_load,
                 contusion,
                 fatigue,
@@ -4294,13 +4399,14 @@ impl World {
                 let max_rest = reference * (1.0 + limit);
                 let old_rest = self.springs[i].rest;
                 let new_rest = (old_rest + plastic_delta).clamp(min_rest, max_rest);
-                if (new_rest - old_rest).abs() > 0.0005 {
+                if (new_rest - old_rest).abs() > 0.006 {
                     self.springs[i].rest = new_rest;
                     self.springs[i].plastic_strain =
                         ((new_rest - reference) / reference).abs().clamp(0.0, 1.0);
                     self.stats.tissue_plastic_events += 1;
                     self.debug.tissue_plastic_events += 1;
                     stretch_ratio = len / new_rest.max(EPSILON);
+                    body_stretch = stretch_ratio / spring.prestretch.max(EPSILON);
                 }
             }
             self.debug.max_tissue_plasticity = self
@@ -4312,12 +4418,6 @@ impl World {
             let fatigue_tear_weakening = tissue_fatigue_tear_weakening(self.materials, fatigue);
             let tear_weakening =
                 (contusion_tear_weakening + fatigue_tear_weakening).clamp(0.0, 0.58);
-            let contusion_stiffness_softening =
-                tissue_stiffness_softening(self.materials, contusion);
-            let fatigue_stiffness_softening =
-                tissue_fatigue_stiffness_softening(self.materials, fatigue);
-            let stiffness_softening =
-                (contusion_stiffness_softening + fatigue_stiffness_softening).clamp(0.0, 0.46);
             let tear_impulse = if spring.layer == TissueLayer::Muscle {
                 spring.tear_impulse * (1.0 - a.exposure.max(b.exposure) * 0.48)
             } else {
@@ -4328,7 +4428,10 @@ impl World {
             // Loaded tissue tears at less stretch than its limit. Skin
             // stretches 54 +/- 17% before it fails (Ni Annaidh et al. 2012), so
             // even crushed skin must stretch about a third to split; muscle
-            // fails across its fibers at about 15% (Takaza et al. 2013).
+            // fails across its fibers at about 15% (Takaza et al. 2013). The
+            // limits are past how far the body holds the tissue at rest, as
+            // they were set against how often blows split skin in life: the
+            // flat body's skin strains more under a blow than a real one.
             let load_tear_base = if spring.layer == TissueLayer::Skin {
                 SKIN_LOAD_TEAR_STRETCH
             } else {
@@ -4336,17 +4439,13 @@ impl World {
             };
             let load_tear_stretch = (load_tear_base - contusion * 0.055 - fatigue * 0.045)
                 .clamp(load_tear_base - 0.08, load_tear_base);
-            let stiffness = spring.stiffness * (1.0 - stiffness_softening).clamp(0.52, 1.0);
-            self.debug.max_tissue_softening = self
-                .debug
-                .max_tissue_softening
-                .max(tear_weakening.max(stiffness_softening));
+            self.debug.max_tissue_softening = self.debug.max_tissue_softening.max(tear_weakening);
+            // How far it was stretched lately, fading over about a step.
             self.springs[i].stress =
-                (self.springs[i].stress * 0.9).max((stretch_ratio - 1.0).max(0.0));
-            if self.tearing_pass
-                && real
-                && (stretch_ratio > tear_stretch
-                    || (endpoint_load > tear_impulse && stretch_ratio > load_tear_stretch))
+                (self.springs[i].stress * 0.28).max((body_stretch - 1.0).max(0.0));
+            if real
+                && (body_stretch > tear_stretch
+                    || (endpoint_load > tear_impulse && body_stretch > load_tear_stretch))
             {
                 let midpoint = midpoint(a.position, b.position);
                 let tangent = normalized(delta, Vec2 { x: 1.0, y: 0.0 });
@@ -4402,30 +4501,6 @@ impl World {
                 }
                 self.bump_point_exposure_load(spring.a, 1.0, endpoint_load * 0.35);
                 self.bump_point_exposure_load(spring.b, 1.0, endpoint_load * 0.35);
-                continue;
-            }
-            let inv_a = if a.pinned { 0.0 } else { 1.0 / a.mass };
-            let inv_b = if b.pinned { 0.0 } else { 1.0 / b.mass };
-            let weighted_gradient = inv_a + inv_b;
-            if weighted_gradient <= EPSILON {
-                continue;
-            }
-            let compliance = tissue_spring_compliance(self.materials, spring.layer);
-            let alpha = xpbd_alpha(compliance, self.materials.fixed_dt);
-            let constraint = len - self.springs[i].rest;
-            let delta_lambda = (-constraint * stiffness - alpha * self.springs[i].lambda)
-                / (weighted_gradient + alpha);
-            self.springs[i].lambda += delta_lambda;
-            let nx = delta.x / len;
-            let ny = delta.y / len;
-            let (point_a, point_b) = two_mut(&mut self.points, spring.a, spring.b);
-            if !point_a.pinned {
-                point_a.position.x -= nx * delta_lambda * inv_a;
-                point_a.position.y -= ny * delta_lambda * inv_a;
-            }
-            if !point_b.pinned {
-                point_b.position.x += nx * delta_lambda * inv_b;
-                point_b.position.y += ny * delta_lambda * inv_b;
             }
         }
         for (
@@ -4638,7 +4713,7 @@ impl World {
             let attachment_distance = distance(skin.position, muscle.position);
             let attachment_stress = attachment
                 .stress
-                .max((attachment_distance / attachment.rest.max(1.0) - 1.0).max(0.0));
+                .max(self.fat_shear(&attachment, attachment_distance));
             let exposure = skin.exposure.max(muscle.exposure).max(best_exposure);
             let local_load = skin.load.max(muscle.load).max(best_load);
             let weakened_load_threshold = load_threshold * (1.0 - exposure * 0.24).clamp(0.66, 1.0);
@@ -4699,7 +4774,9 @@ impl World {
         }
     }
 
-    fn solve_attachments(&mut self) {
+    /// Judges the fat under the skin each substep: where it has sheared too
+    /// far, it tears and the skin comes loose (`soft.rs` pulls it).
+    fn judge_attachments(&mut self) {
         let mut events = Vec::new();
         for i in 0..self.attachments.len() {
             let attachment = self.attachments[i];
@@ -4713,12 +4790,12 @@ impl World {
             if len < EPSILON {
                 continue;
             }
-            let stretch_ratio = len / attachment.rest.max(1.0);
+            let shear = self.fat_shear(&attachment, len);
             let impulse = skin.load.max(muscle.load);
-            self.attachments[i].stress =
-                (self.attachments[i].stress * 0.88).max((stretch_ratio - 1.0).max(0.0));
-            if stretch_ratio > self.materials.attachment_break_stretch
-                || (impulse > self.materials.attachment_break_impulse && stretch_ratio > 1.25)
+            self.attachments[i].stress = (self.attachments[i].stress * 0.68).max(shear);
+            if shear > self.materials.fat_tear_shear
+                || (impulse > self.materials.attachment_break_impulse
+                    && shear > self.materials.fat_loaded_tear_shear)
             {
                 self.attachments[i].broken = true;
                 self.stats.broken_attachments += 1;
@@ -4732,37 +4809,6 @@ impl World {
                     },
                     impulse,
                 ));
-                continue;
-            }
-            let diff = (len - attachment.rest) / len;
-            let correction = scale(delta, diff * self.materials.attachment_stiffness);
-            let skin_share = if skin.pinned {
-                0.0
-            } else {
-                0.72 / skin.mass.max(0.25)
-            };
-            let muscle_share = if muscle.pinned {
-                0.0
-            } else {
-                0.28 / muscle.mass.max(0.25)
-            };
-            let share_sum = skin_share + muscle_share;
-            if share_sum <= EPSILON {
-                continue;
-            }
-            let skin_amount = skin_share / share_sum;
-            let muscle_amount = muscle_share / share_sum;
-            if !self.points[attachment.skin_point].pinned {
-                self.points[attachment.skin_point].position = add(
-                    self.points[attachment.skin_point].position,
-                    scale(correction, skin_amount),
-                );
-            }
-            if !self.points[attachment.muscle_point].pinned {
-                self.points[attachment.muscle_point].position = subtract(
-                    self.points[attachment.muscle_point].position,
-                    scale(correction, muscle_amount),
-                );
             }
         }
         for (point, normal, impulse) in events {
@@ -4778,7 +4824,10 @@ impl World {
         }
     }
 
-    fn solve_bone_attachments(&mut self) {
+    /// Judges each muscle point's tie to its bone each substep: the load the
+    /// flesh carries bears on the bone, and a tie stretched too far tears
+    /// (`soft.rs` pulls flesh and bone together).
+    fn judge_bone_attachments(&mut self) {
         let mut events = Vec::new();
         for i in 0..self.bone_attachments.len() {
             let attachment = self.bone_attachments[i];
@@ -4798,25 +4847,29 @@ impl World {
             if self.debug.tool == ToolMode::Sharp && bone.part.is_long_bone() {
                 transfer = transfer.min(bone.fracture_impulse * BLADE_LONG_BONE_LOAD);
             }
+            let raw_anchor = bone_point(bone, attachment.t);
             if transfer > bone.break_load {
+                // Flesh pressed onto a bone pushes it away from the flesh.
                 bone.bear_break_load(
                     transfer * self.bending_share(attachment.bone, attachment.t),
                     attachment.t,
+                    normalized(subtract(raw_anchor, point.position), Vec2::default()),
                 );
             }
-            let raw_anchor = bone_point(bone, attachment.t);
             let current_distance = distance(point.position, raw_anchor);
             let stretch_ratio = current_distance / attachment.rest.max(1.0);
+            // How far the flesh has been pulled off its place on the bone.
+            let slip = self.bone_tie_slip(&attachment) * self.mm_per_px();
             let impulse = point.load.max(bone.load);
-            self.bone_attachments[i].stress =
-                (self.bone_attachments[i].stress * 0.9).max((stretch_ratio - 1.0).max(0.0));
+            self.bone_attachments[i].stress = (self.bone_attachments[i].stress * 0.73)
+                .max(slip / self.materials.bone_tie_tear_mm.max(EPSILON));
             let torn_loose = if attachment.holds_piece {
                 // Flesh lets go of a piece only once it is torn away.
                 !is_flesh(&self.flesh, attachment.point) || stretch_ratio > PIECE_HOLD_BREAK_STRETCH
             } else {
-                stretch_ratio > self.materials.bone_attachment_break_stretch
+                slip > self.materials.bone_tie_tear_mm
                     || (impulse > self.materials.bone_attachment_break_impulse
-                        && stretch_ratio > 1.45)
+                        && slip > self.materials.bone_tie_loaded_tear_mm)
             };
             if torn_loose {
                 self.bone_attachments[i].broken = true;
@@ -4833,30 +4886,6 @@ impl World {
                 self.bones[attachment.bone] = bone;
                 continue;
             }
-            let target = add(raw_anchor, attachment.offset);
-            let correction = scale(
-                subtract(target, point.position),
-                self.materials.bone_attachment_stiffness,
-            );
-            // A whole bone carries the flesh on it; a piece of broken bone is
-            // carried by the flesh around it and does not drag the flesh.
-            let (point_share, bone_share) = if attachment.holds_piece {
-                (0.0, 1.0)
-            } else {
-                (1.0, 0.10)
-            };
-            if !self.points[attachment.point].pinned {
-                self.points[attachment.point].position = add(
-                    self.points[attachment.point].position,
-                    scale(correction, point_share),
-                );
-            }
-            if !bone.pinned {
-                bone.a.x -= correction.x * bone_share * (1.0 - attachment.t);
-                bone.a.y -= correction.y * bone_share * (1.0 - attachment.t);
-                bone.b.x -= correction.x * bone_share * attachment.t;
-                bone.b.y -= correction.y * bone_share * attachment.t;
-            }
             self.bones[attachment.bone] = bone;
         }
         for (point, normal, impulse) in events {
@@ -4872,7 +4901,10 @@ impl World {
         }
     }
 
-    fn solve_bone_joints(&mut self) {
+    /// Judges each joint each substep: how far it is stretched and bent past
+    /// its range, whether it slips out of place or tears, and what it passes
+    /// on between its bones (`soft.rs` holds it together).
+    fn judge_bone_joints(&mut self) {
         let count = self.bone_joints.len();
         let mut ligament_events = Vec::new();
         for i in 0..count {
@@ -4895,12 +4927,12 @@ impl World {
             }
             let stretch_ratio = len / joint.rest.max(1.0);
             let impulse = a.load.max(b.load);
-            joint.stress = (joint.stress * 0.9).max((stretch_ratio - 1.0).max(0.0));
+            joint.stress = (joint.stress * 0.73).max((stretch_ratio - 1.0).max(0.0));
             let relative_angle = wrap_angle(bone_angle(b) - bone_angle(a) - joint.rest_angle);
             let clamped_angle = relative_angle.clamp(joint.min_angle, joint.max_angle);
             let angle_violation = relative_angle - clamped_angle;
             let overextension = angle_violation.abs();
-            joint.torque_stress = (joint.torque_stress * 0.9).max(overextension);
+            joint.torque_stress = (joint.torque_stress * 0.73).max(overextension);
             if stretch_ratio > self.materials.bone_joint_break_stretch
                 || (impulse > self.materials.bone_joint_break_impulse && stretch_ratio > 1.35)
             {
@@ -4978,33 +5010,6 @@ impl World {
             self.bones[joint.b].load = self.bones[joint.b]
                 .load
                 .max(self.bones[joint.a].load * 0.30);
-            let subluxation_slack = self.materials.bone_joint_subluxation_slack * joint.subluxation;
-            let effective_rest = joint.rest + subluxation_slack;
-            let diff = if joint.subluxated && len < effective_rest {
-                0.0
-            } else {
-                (len - effective_rest) / len
-            };
-            let stiffness_scale = if joint.subluxated {
-                self.materials.bone_joint_subluxation_stiffness_scale
-            } else {
-                1.0
-            };
-            let correction = scale(
-                delta,
-                diff * self.materials.bone_joint_stiffness * 0.5 * stiffness_scale,
-            );
-            self.apply_bone_anchor_delta_idx(joint.a, joint.t_a, correction.x, correction.y);
-            self.apply_bone_anchor_delta_idx(joint.b, joint.t_b, -correction.x, -correction.y);
-            let angle_slack =
-                self.materials.bone_joint_subluxation_angular * joint.subluxation * 0.55;
-            let relaxed_angle = relative_angle
-                - relative_angle
-                    .clamp(joint.min_angle - angle_slack, joint.max_angle + angle_slack);
-            let angle_correction =
-                relaxed_angle * self.materials.bone_joint_angular_stiffness * 0.5 * stiffness_scale;
-            self.rotate_bone_around_anchor_idx(joint.a, joint.t_a, angle_correction);
-            self.rotate_bone_around_anchor_idx(joint.b, joint.t_b, -angle_correction);
             self.bone_joints[i] = joint;
         }
         for (center, load) in ligament_events {
@@ -5051,11 +5056,13 @@ impl World {
             }
         }
         for i in fractures {
-            let at = self.bones.get(i).map_or(0.5, |bone| bone.break_t);
+            let (at, toward) = self.bones.get(i).map_or((0.5, Vec2::default()), |bone| {
+                (bone.break_t, bone.break_normal)
+            });
             self.fracture_bone(
                 i,
                 at,
-                Vec2::default(),
+                toward,
                 self.bones.get(i).map(|b| b.load).unwrap_or(0.0),
             );
         }
@@ -5234,12 +5241,37 @@ impl World {
                     continue;
                 }
 
-                let depth = target_distance - distance_to_tissue;
-                let contact = (depth / target_distance.max(1.0)).clamp(0.0, 1.0);
-                let normal = normalized(
+                let mut depth = target_distance - distance_to_tissue;
+                let mut normal = normalized(
                     delta,
                     fragment_tissue_fallback_normal(bone, point.position, t),
                 );
+                // Flesh a blow drove across the bone since the substep began
+                // still lies on the side it came from, and goes back there,
+                // instead of shoving the bone out through the far side of the
+                // limb.
+                let along = subtract(bone.b, bone.a);
+                let across = Vec2 {
+                    x: -along.y,
+                    y: along.x,
+                };
+                let before = subtract(point.previous, lerp(bone.previous_a, bone.previous_b, t));
+                let before_t = segment_t(point.previous, bone.previous_a, bone.previous_b);
+                if t > 0.0
+                    && t < 1.0
+                    && before_t > 0.0
+                    && before_t < 1.0
+                    && dot(before, across) * dot(delta, across) < 0.0
+                {
+                    let side = normalized(across, normal);
+                    normal = if dot(before, side) > 0.0 {
+                        side
+                    } else {
+                        scale(side, -1.0)
+                    };
+                    depth = target_distance + distance_to_tissue;
+                }
+                let contact = (depth / target_distance.max(1.0)).clamp(0.0, 1.0);
                 let layer_resistance = if point.layer == TissueLayer::Skin {
                     1.34 - point.exposure.min(1.0) * 0.22
                 } else {
@@ -5393,6 +5425,11 @@ impl World {
                 if free_bone_fragment(support) {
                     continue;
                 }
+                // The spine lies behind the trunk, behind whatever a blow to
+                // the front breaks loose, as it lies out of the tools' reach.
+                if support.kind == BoneKind::Spine || fragment.kind == BoneKind::Spine {
+                    continue;
+                }
                 if !self.consume_fragment_bone_check() {
                     continue;
                 }
@@ -5415,7 +5452,7 @@ impl World {
                 let relative_velocity = subtract(velocity_fragment, velocity_support);
                 let normal_speed = dot(relative_velocity, normal);
                 let tangent_velocity = subtract(relative_velocity, scale(normal, normal_speed));
-                let dt = self.materials.fixed_dt.max(EPSILON);
+                let dt = self.solver_dt.max(EPSILON);
                 let closing_speed = (-normal_speed).max(0.0) / dt;
                 let tangential_speed = hypot(tangent_velocity.x, tangent_velocity.y) / dt;
                 let rest_speed = self.materials.fragment_bone_rest_speed.max(1.0);
@@ -5521,10 +5558,18 @@ impl World {
                 self.bones[bone_index].load = self.bones[bone_index].load.max(contact_load * 0.54);
                 let fragment_bending =
                     contact_load * 0.72 * self.bending_share(fragment_index, closest.t_a);
-                self.bones[fragment_index].bear_break_load(fragment_bending, closest.t_a);
+                self.bones[fragment_index].bear_break_load(
+                    fragment_bending,
+                    closest.t_a,
+                    Vec2::default(),
+                );
                 let support_bending =
                     contact_load * 0.54 * self.bending_share(bone_index, closest.t_b);
-                self.bones[bone_index].bear_break_load(support_bending, closest.t_b);
+                self.bones[bone_index].bear_break_load(
+                    support_bending,
+                    closest.t_b,
+                    Vec2::default(),
+                );
                 self.debug.fragment_bone_contacts += 1;
                 if resting_contact {
                     self.debug.fragment_bone_resting_contacts += 1;
@@ -5605,7 +5650,7 @@ impl World {
                 let relative_velocity = subtract(velocity_a, velocity_b);
                 let normal_speed = dot(relative_velocity, normal);
                 let tangent_velocity = subtract(relative_velocity, scale(normal, normal_speed));
-                let dt = self.materials.fixed_dt.max(EPSILON);
+                let dt = self.solver_dt.max(EPSILON);
                 let closing_speed = (-normal_speed).max(0.0) / dt;
                 let tangential_speed = hypot(tangent_velocity.x, tangent_velocity.y) / dt;
                 let rest_speed = self.materials.fragment_pair_rest_speed.max(1.0);
@@ -6019,54 +6064,6 @@ impl World {
         }
     }
 
-    fn solve_areas(&mut self) {
-        let blood_turgor = self.blood_turgor_scale_internal();
-        for index in 0..self.areas.len() {
-            let area = self.areas[index];
-            if self.live_edge_count(area.edge_ab, area.edge_bc, area.edge_ca) < 2 {
-                continue;
-            }
-            let pa = self.points[area.a];
-            let pb = self.points[area.b];
-            let pc = self.points[area.c];
-            let current = signed_area(pa.position, pb.position, pc.position);
-            let constraint = current - area.rest_area;
-            let inv_a = if pa.pinned { 0.0 } else { 1.0 / pa.mass };
-            let inv_b = if pb.pinned { 0.0 } else { 1.0 / pb.mass };
-            let inv_c = if pc.pinned { 0.0 } else { 1.0 / pc.mass };
-            let ax = pb.position.y - pc.position.y;
-            let ay = pc.position.x - pb.position.x;
-            let bx = pc.position.y - pa.position.y;
-            let by = pa.position.x - pc.position.x;
-            let cx = pa.position.y - pb.position.y;
-            let cy = pb.position.x - pa.position.x;
-            let weighted_gradient = inv_a * (ax * ax + ay * ay)
-                + inv_b * (bx * bx + by * by)
-                + inv_c * (cx * cx + cy * cy);
-            if weighted_gradient <= EPSILON {
-                continue;
-            }
-            let compliance = tissue_area_compliance(self.materials, area.layer);
-            let alpha = xpbd_alpha(compliance, self.materials.fixed_dt);
-            let lambda = (-constraint * area.stiffness * blood_turgor
-                - alpha * self.areas[index].lambda)
-                / (weighted_gradient + alpha);
-            self.areas[index].lambda += lambda;
-            if !self.points[area.a].pinned {
-                self.points[area.a].position.x += ax * lambda * inv_a;
-                self.points[area.a].position.y += ay * lambda * inv_a;
-            }
-            if !self.points[area.b].pinned {
-                self.points[area.b].position.x += bx * lambda * inv_b;
-                self.points[area.b].position.y += by * lambda * inv_b;
-            }
-            if !self.points[area.c].pinned {
-                self.points[area.c].position.x += cx * lambda * inv_c;
-                self.points[area.c].position.y += cy * lambda * inv_c;
-            }
-        }
-    }
-
     fn constrain_to_world(&mut self, width: f64, floor_y: f64) {
         let margin = 8.0;
         for point in &mut self.points {
@@ -6087,12 +6084,14 @@ impl World {
                 let contact_floor_y = floor_y - bone.radius.max(1.0);
                 let (a_contact, a_resting) = constrain_fragment_endpoint_to_floor(
                     self.materials,
+                    self.solver_dt,
                     &mut bone.a,
                     &mut bone.previous_a,
                     contact_floor_y,
                 );
                 let (b_contact, b_resting) = constrain_fragment_endpoint_to_floor(
                     self.materials,
+                    self.solver_dt,
                     &mut bone.b,
                     &mut bone.previous_b,
                     contact_floor_y,
@@ -6286,9 +6285,13 @@ impl World {
         let snap = (5.5_f64.max(old.radius * (1.05 + overload * 0.42))).min(len * 0.09) * violence;
         let shear = (2.5_f64.max(old.radius * 0.42)).min(len * 0.035);
         let recoil = snap * (2.1 + overload * 0.8);
+        // A closed bending break folds the bone away from the blow, both
+        // broken ends driven the way it went; one far past the bone's
+        // strength throws the pieces apart across the break, one each way.
+        let back = if open { -1.0 } else { 1.0 };
         let left_cap = Vec2 {
-            x: crack.x - dir.x * gap * 0.5 - normal.x * snap - dir.x * shear,
-            y: crack.y - dir.y * gap * 0.5 - normal.y * snap - dir.y * shear,
+            x: crack.x - dir.x * gap * 0.5 + normal.x * snap * back - dir.x * shear,
+            y: crack.y - dir.y * gap * 0.5 + normal.y * snap * back - dir.y * shear,
         };
         let right_cap = Vec2 {
             x: crack.x + dir.x * gap * 0.5 + normal.x * snap + dir.x * shear,
@@ -6310,17 +6313,17 @@ impl World {
         let mut first = old;
         first.open_break = old.open_break || open;
         first.a = Vec2 {
-            x: old.a.x - normal.x * snap * 0.18,
-            y: old.a.y - normal.y * snap * 0.18,
+            x: old.a.x + normal.x * snap * 0.18 * back,
+            y: old.a.y + normal.y * snap * 0.18 * back,
         };
         first.b = left_cap;
         first.previous_a = Vec2 {
-            x: old.previous_a.x + normal.x * recoil * 0.20,
-            y: old.previous_a.y + normal.y * recoil * 0.20,
+            x: old.previous_a.x - normal.x * recoil * 0.20 * back,
+            y: old.previous_a.y - normal.y * recoil * 0.20 * back,
         };
         first.previous_b = Vec2 {
-            x: previous_crack.x + normal.x * recoil + dir.x * shear * 0.7,
-            y: previous_crack.y + normal.y * recoil + dir.y * shear * 0.7,
+            x: previous_crack.x - normal.x * recoil * back + dir.x * shear * 0.7,
+            y: previous_crack.y - normal.y * recoil * back + dir.y * shear * 0.7,
         };
         first.home_b = Vec2 {
             x: home_crack.x - dir.x * gap * 0.5 - normal.x * snap * 0.35,
@@ -6342,8 +6345,14 @@ impl World {
         first.break_load = old.break_load * 0.28;
         first.break_t = 0.5;
         first.angular_velocity = (first.angular_velocity
-            + spin_sign * fracture_spin * (1.0 - break_t))
+            - spin_sign * fracture_spin * (1.0 - break_t) * back)
             .clamp(-36.0, 36.0);
+        first.mass = old.mass * break_t;
+        let kick_share = self.kick_share();
+        let travel_a = subtract(old.a, old.previous_a);
+        let travel_b = subtract(old.b, old.previous_b);
+        let travel_crack = lerp(travel_a, travel_b, break_t);
+        scale_kick(&mut first, travel_a, travel_crack, kick_share);
         self.bones[bone_index] = first;
 
         let mut second = BoneSegment {
@@ -6391,6 +6400,8 @@ impl World {
         second.angular_velocity = (first.angular_velocity
             - spin_sign * fracture_spin * (0.65 + break_t))
             .clamp(-36.0, 36.0);
+        second.mass = old.mass * (1.0 - break_t);
+        scale_kick(&mut second, travel_crack, travel_b, kick_share);
         let second_index = self.bones.len();
         self.bones.push(second);
 
@@ -6400,8 +6411,14 @@ impl World {
                 continue;
             }
             let original_t = attachment.t;
-            let detach_zone =
-                (0.11 + overload * 0.05 + old.radius / len.max(1.0) * 1.5).clamp(0.10, 0.22);
+            // A closed break tears the muscle off the bone right around the
+            // crack, about as far as the bone is wide; one driven out through
+            // the skin tears it off further.
+            let detach_zone = if open {
+                (0.11 + overload * 0.05 + old.radius / len.max(1.0) * 1.5).clamp(0.10, 0.22)
+            } else {
+                (old.radius * 2.0 / len.max(1.0)).clamp(0.04, 0.10)
+            };
             if (original_t - break_t).abs() <= detach_zone {
                 attachment.broken = true;
                 attachment.stress = 1.0 + overload;
@@ -6419,21 +6436,18 @@ impl World {
             }
             if original_t < break_t {
                 attachment.t = (original_t / break_t.max(0.05)).clamp(0.0, 1.0);
-                if attachment.point < self.points.len() {
-                    let anchor = bone_point(self.bones[bone_index], attachment.t);
-                    attachment.offset = subtract(self.points[attachment.point].position, anchor);
-                    attachment.rest =
-                        distance(self.points[attachment.point].position, anchor).max(1.0);
-                }
             } else {
                 attachment.bone = second_index;
                 attachment.t = ((original_t - break_t) / (1.0 - break_t).max(0.05)).clamp(0.0, 1.0);
-                if attachment.point < self.points.len() {
-                    let anchor = bone_point(self.bones[second_index], attachment.t);
-                    attachment.offset = subtract(self.points[attachment.point].position, anchor);
-                    attachment.rest =
-                        distance(self.points[attachment.point].position, anchor).max(1.0);
-                }
+            }
+            if attachment.point < self.points.len() {
+                let piece = self.bones[attachment.bone];
+                let point = self.points[attachment.point].position;
+                let anchor = bone_point(piece, attachment.t);
+                attachment.offset = subtract(point, anchor);
+                attachment.rest = distance(point, anchor).max(1.0);
+                (attachment.along, attachment.across) = bone_tie_frame(&piece, attachment.t, point);
+                attachment.impulse = Vec2::default();
             }
         }
 
@@ -6495,22 +6509,6 @@ impl World {
                 .abs()
                 .max(second.angular_velocity.abs()),
         );
-        if open {
-            self.chip_splinter(
-                &old,
-                crack,
-                home_crack,
-                dir,
-                normal,
-                snap,
-                recoil,
-                spin_sign * fracture_spin,
-            );
-        }
-        if butterfly {
-            self.chip_butterfly(&old, crack, previous_crack, home_crack, dir, normal);
-        }
-
         let blood_direction = Vec2 {
             x: normal.x + dir.x * 0.28,
             y: normal.y + dir.y * 0.28 - 0.30,
@@ -6519,9 +6517,14 @@ impl World {
         if open {
             self.stats.open_fractures += 1;
         }
+        // Chips break off once the break has torn the flesh around it, so
+        // the flesh left there is what holds them.
         if !open {
             self.bruise_tissue_around_fracture(crack, old.radius, load);
             self.count_fracture(old.part, old.kind, load);
+            if butterfly {
+                self.chip_butterfly(&old, crack, previous_crack, home_crack, dir, normal);
+            }
             return;
         }
 
@@ -6554,6 +6557,19 @@ impl World {
         // out around the bone instead of through the whole limb.
         self.damage_tissue_around_fracture(crack, old.radius * 1.6 + overload * 3.0, load);
         self.count_fracture(old.part, old.kind, load);
+        self.chip_splinter(
+            &old,
+            crack,
+            home_crack,
+            dir,
+            normal,
+            snap,
+            recoil,
+            spin_sign * fracture_spin,
+        );
+        if butterfly {
+            self.chip_butterfly(&old, crack, previous_crack, home_crack, dir, normal);
+        }
     }
 
     /// A violent break also chips a splinter that flies out from the crack.
@@ -6611,6 +6627,13 @@ impl World {
             y: home_crack.y + dir.y * chip_length * 0.55 + normal.y * snap * 0.2,
         };
         splinter.rest_length = distance(splinter.a, splinter.b).max(EPSILON);
+        splinter.mass = piece_mass(old, chip_length, splinter.radius);
+        scale_kick(
+            &mut splinter,
+            Vec2::default(),
+            Vec2::default(),
+            self.kick_share(),
+        );
         self.debug.max_bone_angular_speed = self
             .debug
             .max_bone_angular_speed
@@ -6624,14 +6647,22 @@ impl World {
     /// high-energy crashes; Hu et al. 2024): the muscle points nearest it that
     /// are still flesh are attached to it where they lie along it. Torn far
     /// enough, they let it go as other attachments do.
+    /// How much of a step's motion a kick given now makes: within a substep
+    /// a velocity spans only the substep.
+    pub(super) fn kick_share(&self) -> f64 {
+        (self.solver_dt / self.materials.fixed_dt.max(EPSILON)).clamp(0.0, 1.0)
+    }
+
     pub(super) fn hold_piece_in_flesh(&mut self, bone_index: usize) {
         let Some(&bone) = self.bones.get(bone_index) else {
             return;
         };
         let reach = self.materials.point_spacing * PIECE_HOLD_REACH;
+        // The flesh as it is now: a break tears what lies round it mid-step.
+        let flesh = self.flesh_points();
         let mut near = Vec::new();
         for (index, point) in self.points.iter().enumerate() {
-            if point.layer != TissueLayer::Muscle || !is_flesh(&self.flesh, index) {
+            if point.layer != TissueLayer::Muscle || !flesh[index] {
                 continue;
             }
             let t = segment_t(point.position, bone.a, bone.b);
@@ -6989,34 +7020,6 @@ fn tissue_tear_weakening(materials: Materials, contusion: f64) -> f64 {
     (contusion.clamp(0.0, 1.0) * materials.contusion_tear_weakening).clamp(0.0, 0.52)
 }
 
-fn tissue_stiffness_softening(materials: Materials, contusion: f64) -> f64 {
-    (contusion.clamp(0.0, 1.0) * materials.contusion_stiffness_softening).clamp(0.0, 0.44)
-}
-
-fn tissue_spring_compliance(materials: Materials, layer: TissueLayer) -> f64 {
-    match layer {
-        TissueLayer::Skin => materials.skin_spring_compliance,
-        TissueLayer::Muscle => materials.muscle_spring_compliance,
-    }
-    .max(0.0)
-}
-
-fn tissue_area_compliance(materials: Materials, layer: TissueLayer) -> f64 {
-    match layer {
-        TissueLayer::Skin => materials.skin_area_compliance,
-        TissueLayer::Muscle => materials.muscle_area_compliance,
-    }
-    .max(0.0)
-}
-
-fn xpbd_alpha(compliance: f64, dt: f64) -> f64 {
-    if compliance <= EPSILON {
-        0.0
-    } else {
-        compliance / dt.max(1.0e-5).powi(2)
-    }
-}
-
 fn tissue_fatigue_delta(
     materials: Materials,
     spring: Spring,
@@ -7053,15 +7056,11 @@ fn tissue_fatigue_delta(
         1.0
     };
     let contusion_boost = 1.0 + contusion.clamp(0.0, 1.0) * 0.55;
-    (combined * materials.tissue_fatigue_rate * layer_scale * contusion_boost).clamp(0.0, 0.075)
+    (combined * materials.tissue_fatigue_rate * layer_scale * contusion_boost).clamp(0.0, 0.9)
 }
 
 fn tissue_fatigue_tear_weakening(materials: Materials, fatigue: f64) -> f64 {
     (fatigue.clamp(0.0, 1.0) * materials.tissue_fatigue_tear_weakening).clamp(0.0, 0.42)
-}
-
-fn tissue_fatigue_stiffness_softening(materials: Materials, fatigue: f64) -> f64 {
-    (fatigue.clamp(0.0, 1.0) * materials.tissue_fatigue_stiffness_softening).clamp(0.0, 0.26)
 }
 
 fn tissue_plastic_rest_delta(
@@ -7174,28 +7173,40 @@ mod tests {
 
     #[test]
     fn skin_attachment_pulls_surface_toward_muscle() {
-        let mut materials = Materials::default();
-        materials.attachment_stiffness = 0.34;
-        materials.attachment_break_stretch = 3.0;
+        let materials = Materials {
+            fat_tear_shear: 30.0,
+            gravity: 0.0,
+            skin_posture_hertz: 0.0,
+            muscle_posture_hertz: 0.0,
+            ..Materials::default()
+        };
 
         let mut world = World::new(materials);
-        let skin = world.add_point(Vec2 { x: 0.0, y: 0.0 }, TissueLayer::Skin, false);
-        let muscle = world.add_point(Vec2 { x: 40.0, y: 0.0 }, TissueLayer::Muscle, false);
+        let skin = world.add_point(Vec2 { x: 100.0, y: 100.0 }, TissueLayer::Skin, false);
+        let muscle = world.add_point(Vec2 { x: 140.0, y: 100.0 }, TissueLayer::Muscle, false);
         world.add_attachment(skin, muscle);
 
-        world.points[muscle].position = Vec2 { x: 70.0, y: 0.0 };
-        world.solve_attachments();
+        world.points[muscle].position = Vec2 { x: 170.0, y: 100.0 };
+        world.points[muscle].previous = world.points[muscle].position;
+        for _ in 0..10 {
+            world.step(
+                world.materials.fixed_dt,
+                &InputState::default(),
+                1000.0,
+                1000.0,
+            );
+        }
 
         assert!(
             !world.attachments[0].broken,
             "moderate skin-to-muscle stretch should stay attached"
         );
         assert!(
-            world.points[skin].position.x > 6.0,
+            world.points[skin].position.x > 106.0,
             "skin should be pulled toward underlying muscle"
         );
         assert!(
-            world.points[muscle].position.x < 70.0,
+            world.points[muscle].position.x < 170.0,
             "muscle should receive some opposing tether reaction"
         );
     }
@@ -7227,7 +7238,7 @@ mod tests {
         world.bones[b].b.x += 8.5;
         world.bones[b].load = 760.0;
 
-        world.solve_bone_joints();
+        world.judge_bone_joints();
 
         assert!(
             world.bone_joints[0].subluxated,
@@ -7273,7 +7284,7 @@ mod tests {
         world.bones[b].b.x += 8.5;
         world.bones[b].load = 760.0;
 
-        world.solve_bone_joints();
+        world.judge_bone_joints();
 
         assert!(world.bone_joints[0].subluxated);
         assert_eq!(world.stats.joint_ligament_damage_events, 1);
@@ -7307,7 +7318,7 @@ mod tests {
         world.bones[b].a.x += 0.6;
         world.bones[b].b.x += 0.6;
 
-        world.solve_bone_joints();
+        world.judge_bone_joints();
 
         assert!(!world.bone_joints[0].subluxated);
         assert!(!world.bone_joints[0].broken);
@@ -7579,8 +7590,8 @@ mod tests {
     fn low_blood_volume_reduces_passive_shape_turgor() {
         let mut materials = Materials::default();
         materials.gravity = 0.0;
-        materials.damping = 1.0;
-        materials.skin_shape_stiffness = 0.20;
+        materials.linear_drag = 0.0;
+        materials.skin_posture_hertz = 3.0;
         materials.blood_volume_capacity = 1.0;
         materials.blood_turgor_min_scale = 0.25;
 
@@ -7596,8 +7607,20 @@ mod tests {
         depleted.points[depleted_point].position.x = 200.0;
         depleted.points[depleted_point].previous = depleted.points[depleted_point].position;
 
-        full.integrate(full.materials.fixed_dt, 400.0, 360.0);
-        depleted.integrate(depleted.materials.fixed_dt, 400.0, 360.0);
+        for _ in 0..3 {
+            full.step(
+                full.materials.fixed_dt,
+                &InputState::default(),
+                400.0,
+                400.0,
+            );
+            depleted.step(
+                depleted.materials.fixed_dt,
+                &InputState::default(),
+                400.0,
+                400.0,
+            );
+        }
 
         assert!(
             full.points[full_point].position.x < depleted.points[depleted_point].position.x,
@@ -7630,19 +7653,32 @@ mod tests {
             world.add_spring(c, a, TissueLayer::Skin, 1.0, 99.0, 9999.0, false);
             world.add_area(a, b, c, TissueLayer::Skin, 0.80);
             world.points[c].position.y = 250.0;
+            world.points[c].previous.y = 250.0;
             world
         }
 
         let mut materials = Materials::default();
         materials.blood_volume_capacity = 1.0;
         materials.blood_turgor_min_scale = 0.20;
+        materials.gravity = 0.0;
+        materials.skin_posture_hertz = 0.0;
 
         let mut full = build_area_world(materials, 1.0);
         let mut depleted = build_area_world(materials, 0.0);
         let initial_error = area_error(&full, 0);
 
-        full.solve_areas();
-        depleted.solve_areas();
+        full.step(
+            full.materials.fixed_dt,
+            &InputState::default(),
+            1000.0,
+            1000.0,
+        );
+        depleted.step(
+            depleted.materials.fixed_dt,
+            &InputState::default(),
+            1000.0,
+            1000.0,
+        );
 
         let full_error = area_error(&full, 0);
         let depleted_error = area_error(&depleted, 0);
@@ -7650,99 +7686,6 @@ mod tests {
         assert!(
             full_error < depleted_error,
             "depleted reserve should make triangle area preservation less forceful"
-        );
-    }
-
-    #[test]
-    fn spring_compliance_softens_single_iteration_projection() {
-        fn stretched_spring_world(mut materials: Materials) -> World {
-            materials.skin_spring_compliance = 0.0;
-            materials.muscle_spring_compliance = 0.0;
-            let mut world = World::new(materials);
-            let a = world.add_point(Vec2 { x: 100.0, y: 100.0 }, TissueLayer::Skin, true);
-            let b = world.add_point(Vec2 { x: 120.0, y: 100.0 }, TissueLayer::Skin, false);
-            world.add_spring(a, b, TissueLayer::Skin, 1.0, 99.0, 9999.0, false);
-            world.points[b].position.x = 150.0;
-            world
-        }
-
-        fn spring_length(world: &World) -> f64 {
-            let spring = world.springs[0];
-            distance(
-                world.points[spring.a].position,
-                world.points[spring.b].position,
-            )
-        }
-
-        let legacy_materials = Materials::default();
-        let mut legacy = stretched_spring_world(legacy_materials);
-
-        let mut compliant_materials = Materials::default();
-        compliant_materials.skin_spring_compliance = 0.020;
-        let mut compliant = stretched_spring_world(compliant_materials);
-        compliant.materials.skin_spring_compliance = compliant_materials.skin_spring_compliance;
-
-        legacy.solve_springs();
-        compliant.solve_springs();
-
-        let legacy_error = (spring_length(&legacy) - legacy.springs[0].rest).abs();
-        let compliant_error = (spring_length(&compliant) - compliant.springs[0].rest).abs();
-
-        assert!(
-            compliant_error > legacy_error + 5.0,
-            "XPBD compliance should leave a controlled residual spring stretch in one solve"
-        );
-        assert!(
-            compliant.springs[0].lambda.abs() > 0.0,
-            "compliant spring projection should accumulate a constraint lambda"
-        );
-    }
-
-    #[test]
-    fn area_compliance_softens_single_iteration_projection() {
-        fn area_error(world: &World) -> f64 {
-            let area = world.areas[0];
-            let current = signed_area(
-                world.points[area.a].position,
-                world.points[area.b].position,
-                world.points[area.c].position,
-            );
-            (current - area.rest_area).abs()
-        }
-
-        fn distorted_area_world(mut materials: Materials) -> World {
-            materials.skin_area_compliance = 0.0;
-            materials.muscle_area_compliance = 0.0;
-            let mut world = World::new(materials);
-            let a = world.add_point(Vec2 { x: 100.0, y: 100.0 }, TissueLayer::Skin, true);
-            let b = world.add_point(Vec2 { x: 200.0, y: 100.0 }, TissueLayer::Skin, true);
-            let c = world.add_point(Vec2 { x: 100.0, y: 200.0 }, TissueLayer::Skin, false);
-            world.add_spring(a, b, TissueLayer::Skin, 1.0, 99.0, 9999.0, false);
-            world.add_spring(b, c, TissueLayer::Skin, 1.0, 99.0, 9999.0, false);
-            world.add_spring(c, a, TissueLayer::Skin, 1.0, 99.0, 9999.0, false);
-            world.add_area(a, b, c, TissueLayer::Skin, 1.0);
-            world.points[c].position.y = 260.0;
-            world
-        }
-
-        let legacy_materials = Materials::default();
-        let mut legacy = distorted_area_world(legacy_materials);
-
-        let mut compliant_materials = Materials::default();
-        compliant_materials.skin_area_compliance = 8.0;
-        let mut compliant = distorted_area_world(compliant_materials);
-        compliant.materials.skin_area_compliance = compliant_materials.skin_area_compliance;
-
-        legacy.solve_areas();
-        compliant.solve_areas();
-
-        assert!(
-            area_error(&compliant) > area_error(&legacy) + 500.0,
-            "XPBD compliance should leave a controlled residual area error in one solve"
-        );
-        assert!(
-            compliant.areas[0].lambda.abs() > 0.0,
-            "compliant area projection should accumulate a constraint lambda"
         );
     }
 
@@ -9046,7 +8989,6 @@ mod tests {
         materials.max_fluid_particles = 0;
         materials.max_wound_sources = 0;
         materials.contusion_tear_weakening = 0.50;
-        materials.contusion_stiffness_softening = 0.35;
         let mut world = World::new(materials);
         world.debug.tool = ToolMode::Sharp;
         world.debug.impact = 1200.0;
@@ -9060,7 +9002,7 @@ mod tests {
         // Loaded skin tears at 35% stretch, bruised skin a little sooner.
         world.points[b].position.x = 132.0;
 
-        world.solve_springs();
+        world.judge_springs();
 
         assert!(
             world.springs[0].broken,
@@ -9069,7 +9011,7 @@ mod tests {
         assert_eq!(world.stats.broken_skin, 1);
         assert!(
             world.debug.max_tissue_softening > 0.0,
-            "spring solve should report local contusion-driven softening"
+            "the tear judge should report local contusion-driven weakening"
         );
     }
 
@@ -9083,7 +9025,9 @@ mod tests {
         materials.tissue_fatigue_rate = 0.08;
         materials.tissue_fatigue_decay = 0.0;
         materials.tissue_fatigue_tear_weakening = 0.45;
-        materials.tissue_fatigue_stiffness_softening = 0.12;
+        // Each judging is a step of loading; the stretch must not set
+        // meanwhile.
+        materials.tissue_plastic_rate = 0.0;
         let mut world = World::new(materials);
         let a = world.add_point(Vec2 { x: 0.0, y: 0.0 }, TissueLayer::Skin, true);
         let b = world.add_point(Vec2 { x: 100.0, y: 0.0 }, TissueLayer::Skin, true);
@@ -9093,7 +9037,7 @@ mod tests {
         world.points[b].position.x = 121.0;
         world.points[b].previous.x = 121.0;
 
-        world.solve_springs();
+        world.judge_springs();
         assert!(
             !world.springs[0].broken,
             "a single subcritical load should accumulate fatigue without immediately tearing"
@@ -9104,7 +9048,7 @@ mod tests {
             if world.springs[0].broken {
                 break;
             }
-            world.solve_springs();
+            world.judge_springs();
         }
 
         assert!(
@@ -9161,7 +9105,7 @@ mod tests {
         world.add_triangle(a, b, c, TissueLayer::Muscle);
 
         world.points[b].position.x = 28.0;
-        world.solve_springs();
+        world.judge_springs();
         world.update_triangle_damage();
 
         assert!(world.springs[0].broken);
@@ -9189,7 +9133,7 @@ mod tests {
         world.add_triangle(a, b, c, TissueLayer::Muscle);
 
         world.points[b].position.x = 28.0;
-        world.solve_springs();
+        world.judge_springs();
         world.update_triangle_damage();
 
         assert!(world.springs[0].broken);
@@ -9443,7 +9387,7 @@ mod tests {
         world.points[b].load = 900.0;
         world.points[b].position.x = 138.0;
 
-        world.solve_springs();
+        world.judge_springs();
 
         assert!(
             !world.springs[0].broken,
@@ -9476,7 +9420,7 @@ mod tests {
         world.points[b].load = 900.0;
         world.points[b].position.x = 62.0;
 
-        world.solve_springs();
+        world.judge_springs();
 
         assert!(
             world.springs[0].rest < initial_rest,
@@ -9795,7 +9739,7 @@ mod tests {
             1.0,
         );
         for _ in 0..60 {
-            world.integrate(world.materials.fixed_dt, 220.0, 120.0);
+            world.predict_step(world.materials.fixed_dt, 220.0, 120.0);
         }
 
         assert_eq!(world.stats.blood_stain_deposits, 1, "the drop should land");
@@ -10266,6 +10210,43 @@ fn closest_segment_points(a0: Vec2, a1: Vec2, b0: Vec2, b1: Vec2) -> SegmentClos
     }
 }
 
+/// Where `point` sits from `t` along `bone`, along the bone and across it (a
+/// quarter turn counterclockwise from `a` to `b`), in pixels.
+fn bone_tie_frame(bone: &BoneSegment, t: f64, point: Vec2) -> (f64, f64) {
+    let offset = subtract(point, bone_point(*bone, t));
+    let along = normalized(subtract(bone.b, bone.a), Vec2 { x: 0.0, y: 1.0 });
+    (
+        dot(offset, along),
+        dot(
+            offset,
+            Vec2 {
+                x: -along.y,
+                y: along.x,
+            },
+        ),
+    )
+}
+
+/// A break kicks its pieces by moving their ends and where they were, as a
+/// step's motion; `share` of that kick is kept, so a break within a substep
+/// throws its pieces as fast as one between steps. `travel_a` and
+/// `travel_b` are how far the ends were moving already.
+fn scale_kick(piece: &mut BoneSegment, travel_a: Vec2, travel_b: Vec2, share: f64) {
+    if share >= 1.0 {
+        return;
+    }
+    let kick_a = subtract(subtract(piece.a, piece.previous_a), travel_a);
+    let kick_b = subtract(subtract(piece.b, piece.previous_b), travel_b);
+    piece.previous_a = subtract(piece.a, add(travel_a, scale(kick_a, share)));
+    piece.previous_b = subtract(piece.b, add(travel_b, scale(kick_b, share)));
+}
+
+/// What a piece `length` long and `radius` thick broken off `bone` weighs.
+pub(super) fn piece_mass(bone: &BoneSegment, length: f64, radius: f64) -> f64 {
+    let whole = bone.rest_length.max(EPSILON) * bone.radius * bone.radius;
+    (bone.mass * length * radius * radius / whole.max(EPSILON)).max(0.02)
+}
+
 fn bone_point(bone: BoneSegment, t: f64) -> Vec2 {
     Vec2 {
         x: bone.a.x + (bone.b.x - bone.a.x) * t,
@@ -10282,6 +10263,7 @@ fn bone_anchor_velocity(bone: BoneSegment, t: f64) -> Vec2 {
 
 fn constrain_fragment_endpoint_to_floor(
     materials: Materials,
+    dt: f64,
     point: &mut Vec2,
     previous: &mut Vec2,
     floor_y: f64,
@@ -10291,7 +10273,7 @@ fn constrain_fragment_endpoint_to_floor(
     }
 
     let velocity = subtract(*point, *previous);
-    let speed = hypot(velocity.x, velocity.y) / materials.fixed_dt.max(EPSILON);
+    let speed = hypot(velocity.x, velocity.y) / dt.max(EPSILON);
     let resting = speed < materials.fragment_floor_rest_speed.max(1.0);
     point.y = floor_y;
 
@@ -10453,15 +10435,4 @@ fn normalized(value: Vec2, fallback: Vec2) -> Vec2 {
 
 fn hypot(x: f64, y: f64) -> f64 {
     (x * x + y * y).sqrt()
-}
-
-fn two_mut<T>(values: &mut [T], a: usize, b: usize) -> (&mut T, &mut T) {
-    assert!(a != b);
-    if a < b {
-        let (left, right) = values.split_at_mut(b);
-        (&mut left[a], &mut right[0])
-    } else {
-        let (left, right) = values.split_at_mut(a);
-        (&mut right[0], &mut left[b])
-    }
 }

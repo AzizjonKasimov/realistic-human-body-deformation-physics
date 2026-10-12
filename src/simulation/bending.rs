@@ -38,12 +38,14 @@ const BUTTERFLY_LENGTH: f64 = 2.6;
 const BUTTERFLY_RADIUS: f64 = 0.5;
 
 impl BoneSegment {
-    /// Bears a `load` that bends the bone, at `t` along it, toward breaking
-    /// it; the break comes where the bone was bent hardest.
-    pub(super) fn bear_break_load(&mut self, load: f64, t: f64) {
+    /// Bears a `load` that bends the bone, at `t` along it, pushing it
+    /// `toward` (zero when no one way), toward breaking it; the break comes
+    /// where the bone was bent hardest, driven the way that load pushed.
+    pub(super) fn bear_break_load(&mut self, load: f64, t: f64, toward: Vec2) {
         if load > self.break_load {
             self.break_load = load;
             self.break_t = t.clamp(0.0, 1.0);
+            self.break_normal = toward;
         }
     }
 }
@@ -230,6 +232,7 @@ impl World {
             ..BoneSegment::default()
         };
         wedge.rest_length = distance(wedge.a, wedge.b).max(EPSILON);
+        wedge.mass = piece_mass(old, wedge.rest_length, wedge.radius);
         self.bones.push(wedge);
         self.hold_piece_in_flesh(self.bones.len() - 1);
         self.stats.butterfly_fragments += 1;
@@ -474,10 +477,10 @@ mod tests {
     fn the_hardest_bending_load_sets_where_the_bone_breaks() {
         let (mut world, upper, _, _) = arm();
         let mut bone = world.bones[upper];
-        bone.bear_break_load(900.0, 0.3);
-        bone.bear_break_load(700.0, 0.6);
+        bone.bear_break_load(900.0, 0.3, Vec2::default());
+        bone.bear_break_load(700.0, 0.6, Vec2::default());
         assert_eq!(bone.break_t, 0.3);
-        bone.bear_break_load(2500.0, 0.7);
+        bone.bear_break_load(2500.0, 0.7, Vec2::default());
         assert_eq!(bone.break_load, 2500.0);
         assert_eq!(bone.break_t, 0.7);
         world.bones[upper] = bone;

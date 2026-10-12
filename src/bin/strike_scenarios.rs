@@ -26,6 +26,14 @@
 //!                                     its path, on bones STRENGTH times as strong
 //!                                     (the sweep CSV's first columns), to look
 //!                                     into a run the sweep found out of band
+//!   --fastest SPEED                   also print each frame on which some tissue
+//!                                     moved faster than SPEED px/s: which point,
+//!                                     its layer, weight, and what holds it
+//!   --trace point:N[:FROM-TO]         also print what each phase of each step,
+//!   --trace bone:N[:FROM-TO]          substep by substep, did to tissue point N
+//!                                     or bone N (its middle), on frames FROM to
+//!                                     TO: how far it moved it and how it changed
+//!                                     its speed, to find what throws it
 //!   --list                            print the scenarios and their plays
 //!   --phases                          instead, time each phase of a step over the
 //!                                     selected scenarios (or the custom play) and
@@ -75,6 +83,39 @@ struct Options {
     phases: bool,
     /// One sweep run to play: along, across, and bone strength.
     variant: Option<(f64, f64, f64)>,
+    /// What to watch while the scenarios play.
+    watch: Watch,
+}
+
+/// What to print about each frame as a scenario plays.
+#[derive(Clone, Copy, Default)]
+struct Watch {
+    /// Report tissue moving faster than this, in pixels per second.
+    fastest: Option<f64>,
+    /// Follow a point or bone through each phase of these frames.
+    trace: Option<(rp::Traced, i32, i32)>,
+}
+
+impl Watch {
+    /// The body for `scenario`, following what `--trace` names.
+    fn body(&self, scenario: &Scenario) -> rp::World {
+        let mut world =
+            rp::create_layered_body(SCENARIO_WIDTH, SCENARIO_HEIGHT, scenario.materials());
+        world.trace(self.trace.map(|(traced, _, _)| traced));
+        world
+    }
+
+    /// Prints what `--fastest` and `--trace` ask about `frame`.
+    fn report(&self, name: &str, frame: i32, world: &rp::World, last_positions: &[rp::Vec2]) {
+        if let Some(limit) = self.fastest {
+            report_fastest(name, frame, world, last_positions, limit);
+        }
+        if let Some((traced, from, to)) = self.trace {
+            if (from..=to).contains(&frame) {
+                report_trace(name, frame, world, traced);
+            }
+        }
+    }
 }
 
 fn main() {
@@ -137,10 +178,145 @@ fn main() {
     } else if options.sweep {
         sweep(&selected, &output_dir, options.custom.is_some());
     } else if options.custom.is_some() {
-        play_custom(&selected[0], &output_dir);
+        play_custom(&selected[0], &output_dir, options.watch);
     } else {
-        play_scenarios(&selected, &options.csv_path, &output_dir);
+        play_scenarios(&selected, &options.csv_path, &output_dir, options.watch);
     }
+}
+
+/// Prints the tissue point that moved fastest on `frame`, when it moved
+/// faster than `limit` px/s since `last_positions`: its layer, whether it is
+/// a cut's ghost, what it weighs, whether its skin still holds to the muscle,
+/// and how fast the tool moves.
+fn report_fastest(
+    name: &str,
+    frame: i32,
+    world: &rp::World,
+    last_positions: &[rp::Vec2],
+    limit: f64,
+) {
+    let dt = world.materials().fixed_dt;
+    let Some((index, speed)) = world
+        .points()
+        .iter()
+        .zip(last_positions)
+        .enumerate()
+        .filter(|(_, (point, _))| !point.pinned)
+        .map(|(index, (point, last))| {
+            let moved = (point.position.x - last.x).hypot(point.position.y - last.y);
+            (index, moved / dt)
+        })
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+    else {
+        return;
+    };
+    if speed <= limit {
+        return;
+    }
+    let point = world.points()[index];
+    let held = world
+        .attachments()
+        .iter()
+        .filter(|tie| !tie.broken && (tie.skin_point == index || tie.muscle_point == index))
+        .count();
+    println!(
+        "{name} frame {frame}: point {index} ({:?}{}{}) {:.0} g moves {speed:.0} px/s at ({:.0}, {:.0}), {held} skin ties, tool {:.0} px/s, outline contacts {} (deepest {:.1} px)",
+        point.layer,
+        if point.is_ghost() { ", a cut's ghost" } else { "" },
+        if point.on_cut { ", on a tear" } else { "" },
+        point.mass * 100.0,
+        point.position.x,
+        point.position.y,
+        world.debug().striker_speed,
+        world.debug().outline_contacts,
+        world.debug().max_outline_overlap,
+    );
+}
+
+/// Prints what each phase of `frame` did to the point or bone `traced`, the
+/// phases that barely touched it left out.
+fn report_trace(name: &str, frame: i32, world: &rp::World, traced: rp::Traced) {
+    let place = match traced {
+        rp::Traced::Point(index) => world.points().get(index).map(|point| {
+            format!(
+                "point {index} ({:?}{}, {:.0} g) at ({:.1}, {:.1})",
+                point.layer,
+                if point.is_ghost() {
+                    ", a cut's ghost"
+                } else {
+                    ""
+                },
+                point.mass * 100.0,
+                point.position.x,
+                point.position.y
+            )
+        }),
+        rp::Traced::Bone(index) => world.bones().get(index).map(|bone| {
+            format!(
+                "bone {index} ({:?}{}{}) from ({:.1}, {:.1}) to ({:.1}, {:.1})",
+                bone.part,
+                if bone.fractured { ", broken" } else { "" },
+                if bone.splinter { ", a splinter" } else { "" },
+                bone.a.x,
+                bone.a.y,
+                bone.b.x,
+                bone.b.y
+            )
+        }),
+    };
+    let Some(place) = place else {
+        return;
+    };
+    println!("{name} frame {frame}: {place}");
+    for stage in world.traced_stages() {
+        let moved = stage.moved.x.hypot(stage.moved.y);
+        let change = (stage.velocity_after.x - stage.velocity_before.x)
+            .hypot(stage.velocity_after.y - stage.velocity_before.y);
+        if moved < 0.05 && change < 20.0 {
+            continue;
+        }
+        println!(
+            "    {:<18} moved ({:>6.2}, {:>6.2}) px, speed ({:>6.0}, {:>6.0}) -> ({:>6.0}, {:>6.0}) px/s",
+            stage.phase,
+            stage.moved.x,
+            stage.moved.y,
+            stage.velocity_before.x,
+            stage.velocity_before.y,
+            stage.velocity_after.x,
+            stage.velocity_after.y
+        );
+    }
+}
+
+/// Reads `--trace point:N[:FROM-TO]` or `--trace bone:N[:FROM-TO]`.
+fn parse_trace(spec: &str) -> Result<(rp::Traced, i32, i32), String> {
+    let wrong = || format!("--trace takes point:N[:FROM-TO] or bone:N[:FROM-TO], got `{spec}`");
+    let mut parts = spec.split(':');
+    let kind = parts.next().ok_or_else(wrong)?;
+    let index: usize = parts
+        .next()
+        .ok_or_else(wrong)?
+        .parse()
+        .map_err(|_| wrong())?;
+    let traced = match kind {
+        "point" => rp::Traced::Point(index),
+        "bone" => rp::Traced::Bone(index),
+        _ => return Err(wrong()),
+    };
+    let (from, to) = match parts.next() {
+        Some(range) => {
+            let (from, to) = range.split_once('-').ok_or_else(wrong)?;
+            (
+                from.parse().map_err(|_| wrong())?,
+                to.parse().map_err(|_| wrong())?,
+            )
+        }
+        None => (0, i32::MAX),
+    };
+    if parts.next().is_some() {
+        return Err(wrong());
+    }
+    Ok((traced, from, to))
 }
 
 fn parse_options() -> Result<Options, String> {
@@ -153,6 +329,7 @@ fn parse_options() -> Result<Options, String> {
         list: false,
         phases: false,
         variant: None,
+        watch: Watch::default(),
     };
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -189,6 +366,18 @@ fn parse_options() -> Result<Options, String> {
                 };
                 options.variant = Some((along, across, strength));
             }
+            "--fastest" => {
+                let speed = args.next().ok_or("--fastest needs a speed in px/s")?;
+                options.watch.fastest = Some(
+                    speed
+                        .parse::<f64>()
+                        .map_err(|_| format!("--fastest takes a speed, got `{speed}`"))?,
+                );
+            }
+            "--trace" => {
+                let spec = args.next().ok_or("--trace needs point:N or bone:N")?;
+                options.watch.trace = Some(parse_trace(&spec)?);
+            }
             flag if flag.starts_with("--") => return Err(format!("unknown option `{flag}`")),
             path => options.csv_path = PathBuf::from(path),
         }
@@ -197,7 +386,7 @@ fn parse_options() -> Result<Options, String> {
 }
 
 /// Plays each scenario once with the per-frame CSV, summary, and tuning report.
-fn play_scenarios(selected: &[Scenario], csv_path: &Path, output_dir: &Path) {
+fn play_scenarios(selected: &[Scenario], csv_path: &Path, output_dir: &Path, watch: Watch) {
     let summary_path = output_dir.join("strike_summary.csv");
     let report_path = output_dir.join("strike_tuning_report.txt");
     let mut csv = BufWriter::new(File::create(csv_path).expect("create strike CSV"));
@@ -209,11 +398,13 @@ fn play_scenarios(selected: &[Scenario], csv_path: &Path, output_dir: &Path) {
     for scenario in selected {
         let mut write_error = None;
         let mut last_positions = Vec::new();
-        let (_, result) = run(
+        let (_, result) = run_on(
+            watch.body(scenario),
             scenario,
             SCENARIO_WIDTH,
             SCENARIO_HEIGHT,
             |frame, input, world| {
+                watch.report(scenario.name, frame, world, &last_positions);
                 if write_error.is_none() {
                     write_error =
                         write_frame(&mut csv, scenario, frame, input, world, &mut last_positions)
@@ -249,17 +440,19 @@ fn play_scenarios(selected: &[Scenario], csv_path: &Path, output_dir: &Path) {
 
 /// Plays one custom swing or gesture and prints what it did, with its
 /// frame-by-frame telemetry in `strike_custom_frames.csv`.
-fn play_custom(scenario: &Scenario, output_dir: &Path) {
+fn play_custom(scenario: &Scenario, output_dir: &Path, watch: Watch) {
     let frames_path = output_dir.join("strike_custom_frames.csv");
     let mut frames = BufWriter::new(File::create(&frames_path).expect("create custom frames"));
     write_frame_header(&mut frames).expect("write frame header");
     let mut write_error = None;
     let mut last_positions = Vec::new();
-    let (world, result) = run(
+    let (world, result) = run_on(
+        watch.body(scenario),
         scenario,
         SCENARIO_WIDTH,
         SCENARIO_HEIGHT,
         |frame, input, world| {
+            watch.report(scenario.name, frame, world, &last_positions);
             if write_error.is_none() {
                 write_error = write_frame(
                     &mut frames,

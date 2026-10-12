@@ -2,8 +2,12 @@
 //! runs only when a caller hands the world a clock ([`World::time_phases`]),
 //! as `strike_scenarios --phases` does; the app never does, so the browser
 //! build needs no clock.
+//!
+//! The same hook can follow one point or bone through every phase
+//! ([`World::trace`]), as `strike_scenarios --trace` does, to find which
+//! phase throws a piece of tissue or bone.
 
-use super::World;
+use super::{midpoint, scale, subtract, BoneSegment, Point, Vec2, World};
 
 /// Reads a clock, in milliseconds.
 pub type PhaseClock = fn() -> f64;
@@ -97,7 +101,87 @@ impl PhaseTimes {
     }
 }
 
+/// What [`World::trace`] follows through each phase of a step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Traced {
+    Point(usize),
+    /// A bone, by its middle.
+    Bone(usize),
+}
+
+/// What one phase of a step did to the traced point or bone: how far it
+/// moved it, and its velocity before and after, in pixels per second over
+/// the substep (or the whole step) the phase ran in.
+#[derive(Clone, Copy, Debug)]
+pub struct TracedStage {
+    pub phase: &'static str,
+    pub moved: Vec2,
+    pub velocity_before: Vec2,
+    pub velocity_after: Vec2,
+}
+
+/// Where a traced point or bone is, and where it was a substep (or step) ago.
+#[derive(Clone, Copy)]
+struct TracedPlace {
+    now: Vec2,
+    before: Vec2,
+}
+
+impl TracedPlace {
+    fn of_point(point: &Point) -> Self {
+        Self {
+            now: point.position,
+            before: point.previous,
+        }
+    }
+
+    fn of_bone(bone: &BoneSegment) -> Self {
+        Self {
+            now: midpoint(bone.a, bone.b),
+            before: midpoint(bone.previous_a, bone.previous_b),
+        }
+    }
+}
+
 impl World {
+    /// Follows `traced` through each phase of every later step, for
+    /// [`World::traced_stages`]; `None` stops.
+    pub fn trace(&mut self, traced: Option<Traced>) {
+        self.traced = traced;
+        self.traced_stages.clear();
+    }
+
+    /// What each phase of the last step did to what [`World::trace`]
+    /// follows, the phases that left it alone left out.
+    pub fn traced_stages(&self) -> &[TracedStage] {
+        &self.traced_stages
+    }
+
+    fn traced_place(&self) -> Option<TracedPlace> {
+        match self.traced? {
+            Traced::Point(index) => self.points.get(index).map(TracedPlace::of_point),
+            Traced::Bone(index) => self.bones.get(index).map(TracedPlace::of_bone),
+        }
+    }
+
+    fn record_traced_stage(&mut self, phase: &'static str, before: TracedPlace) {
+        let Some(after) = self.traced_place() else {
+            return;
+        };
+        let h = self.solver_dt.max(1.0e-9);
+        let velocity = |place: TracedPlace| scale(subtract(place.now, place.before), 1.0 / h);
+        let stage = TracedStage {
+            phase,
+            moved: subtract(after.now, before.now),
+            velocity_before: velocity(before),
+            velocity_after: velocity(after),
+        };
+        let changed = subtract(stage.velocity_after, stage.velocity_before);
+        if stage.moved != Vec2::default() || changed != Vec2::default() {
+            self.traced_stages.push(stage);
+        }
+    }
+
     /// Times each phase of every later step with `clock`, from fresh totals;
     /// `None` stops timing.
     pub fn time_phases(&mut self, clock: Option<PhaseClock>) {
@@ -112,17 +196,24 @@ impl World {
 
     /// Runs one phase of a step, timing it when a clock is set.
     pub(super) fn timed(&mut self, name: &'static str, phase: impl FnOnce(&mut Self)) {
-        let Some(clock) = self.phase_clock else {
-            return phase(self);
-        };
-        let started = clock();
-        phase(self);
-        let ms = clock() - started;
-        self.phase_times.record(name, ms);
+        let traced = self.traced_place();
+        match self.phase_clock {
+            Some(clock) => {
+                let started = clock();
+                phase(self);
+                let ms = clock() - started;
+                self.phase_times.record(name, ms);
+            }
+            None => phase(self),
+        }
+        if let Some(before) = traced {
+            self.record_traced_stage(name, before);
+        }
     }
 
     /// Runs a whole step, timing it when a clock is set.
     pub(super) fn timed_step(&mut self, step: impl FnOnce(&mut Self)) {
+        self.traced_stages.clear();
         let Some(clock) = self.phase_clock else {
             return step(self);
         };

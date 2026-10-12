@@ -829,9 +829,10 @@ fn arm_pressed_against_the_chest_stays_outside_it() {
     let mut world = rp::create_layered_body(width, height, materials);
     let dt = world.materials().fixed_dt;
     let body = rp::body_frame(width, height);
-    // A firm hammer swing into the outside of the arm, leaning on it after.
+    // A firm hammer swing into the outside of the arm, leaning on it after:
+    // the flesh gives under the hammer, so a swing has to drive the arm in.
     let gesture =
-        rp::scenarios::Gesture::parse("hammer:-0.35,0.34:wait=10:down:0.0,0.34/8:wait=60").unwrap();
+        rp::scenarios::Gesture::parse("hammer:-0.35,0.34:wait=10:down:0.0,0.34/4:wait=60").unwrap();
     let (mut contacts, mut deepest) = (0, 0.0f64);
     for frame in 0..gesture.frames() {
         world.step(dt, &gesture.input(frame, body), width, height);

@@ -40,8 +40,8 @@ This project is aiming for physically grounded, game-feasible body destruction r
    - Recursive fracture density is controlled by maximum fracture depth, generic/rib-specific minimum fragment length, and secondary fragment strength. These controls should be changed only with strike telemetry so extra debris does not silently exceed the real-time budget.
 
 3. **Soft tissue**
-   - Skin and muscle use PBD-style points, springs, area constraints, and breakable attachments.
-   - XPBD-style compliance is the right next solver upgrade when stiffness tuning starts depending too much on timestep or iteration count; the Rust prototype now has opt-in compliant spring and area projection with per-step lambda reset and focused tests.
+   - Skin and muscle are points, springs, area constraints, and breakable attachments, each point weighing what its share of real tissue weighs and each spring as stiff as the measured tissue (`tissue.rs`), skin stiffening on a J-shaped curve and resting stretched as living skin does.
+   - The solver is Box2D v3's soft step (`soft.rs`): substeps, each constraint a damped spring solved implicitly from its stiffness and damping ratio, so stiffness no longer depends on the timestep or iteration count, and warm starting. It was chosen over XPBD, which NVIDIA has patented; the body's contacts stay position projections between the passes.
    - Sharp cuts should propagate from existing broken skin edges into adjacent high-stress or fatigued skin springs under a per-step cap, so cut growth follows local stress concentration without becoming an unbounded flood fill.
    - Tools are solid bodies with momentum, driven toward the pointer by a hand spring whose pressing force is capped at what an arm can push. Blunt tools exchange momentum with the tissue and bone they shove, and their contact stays in the solver iterations so the tissue network pushes back on them; a swing therefore stops in the body instead of passing through it, and injury follows from the momentum actually delivered.
    - A sharp blade is a thin segment swept along its motion each step that may only advance through fibers it severs: a fiber its tip or cutting edge reaches is cut when the blade's momentum or the hand's push overcomes it, and otherwise holds the blade, which can slide along it. Bone stops a blade. Skin is the tough layer and the muscle beneath parts readily. Knife wounds are incisions along the stroke rather than crush channels.
@@ -121,7 +121,7 @@ This project is aiming for physically grounded, game-feasible body destruction r
 - Gate fragment-driven vessel lacerations separately from direct vessel lacerations so severe debris can cause vascular injury without making medium blunt, limb, or sharp direct-cut scenarios lose causal clarity.
 - Gate spring-fatigue events and fatigue maxima in strike playback so repeated subcritical tissue damage remains covered independently of single-impact tearing.
 - Gate plastic deformation events and plasticity maxima in strike playback so sustained post-impact tissue set remains covered without disrupting primary strike outcomes.
-- Raise XPBD tissue spring/area compliance only in measured tuning passes, keeping the neutral default path behavior covered while tests prove compliant residual error when the knobs are enabled.
+- Keep tissue stiffness and mass physical (`tissue.rs`); tune injuries by their thresholds against the real-life checks, not by softening the tissue.
 - Surface wound reopen counts in strike telemetry so later multi-strike scenarios can gate clot disruption and rebleeding without adding unbounded wound work.
 - Prefer several small solver substeps or staged solves only where they visibly improve stiffness or contact stability.
 
@@ -133,8 +133,14 @@ This project is aiming for physically grounded, game-feasible body destruction r
   https://dev.epicgames.com/documentation/unreal-engine/chaos-destruction-overview
 - Position Based Dynamics, Mueller et al.: the foundation for stable real-time constraint projection.  
   https://matthias-research.github.io/pages/publications/posBasedDyn.pdf
-- XPBD, Macklin et al.: compliant constraints with stiffness less tied to timestep and iteration count.  
+- XPBD, Macklin et al.: compliant constraints with stiffness less tied to timestep and iteration count (patented by NVIDIA, so not used).  
   https://matthias-research.github.io/pages/publications/XPBD.pdf
+- Box2D v3, Catto: the soft step the solver is rebuilt from (`b2MakeSoft`, substeps, warm starting, relaxing; MIT).  
+  https://box2d.org/posts/2024/02/solver2d/
+- Soft Constraints, Catto (GDC 2011): a spring and damper solved implicitly as a constraint with a frequency and damping ratio.  
+  https://box2d.org/files/ErinCatto_SoftConstraints_GDC2011.pdf
+- Approximate Simulation of Elastic Membranes by Triangulated Spring Meshes, Van Gelder (1998): spring stiffness from a sheet's modulus.  
+  https://doi.org/10.1080/10867651.1998.10487490
 - Small Steps in Physics Simulation, Macklin et al.: smaller substeps can improve stiffness and stability.  
   https://mmacklin.com/smallsteps.pdf
 - PhysX Articulations: stable reduced-coordinate articulated body chains for ragdoll-like skeletons.  

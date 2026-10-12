@@ -9,6 +9,7 @@
 //! stretch in, as an arm pressed against the chest, a hand against a thigh, or
 //! one leg against the other do.
 
+use super::soft::KG_PER_MASS;
 use super::*;
 
 /// Outline points this close along the loop are neighbors, which the
@@ -41,6 +42,13 @@ pub(super) struct OutlinePair {
     outline: usize,
     point: usize,
     edge: usize,
+}
+
+impl OutlineLoop {
+    /// The loop's points, in order along it.
+    pub(super) fn points(&self) -> &[usize] {
+        &self.points
+    }
 }
 
 impl World {
@@ -105,6 +113,140 @@ impl World {
                 outline.edge_springs[position] = None;
                 outline.edge_springs.insert(position + 1, onward);
             }
+        }
+    }
+
+    /// The skin rests stretched (`tissue.rs`), so it pulls each point of its
+    /// outline inward, and in a hollow such as the armpit outward; in a body
+    /// the skin runs on round the back there and the flesh inside holds it.
+    /// Measures that pull at rest, from the skin that still holds together
+    /// there, which `pull_outline_round` then holds against: where the skin
+    /// is cut or torn, the pull it carried is gone, and the edge draws back.
+    /// Skin cut free of the body's skin has no body behind it, and is held by
+    /// nothing.
+    pub(super) fn measure_outline_wrap(&mut self) {
+        let homes: Vec<Vec2> = self.points.iter().map(|point| point.home).collect();
+        let force = self.skin_pull(&homes);
+        let joined = self.skin_joined_to_body();
+        for point in &mut self.points {
+            point.wrap = Vec2::default();
+        }
+        for outline in &self.outlines {
+            for &point in &outline.points {
+                if self.points[point].layer == TissueLayer::Skin && joined[point] {
+                    self.points[point].wrap = scale(force[point], -1.0);
+                }
+            }
+        }
+        self.outline_wrap_stale = false;
+    }
+
+    /// Which skin points the body's skin still holds: those its intact
+    /// springs join to the crown, where the body hangs.
+    fn skin_joined_to_body(&self) -> Vec<bool> {
+        let mut joined = vec![false; self.points.len()];
+        let mut neighbours: Vec<Vec<usize>> = vec![Vec::new(); self.points.len()];
+        for spring in &self.springs {
+            if spring.broken || spring.layer != TissueLayer::Skin {
+                continue;
+            }
+            if self.points[spring.a].is_ghost() || self.points[spring.b].is_ghost() {
+                continue;
+            }
+            neighbours[spring.a].push(spring.b);
+            neighbours[spring.b].push(spring.a);
+        }
+        let mut stack: Vec<usize> = (0..self.points.len())
+            .filter(|&index| {
+                let point = &self.points[index];
+                point.pinned && point.layer == TissueLayer::Skin
+            })
+            .collect();
+        for &index in &stack {
+            joined[index] = true;
+        }
+        while let Some(index) = stack.pop() {
+            for &next in &neighbours[index] {
+                if !joined[next] {
+                    joined[next] = true;
+                    stack.push(next);
+                }
+            }
+        }
+        joined
+    }
+
+    /// The net pull the skin's springs and triangles that still hold real
+    /// flesh put on each point lying at `places`. A piece of a cut reaching a
+    /// ghost holds no flesh across the cut, and pulls nothing there.
+    fn skin_pull(&self, places: &[Vec2]) -> Vec<Vec2> {
+        let mut force = vec![Vec2::default(); self.points.len()];
+        let real = |index: usize| !self.points[index].is_ghost();
+        for spring in &self.springs {
+            if spring.broken
+                || spring.layer != TissueLayer::Skin
+                || !real(spring.a)
+                || !real(spring.b)
+            {
+                continue;
+            }
+            let (a, b) = (places[spring.a], places[spring.b]);
+            let along = subtract(b, a);
+            let length = hypot(along.x, along.y);
+            if length < EPSILON {
+                continue;
+            }
+            let (stiffness, rest) = self.spring_stiffness_at(spring, length);
+            let pull = scale(along, stiffness / KG_PER_MASS * (length - rest) / length);
+            force[spring.a] = add(force[spring.a], pull);
+            force[spring.b] = subtract(force[spring.b], pull);
+        }
+        for area in &self.areas {
+            if area.layer != TissueLayer::Skin
+                || area.rest_area.abs() <= EPSILON
+                || !self.area_alive(area)
+                || !(real(area.a) && real(area.b) && real(area.c))
+            {
+                continue;
+            }
+            let corners = [area.a, area.b, area.c];
+            let [a, b, c] = corners.map(|corner| places[corner]);
+            let stiffness = area.stiffness / KG_PER_MASS / area.rest_area.abs();
+            let squeeze = stiffness * (signed_area(a, b, c) - area.rest_area);
+            let gradients = [
+                Vec2 {
+                    x: (b.y - c.y) * 0.5,
+                    y: (c.x - b.x) * 0.5,
+                },
+                Vec2 {
+                    x: (c.y - a.y) * 0.5,
+                    y: (a.x - c.x) * 0.5,
+                },
+                Vec2 {
+                    x: (a.y - b.y) * 0.5,
+                    y: (b.x - a.x) * 0.5,
+                },
+            ];
+            for (corner, gradient) in corners.into_iter().zip(gradients) {
+                force[corner] = subtract(force[corner], scale(gradient, squeeze));
+            }
+        }
+        force
+    }
+
+    /// Holds each point of the skin's outline against the pull its skin
+    /// carried at rest (`measure_outline_wrap`), as a steady load: one that
+    /// turned with the outline would drive it round in a flutter.
+    pub(super) fn pull_outline_round(&mut self, h: f64) {
+        if self.outline_wrap_stale {
+            self.measure_outline_wrap();
+        }
+        for (index, point) in self.points.iter_mut().enumerate() {
+            if point.wrap == Vec2::default() || point.pinned || !is_flesh(&self.flesh, index) {
+                continue;
+            }
+            let shift = scale(point.wrap, h * h / point.mass.max(EPSILON));
+            point.position = add(point.position, shift);
         }
     }
 

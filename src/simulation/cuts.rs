@@ -22,8 +22,8 @@
 //! (rapier2d 0.36, `tearing_crack.rs`, Apache-2.0), after the tearing in
 //! Müller et al., "Position Based Dynamics" (2007).
 //!
-//! Skin and muscle are under tension in a living body and pull back when
-//! cut, so each side of a cut draws back from it, and the cut gapes.
+//! Skin rests stretched in a living body (`tissue.rs`), so once a cut parts
+//! it, the skin on each side pulls back from the cut and the cut gapes.
 
 use super::*;
 
@@ -285,8 +285,9 @@ impl World {
     /// passed through, two of its sides cut, splits into two pieces, each
     /// holding the flesh on its side of the blade's path; the points around
     /// it split where the flesh on the two sides no longer meets, ghosts
-    /// carrying each piece's far corners; and each side draws back from the
-    /// cut. A cut fiber that no triangle uses, such as a lone test fiber,
+    /// carrying each piece's far corners; and the skin's own tension draws
+    /// each side back from the cut. A cut fiber that no triangle uses, such
+    /// as a lone test fiber,
     /// breaks instead.
     pub(super) fn open_blade_cuts(&mut self) {
         if self.pending_cuts.is_empty() {
@@ -365,7 +366,7 @@ impl World {
             self.triangles.push(piece);
             if let Some(&area) = area_of.get(&index) {
                 self.areas.push(AreaConstraint {
-                    lambda: 0.0,
+                    impulse: 0.0,
                     ..self.areas[area]
                 });
                 area_of.insert(partner, self.areas.len() - 1);
@@ -419,6 +420,9 @@ impl World {
                 }
             }
             self.points[*node].mass = kept.max(source.mass * GHOST_MASS_SHARE);
+            // The blade cut the fat over the rest of the point's flesh too.
+            let share = self.points[*node].mass / source.mass.max(EPSILON);
+            self.share_fat_ties(*node, share);
         }
         for &(triangle, from, to) in &moves {
             replace_corner(&mut self.triangles[triangle], from, to);
@@ -433,10 +437,9 @@ impl World {
         }
         self.rejoin_piece_springs(&around, &before, &area_of);
 
-        self.retract_cut_sides(&pairs);
         self.follow_rest_places(&homes_before, &origin);
         self.stats.cut_openings += origin.len() as i32;
-        self.finish_topology_change();
+        self.finish_topology_change(&origin);
     }
 
     /// Where the blade crossed two sides of `triangle`, if it did: the sides
@@ -629,7 +632,7 @@ impl World {
                     self.springs.push(Spring {
                         a,
                         b,
-                        lambda: 0.0,
+                        impulse: 0.0,
                         twin: MISSING_SPRING,
                         ..spring
                     });
@@ -662,51 +665,6 @@ impl World {
             area.edge_ab = edge_between(area.a, area.b);
             area.edge_bc = edge_between(area.b, area.c);
             area.edge_ca = edge_between(area.c, area.a);
-        }
-    }
-
-    /// Each side of the cuts through `pairs` draws back from the cut in the
-    /// rest shape, as cut skin and muscle do: every corner of a piece moves
-    /// away from the cut into its piece's side, so the two lips part evenly
-    /// along the cut. A point holding both sides together at the end of a
-    /// cut stays.
-    fn retract_cut_sides(&mut self, pairs: &[(usize, usize)]) {
-        let spacing = self.materials.point_spacing;
-        let mut pull = vec![(Vec2::default(), 0.0); self.points.len()];
-        for &(first, second) in pairs {
-            for index in [first, second] {
-                let triangle = self.triangles[index];
-                let Some(cut) = triangle.cut else {
-                    continue;
-                };
-                let [from, to] = cut.ends();
-                let middle = midpoint(
-                    self.piece_position(&triangle, from, true),
-                    self.piece_position(&triangle, to, true),
-                );
-                let (_, centroid) = triangle.piece().share_and_centroid();
-                let away = subtract(self.piece_position(&triangle, centroid, true), middle);
-                let length = hypot(away.x, away.y);
-                if length <= EPSILON {
-                    continue;
-                }
-                for corner in corners(&triangle) {
-                    pull[corner].0 = add(pull[corner].0, scale(away, 1.0 / length));
-                    pull[corner].1 += 1.0;
-                }
-            }
-        }
-        for (index, &(direction, count)) in pull.iter().enumerate() {
-            let length = hypot(direction.x, direction.y);
-            // Pulled both ways, the point is where the cut ends.
-            if count <= 0.0 || length < count * 0.35 || self.points[index].pinned {
-                continue;
-            }
-            let retraction = match self.points[index].layer {
-                TissueLayer::Skin => self.materials.skin_cut_retraction,
-                TissueLayer::Muscle => self.materials.muscle_cut_retraction,
-            } * spacing;
-            self.move_point_with_rest(index, scale(direction, retraction / length));
         }
     }
 
@@ -785,16 +743,37 @@ impl World {
         if families.is_empty() {
             return;
         }
-        // A tear parts as far as what tore it pulls it; only a blade's cut
-        // draws its lips back.
+        // A tear parts as far as what tore it pulls it.
         self.follow_rest_places(&homes_before, &origin);
-        self.finish_topology_change();
+        self.finish_topology_change(&origin);
+    }
+
+    /// Leaves the fat ties on `point` `share` as stiff as they were, as a
+    /// point split by a cut or tear holds only part of the flesh round it,
+    /// and the fat over that.
+    fn share_fat_ties(&mut self, point: usize, share: f64) {
+        let share = share.clamp(0.0, 1.0);
+        for attachment in &mut self.attachments {
+            if attachment.skin_point == point || attachment.muscle_point == point {
+                attachment.stiffness *= share;
+            }
+        }
     }
 
     /// Keeps the per-point state in step with points a cut or tear added,
-    /// and tells anything built from the mesh to rebuild. A ghost holds no
-    /// flesh from the start.
-    fn finish_topology_change(&mut self) {
+    /// copied from the points in `origin` in order, and tells anything built
+    /// from the mesh to rebuild. A ghost holds no flesh from the start. What
+    /// the soft constraints on the split points carried no longer fits them,
+    /// as their springs now reach copies of a fraction of the mass, so those
+    /// start afresh (`soft.rs`).
+    fn finish_topology_change(&mut self, origin: &[usize]) {
+        let first_copy = self.points.len() - origin.len();
+        let mut split = vec![false; self.points.len()];
+        for (copy, &source) in origin.iter().enumerate() {
+            split[first_copy + copy] = true;
+            split[source] = true;
+        }
+        self.forget_soft_impulses_at(&split);
         self.blunt_knock.resize(self.points.len(), 0.0);
         let known = self.flesh.len();
         self.flesh.resize(self.points.len(), true);
@@ -802,16 +781,7 @@ impl World {
             self.flesh[index] = !self.points[index].is_ghost();
         }
         self.topology_version += 1;
-    }
-
-    /// Moves point `index` and its rest place by `offset`, keeping its
-    /// velocity, so the edit leaves the tissue no more strained than it was;
-    /// [`World::follow_rest_places`] then carries the rest lengths along.
-    fn move_point_with_rest(&mut self, index: usize, offset: Vec2) {
-        let point = &mut self.points[index];
-        point.home = add(point.home, offset);
-        point.position = add(point.position, offset);
-        point.previous = add(point.previous, offset);
+        self.outline_wrap_stale = true;
     }
 
     /// Splits point `point` across the line through its rest place normal to
@@ -1028,7 +998,7 @@ impl World {
             for &g in held.iter().skip(1) {
                 let mut lip = self.springs[index];
                 replace_end(&mut lip, member[first], member[g]);
-                lip.lambda = 0.0;
+                lip.impulse = 0.0;
                 lip.twin = index;
                 self.springs.push(lip);
                 let lip_index = self.springs.len() - 1;
@@ -1070,7 +1040,10 @@ impl World {
         }
 
         // Skin stays tied to the muscle on its own side, and both sides of
-        // torn muscle stay tied to the bone.
+        // torn muscle stay tied to the bone. Each copy holds the fat over no
+        // more than its share of the flesh, as it holds its share of the mass.
+        let mut held_fat = vec![0.0; groups];
+        let mut all_fat = 0.0;
         for index in 0..self.attachments.len() {
             let attachment = self.attachments[index];
             let (own, other) = match source.layer {
@@ -1080,10 +1053,20 @@ impl World {
             if own != point {
                 continue;
             }
-            let copy = member[toward_point(self.points[other].home)];
+            let group = toward_point(self.points[other].home);
+            let copy = member[group];
             match source.layer {
                 TissueLayer::Skin => self.attachments[index].skin_point = copy,
                 TissueLayer::Muscle => self.attachments[index].muscle_point = copy,
+            }
+            held_fat[group] += attachment.stiffness;
+            all_fat += attachment.stiffness;
+        }
+        for (group, &held) in held_fat.iter().enumerate() {
+            let copy = member[group];
+            if held > EPSILON {
+                let share = self.points[copy].mass / source.mass.max(EPSILON);
+                self.share_fat_ties(copy, share * all_fat / held);
             }
         }
         let anchors: Vec<BoneAttachment> = self
@@ -1305,11 +1288,18 @@ mod tests {
     use super::*;
 
     const PATCH_SPACING: f64 = 10.0;
+    const PATCH_PRESTRETCH: f64 = 1.12;
 
     /// A sheet of skin built like the body's: a grid of points joined by a
     /// spring along every triangle edge, with the triangles and their area
-    /// constraints, held at its top and bottom rows.
+    /// constraints, held at its top and bottom rows and stretched between
+    /// them as living skin is round a limb.
     fn skin_patch(columns: usize, rows: usize) -> World {
+        stretched_skin_patch(columns, rows, PATCH_PRESTRETCH)
+    }
+
+    /// The same, stretched `stretch` times between its held rows.
+    fn stretched_skin_patch(columns: usize, rows: usize, stretch: f64) -> World {
         let materials = Materials {
             gravity: 0.0,
             // Tears spreading from a loaded cut are their own rule; these
@@ -1352,7 +1342,7 @@ mod tests {
                     a,
                     b,
                     TissueLayer::Skin,
-                    m.skin_structural_stiffness,
+                    1.0,
                     m.skin_tear_stretch,
                     m.skin_tear_impulse,
                     false,
@@ -1362,8 +1352,16 @@ mod tests {
         for &(here, right, below, across) in &cells {
             for [a, b, c] in [[here, right, below], [right, across, below]] {
                 world.add_triangle(a, b, c, TissueLayer::Skin);
-                world.add_area(a, b, c, TissueLayer::Skin, m.skin_area_stiffness);
+                world.add_area(a, b, c, TissueLayer::Skin, 1.0);
             }
+        }
+        for spring in &mut world.springs {
+            let (a, b) = (world.points[spring.a].home, world.points[spring.b].home);
+            let along = normalized(subtract(b, a), Vec2 { x: 1.0, y: 0.0 });
+            let by = 1.0 + (stretch - 1.0) * along.y * along.y;
+            spring.rest /= by;
+            spring.rest_reference = spring.rest;
+            spring.prestretch = by;
         }
         world
     }
@@ -1484,7 +1482,7 @@ mod tests {
         assert!(!cuts.is_empty(), "the cut should have lips");
         let off = farthest_off(&world, cut_y);
         assert!(
-            off < PATCH_SPACING * 0.15,
+            off < PATCH_SPACING * 0.2,
             "the cut should run along the blade's path, not {off:.2} px off it"
         );
         let widest = cuts
@@ -1494,17 +1492,17 @@ mod tests {
                 [distance(first.0, second.0), distance(first.1, second.1)]
             })
             .fold(0.0, f64::max);
-        let spacing = world.materials.point_spacing;
         assert!(
-            widest > world.materials.skin_cut_retraction * spacing,
-            "the cut should gape once the knife has gone: widest {widest:.2} px"
+            widest > PATCH_SPACING * 0.2,
+            "the skin's tension should open the cut once the knife has gone: widest {widest:.2} px"
         );
     }
 
     #[test]
     fn knife_just_inside_the_edge_opens_there() {
-        let mut world = skin_patch(12, 10);
-        // A free edge, held only by the rest of the patch.
+        // A free edge, held only by the rest of the patch: unstretched, as
+        // nothing here stands for the skin running on beyond it.
+        let mut world = stretched_skin_patch(12, 10, 1.0);
         for point in 0..12 {
             world.points[point].pinned = false;
         }

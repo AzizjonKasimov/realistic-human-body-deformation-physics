@@ -750,7 +750,7 @@ mod tests {
                         a,
                         b,
                         TissueLayer::Skin,
-                        m.skin_structural_stiffness,
+                        1.0,
                         m.skin_tear_stretch,
                         m.skin_tear_impulse,
                         false,

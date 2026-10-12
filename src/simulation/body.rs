@@ -135,7 +135,6 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
     let mut world = World::new(materials);
     world.body_height = frame.height;
     let spacing = materials.point_spacing;
-    let at = |landmark: Landmark| frame.point(landmark.0, landmark.1);
 
     let skin = build_layer_mesh(&mut world, frame, field, TissueLayer::Skin, 0.0);
     let muscle = build_layer_mesh(
@@ -145,10 +144,7 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
         TissueLayer::Muscle,
         spacing * MUSCLE_INSET_SCALE,
     );
-    let fiber_guides: Vec<(Vec2, Vec2)> = fiber_guide_landmarks()
-        .iter()
-        .map(|&(a, b)| (at(a), at(b)))
-        .collect();
+    let fiber_guides = fiber_guides(frame);
     let skin_edges = add_layer_springs(&mut world, &skin, TissueLayer::Skin, &fiber_guides);
     let muscle_edges = add_layer_springs(&mut world, &muscle, TissueLayer::Muscle, &fiber_guides);
     add_long_fiber_springs(&mut world, &muscle, &muscle_edges, &fiber_guides);
@@ -269,7 +265,17 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
         );
     }
 
+    world.give_tissue_physical_properties(frame);
     world
+}
+
+/// The bones' directions in `frame`, which steer the muscle's fibers and the
+/// lines the skin is stretched along.
+pub(super) fn fiber_guides(frame: BodyFrame) -> Vec<(Vec2, Vec2)> {
+    fiber_guide_landmarks()
+        .iter()
+        .map(|&(a, b)| (frame.point(a.0, a.1), frame.point(b.0, b.1)))
+        .collect()
 }
 
 /// Bone directions that steer muscle fiber orientation (ribs excluded).
@@ -599,7 +605,7 @@ fn edge_key(a: usize, b: usize) -> (usize, usize) {
 }
 
 /// Unit direction of the bone guide nearest to `point`.
-fn fiber_direction(point: Vec2, guides: &[(Vec2, Vec2)]) -> Vec2 {
+pub(super) fn fiber_direction(point: Vec2, guides: &[(Vec2, Vec2)]) -> Vec2 {
     let mut best = (f64::INFINITY, Vec2 { x: 0.0, y: 1.0 });
     for &(a, b) in guides {
         let d = distance_to_segment(point, a, b);
@@ -610,12 +616,14 @@ fn fiber_direction(point: Vec2, guides: &[(Vec2, Vec2)]) -> Vec2 {
     best.1
 }
 
+/// A spring of `kind` between `a` and `b`; how stiff it is comes from the
+/// tissue it is in (`tissue.rs`).
 fn push_spring(
     world: &mut World,
     a: usize,
     b: usize,
     layer: TissueLayer,
-    (stiffness, tear_stretch, tear_impulse, fiber): (f64, f64, f64, bool),
+    (kind, tear_stretch, tear_impulse): (SpringKind, f64, f64),
 ) -> usize {
     let rest = distance(world.points[a].position, world.points[b].position);
     world.springs.push(Spring {
@@ -623,18 +631,18 @@ fn push_spring(
         b,
         rest,
         rest_reference: rest,
-        stiffness,
+        kind,
         tear_stretch,
         tear_impulse,
         layer,
-        fiber,
+        fiber: matches!(kind, SpringKind::Fiber | SpringKind::LongFiber),
         ..Spring::default()
     });
     world.springs.len() - 1
 }
 
-/// One spring per triangle edge. Muscle edges take fiber, cross, or shear
-/// properties from their angle to the nearest bone.
+/// One spring per triangle edge. Muscle edges are fibers, cross fibers, or
+/// between, by their angle to the nearest bone.
 fn add_layer_springs(
     world: &mut World,
     mesh: &LayerMesh,
@@ -654,12 +662,7 @@ fn add_layer_springs(
                 continue;
             }
             let properties = if layer == TissueLayer::Skin {
-                (
-                    m.skin_structural_stiffness,
-                    m.skin_tear_stretch,
-                    m.skin_tear_impulse,
-                    false,
-                )
+                (SpringKind::Skin, m.skin_tear_stretch, m.skin_tear_impulse)
             } else {
                 let pa = world.points[a].position;
                 let pb = world.points[b].position;
@@ -667,24 +670,21 @@ fn add_layer_springs(
                 let alignment = dot(along, fiber_direction(midpoint(pa, pb), guides)).abs();
                 if alignment >= FIBER_ALIGNMENT {
                     (
-                        m.muscle_fiber_stiffness,
+                        SpringKind::Fiber,
                         m.muscle_tear_stretch,
                         m.muscle_tear_impulse,
-                        true,
                     )
                 } else if alignment <= CROSS_ALIGNMENT {
                     (
-                        m.muscle_cross_stiffness,
+                        SpringKind::Cross,
                         m.muscle_tear_stretch,
                         m.muscle_tear_impulse,
-                        false,
                     )
                 } else {
                     (
-                        m.muscle_shear_stiffness,
+                        SpringKind::Shear,
                         m.muscle_tear_stretch * 1.12,
                         m.muscle_tear_impulse,
-                        false,
                     )
                 }
             };
@@ -740,10 +740,9 @@ fn add_long_fiber_springs(
                     r,
                     TissueLayer::Muscle,
                     (
-                        m.muscle_fiber_stiffness * 0.42,
+                        SpringKind::LongFiber,
                         m.muscle_tear_stretch * 1.05,
                         m.muscle_tear_impulse,
-                        true,
                     ),
                 );
             }
@@ -757,11 +756,6 @@ fn add_layer_triangles(
     edges: &HashMap<(usize, usize), usize>,
     layer: TissueLayer,
 ) {
-    let stiffness = if layer == TissueLayer::Skin {
-        world.materials.skin_area_stiffness
-    } else {
-        world.materials.muscle_area_stiffness
-    };
     for &[a, b, c] in &mesh.triangles {
         let edge_ab = edges[&edge_key(a, b)];
         let edge_bc = edges[&edge_key(b, c)];
@@ -788,9 +782,9 @@ fn add_layer_triangles(
                 world.points[b].position,
                 world.points[c].position,
             ),
-            stiffness,
+            stiffness: 0.0,
             layer,
-            lambda: 0.0,
+            impulse: 0.0,
         });
     }
 }
@@ -820,6 +814,8 @@ fn attach_skin_to_muscle(world: &mut World, skin_points: &[usize], muscle_points
                     rest: d.max(spacing * 0.34),
                     broken: false,
                     stress: 0.0,
+                    stiffness: 0.0,
+                    impulse: 0.0,
                 });
             }
         }

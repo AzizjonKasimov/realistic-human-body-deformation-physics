@@ -355,6 +355,9 @@ impl Default for ToolBody {
 
 #[derive(Clone, Debug)]
 pub(super) struct ToolSolverContact {
+    /// The striking part where the step began and where it ends; the solver
+    /// moves it from one to the other through the substeps (`soft.rs`).
+    start: ToolContactShape,
     shape: ToolContactShape,
     inertia: f64,
     /// Tissue points close enough to touch the tool this step.
@@ -610,6 +613,11 @@ impl World {
             return;
         }
         if input.tool != self.tool.mode {
+            // A tool taken in hand starts as the first one did, its handle
+            // down, rather than turned as the last tool was held.
+            let fresh = ToolBody::default();
+            self.tool.heading = fresh.heading;
+            self.tool.side = fresh.side;
             self.tool.mode = input.tool;
             self.tool.embedded = false;
             self.tool.held = false;
@@ -1054,7 +1062,11 @@ impl World {
             };
             bone.load = bone.load.max(load);
             if load > bone.break_load {
-                bone.bear_break_load(load * self.bending_share(index, after.t_b), after.t_b);
+                bone.bear_break_load(
+                    load * self.bending_share(index, after.t_b),
+                    after.t_b,
+                    normalized(self.tool.velocity, to.direction),
+                );
             }
             if load > self.materials.fragment_wake_load {
                 self.wake_fragment(&mut bone);
@@ -1308,12 +1320,14 @@ impl World {
             .filter(|&(index, point)| {
                 !point.pinned
                     && is_flesh(&self.flesh, index)
-                    && sample_point_contact(point.position, &shape).distance <= reach
+                    && (sample_point_contact(point.position, &shape).distance <= reach
+                        || sample_point_contact(point.previous, &start).distance <= reach)
             })
             .map(|(index, _)| index)
             .collect();
         if !candidates.is_empty() {
             self.tool.contact = Some(ToolSolverContact {
+                start,
                 shape,
                 inertia: strike.inertia,
                 candidates,
@@ -1437,6 +1451,17 @@ impl World {
                 normal = shape.direction;
                 dist = 1.0;
             }
+            // A blunt tool cannot pass through bone: one the tool's axis has
+            // run past within this sub-step still lies ahead of it, and is
+            // shoved the way the tool moves, not out behind it. A bone
+            // farther behind was there before the sub-step, as a piece the
+            // tool has come to rest on, and is pushed out the nearest way.
+            if speed > EPSILON && dot(normal, velocity) < 0.0 {
+                let behind = -dot(subtract(closest, pair.point_a), velocity) / speed;
+                if behind <= speed * sub_dt + bone.radius {
+                    normal = scale(velocity, 1.0 / speed);
+                }
+            }
             if dist > shape.influence + bone.radius + self.max_figure_cover() {
                 continue;
             }
@@ -1473,7 +1498,7 @@ impl World {
             );
             let (share, worst) = self.break_share(i, from, to, normal);
             let blow = force * share;
-            bone.bear_break_load(blow, worst);
+            bone.bear_break_load(blow, worst, normal);
             self.debug.max_bone_load = self.debug.max_bone_load.max(bone.load);
             if !touches {
                 let should_fracture =
@@ -1512,21 +1537,33 @@ impl World {
                     y: normal.y * depth * contact_strength * strike.profile.rebound_scale
                         + velocity.y * sub_dt * contact_strength * 0.58 * strike.profile.drag_scale,
                 };
-                bone.a.x += push.x * (1.0 - t);
-                bone.a.y += push.y * (1.0 - t);
-                bone.b.x += push.x * t;
-                bone.b.y += push.y * t;
+                // The tool shoves the stretch of bone it presses, so that
+                // stretch moves out of its way: a bat lying along a bone moves
+                // the whole bone, where shoving at the nearest point, one of
+                // the bone's ends, only turned it while the bat ran over it.
+                let (from, to) = pressed_stretch(
+                    shape.axis_start,
+                    shape.axis_end,
+                    shape.influence + bone.radius,
+                    &bone,
+                    t,
+                );
+                let middle = (from + to) * 0.5;
+                let reach = 1.0 / ((1.0 - middle).powi(2) + middle.powi(2));
+                bone.a = add(bone.a, scale(push, (1.0 - middle) * reach));
+                bone.b = add(bone.b, scale(push, middle * reach));
                 let mass = (bone.rest_length
                     * bone.radius
                     * bone.radius
                     * self.materials.tool_bone_mass_scale)
                     .max(1.0);
                 given = add(given, scale(push, mass / dt));
+                let pressed = bone_point(bone, middle);
                 apply_bone_torque(
                     &self.materials,
                     &mut self.debug,
                     &mut bone,
-                    closest,
+                    pressed,
                     Vec2 {
                         x: normal.x * direct_load * 0.16 * strike.profile.rebound_scale
                             + velocity.x
@@ -1555,14 +1592,23 @@ impl World {
 
     /// Tissue a blunt tool presses into pushes back on it, split by mass, so a
     /// tool held against the body sinks only as deep as the tissue gives way.
+    /// Through the substeps the tool moves from where the step began to where
+    /// it ends, as the tissue does.
     pub(super) fn solve_tool_contact(&mut self) {
         let Some(contact) = &self.tool.contact else {
             return;
         };
         let shift = self.tool.solver_shift;
+        let progress = self.solver_progress;
         let shape = ToolContactShape {
-            axis_start: add(contact.shape.axis_start, shift),
-            axis_end: add(contact.shape.axis_end, shift),
+            axis_start: add(
+                lerp(contact.start.axis_start, contact.shape.axis_start, progress),
+                shift,
+            ),
+            axis_end: add(
+                lerp(contact.start.axis_end, contact.shape.axis_end, progress),
+                shift,
+            ),
             ..contact.shape
         };
         let surface = shape.radius + 1.0;
