@@ -748,6 +748,13 @@ fn draw_cut_lips(ctx: &RenderContext, layer: rp::TissueLayer) {
     }
 }
 
+/// How far torn-away flesh may be stretched, as a share of its rest length,
+/// before its pulp starts to fade, and by when it is gone. A smashed limb's
+/// pulp is pulled to about three times its length and must still cover it; a
+/// flap torn loose leaves its tissue stretched much further.
+const PULP_FADE_FROM: f32 = 3.0;
+const PULP_FADE_TO: f32 = 5.0;
+
 /// Flesh torn away from the sheets, crushed or torn through, as the pulped,
 /// bloodied flesh it is. The sheets are the body seen from the front, and a
 /// real body keeps its depth under a wound: a crushed arm shows pulped
@@ -780,7 +787,7 @@ fn draw_crushed_flesh(ctx: &RenderContext) {
             let now = length(sub(points[b].position, points[a].position));
             stretch = stretch.max(now / rest.max(1.0));
         }
-        let opacity = 1.0 - smoothstep(1.8, 3.0, stretch as f32);
+        let opacity = 1.0 - smoothstep(PULP_FADE_FROM, PULP_FADE_TO, stretch as f32);
         if opacity <= 0.02 {
             continue;
         }

@@ -1248,6 +1248,8 @@ pub struct ScenarioResult {
     /// Pieces of a closed break that ended outside the skin
     /// (`closed_pieces_out`).
     pub closed_pieces_out: i32,
+    /// Whole bones that ended outside the skin (`whole_bones_out`).
+    pub whole_bones_out: i32,
     pub final_spinning_fragments: i32,
     pub final_sleeping_fragments: i32,
     pub max_active_fragments: i32,
@@ -1521,6 +1523,7 @@ impl ScenarioResult {
         self.final_sleeping_fragments = sleeping_fragment_count(world);
         self.bone_pieces_out = bone_pieces_out(world);
         self.closed_pieces_out = closed_pieces_out(world);
+        self.whole_bones_out = whole_bones_out(world);
         self.measure_cut(world);
     }
 
@@ -1781,6 +1784,19 @@ pub fn closed_pieces_out(world: &World) -> i32 {
         .bones()
         .iter()
         .filter(|bone| bone.fractured && !bone.splinter && !bone.open_break)
+        .filter(|bone| !inside_the_skin(world, midpoint(bone.a, bone.b)))
+        .count() as i32
+}
+
+/// Whole bones whose middle lies outside the skin. A bone that has not
+/// broken belongs inside its limb whatever is done to the flesh on it; this
+/// counts how often one ends up bare beside it, as a hand's bone did once a
+/// blow stripped its flesh off it, for the sweep to report.
+pub fn whole_bones_out(world: &World) -> i32 {
+    world
+        .bones()
+        .iter()
+        .filter(|bone| !bone.fractured && !bone.splinter)
         .filter(|bone| !inside_the_skin(world, midpoint(bone.a, bone.b)))
         .count() as i32
 }

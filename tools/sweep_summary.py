@@ -1,5 +1,7 @@
 """Sums up a strike sweep report: runs in band, real-life mismatches, and the
-closed-break and loose bone counts, so two sweeps can be compared at a glance.
+counts of bone outside the body (closed breaks' pieces and whole bones outside
+the skin, and broken bone thrown clear), so two sweeps can be compared at a
+glance.
 
     python tools\\sweep_summary.py [output\\strike_sweep_report.txt ...]
 """
@@ -9,7 +11,7 @@ import sys
 
 def summarize(path):
     text = open(path, encoding='utf-8').read()
-    in_band = runs = closed = loose = 0
+    in_band = runs = closed = whole = loose = 0
     problems = []
     scenario = '?'
     for line in text.splitlines():
@@ -23,6 +25,10 @@ def summarize(path):
         if found:
             closed += int(found.group(1))
             problems.append(f'{scenario}: closed pieces outside the skin in {found.group(1)}')
+        found = re.search(r'a whole bone ends outside the skin in (\d+)', line)
+        if found:
+            whole += int(found.group(1))
+            problems.append(f'{scenario}: whole bone outside the skin in {found.group(1)}')
         if 'out of band' in line:
             loose += sum(int(n) for n in re.findall(r'bone_pieces_out in (\d+)', line))
             problems.append(f'{scenario}: {line.strip()}')
@@ -31,7 +37,8 @@ def summarize(path):
     mismatches = sum(1 for p in problems if p.startswith('real life'))
     print(path)
     print(f'  runs in band {in_band}/{runs}, real-life mismatches {mismatches}, '
-          f'closed-break pieces outside the skin {closed}, bone thrown out {loose}')
+          f'closed-break pieces outside the skin {closed}, whole bones outside the skin {whole}, '
+          f'bone thrown out {loose}')
     for problem in problems:
         print('   ', problem)
 

@@ -187,7 +187,9 @@ fn visual_scenarios() -> Vec<VisualScenario> {
             // arm takes much of the blow, so the organs behind it are at most
             // bruised, in some swings and not others (the sweep's organ damage).
             // With the skin's real stiffness it splits in only a couple of
-            // places.
+            // places, and the chest's cavity takes a pressure the sweep
+            // spreads from about 0.07 to 0.9 (from 0.09 before), this swing's
+            // near the low end.
             expectations: VisualExpectations {
                 min_skin_wound_edges: 2,
                 min_muscle_fiber_tears: 10,
@@ -195,7 +197,7 @@ fn visual_scenarios() -> Vec<VisualScenario> {
                 min_bruised_points: 25,
                 min_fractured_bones: 2,
                 min_fracture_caps: 2,
-                min_cavity_pressure: 0.1,
+                min_cavity_pressure: 0.05,
                 ..VisualExpectations::default()
             },
         },

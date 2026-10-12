@@ -684,7 +684,6 @@ impl World {
     /// feel it.
     fn solve_soft_bone_ties(&mut self, h: f64) {
         let zeta = self.materials.bone_tie_damping_ratio;
-        let omega = 2.0 * PI * self.materials.bone_tie_hertz;
         for index in 0..self.bone_attachments.len() {
             let attachment = self.bone_attachments[index];
             if attachment.broken
@@ -699,6 +698,11 @@ impl World {
             if tie.inverse_mass <= EPSILON {
                 continue;
             }
+            let hertz = match bone.part {
+                BonePart::Foot => self.materials.foot_tie_hertz,
+                _ => self.materials.bone_tie_hertz,
+            };
+            let omega = 2.0 * PI * hertz;
             let (a, b) = bone_place(&bone);
             let error = subtract(place(&point), tie.target(a, b));
             let bone_velocity = tie.anchor(

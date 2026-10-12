@@ -306,8 +306,13 @@ pub struct Materials {
     pub muscle_damping_ratio: f64,
     /// How fast muscle on a bone springs back to where it sits on it, in
     /// hertz, and how fast that dies away: soft tissue on the limbs rings at
-    /// 10 to 55 Hz after a jolt and settles within a cycle or two.
+    /// 10 to 55 Hz after a jolt and settles within a cycle or two. The
+    /// sole's skin and fat are bound to the foot's bones by fascia over
+    /// little muscle, and hold them at the top of that range
+    /// (`foot_tie_hertz`): tied as loosely, a bat's barrel catching the foot
+    /// dragged its bone out from under its light flesh.
     pub bone_tie_hertz: f64,
+    pub foot_tie_hertz: f64,
     pub bone_tie_damping_ratio: f64,
     pub muscle_fiber_rupture_damage_floor: f64,
     pub muscle_tear_stretch: f64,
@@ -549,6 +554,7 @@ impl Default for Materials {
             muscle_cross_stiffening_ratio: 4.0,
             muscle_damping_ratio: 0.3,
             bone_tie_hertz: 20.0,
+            foot_tie_hertz: 55.0,
             bone_tie_damping_ratio: 0.4,
             muscle_fiber_rupture_damage_floor: 0.0,
             muscle_tear_stretch: 1.92,
@@ -4867,8 +4873,11 @@ impl World {
                 // Flesh lets go of a piece only once it is torn away.
                 !is_flesh(&self.flesh, attachment.point) || stretch_ratio > PIECE_HOLD_BREAK_STRETCH
             } else {
+                // Flesh crushed onto its bone tears off it sooner; a blow
+                // landing elsewhere on the bone does not loosen every tie on
+                // it, as a bat striking a hanging hand stripped its flesh.
                 slip > self.materials.bone_tie_tear_mm
-                    || (impulse > self.materials.bone_attachment_break_impulse
+                    || (point.load > self.materials.bone_attachment_break_impulse
                         && slip > self.materials.bone_tie_loaded_tear_mm)
             };
             if torn_loose {
@@ -5666,18 +5675,18 @@ impl World {
                         + self.materials.fragment_pair_rest_stiffness * rest_factor);
                 let share_a = inv_mass_a / inv_sum;
                 let share_b = inv_mass_b / inv_sum;
-                self.apply_bone_anchor_delta_idx(
-                    i,
-                    closest.t_a,
-                    normal.x * correction * share_a,
-                    normal.y * correction * share_a,
-                );
-                self.apply_bone_anchor_delta_idx(
-                    j,
-                    closest.t_b,
-                    -normal.x * correction * share_b,
-                    -normal.y * correction * share_b,
-                );
+                // Overlapping pieces part without being thrown apart: the
+                // push moves them, and as Box2D relaxes its contacts, gives
+                // them no speed of its own. Resolved within one short
+                // substep, an overlap would throw a chip at its depth over
+                // the substep, thousands of px/s; the damping below still
+                // takes the speed out of pieces closing on each other.
+                if let Some(bone) = self.bones.get_mut(i) {
+                    shift_bone_anchor(bone, closest.t_a, scale(normal, correction * share_a));
+                }
+                if let Some(bone) = self.bones.get_mut(j) {
+                    shift_bone_anchor(bone, closest.t_b, scale(normal, -correction * share_b));
+                }
                 let contact = (overlap / target_distance.max(1.0)).clamp(0.0, 1.0);
                 let normal_damping = (contact
                     * (self.materials.fragment_pair_normal_damping
@@ -10029,6 +10038,20 @@ fn apply_bone_anchor_delta(bone: &mut BoneSegment, t: f64, dx: f64, dy: f64) {
     bone.a.y += dy * (1.0 - t);
     bone.b.x += dx * t;
     bone.b.y += dy * t;
+}
+
+/// Moves a bone as `apply_bone_anchor_delta` does, where it is and where it
+/// was alike, so the move gives it no speed.
+fn shift_bone_anchor(bone: &mut BoneSegment, t: f64, delta: Vec2) {
+    if bone.pinned {
+        return;
+    }
+    let t = t.clamp(0.0, 1.0);
+    let (shift_a, shift_b) = (scale(delta, 1.0 - t), scale(delta, t));
+    bone.a = add(bone.a, shift_a);
+    bone.b = add(bone.b, shift_b);
+    bone.previous_a = add(bone.previous_a, shift_a);
+    bone.previous_b = add(bone.previous_b, shift_b);
 }
 
 fn rotate_bone_around_anchor(bone: &mut BoneSegment, t: f64, angle: f64) {
