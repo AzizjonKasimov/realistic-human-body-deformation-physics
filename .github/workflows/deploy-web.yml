@@ -1,7 +1,8 @@
 name: Deploy web build
 
 # Builds the WebAssembly version with tools/build_web.ps1 and publishes it to
-# GitHub Pages, so the browser version always matches main.
+# GitHub Pages, so the browser version always matches main, then tags a new
+# version the first time it goes live.
 on:
   push:
     branches: [main]
@@ -46,3 +47,26 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5
+
+  # The first time a version goes live, tag the commit (v0.7.0), so the game a
+  # video showed can be built again: git checkout v0.7.0, or
+  # tools/compare.ps1 -Ref v0.7.0. Later deploys of the same version keep it.
+  tag:
+    needs: deploy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Tag the version that went live
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          tag="v$version"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
+            echo "$tag is already tagged"
+          else
+            git tag "$tag"
+            git push origin "refs/tags/$tag"
+            echo "Tagged $tag"
+          fi

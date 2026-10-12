@@ -43,6 +43,49 @@ function Get-CrateScripts {
     return $scripts
 }
 
+# The version as the game shows it, from Cargo.toml: v0.7 for 0.7.0 and v0.7.1
+# for 0.7.1, as `version_label` in src/version.rs writes it.
+function Get-VersionLabel {
+    $manifest = [IO.File]::ReadAllText((Join-Path $repoRoot "Cargo.toml"))
+    $match = [regex]::Match($manifest, '(?m)^version\s*=\s*"([^"]+)"')
+    if (-not $match.Success) {
+        throw "Cargo.toml has no package version."
+    }
+    $version = $match.Groups[1].Value
+    $parts = $version.Split(".")
+    if ($parts.Count -eq 3 -and $parts[2] -eq "0") {
+        return "v$($parts[0]).$($parts[1])"
+    }
+    return "v$version"
+}
+
+# The changes listed under the newest entry of CHANGELOG.md, which must be the
+# entry for this version, so the start screen never shows another version's.
+function Get-NewestChanges([string]$Label) {
+    $lines = [IO.File]::ReadAllLines((Join-Path $repoRoot "CHANGELOG.md"))
+    $first = 0
+    while ($first -lt $lines.Count -and -not $lines[$first].StartsWith("## ")) {
+        $first++
+    }
+    $heading = if ($first -lt $lines.Count) { $lines[$first] } else { "" }
+    if ($heading -notmatch "^## $([regex]::Escape($Label)) \(\d{4}-\d{2}-\d{2}\)\s*$") {
+        throw "CHANGELOG.md should start with an entry for $Label, headed '## $Label (YYYY-MM-DD)', not '$heading'. Bump Cargo.toml and CHANGELOG.md together."
+    }
+    $changes = @()
+    for ($i = $first + 1; $i -lt $lines.Count -and -not $lines[$i].StartsWith("## "); $i++) {
+        if ($lines[$i].StartsWith("- ")) {
+            $changes += $lines[$i].Substring(2).Trim()
+        }
+    }
+    if ($changes.Count -eq 0) {
+        throw "CHANGELOG.md's entry for $Label lists no changes ('- ' lines)."
+    }
+    return $changes
+}
+
+$versionLabel = Get-VersionLabel
+$newestChanges = Get-NewestChanges $versionLabel
+
 Invoke-Cargo -Arguments @("build", "--release", "--target", $wasmTarget, "--bin", "realistic_physics") -Label "Build Rust app for the web (wasm32, Release)"
 
 $wasm = Join-Path $repoRoot "target/$wasmTarget/release/realistic_physics.wasm"
@@ -72,7 +115,15 @@ $loaderStamp = Get-ContentStamp (Join-Path $siteDir "gl.js")
 $audioStamp = Get-ContentStamp (Join-Path $siteDir "audio.js")
 $analyticsStamp = Get-ContentStamp (Join-Path $siteDir "analytics.js")
 $page = [IO.File]::ReadAllText((Join-Path $repoRoot "web/index.html"))
+# The start screen's version, by the title and over what is new in it.
+$versionSpan = '<span class="version"></span>'
+if (-not $page.Contains($versionSpan)) {
+    throw "web/index.html should contain $versionSpan."
+}
+$page = $page.Replace($versionSpan, "<span class=`"version`">$versionLabel</span>")
+$newsItems = ($newestChanges | ForEach-Object { "<li>$([Net.WebUtility]::HtmlEncode($_))</li>" }) -join ""
 $references = @(
+    @{ From = '<ul class="news"></ul>'; To = "<ul class=`"news`">$newsItems</ul>" },
     @{ From = 'src="gl.js"'; To = "src=`"gl.js?v=$loaderStamp`"" },
     @{ From = 'src="audio.js"'; To = "src=`"audio.js?v=$audioStamp`"" },
     @{ From = 'src="analytics.js"'; To = "src=`"analytics.js?v=$analyticsStamp`"" },
@@ -89,7 +140,7 @@ foreach ($reference in $references) {
 
 $wasmKb = (Get-Item -LiteralPath (Join-Path $siteDir "realistic_physics.wasm")).Length / 1KB
 Write-Host ""
-Write-Host ("Built web version in {0} (wasm {1:N0} KB)" -f $siteDir, $wasmKb)
+Write-Host ("Built web version {0} in {1} (wasm {2:N0} KB)" -f $versionLabel, $siteDir, $wasmKb)
 
 if ($Serve) {
     & (Join-Path $PSScriptRoot "serve_web.ps1") -Port $Port -Root $siteDir

@@ -3,8 +3,10 @@ pub mod scenarios;
 mod silhouette;
 pub mod simulation;
 pub mod sound;
+mod version;
 
 pub use simulation::*;
+pub use version::version_label;
 
 #[cfg(test)]
 mod tests {

@@ -13,9 +13,20 @@ See [docs/DESTRUCTION_ARCHITECTURE.md](docs/DESTRUCTION_ARCHITECTURE.md) for the
 
 [![Watch the latest Realistic Physics video on YouTube](https://img.youtube.com/vi/YSuN8D9t4ZI/hqdefault.jpg)](https://www.youtube.com/watch?v=YSuN8D9t4ZI)
 
-- [I Made My Body Physics Engine More Realistic With Claude Opus 5.5](https://www.youtube.com/watch?v=YSuN8D9t4ZI) (October 2026): damage that follows the speed of a blow, the mannequin body, and the browser version.
-- [My Body Physics Engine Got a Big Update](https://youtube.com/shorts/L87wyjLrdNE) (October 2026): a 20-second Short rendered by the app itself.
-- [Game Engine with Realistic Body Destruction Physics](https://www.youtube.com/watch?v=hCXVPSU6etE) (June 2026): the first version, written in C++ before the port to Rust.
+- [I Made My Body Physics Engine More Realistic With Claude Opus 5.5](https://www.youtube.com/watch?v=YSuN8D9t4ZI) (October 2026, v0.4): damage that follows the speed of a blow, the mannequin body, and the browser version.
+- [My Body Physics Engine Got a Big Update](https://youtube.com/shorts/L87wyjLrdNE) (October 2026, v0.4): a 20-second Short rendered by the app itself.
+- [Game Engine with Realistic Body Destruction Physics](https://www.youtube.com/watch?v=hCXVPSU6etE) (June 2026, v0.1): the first version, written in C++ before the port to Rust.
+
+## Versions
+
+The game shows its version, such as v0.7, on the browser's start screen and faintly in its bottom-left corner, so anyone who watched a video of it can tell whether the game has changed since. The start screen also lists what is new in that version, and [CHANGELOG.md](CHANGELOG.md) lists every version. Only the newest version is online. `realistic_physics.exe --version` prints the version without opening the game, and the YouTube Shorts made from the app show it at the top of every frame.
+
+When a change that players would notice reaches `main`, bump the version in `Cargo.toml` in the same change and add its entry at the top of `CHANGELOG.md`, headed `## v0.8 (YYYY-MM-DD)`, with each change as a plain `- ` sentence, since the start screen shows them as written:
+
+- the middle number for a new feature or a big change, such as a new tool, a new kind of injury, or a step towards the fighting game (0.7.0 to 0.8.0, shown as v0.8);
+- the last number for a fix or tuning (0.7.0 to 0.7.1, shown as v0.7.1).
+
+Docs, tests, and tools leave the version alone. `cargo test` and `tools\build_web.ps1` stop when `Cargo.toml` and `CHANGELOG.md` disagree. The deploy tags each version the first time it goes live (`v0.7.0`), so `git checkout v0.7.0` or `.\tools\compare.ps1 -Ref v0.7.0` gets the game that a video of that version showed. Versions before v0.7 were numbered afterwards from the history, and their tags mark each one's last commit.
 
 ## Current Rust Milestone
 
@@ -347,7 +358,8 @@ The visual diagnostic exits nonzero if what is drawn stops matching what the sim
 - `src/bin/realistic_physics/main.rs` owns the `macroquad` app shell, input, timing, and rendering. It also runs in the browser, so the app and simulation must avoid file I/O, threads, and `std::time`, none of which work on `wasm32-unknown-unknown`. `src/bin/realistic_physics/capture.rs` is the native-only screenshot mode, and `src/bin/realistic_physics/selftest.rs` the self-test mode, which runs in both builds (the page hands it a clock and takes its report through a small gl.js plugin). `src/bin/realistic_physics/about.rs` shows the about card through the same plugin, or natively opens the write-up in the default browser.
 - `src/scenarios.rs` holds the scripted strikes and gestures and the tuned scenarios with their injury and steadiness bands, shared by the strike runner, the visual damage diagnostic, the capture mode, and the self-test, which also ships in the browser build.
 - `src/sound.rs` hears what each simulation step sounded like and picks the clip and volume for each sound; `src/sound/synth.rs` synthesizes the clips and `src/sound/mixdown.rs` mixes a run offline the way the app plays it. `src/bin/realistic_physics/audio.rs` plays the sound in the app, and `tests/sound_tests.rs` checks it. `vendor/quad-snd` is the patched sound backend.
-- `web/index.html` is the browser page: start screen with a content warning and an About section with links (the same card opens again as the about card), loader, error messages, and the `?stats` frame-time overlay (also exposed as `window.__perf` for automated checks). `web/analytics.js` counts visits on the live site (see [Visit Counts](#visit-counts)); `src/bin/realistic_physics/analytics.rs` tells it the first blow with each tool, through an import the page's gl.js plugin defines.
+- `src/version.rs` writes the version as the game shows it (v0.7 for 0.7.0), and its test checks that `CHANGELOG.md` starts with that version's entry (see [Versions](#versions)).
+- `web/index.html` is the browser page: start screen with a content warning, the version and what is new in it (which `tools/build_web.ps1` fills in from `Cargo.toml` and `CHANGELOG.md`), and an About section with links (the same card opens again as the about card), loader, error messages, and the `?stats` frame-time overlay (also exposed as `window.__perf` for automated checks). `web/analytics.js` counts visits on the live site (see [Visit Counts](#visit-counts)); `src/bin/realistic_physics/analytics.rs` tells it the first blow with each tool, through an import the page's gl.js plugin defines.
 - `tools/build_web.ps1` builds the browser version into `target\web`; `tools/serve_web.ps1` serves it locally with the `application/wasm` content type browsers require.
 - `tools/bench.ps1` times the simulation against a commit (see [Measure Speed](#measure-speed)).
 - `.cargo/config.toml` lets the wasm linker leave miniquad's WebGL functions as imports for `gl.js` to provide; recent Rust versions no longer do that by default.

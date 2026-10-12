@@ -1,6 +1,8 @@
 [package]
 name = "realistic_physics"
-version = "0.1.0"
+# The version players see in the game and on videos of it; CHANGELOG.md lists
+# what each one changed, and README.md's Versions section says when to bump it.
+version = "0.7.0"
 edition = "2021"
 license = "MIT"
 

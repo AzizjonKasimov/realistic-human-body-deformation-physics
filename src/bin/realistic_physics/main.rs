@@ -275,8 +275,19 @@ fn window_conf() -> Conf {
     }
 }
 
-#[macroquad::main(window_conf)]
-async fn main() {
+fn main() {
+    // `--version` prints the version the game shows and exits before the
+    // window opens; video_tools' short.py stamps it on each Short.
+    #[cfg(not(target_arch = "wasm32"))]
+    if std::env::args().skip(1).any(|arg| arg == "--version") {
+        println!("{}", rp::version_label());
+        return;
+    }
+    // What `#[macroquad::main(window_conf)]` would write.
+    macroquad::Window::from_config(window_conf(), run());
+}
+
+async fn run() {
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(request) = capture::request() {
         capture::run(request).await;
@@ -468,6 +479,7 @@ fn draw_app(app: &AppState) {
     }
     draw_hud(&ctx);
     draw_controls_hint(&ctx);
+    draw_version(&ctx);
     if app.debug_overlay {
         draw_debug_panel(&ctx);
     }
@@ -1992,6 +2004,19 @@ fn draw_hud(ctx: &RenderContext) {
             ctx.palette.hud_back,
         );
     }
+}
+
+/// The version, faint in the floor strip's left corner, clear of the body and
+/// the controls, so a video of the game shows which version it was made with.
+/// Capture mode's label takes the right corner.
+fn draw_version(ctx: &RenderContext) {
+    draw_text(
+        &rp::version_label(),
+        14.0,
+        ctx.height - 14.0,
+        15.0,
+        with_alpha(ctx.palette.hud_muted, 0.7),
+    );
 }
 
 /// HUD chip labels: the tool, whether the simulation runs, and the damage
