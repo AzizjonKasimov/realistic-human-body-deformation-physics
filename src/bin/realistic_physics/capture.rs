@@ -32,6 +32,11 @@
 //!                            and running counts of broken bones, torn skin and
 //!                            muscle, bruises, and blood drops (a video's sound
 //!                            is made from them)
+//! --sound FILE               write the game's own sound for the steps played,
+//!                            as a WAV mixed step by step the way the app plays
+//!                            it (`sound::Mixdown`), each step's sounds starting
+//!                            a step's time after the last's, so a video can
+//!                            carry the game's sound in time with its frames
 //! ```
 
 use std::env;
@@ -41,6 +46,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use rp::scenarios::{scenario, tool_name, tool_touching, Gesture, Play, Scenario, Strike};
+use rp::sound::{wav_bytes, Foley, Mixdown, SoundBank};
 
 use super::*;
 
@@ -59,6 +65,8 @@ pub struct CaptureRequest {
     show_label: bool,
     body_frame: Option<rp::BodyFrame>,
     events: Option<PathBuf>,
+    /// Where to write the game's own sound for the steps played.
+    sound: Option<PathBuf>,
     /// One run of the strike sweep: the play moved along and across its
     /// path, on bones this much stronger (`strike_scenarios --variant`).
     variant: Option<(f64, f64, f64)>,
@@ -98,6 +106,7 @@ pub fn request() -> Option<CaptureRequest> {
         show_label: true,
         body_frame: None,
         events: None,
+        sound: None,
         variant: None,
     };
     while let Some(arg) = args.next() {
@@ -144,6 +153,7 @@ pub fn request() -> Option<CaptureRequest> {
                     Some(parse_body_frame(&value("--body-frame")).unwrap_or_else(|e| fail(&e)));
             }
             "--events" => request.events = Some(PathBuf::from(value("--events"))),
+            "--sound" => request.sound = Some(PathBuf::from(value("--sound"))),
             "--variant" => {
                 let spec = value("--variant");
                 let numbers: Vec<f64> = spec
@@ -199,6 +209,12 @@ pub async fn run(request: CaptureRequest) {
         writeln!(out, "{EVENT_HEADER}").unwrap_or_else(|error| fail(&error.to_string()));
         out
     });
+    // The game hears each step as the app does and mixes it as the app plays
+    // it, one step a step's time long.
+    let bank = request.sound.as_ref().map(|_| SoundBank::render());
+    let mut sound = bank
+        .as_ref()
+        .map(|bank| (Foley::new(), Mixdown::new(bank, dt)));
     for frame in 0..frames {
         let input = match &request.play {
             Some(play) => play.input(frame, dt, app.frame),
@@ -213,6 +229,9 @@ pub async fn run(request: CaptureRequest) {
         }
         app.pointer_down = input.down;
         step_world(&mut app, &input, width, height);
+        if let Some((foley, mix)) = sound.as_mut() {
+            mix.step(&foley.hear(&app.world));
+        }
         let step = frame + 1;
         if let Some(out) = events.as_mut() {
             write_event(out, step, &input, &app.world)
@@ -228,6 +247,11 @@ pub async fn run(request: CaptureRequest) {
     save_views(&mut app, &request, request.every.map(|_| frames)).await;
     if let Some(mut out) = events {
         out.flush().unwrap_or_else(|error| fail(&error.to_string()));
+    }
+    if let (Some(path), Some((_, mix))) = (&request.sound, sound) {
+        std::fs::write(path, wav_bytes(&mix.finish()))
+            .unwrap_or_else(|error| fail(&format!("cannot write {}: {error}", path.display())));
+        println!("wrote {}", path.display());
     }
 }
 
