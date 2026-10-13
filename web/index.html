@@ -381,7 +381,7 @@
     // the install itself, and then the card shows an Install button; other
     // browsers get the steps for their own menus. The section stays hidden
     // where the game already runs as an app, and where the browser cannot
-    // install pages (Firefox on a computer).
+    // install pages (Firefox on a Mac or Linux).
     const installSection = document.getElementById("install");
     const installHow = document.getElementById("install-how");
     const installButton = document.getElementById("install-button");
@@ -426,8 +426,17 @@
       if (onAndroid) {
         return "In the browser's menu <b>⋮</b>, tap <b>Add to Home screen</b> or <b>Install app</b>.";
       }
+      // Safari on a Mac adds sites to the Dock from version 17 (macOS
+      // Sonoma), and Firefox installs them on Windows from version 143; on a
+      // Mac or Linux Firefox cannot.
+      const version = function (name) {
+        return Number((agent.match(new RegExp(name + "/(\\d+)")) || [])[1]) || 0;
+      };
       if (/Macintosh/.test(agent) && /Safari\//.test(agent) && !/Chrome|Chromium|Edg\//.test(agent)) {
-        return "In Safari's <b>File</b> menu, choose <b>Add to Dock</b>.";
+        return version("Version") >= 17 ? "In Safari's <b>File</b> menu, choose <b>Add to Dock</b>." : "";
+      }
+      if (/Windows/.test(agent) && version("Firefox") >= 143) {
+        return "Click the web apps button in the address bar.";
       }
       if (/Chrome\//.test(agent)) {
         return "Click the install icon at the right end of the address bar.";

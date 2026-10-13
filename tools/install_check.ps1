@@ -15,11 +15,12 @@ headless Edge (or Chrome). It checks that:
   have no transparent pixels;
 - the start screen's install section gives the steps for each kind of
   browser (Chrome and Samsung Internet on Android, iPhone, iPad, an app's
-  built-in browser on either, Safari on a Mac, Chrome or Edge on a
-  computer), stays hidden in Firefox on a computer and when the game
-  already runs as an installed app, and shows an Install button when the
-  browser offers to install, which asks the browser once and then says the
-  game is installed.
+  built-in browser on either, Chrome and Edge on Windows, a Mac, or a
+  Chromebook, Safari on a Mac, Firefox on Windows), stays hidden where the
+  browser cannot install pages (Firefox on a Mac or Linux, older Safari and
+  Firefox) and when the game already runs as an installed app, and shows an
+  Install button when the browser offers to install, which asks the browser
+  once and then says the game is installed.
 
 It writes output\install\report.txt and exits 1 on any problem.
 
@@ -120,6 +121,37 @@ $cases = @(
         Touch  = 0
         Expect = @("Add to Dock", "in its own window")
     },
+    # Add to Dock came with Safari 17 (macOS Sonoma).
+    @{
+        Name   = "Mac, Safari 16"
+        Agent  = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Safari/605.1.15"
+        Touch  = 0
+        Expect = @()
+    },
+    @{
+        Name   = "Mac, Chrome"
+        Agent  = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) $chrome Safari/537.36"
+        Touch  = 0
+        Expect = @("install icon", "in its own window")
+    },
+    @{
+        Name   = "Mac, Firefox"
+        Agent  = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:150.0) Gecko/20100101 Firefox/150.0"
+        Touch  = 0
+        Expect = @()
+    },
+    @{
+        Name   = "Chromebook"
+        Agent  = "Mozilla/5.0 (X11; CrOS x86_64 16328.65.0) AppleWebKit/537.36 (KHTML, like Gecko) $chrome Safari/537.36"
+        Touch  = 10
+        Expect = @("install icon", "in its own window")
+    },
+    @{
+        Name   = "Linux, Firefox"
+        Agent  = "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:150.0) Gecko/20100101 Firefox/150.0"
+        Touch  = 0
+        Expect = @()
+    },
     @{
         Name   = "Windows, Edge"
         Agent  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) $chrome Safari/537.36 Edg/141.0.0.0"
@@ -132,9 +164,16 @@ $cases = @(
         Touch  = 0
         Expect = @("install icon", "in its own window")
     },
+    # Firefox installs pages on Windows from version 143.
     @{
         Name   = "Windows, Firefox"
-        Agent  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:143.0) Gecko/20100101 Firefox/143.0"
+        Agent  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0"
+        Touch  = 0
+        Expect = @("web apps button", "in its own window")
+    },
+    @{
+        Name   = "Windows, Firefox 142"
+        Agent  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:142.0) Gecko/20100101 Firefox/142.0"
         Touch  = 0
         Expect = @()
     }

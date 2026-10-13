@@ -157,7 +157,7 @@ The browser version installs as an app with its own icon, so it opens from the h
 
 - **Android**: open the link in Chrome, then in its menu (⋮) tap **Add to Home screen** (or **Install app**) and **Install**. In Samsung Internet, tap the menu (≡), **Add page to**, then **Home screen**. If the link opened inside an app such as LinkedIn or YouTube, first choose **Open in Chrome** or **Open in browser** from that app's menu.
 - **iPhone and iPad**: open the link in Safari, tap **Share** (under **⋯** in Safari's compact layout), then **Add to Home Screen**, keep **Open as Web App** on, and tap **Add**. Chrome, Firefox and Edge on iOS have **Add to Home Screen** in their Share menu too.
-- **Computer**: in Chrome or Edge, click the install icon at the right end of the address bar; in Safari on a Mac, choose **File > Add to Dock**. Firefox on a computer cannot install pages.
+- **Computer** (Windows, Mac, Linux, or Chromebook): in Chrome or Edge, click the install icon at the right end of the address bar. In Firefox on Windows (version 143 or newer), click the web apps button in the address bar. In Safari on a Mac (macOS Sonoma or newer), choose **File > Add to Dock**. Firefox on a Mac or Linux cannot install pages yet.
 
 The start screen shows the steps for the visitor's own browser, and an **Install app** button where the browser lets the page offer the install (Chrome, Edge, Samsung Internet); the browser's own install bar is held back so it cannot cover the game's buttons. Opened as the app, the start screen leaves the steps out.
 
@@ -167,7 +167,7 @@ The start screen shows the steps for the visitor's own browser, and an **Install
 .\tools\install_check.ps1
 ```
 
-It builds the web version, serves it on localhost, and checks in headless Edge (or Chrome) that the browser reads the manifest without errors and finds nothing that stops it from installing the page, that every icon loads at the size it claims (with no transparent pixels in those that systems crop), and that the start screen gives the right steps in each kind of browser: Chrome and Samsung Internet on Android, iPhone, iPad, an app's built-in browser on either, Safari on a Mac, Chrome and Edge on a computer; nothing in Firefox on a computer or when opened as the app; and the Install button's turns. It writes `output\install\report.txt` and exits 1 on a problem. `-Live` checks the live site after a deploy, with GoatCounter's addresses blocked so it counts nothing, and `-SkipBuild` reuses the last build.
+It builds the web version, serves it on localhost, and checks in headless Edge (or Chrome) that the browser reads the manifest without errors and finds nothing that stops it from installing the page, that every icon loads at the size it claims (with no transparent pixels in those that systems crop), and that the start screen gives the right steps in each kind of browser: Chrome and Samsung Internet on Android, iPhone, iPad, an app's built-in browser on either, Chrome and Edge on Windows, a Mac, or a Chromebook, Safari on a Mac, Firefox on Windows; nothing where the browser cannot install pages (Firefox on a Mac or Linux, older Safari and Firefox) or when opened as the app; and the Install button's turns. It writes `output\install\report.txt` and exits 1 on a problem. `-Live` checks the live site after a deploy, with GoatCounter's addresses blocked so it counts nothing, and `-SkipBuild` reuses the last build.
 
 ### Visit Counts
 
