@@ -20,7 +20,9 @@ headless Edge (or Chrome). It checks that:
   browser cannot install pages (Firefox on a Mac or Linux, older Safari and
   Firefox) and when the game already runs as an installed app, and shows an
   Install button when the browser offers to install, which asks the browser
-  once and then says the game is installed.
+  once and then says the game is installed;
+- the install box sits right under the Start button and shows whole before
+  any scrolling on a 360x640 and a 390x844 phone and a 1280x720 laptop.
 
 It writes output\install\report.txt and exits 1 on any problem.
 
@@ -412,6 +414,44 @@ return {
     }
 }
 
+# The install box sits right under Start (the user's wish, 2026-10-13), so
+# visitors see that they can install the game without scrolling: on a small
+# and a common phone, with the longest steps (an app's built-in browser) on
+# the small one, and on a laptop.
+function Test-InstallPlacement([string]$Url) {
+    $windowsChrome = $cases | Where-Object { $_.Name -eq "Windows, Chrome" }
+    $inApp = $cases | Where-Object { $_.Name -eq "Android, LinkedIn app" }
+    $screens = @(
+        @{ Name = "Phone 360x640"; Width = 360; Height = 640; Scale = 3; Mobile = $true; Visitor = $inApp },
+        @{ Name = "Phone 390x844"; Width = 390; Height = 844; Scale = 3; Mobile = $true; Visitor = $cases[0] },
+        @{ Name = "Laptop 1280x720"; Width = 1280; Height = 720; Scale = 1; Mobile = $false; Visitor = $windowsChrome }
+    )
+    Add-Line ""
+    Add-Line "Where the install box shows, before any scrolling"
+    foreach ($screen in $screens) {
+        Set-Visitor $screen.Visitor.Agent $screen.Visitor.Touch
+        Invoke-Cdp $page "Emulation.setDeviceMetricsOverride" @{
+            width = $screen.Width; height = $screen.Height; deviceScaleFactor = $screen.Scale; mobile = $screen.Mobile
+        } | Out-Null
+        Open-Page $Url
+        $box = Invoke-PageScript $page @"
+const box = document.getElementById('install');
+const start = document.getElementById('start').getBoundingClientRect();
+const rect = box.getBoundingClientRect();
+return { hidden: box.hidden, top: Math.round(rect.top), bottom: Math.round(rect.bottom), screen: innerHeight, below: rect.top >= start.bottom };
+"@
+        Add-Line ("  {0,-22} {1} ({2})" -f $screen.Name, $(if ($box.hidden) { "hidden" } else { "from $($box.top) to $($box.bottom) px of $($box.screen)" }), $screen.Visitor.Name)
+        if ($box.hidden) {
+            $problems.Add("$($screen.Name): the install box is hidden")
+        } elseif ($box.bottom -gt $box.screen) {
+            $problems.Add("$($screen.Name): the install box ends $($box.bottom - $box.screen) px below the first screen")
+        } elseif (-not $box.below) {
+            $problems.Add("$($screen.Name): the install box is not under the Start button")
+        }
+    }
+    Invoke-Cdp $page "Emulation.clearDeviceMetricsOverride" | Out-Null
+}
+
 $url = $liveUrl
 $server = $null
 $page = $null
@@ -472,6 +512,7 @@ try {
     }
     Test-Icons
     Test-InstallSection $url
+    Test-InstallPlacement $url
 } finally {
     Stop-HeadlessBrowser $page
     if ($server -and -not $server.HasExited) {

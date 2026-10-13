@@ -2,6 +2,10 @@
 
 What each version of Realistic Physics changed, newest first. The game shows its version on the start screen and in its bottom-left corner, and every Short made from the game shows the version it was made with. Only the newest version is online.
 
+## v0.8.2 (2026-10-13)
+
+- How to install the game as an app now shows right under the Start button, so you see it first.
+
 ## v0.8.1 (2026-10-13)
 
 - Firefox on Windows can now install the game as an app too, like Chrome, Edge and Safari, and the start screen shows how.

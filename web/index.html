@@ -127,8 +127,20 @@
     list-style: none;
     font-weight: 600;
   }
+  .install {
+    display: flex;
+    gap: 14px;
+    align-items: flex-start;
+    margin: 14px 0 0;
+    padding: 12px 14px;
+    border: 1px solid rgba(255, 188, 66, 0.6);
+    background: rgba(255, 188, 66, 0.08);
+  }
+  .install img { flex: none; width: 48px; height: 48px; }
+  .install h2 { margin: 0 0 2px; font-size: 16px; }
+  .install p { margin: 0; font-size: 14px; }
   #install-button {
-    margin: 4px 0 0;
+    margin: 8px 0 0;
     padding: 8px 16px;
     font: inherit;
     font-weight: 600;
@@ -172,6 +184,16 @@
     <p class="tagline">A 2D simulation of realistic injuries: skin, muscle and bone stretch, tear, break and bleed through real physics, not canned animations.</p>
     <p class="warning"><strong>Content warning:</strong> graphic simulated injury, including blood, torn tissue and broken bones.</p>
     <button id="start" type="button">Start simulation</button>
+    <!-- Right under Start, so visitors see that they can install the game
+         before they scroll; filled in for their browser by the script below. -->
+    <section class="install" id="install" aria-labelledby="install-title" hidden>
+      <img src="icons/icon-192.png" alt="" width="48" height="48">
+      <div>
+        <h2 id="install-title">Play it as an app</h2>
+        <p id="install-how"></p>
+        <button id="install-button" type="button" hidden>Install app</button>
+      </div>
+    </section>
     <dl class="controls">
       <dt>Drag</dt><dd>Swing the tool into the body; hold it there and drag on to press harder</dd>
       <dt>H / B / S</dt><dd>Sledgehammer, bat or knife</dd>
@@ -189,12 +211,6 @@
         <li><a href="https://www.youtube.com/watch?v=YSuN8D9t4ZI" target="_blank" rel="noopener">Video</a></li>
         <li><a href="https://github.com/AzizjonKasimov/realistic-human-body-deformation-physics" target="_blank" rel="noopener">Source code</a></li>
       </ul>
-    </section>
-    <!-- Filled in for the visitor's browser by the script below. -->
-    <section class="about" id="install" aria-labelledby="install-title" hidden>
-      <h2 id="install-title">Play it as an app</h2>
-      <p id="install-how"></p>
-      <button id="install-button" type="button" hidden>Install app</button>
     </section>
     <section class="about" aria-labelledby="news-title">
       <h2 id="news-title">What's new in <span class="version"></span></h2>
@@ -395,8 +411,8 @@
     const inAppBrowser = /; wv\)|FBAN|FBAV|FB_IAB|Instagram|LinkedInApp|KAKAOTALK|NAVER\(inapp|Line\/|MicroMessenger|BytedanceWebview|musical_ly|Snapchat/.test(agent) ||
       (onIos && !/Safari\//.test(agent));
     const opensAs = onIos || onAndroid
-      ? "from your home screen like any other app, without the browser's bars"
-      : "in its own window, like any other app";
+      ? "from your home screen, without the browser's bars"
+      : "in its own window, without the browser's bars";
     let installPrompt = null;
     let installed = false;
 
