@@ -23,6 +23,13 @@ function Find-Browser([string]$Path) {
     throw "Found neither Edge nor Chrome; pass -Browser with a Chromium browser's path."
 }
 
+# A script for Page.addScriptToEvaluateOnNewDocument that makes the page see
+# itself running as an installed app opened from the home screen
+# (display-mode: standalone), which a headless browser cannot open it as.
+function Get-InstalledAppScript {
+    return "const matchMedia = window.matchMedia.bind(window); window.matchMedia = query => /display-mode:\s*standalone/.test(query) ? { matches: true, media: query, onchange: null, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent() { return false; } } : matchMedia(query);"
+}
+
 # Starts a headless browser on a fresh profile and connects to its page. Pass
 # the result to the other functions here, and to Stop-HeadlessBrowser in a
 # finally block. A script block in its OnEvent receives each DevTools event

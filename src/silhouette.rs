@@ -257,6 +257,13 @@ impl SilhouetteField {
     }
 }
 
+/// Signed distance from (`u`, `v`), in body heights, to the mannequin's
+/// outline; negative inside. For drawing the figure outside the simulation,
+/// such as the browser version's app icon (`src/bin/make_icons.rs`).
+pub fn silhouette_distance(u: f64, v: f64) -> f64 {
+    human_silhouette().distance(u, v)
+}
+
 /// The mannequin figure, built on first use.
 pub(crate) fn human_silhouette() -> &'static SilhouetteField {
     static FIELD: OnceLock<SilhouetteField> = OnceLock::new();

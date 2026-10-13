@@ -9,7 +9,13 @@
 <meta property="og:title" content="Realistic Physics: a realistic injury simulation">
 <meta property="og:description" content="Strike a layered human figure with a sledgehammer, a bat or a knife. Skin, muscle and bone respond through real physics, and the injuries are checked against published research. Runs in your browser.">
 <meta name="theme-color" content="#0f0f11">
-<link rel="icon" href="data:,">
+<!-- Lets visitors install the page as an app; src/bin/make_icons.rs draws the icons. -->
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/favicon-32.png" sizes="32x32" type="image/png">
+<link rel="icon" href="icons/icon-192.png" sizes="192x192" type="image/png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-title" content="Realistic Physics">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
 <style>
   :root {
     --bg: #0f0f11;
@@ -53,7 +59,7 @@
   }
   /* Opened again as the about card, it lets the paused simulation show through. */
   #gate.paused { background: rgba(15, 15, 17, 0.8); }
-  #gate[hidden], #status[hidden], #perf[hidden] { display: none; }
+  #gate[hidden], #status[hidden], #perf[hidden], #install[hidden], #install-button[hidden] { display: none; }
   .card {
     width: 100%;
     max-width: 560px;
@@ -121,6 +127,17 @@
     list-style: none;
     font-weight: 600;
   }
+  #install-button {
+    margin: 4px 0 0;
+    padding: 8px 16px;
+    font: inherit;
+    font-weight: 600;
+    color: var(--accent);
+    background: transparent;
+    border: 1px solid var(--accent);
+    cursor: pointer;
+  }
+  #install-button:hover, #install-button:focus-visible { background: rgba(255, 188, 66, 0.12); outline: 2px solid var(--text); outline-offset: 2px; }
   .footer { margin: 18px 0 0; font-size: 13px; color: var(--muted); }
   #status {
     position: fixed;
@@ -172,6 +189,12 @@
         <li><a href="https://www.youtube.com/watch?v=YSuN8D9t4ZI" target="_blank" rel="noopener">Video</a></li>
         <li><a href="https://github.com/AzizjonKasimov/realistic-human-body-deformation-physics" target="_blank" rel="noopener">Source code</a></li>
       </ul>
+    </section>
+    <!-- Filled in for the visitor's browser by the script below. -->
+    <section class="about" id="install" aria-labelledby="install-title" hidden>
+      <h2 id="install-title">Play it as an app</h2>
+      <p id="install-how"></p>
+      <button id="install-button" type="button" hidden>Install app</button>
     </section>
     <section class="about" aria-labelledby="news-title">
       <h2 id="news-title">What's new in <span class="version"></span></h2>
@@ -351,6 +374,115 @@
         closeAbout();
       }
     });
+
+    // The card tells how to install the game as an app (manifest.webmanifest),
+    // so it opens from the home screen or the computer's apps without the
+    // browser's bars. Chrome, Edge and Samsung Internet let the page offer
+    // the install itself, and then the card shows an Install button; other
+    // browsers get the steps for their own menus. The section stays hidden
+    // where the game already runs as an app, and where the browser cannot
+    // install pages (Firefox on a computer).
+    const installSection = document.getElementById("install");
+    const installHow = document.getElementById("install-how");
+    const installButton = document.getElementById("install-button");
+    const agent = navigator.userAgent;
+    // iPads ask for the desktop site, so they look like a Mac with touch.
+    const onIos = /iPhone|iPad|iPod/.test(agent) || (/Macintosh/.test(agent) && navigator.maxTouchPoints > 1);
+    const onAndroid = /Android/.test(agent);
+    // Apps' built-in browsers (LinkedIn, Facebook, Instagram, KakaoTalk...)
+    // cannot add a page to the home screen. On iOS they also leave Safari's
+    // name out of the user agent.
+    const inAppBrowser = /; wv\)|FBAN|FBAV|FB_IAB|Instagram|LinkedInApp|KAKAOTALK|NAVER\(inapp|Line\/|MicroMessenger|BytedanceWebview|musical_ly|Snapchat/.test(agent) ||
+      (onIos && !/Safari\//.test(agent));
+    const opensAs = onIos || onAndroid
+      ? "from your home screen like any other app, without the browser's bars"
+      : "in its own window, like any other app";
+    let installPrompt = null;
+    let installed = false;
+
+    function runningAsApp() {
+      return navigator.standalone === true || ["standalone", "fullscreen", "minimal-ui"].some(function (mode) {
+        return window.matchMedia("(display-mode: " + mode + ")").matches;
+      });
+    }
+
+    // The steps in this browser's menus, or "" where it cannot install pages.
+    function installSteps() {
+      if (inAppBrowser) {
+        return onIos
+          ? "Open this page in Safari first (this app's menu has <b>Open in browser</b>), then tap <b>Share</b> and <b>Add to Home Screen</b>."
+          : "Open this page in Chrome first (this app's menu has <b>Open in browser</b>), then in Chrome's menu <b>⋮</b> tap <b>Add to Home screen</b>.";
+      }
+      if (onIos) {
+        // Chrome, Firefox and Edge on iOS name themselves; Safari's Share
+        // button hides under ⋯ in its compact layout.
+        return /CriOS|FxiOS|EdgiOS/.test(agent)
+          ? "Tap <b>Share</b>, then <b>Add to Home Screen</b>."
+          : "Tap <b>Share</b> (in Safari it is under <b>⋯</b>), then <b>Add to Home Screen</b>.";
+      }
+      if (/SamsungBrowser/.test(agent)) {
+        return "In the browser's menu <b>≡</b>, tap <b>Add page to</b>, then <b>Home screen</b>.";
+      }
+      if (onAndroid) {
+        return "In the browser's menu <b>⋮</b>, tap <b>Add to Home screen</b> or <b>Install app</b>.";
+      }
+      if (/Macintosh/.test(agent) && /Safari\//.test(agent) && !/Chrome|Chromium|Edg\//.test(agent)) {
+        return "In Safari's <b>File</b> menu, choose <b>Add to Dock</b>.";
+      }
+      if (/Chrome\//.test(agent)) {
+        return "Click the install icon at the right end of the address bar.";
+      }
+      return "";
+    }
+
+    function showInstall() {
+      if (runningAsApp()) {
+        installSection.hidden = true;
+        return;
+      }
+      installButton.hidden = true;
+      if (installed) {
+        installHow.textContent = "Installed: open it " + (onIos || onAndroid ? "from your home screen." : "from your apps.");
+      } else if (installPrompt) {
+        installHow.textContent = "Install it and it opens " + opensAs + ".";
+        installButton.hidden = false;
+      } else {
+        const steps = installSteps();
+        installHow.innerHTML = steps && steps + " It then opens " + opensAs + ".";
+      }
+      installSection.hidden = !installHow.textContent;
+    }
+
+    window.addEventListener("beforeinstallprompt", function (event) {
+      // Keeps the browser's own install bar from covering the game's
+      // buttons; the card offers the install instead.
+      event.preventDefault();
+      installPrompt = event;
+      showInstall();
+    });
+
+    installButton.addEventListener("click", function () {
+      const offer = installPrompt;
+      if (!offer) {
+        return;
+      }
+      // A prompt can be shown only once; the browser offers a new one later
+      // if this one is turned down.
+      installPrompt = null;
+      offer.prompt();
+      offer.userChoice.then(function (choice) {
+        installed = installed || choice.outcome === "accepted";
+        showInstall();
+      });
+    });
+
+    window.addEventListener("appinstalled", function () {
+      installed = true;
+      installPrompt = null;
+      showInstall();
+    });
+
+    showInstall();
 
     function installPerfOverlay() {
       const perf = document.getElementById("perf");

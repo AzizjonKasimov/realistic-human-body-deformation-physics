@@ -119,3 +119,17 @@ function Stop-RunningAppIfRequested {
     $running | Stop-Process -Force
     Write-Host "Stopped running realistic_physics.exe before rebuild."
 }
+
+# The content type for each file the web build serves, by extension, for the
+# local servers (serve_web.ps1, analytics_check.ps1, install_check.ps1).
+# Browsers only stream-compile WebAssembly served as application/wasm, which a
+# plain file:// page or many quick servers do not provide.
+function Get-WebContentTypes {
+    return @{
+        ".html"        = "text/html; charset=utf-8"
+        ".js"          = "text/javascript; charset=utf-8"
+        ".wasm"        = "application/wasm"
+        ".webmanifest" = "application/manifest+json"
+        ".png"         = "image/png"
+    }
+}

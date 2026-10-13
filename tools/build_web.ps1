@@ -102,6 +102,10 @@ Copy-Item -LiteralPath (Get-CrateScripts) -Destination $siteDir
 # The page's own visit counting (web/analytics.js), which sends only from the
 # published site.
 Copy-Item -LiteralPath (Join-Path $repoRoot "web/analytics.js") -Destination $siteDir
+# The app manifest and the icons it names, which let visitors install the page
+# as an app (src/bin/make_icons.rs draws the icons).
+Copy-Item -LiteralPath (Join-Path $repoRoot "web/manifest.webmanifest") -Destination $siteDir
+Copy-Item -LiteralPath (Join-Path $repoRoot "web/icons") -Destination $siteDir -Recurse
 
 # GitHub Pages lets browsers cache every file for ten minutes, so a returning
 # visitor could get a new page with the previous simulation. Stamping the wasm

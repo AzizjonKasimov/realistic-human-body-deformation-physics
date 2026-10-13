@@ -14,13 +14,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $Root "index.html"))) {
 $Root = (Resolve-Path -LiteralPath $Root).Path
 $rootPrefix = $Root.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
 
-# Browsers only stream-compile WebAssembly served as application/wasm, which a
-# plain file:// page or many quick servers do not provide.
-$contentTypes = @{
-    ".html" = "text/html; charset=utf-8"
-    ".js"   = "text/javascript; charset=utf-8"
-    ".wasm" = "application/wasm"
-}
+$contentTypes = Get-WebContentTypes
 
 $url = "http://localhost:$Port/"
 $listener = [System.Net.HttpListener]::new()

@@ -5,6 +5,7 @@ pub mod simulation;
 pub mod sound;
 mod version;
 
+pub use silhouette::silhouette_distance;
 pub use simulation::*;
 pub use version::version_label;
 

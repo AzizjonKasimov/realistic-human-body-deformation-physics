@@ -2,7 +2,8 @@
 // which sets no cookies and keeps nothing on the visitor's device, and a few
 // events that show what visitors did: pressing Start, the simulation loading
 // or failing to, the first blow with each tool, how long they played, whether
-// the frame rate held, and which links they followed.
+// the frame rate held, which links they followed, and whether they installed
+// the game as an app or opened it as one.
 //
 // Only the published site sends anything. Local builds (serve_web.ps1, the
 // parity check, the browser pane), copies published elsewhere, and ?selftest
@@ -87,6 +88,19 @@
   // tags such as ?ref=linkedin from the query it is sent.
   events.push({ name: "visit", title: document.title, at: Math.round(performance.now()) });
   send({ path: location.pathname, title: document.title });
+
+  // Visits that open the game installed as an app (from the home screen, the
+  // computer's apps, or the Dock), and installs, from the start screen's
+  // button or the browser's own menu. Safari tells the page of no installs.
+  const openedAsApp = navigator.standalone === true || ["standalone", "fullscreen", "minimal-ui"].some(function (mode) {
+    return window.matchMedia("(display-mode: " + mode + ")").matches;
+  });
+  if (openedAsApp) {
+    count("opened-as-app", "Opened as an installed app");
+  }
+  window.addEventListener("appinstalled", function () {
+    count("installed", "Installed as an app");
+  });
 
   // Start, then whether the simulation loaded. The start button doubles as
   // the way back to the simulation later, so only its first press counts.

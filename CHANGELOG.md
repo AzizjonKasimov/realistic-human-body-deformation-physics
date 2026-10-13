@@ -2,6 +2,11 @@
 
 What each version of Realistic Physics changed, newest first. The game shows its version on the start screen and in its bottom-left corner, and every Short made from the game shows the version it was made with. Only the newest version is online.
 
+## v0.8 (2026-10-13)
+
+- The game can be installed as an app with its own icon, and then opens from the home screen or the computer's apps without the browser's bars.
+- The start screen shows how to install it in your browser, with an Install button where the browser allows one.
+
 ## v0.7 (2026-10-12)
 
 - Skin, fat and muscle weigh and stretch as the real tissues do.

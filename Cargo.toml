@@ -2,7 +2,7 @@
 name = "realistic_physics"
 # The version players see in the game and on videos of it; CHANGELOG.md lists
 # what each one changed, and README.md's Versions section says when to bump it.
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 license = "MIT"
 
@@ -33,6 +33,10 @@ path = "src/bin/contact_sheet.rs"
 [[bin]]
 name = "see_through"
 path = "src/bin/see_through.rs"
+
+[[bin]]
+name = "make_icons"
+path = "src/bin/make_icons.rs"
 
 [dependencies]
 # Trigonometry that comes out the same natively and in the browser; see

@@ -8,7 +8,7 @@ By default it plays the local web build (target\web, rebuilt unless
 -SkipBuild) at the live site's address, so analytics.js sends as it does
 there and loads GoatCounter's real script, while the check answers every
 request to GoatCounter itself, so nothing is counted (a host rule also stops
-any request that would slip past). It plays four page loads:
+any request that would slip past). It plays six page loads:
 
 - Playing: Start, a blow with each tool, a link followed, the about card
   opened (play time must stop, and its button must not count a second
@@ -18,6 +18,10 @@ any request that would slip past). It plays four page loads:
   load-failed.
 - Crash: the simulation throws in its frame after loading, which must count
   crashed.
+- Opened as an app: the page sees itself opened as the installed app, which
+  must count opened-as-app.
+- Installed: the browser tells the page it was installed, which must count
+  installed.
 
 It lists each page's events with the request sent for each, writes
 output\analytics\report.txt, and exits 1 when an event is missing, counted
@@ -73,11 +77,7 @@ $sitePath = "/realistic-human-body-deformation-physics/"
 $liveUrl = "https://$liveHost$sitePath"
 $countHost = "$siteCode.goatcounter.com"
 $siteDir = Join-Path $repoRoot "target\web"
-$contentTypes = @{
-    ".html" = "text/html; charset=utf-8"
-    ".js"   = "text/javascript; charset=utf-8"
-    ".wasm" = "application/wasm"
-}
+$contentTypes = Get-WebContentTypes
 # GoatCounter answers a count with a 1x1 GIF, and so does the local check.
 $gif = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"
 
@@ -521,6 +521,21 @@ try {
             Wait-Counted "crashed" 6 | Out-Null
         }
         Test-Run "Crash" @("visit", "start", "loaded", "crashed")
+
+        Write-Host ""
+        Write-Host "Opened as an app: loading the page as the installed app opens it..."
+        $asApp = Invoke-Cdp $page "Page.addScriptToEvaluateOnNewDocument" @{ source = Get-InstalledAppScript }
+        Open-Page
+        Wait-Counted "opened-as-app" 3 | Out-Null
+        Invoke-Cdp $page "Page.removeScriptToEvaluateOnNewDocument" @{ identifier = $asApp.identifier } | Out-Null
+        Test-Run "Opened as an app" @("visit", "opened-as-app")
+
+        Write-Host ""
+        Write-Host "Installed: the browser telling the page the visitor installed it..."
+        Open-Page
+        Invoke-PageScript $page "window.dispatchEvent(new Event('appinstalled')); return true;" | Out-Null
+        Wait-Counted "installed" 3 | Out-Null
+        Test-Run "Installed" @("visit", "installed")
     }
 } finally {
     Stop-HeadlessBrowser $page
