@@ -169,6 +169,14 @@ The live page counts visits with [GoatCounter](https://www.goatcounter.com), whi
 
 It sends only from `azizjonkasimov.github.io`, so local builds, copies published elsewhere, and `?selftest` runs count nothing. Every event still lands in `window.__analytics`, and the play time counted so far in `window.rpAnalytics.playedSeconds()`, for checks. To leave your own visits out, open the page once in each browser you use with `#toggle-goatcounter` at the end of its address. To see which post brought visitors when the referrer is missing (apps' built-in browsers often drop it), add `?campaign=NAME` to the links you share; GoatCounter lists them under Campaigns.
 
+To check the counting after a change to the page or its events:
+
+```powershell
+.\tools\analytics_check.ps1
+```
+
+It builds the web version and plays it at the live site's address in headless Edge (or Chrome), answering GoatCounter's requests itself so nothing is counted: Start, a blow with each tool, a link, the about card, a minute of play, and three page loads that fail on purpose (WebGL off, the download failing, a crash). It lists each event with the request sent for it, writes `output\analytics\report.txt`, and exits 1 when an event is missing, doubled, unexpected, or sent wrong. `-Live` plays a short visit on the live site instead and checks that GoatCounter accepts each request and that the live `analytics.js` is the one in `web\`; GoatCounter files a headless browser's visits under bots, so this adds nothing to the counts. `-SkipBuild` reuses the last build.
+
 ## Controls
 
 - Left-drag to swing the selected tool into the body. The tool moves with your pointer like a tool held firmly in hand: swing from outside the body for a hard hit, or hold the tool against the body and keep dragging past it to press harder. The ring marks where your hand is. Damage comes from the tool's shape and weight, its speed when it lands, and how hard you press; it grows steeply with speed, so slow moves only bruise.
@@ -367,7 +375,7 @@ The visual diagnostic exits nonzero if what is drawn stops matching what the sim
 - `src/bin/strike_scenarios.rs` writes deterministic strike telemetry and tuning summaries, sweeps scenarios over small swing offsets, plays custom swings, and times the phases of a step.
 - `src/bin/visual_damage_diagnostics.rs` writes deterministic SVG damage captures and visual primitive metrics.
 - `src/bin/contact_sheet.rs` lays PNG screenshots out in one image.
-- `tools/verify.ps1`, `tools/compare.ps1`, `tools/parity.ps1`, `tools/capture.ps1`, and `tools/sound_check.ps1` are the checking workflows described above.
+- `tools/verify.ps1`, `tools/compare.ps1`, `tools/parity.ps1`, `tools/analytics_check.ps1`, `tools/capture.ps1`, and `tools/sound_check.ps1` are the checking workflows described above; `tools/headless.ps1` drives the headless browser for the parity and analytics checks.
 - `tests/simulation_tests.rs` contains focused Rust simulation checks, including mirror symmetry of the body and skin covering the muscle at rest in several window sizes.
 - `src/silhouette.rs` defines the mannequin figure (torso outline, limb joints and radii, head, hands, feet) for one side and mirrors it into a signed distance field; `src/simulation/body.rs` meshes the body from it, builds the limb bones on the same joints, and places the rest of the anatomy. `body_frame` maps body coordinates (fractions of body height) to the window, which the strike scenarios use to aim at anatomy; the app moves and shrinks the body with `body_frame_between` when that placement would run under its status chips or control buttons.
 

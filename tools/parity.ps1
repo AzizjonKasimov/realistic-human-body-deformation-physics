@@ -37,6 +37,7 @@ param(
 )
 
 . "$PSScriptRoot\common.ps1"
+. "$PSScriptRoot\headless.ps1"
 
 $repoRoot = Get-RepoRoot
 $out = Join-Path $repoRoot "output\parity"
@@ -44,70 +45,14 @@ New-Item -ItemType Directory -Force $out | Out-Null
 $nativeReport = Join-Path $out "native.json"
 $webReport = Join-Path $out "web.json"
 
-function Find-Browser {
-    if ($Browser) {
-        if (-not (Test-Path -LiteralPath $Browser)) {
-            throw "No browser at $Browser"
-        }
-        return $Browser
-    }
-    $candidates = @(
-        "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
-        "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
-        "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
-        "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
-    )
-    foreach ($candidate in $candidates) {
-        if (Test-Path -LiteralPath $candidate) {
-            return $candidate
-        }
-    }
-    throw "Found neither Edge nor Chrome; pass -Browser with a Chromium browser's path."
-}
-
-function Receive-CdpMessage([System.Net.WebSockets.ClientWebSocket]$Socket) {
-    $buffer = [byte[]]::new(1MB)
-    $message = [IO.MemoryStream]::new()
-    do {
-        $segment = [ArraySegment[byte]]::new($buffer)
-        $result = $Socket.ReceiveAsync($segment, [Threading.CancellationToken]::None).GetAwaiter().GetResult()
-        if ($result.MessageType -eq [System.Net.WebSockets.WebSocketMessageType]::Close) {
-            throw "The browser closed the DevTools connection."
-        }
-        $message.Write($buffer, 0, $result.Count)
-    } while (-not $result.EndOfMessage)
-    return [Text.Encoding]::UTF8.GetString($message.ToArray())
-}
-
-# Sends one DevTools command and returns its result, skipping the events the
-# browser sends in between.
-function Invoke-Cdp([System.Net.WebSockets.ClientWebSocket]$Socket, [int]$Id, [string]$Method, [hashtable]$Params) {
-    $request = @{ id = $Id; method = $Method; params = $Params } | ConvertTo-Json -Depth 8 -Compress
-    $bytes = [Text.Encoding]::UTF8.GetBytes($request)
-    $segment = [ArraySegment[byte]]::new($bytes)
-    $Socket.SendAsync($segment, [System.Net.WebSockets.WebSocketMessageType]::Text, $true, [Threading.CancellationToken]::None).GetAwaiter().GetResult() | Out-Null
-    while ($true) {
-        $reply = Receive-CdpMessage $Socket | ConvertFrom-Json -Depth 64
-        if ($reply.id -eq $Id) {
-            if ($reply.error) {
-                throw "$Method failed: $($reply.error.message)"
-            }
-            return $reply.result
-        }
-    }
-}
-
 # Plays ?selftest in a headless browser and returns window.__selftest as JSON.
 function Invoke-WebSelfTest {
     $siteDir = Join-Path $repoRoot "target\web"
     if (-not (Test-Path -LiteralPath (Join-Path $siteDir "index.html"))) {
         throw "No web build in $siteDir; run without -SkipBuild."
     }
-    $browserPath = Find-Browser
-    $profileDir = Join-Path ([IO.Path]::GetTempPath()) "rp-parity-$PID"
     $server = $null
-    $browserProcess = $null
-    $socket = $null
+    $page = $null
     try {
         $server = Start-Process pwsh -PassThru -WindowStyle Hidden -ArgumentList @(
             "-NoProfile", "-File", (Join-Path $PSScriptRoot "serve_web.ps1"), "-Port", $Port, "-Root", $siteDir
@@ -126,40 +71,12 @@ function Invoke-WebSelfTest {
             }
         }
 
-        # Port 0 lets the browser pick a free DevTools port, which it writes
-        # to DevToolsActivePort in its profile.
-        if (Test-Path -LiteralPath $profileDir) {
-            Remove-Item -LiteralPath $profileDir -Recurse -Force
-        }
-        $browserProcess = Start-Process $browserPath -PassThru -ArgumentList @(
-            "--headless=new", "--remote-debugging-port=0", "--user-data-dir=`"$profileDir`"",
-            "--no-first-run", "--no-default-browser-check", "--disable-extensions",
-            "--enable-unsafe-swiftshader", "--window-size=1280,720", "about:blank"
-        )
-        $portFile = Join-Path $profileDir "DevToolsActivePort"
-        $deadline = (Get-Date).AddSeconds(30)
-        while (-not (Test-Path -LiteralPath $portFile) -or -not (Get-Content -LiteralPath $portFile -ErrorAction SilentlyContinue)) {
-            if ((Get-Date) -gt $deadline) {
-                throw "The headless browser did not open its DevTools port."
-            }
-            Start-Sleep -Milliseconds 200
-        }
-        $devtoolsPort = (Get-Content -LiteralPath $portFile | Select-Object -First 1).Trim()
-        $targets = Invoke-RestMethod "http://127.0.0.1:$devtoolsPort/json/list"
-        $page = @($targets) | Where-Object { $_.type -eq "page" } | Select-Object -First 1
-        if (-not $page) {
-            throw "The headless browser has no page to drive."
-        }
-
-        $socket = [System.Net.WebSockets.ClientWebSocket]::new()
-        $socket.Options.KeepAliveInterval = [TimeSpan]::Zero
-        $socket.ConnectAsync([Uri]$page.webSocketDebuggerUrl, [Threading.CancellationToken]::None).GetAwaiter().GetResult() | Out-Null
-        $id = 1
-        Invoke-Cdp $socket ($id++) "Page.navigate" @{ url = "$($url)?selftest" } | Out-Null
+        $page = Start-HeadlessBrowser $Browser "parity"
+        Invoke-Cdp $page "Page.navigate" @{ url = "$($url)?selftest" } | Out-Null
         $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
         while ($true) {
             Start-Sleep -Seconds 1
-            $result = Invoke-Cdp $socket ($id++) "Runtime.evaluate" @{
+            $result = Invoke-Cdp $page "Runtime.evaluate" @{
                 expression    = "window.__selftest ? JSON.stringify(window.__selftest) : ''"
                 returnByValue = $true
             }
@@ -167,7 +84,7 @@ function Invoke-WebSelfTest {
                 return $result.result.value
             }
             if ((Get-Date) -gt $deadline) {
-                $status = Invoke-Cdp $socket ($id++) "Runtime.evaluate" @{
+                $status = Invoke-Cdp $page "Runtime.evaluate" @{
                     expression    = "document.getElementById('status').textContent"
                     returnByValue = $true
                 }
@@ -175,18 +92,9 @@ function Invoke-WebSelfTest {
             }
         }
     } finally {
-        if ($socket) {
-            $socket.Dispose()
-        }
-        foreach ($process in @($browserProcess, $server)) {
-            if ($process -and -not $process.HasExited) {
-                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-            }
-        }
-        # The browser's helper processes hold the profile for a moment.
-        for ($attempt = 0; $attempt -lt 20 -and (Test-Path -LiteralPath $profileDir); $attempt++) {
-            Start-Sleep -Milliseconds 250
-            Remove-Item -LiteralPath $profileDir -Recurse -Force -ErrorAction SilentlyContinue
+        Stop-HeadlessBrowser $page
+        if ($server -and -not $server.HasExited) {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
         }
     }
 }
