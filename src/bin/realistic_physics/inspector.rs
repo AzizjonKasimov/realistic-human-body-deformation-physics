@@ -111,6 +111,7 @@ pub fn request() -> Option<InspectRequest> {
         shot: None,
     };
     let mut variant = None;
+    let mut settings = Vec::new();
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = |name: &str| {
@@ -179,9 +180,20 @@ pub fn request() -> Option<InspectRequest> {
             }
             "--why" => request.why = true,
             "--shot" => request.shot = Some(PathBuf::from(value("--shot"))),
+            "--set" => settings.push(value("--set")),
             other => fail(&format!("unknown option `{other}`")),
         }
     }
+    // Settings changed from the defaults, as the scenario tool takes them,
+    // so a change tried there can be looked at here. The browser takes no
+    // command line, so its build leaves the settings parser out.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let settings = rp::parse_settings(&settings).unwrap_or_else(|error| fail(&error));
+        rp::scenarios::use_settings(settings);
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = settings;
     if let Some((along, across, strength)) = variant {
         request.scenario = request
             .scenario

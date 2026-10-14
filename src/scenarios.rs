@@ -6,11 +6,47 @@
 //! browser build too.
 
 use std::fmt;
+use std::sync::OnceLock;
 
 use crate::{
     body_frame, create_layered_body, swing_power, BodyFrame, BonePart, BoneSegment, InputState,
     Limb, Materials, TissueLayer, ToolMode, Vec2, World, BONE_PARTS,
 };
+
+/// The settings the tools were given (`--set NAME=VALUE`), applied to every
+/// world a scenario, a random blow, or a moved-body test plays on.
+static SETTINGS: OnceLock<Vec<(String, String)>> = OnceLock::new();
+
+/// Plays every scenario from now on with `settings` changed from the defaults
+/// (checked by [`crate::parse_settings`]). Only the first call counts.
+pub fn use_settings(settings: Vec<(String, String)>) {
+    let _ = SETTINGS.set(settings);
+}
+
+/// The settings the tools were given, as `NAME=VALUE` items.
+pub fn settings_used() -> Vec<String> {
+    SETTINGS
+        .get()
+        .map(|settings| {
+            settings
+                .iter()
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The default materials with the settings the tools were given. The
+/// browser is given none, so its build leaves the settings parser out.
+pub fn set_materials() -> Materials {
+    #[allow(unused_mut)]
+    let mut materials = Materials::default();
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(settings) = SETTINGS.get() {
+        crate::apply_settings(&mut materials, settings).expect("settings checked when given");
+    }
+    materials
+}
 
 /// Window size the tuned scenarios are played in.
 pub const SCENARIO_WIDTH: f64 = 1280.0;
@@ -822,10 +858,11 @@ impl Scenario {
         }
     }
 
-    /// The materials the scenario plays on: the defaults, on bones as strong
-    /// as its `bone_strength`.
+    /// The materials the scenario plays on: the defaults with the settings
+    /// the tools were given ([`use_settings`]), on bones as strong as its
+    /// `bone_strength`.
     pub fn materials(&self) -> Materials {
-        let mut materials = Materials::default();
+        let mut materials = set_materials();
         materials.bone_fracture_impulse *= self.bone_strength;
         materials
     }
@@ -2873,6 +2910,27 @@ pub fn scenarios() -> Vec<Scenario> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fist measures count from where each fist stood when the play
+    /// began, whatever it stood off its drawing then: measured from the
+    /// drawing, they took in the 10 px the fists sagged at rest in v0.9.
+    #[test]
+    fn fists_count_from_where_they_stood() {
+        let world = create_layered_body(SCENARIO_WIDTH, SCENARIO_HEIGHT, Materials::default());
+        let at_start = fists_off_their_place(&world);
+        for (shift, drop) in fist_offsets(&world, at_start) {
+            assert!(shift < 1e-9 && drop.abs() < 1e-9, "{shift} {drop}");
+        }
+        let stood_lower = [Vec2 { x: 0.0, y: 10.0 }; 2];
+        for ((shift, drop), off) in fist_offsets(&world, stood_lower).into_iter().zip(at_start) {
+            let expected = libm::hypot(off.x, off.y - 10.0);
+            assert!(
+                (shift - expected).abs() < 1e-9,
+                "{shift} against {expected}"
+            );
+            assert!((drop - (off.y - 10.0)).abs() < 1e-9);
+        }
+    }
 
     #[test]
     fn strike_spec_parses_tool_path_and_options() {

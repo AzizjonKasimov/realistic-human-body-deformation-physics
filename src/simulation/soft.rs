@@ -545,6 +545,40 @@ impl World {
         self.solve_soft_joints(h);
     }
 
+    /// How far whole joint `joint` has let its second bone's anchor move
+    /// from where it was built on the first bone, in pixels: what the settle
+    /// learns to hold at nothing under the body's weight, and a blow can
+    /// move. `None` for a joint loosened or torn, which holds only a gap.
+    /// (Against where the joint holds the anchor, `BoneJoint::hold`, a joint
+    /// at rest would read the give the settle learned out.)
+    pub fn joint_slip(&self, joint: usize) -> Option<f64> {
+        let joint = self.bone_joints.get(joint)?;
+        let hold = self.joint_hold(joint)?;
+        if hold.pulls_only {
+            return None;
+        }
+        let (a, b) = (&self.bones[joint.a], &self.bones[joint.b]);
+        let built = |bone: &BoneSegment| BoneSegment {
+            a: bone.home_a,
+            b: bone.home_b,
+            ..*bone
+        };
+        let meant = joint_hold_offset(
+            &built(a),
+            joint.t_a,
+            bone_point(built(b), joint.t_b),
+            joint.rest,
+        );
+        let length = a.rest_length.max(EPSILON);
+        let tau = joint.t_a + meant.x * hold.reach() / length;
+        let sigma = meant.y * hold.reach() / length;
+        let held = add(
+            lerp(a.a, a.b, tau),
+            scale(perpendicular(subtract(a.b, a.a)), sigma),
+        );
+        Some(distance(lerp(b.a, b.b, joint.t_b), held))
+    }
+
     /// A whole joint holds its bones together and within their range, as
     /// Box2D's joints do: stiff, but soft enough to stay steady, at most a
     /// quarter of the substep rate, and heavily damped. It holds its second
@@ -991,7 +1025,7 @@ impl World {
 
     /// How far the flesh of `attachment` sits off its place on its bone, in
     /// pixels.
-    pub(super) fn bone_tie_slip(&self, attachment: &BoneAttachment) -> f64 {
+    pub fn bone_tie_slip(&self, attachment: &BoneAttachment) -> f64 {
         let point = &self.points[attachment.point];
         let bone = &self.bones[attachment.bone];
         let tie = BoneTie::of(attachment, point, bone);
@@ -1331,6 +1365,63 @@ mod tests {
 
     fn ball_height(world: &World) -> f64 {
         world.points[1].position.y
+    }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// A joint's pin moves the place it holds and the anchor it holds
+        /// there apart by exactly its impulse over its effective mass, the
+        /// same every way, wherever the two bones lie and whatever the
+        /// hold: the effective mass the solver divides by is the one the
+        /// bones' ends really give.
+        #[test]
+        fn a_joint_pin_moves_its_anchor_as_its_mass_says(
+            ax in -200.0..200.0f64, ay in -200.0..200.0f64, bx in -200.0..200.0f64, by in -200.0..200.0f64,
+            cx in -200.0..200.0f64, cy in -200.0..200.0f64, dx in -200.0..200.0f64, dy in -200.0..200.0f64,
+            t_a in 0.0..1.0f64, t_b in 0.0..1.0f64,
+            along in -20.0..20.0f64, across in -20.0..20.0f64,
+            push_x in -50.0..50.0f64, push_y in -50.0..50.0f64,
+        ) {
+            let (a0, a1) = (Vec2 { x: ax, y: ay }, Vec2 { x: bx, y: by });
+            let (b0, b1) = (Vec2 { x: cx, y: cy }, Vec2 { x: dx, y: dy });
+            prop_assume!(distance(a0, a1) > 5.0 && distance(b0, b1) > 5.0);
+            let mut world = World::new(Materials::default());
+            let first = world.add_bone_segment(a0, a1, 4.0, 1.0e9, false);
+            let second = world.add_bone_segment(b0, b1, 4.0, 1.0e9, false);
+            world.bones[first].mass = 3.0;
+            world.bones[second].mass = 7.0;
+            let joint = BoneJoint {
+                a: first,
+                b: second,
+                t_a,
+                t_b,
+                rest: 8.0,
+                hold: Vec2 { x: along, y: across },
+                ..BoneJoint::default()
+            };
+            let h = 1.0 / 240.0;
+            let pin = JointPin::of(&joint, &world.bones, 1.0);
+            let error_now = |world: &World| JointPin::of(&joint, &world.bones, 1.0).error;
+            // The pin is judged from where the substep began, so let the
+            // bones begin where they are.
+            let before = error_now(&world);
+            let impulse = Vec2 { x: push_x, y: push_y };
+            world.apply_joint_pin(&joint, &pin, impulse, h);
+            for bone in [first, second] {
+                world.bones[bone].previous_a = world.bones[bone].a;
+                world.bones[bone].previous_b = world.bones[bone].b;
+            }
+            let after = error_now(&world);
+            let moved = subtract(after, before);
+            let expected = scale(impulse, pin.inverse_mass * h);
+            prop_assert!(
+                distance(moved, expected) < 1e-6 * (1.0 + hypot(expected.x, expected.y)),
+                "moved {moved:?}, expected {expected:?}"
+            );
+        }
     }
 
     /// One whole step, with no tool in play.

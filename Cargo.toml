@@ -44,6 +44,21 @@ path = "src/bin/make_icons.rs"
 libm = "0.2.16"
 # "audio" plays the game's sound through quad-snd.
 macroquad = { version = "0.4", features = ["audio"] }
+# The Rerun SDK (MIT OR Apache-2.0), only with the `record` feature: the
+# scenario tool's recordings, never part of the game.
+rerun = { version = "=0.38.1", optional = true, default-features = false, features = ["sdk", "rrd"] }
+
+# proptest (MIT OR Apache-2.0), natively only: the property tests' generated
+# cases, and the shrinking that turns a random blow breaking a rule into the
+# simplest blow that still breaks it (strike_scenarios --random --shrink).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
+
+[features]
+# Records a run for the Rerun viewer (`strike_scenarios --record`,
+# tools\record.ps1): every point, bone, joint, and event on a timeline, with
+# any number plotted over the run.
+record = ["dep:rerun"]
 
 # quad-snd with lower latency and smooth volume changes; vendor/quad-snd/PATCHES.md
 # lists the changes.

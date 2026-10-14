@@ -61,6 +61,49 @@ mod tests {
         );
     }
 
+    /// A change tried out behind `trying("name")` (`RP_TRY`) is a question
+    /// still open: once it is answered, one way stays and the switch goes, so
+    /// no code under `src` may ask outside the function itself.
+    #[test]
+    fn nothing_is_left_being_tried() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        all_sources(&src, &mut files);
+        // Built from parts, so this test's own source does not ask.
+        let call = ["try", "ing("].concat();
+        let mut found = Vec::new();
+        for file in &files {
+            if file.ends_with("tuning.rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(file).unwrap();
+            for (index, line) in text.lines().enumerate() {
+                let code = line.split("//").next().unwrap_or_default();
+                if code.contains(call.as_str()) {
+                    let path = file.strip_prefix(&src).unwrap().to_string_lossy();
+                    found.push(format!("src/{}:{}", path.replace('\\', "/"), index + 1));
+                }
+            }
+        }
+        assert!(
+            found.is_empty(),
+            "an experiment is still switched by `trying`; keep one way and remove the switch:\n{}",
+            found.join("\n")
+        );
+    }
+
+    /// Every source file under `dir`.
+    fn all_sources(dir: &Path, files: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                all_sources(&path, files);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                files.push(path);
+            }
+        }
+    }
+
     /// Every source file under `dir` outside the modules in `NOT_SIMULATED`.
     fn simulated_sources(dir: &Path, files: &mut Vec<PathBuf>) {
         for entry in std::fs::read_dir(dir).unwrap() {

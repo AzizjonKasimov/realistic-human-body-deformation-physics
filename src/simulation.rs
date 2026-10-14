@@ -12,10 +12,13 @@ mod journal;
 mod motion;
 mod outline;
 mod phases;
+#[cfg(test)]
+mod properties;
 mod soft;
 mod stance;
 mod tissue;
 mod tools;
+mod tuning;
 
 pub use blood::{BloodTrail, SkinSpot};
 pub use body::{
@@ -29,6 +32,7 @@ pub use phases::{PhaseClock, PhaseTime, PhaseTimes, Traced, TracedStage};
 pub use stance::{HipHold, JointDrive, Limb, PostureBinding};
 pub use tissue::SpringKind;
 pub use tools::{swing_power, tool_geometry, tool_pose, ToolGeometry, ToolPose, ToolReach};
+pub use tuning::{apply_settings, parse_settings, trying};
 
 const EPSILON: f64 = 0.0001;
 /// Share of a blunt blow's knock on a point that bears on a scab there.

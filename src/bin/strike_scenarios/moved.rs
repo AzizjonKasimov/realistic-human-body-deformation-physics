@@ -297,14 +297,14 @@ pub(crate) fn moved_body_tests(selected: &[Scenario], output_dir: &Path) {
 fn free_body_checks() -> Vec<String> {
     let falling = free_body(
         "falling free",
-        rp::Materials::default(),
+        rp::scenarios::set_materials(),
         rp::Vec2::default(),
     );
     let drifting = free_body(
         "drifting at 1 m/s with no gravity",
         rp::Materials {
             gravity: 0.0,
-            ..rp::Materials::default()
+            ..rp::scenarios::set_materials()
         },
         rp::Vec2 { x: 320.0, y: 0.0 },
     );

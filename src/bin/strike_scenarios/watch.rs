@@ -15,6 +15,8 @@ pub(crate) struct Watch {
     pub(crate) stance: Option<i32>,
     /// Keep a journal of what happens, to print when the run ends.
     pub(crate) journal: bool,
+    /// Lay the body out in numbers on one frame.
+    pub(crate) dump: Option<Dump>,
 }
 
 impl Watch {
@@ -47,6 +49,9 @@ impl Watch {
             if (from..=to).contains(&frame) {
                 report_trace(name, frame, world, traced);
             }
+        }
+        if let Some(dump) = self.dump {
+            dump.report(name, frame, world);
         }
         if let Some(every) = self.stance {
             if (frame + 1) % every.max(1) == 0 {
@@ -101,6 +106,10 @@ fn report_stance(name: &str, frame: i32, world: &rp::World, last_positions: &[rp
             loose("broken")
         } else if joint.post_fracture_limited {
             loose("loose")
+        } else if let Some(slip) = world.joint_slip(index).filter(|&slip| slip > 0.5) {
+            // A whole joint holds its second bone at a place on the first;
+            // how far that bone has slipped from there.
+            format!(" slipped {slip:.1}px")
         } else if gap > joint.rest + 0.5 {
             format!(" apart +{:.1}px", gap - joint.rest)
         } else {

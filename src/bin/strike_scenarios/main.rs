@@ -64,6 +64,38 @@
 //!                                     and what the watchdogs flagged, each with
 //!                                     a play to replay (random_blows_report.txt,
 //!                                     random_blows.csv)
+//!   --set NAME=VALUE[,NAME=VALUE...]  change any setting of `Materials` from its
+//!                                     default for every world played (gravity,
+//!                                     bone_joint_hertz, ...), to try a value
+//!                                     without rebuilding; repeatable
+//!   --quick                           a quick sweep: 9 runs a scenario (3 along,
+//!                                     3 bone strengths) instead of 45, to see
+//!                                     which way a change goes in a fifth of the
+//!                                     time
+//!   --diff A B                        set two sweeps side by side (folders that
+//!                                     hold their strike_sweep_runs.csv): every
+//!                                     band, real-life check, watchdog, and main
+//!                                     number that moved, with how likely chance
+//!                                     is to move it as far (sweep_diff.txt)
+//!   --dump WHAT[:FRAME]               lay the body out in numbers on a frame of
+//!                                     the play (0, the start, by default): bones
+//!                                     where they lie and how far from where they
+//!                                     were built, joints turned and slipped,
+//!                                     arteries, flesh slid off each bone; WHAT is
+//!                                     bones, joints, vessels, ties, or all
+//!   --record FILE.rrd                 record a lone scenario or custom play for
+//!                                     the Rerun viewer: every point, fiber,
+//!                                     bone, joint, the tool, and blood on a
+//!                                     timeline, the injuries and watchdogs as a
+//!                                     log, and the fists, joints, bone loads,
+//!                                     and flesh slid off each bone plotted
+//!                                     (build with `--features record`;
+//!                                     tools\record.ps1 builds, records, opens)
+//!   --shrink                          with --random, shrink the first play that
+//!                                     broke each rule or tripped each watchdog to
+//!                                     the simplest like it that still does:
+//!                                     slower, shorter, more level, no drag
+//!                                     (proptest's binary search)
 //!   --list                            print the scenarios and their plays
 //!   --phases                          instead, time each phase of a step over the
 //!                                     selected scenarios (or the custom play) and
@@ -76,17 +108,22 @@
 //!
 //! Outputs go next to the CSV path (default `output/strike_scenarios.csv`).
 
+mod diff;
+mod dump;
 mod inspect;
 mod moved;
 mod random;
+mod record;
 mod summary;
 mod sweep;
 mod watch;
 
+use dump::*;
 use inspect::*;
 use moved::*;
 use random::*;
 use realistic_physics as rp;
+use record::Recorder;
 use rp::scenarios::{
     active_fluid_count, fastest_point_speed, free_fragment_count, inside_the_skin, run, run_on,
     scenarios, spinning_fragment_count, tool_axis, tool_lag, tool_name, tool_touching, Gesture,
@@ -110,6 +147,14 @@ struct Options {
     csv_path: PathBuf,
     only: Vec<String>,
     sweep: bool,
+    /// With the sweep, 9 runs a scenario instead of 45.
+    quick: bool,
+    /// Two sweeps to set side by side instead of playing.
+    diff: Option<(PathBuf, PathBuf)>,
+    /// Record a lone scenario or custom play for the Rerun viewer.
+    record: Option<PathBuf>,
+    /// With the random blows, shrink the first play to break each rule.
+    shrink: bool,
     /// A custom swing or gesture to play instead of the scenarios.
     custom: Option<Play>,
     /// Where to write what each one sounds like, instead of the CSVs.
@@ -129,6 +174,8 @@ struct Options {
     random: Option<usize>,
     seed: u64,
     tools: Vec<rp::ToolMode>,
+    /// Settings changed from the defaults for every world, `NAME=VALUE`.
+    settings: Vec<String>,
 }
 
 fn main() {
@@ -149,6 +196,13 @@ fn main() {
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf();
     fs::create_dir_all(&output_dir).expect("create output directory");
+    let settings = rp::scenarios::settings_used();
+    if !settings.is_empty() {
+        println!(
+            "settings changed from the defaults: {}",
+            settings.join(", ")
+        );
+    }
 
     if options.list {
         for scenario in scenarios() {
@@ -156,8 +210,21 @@ fn main() {
         }
         return;
     }
+    if let Some((a, b)) = &options.diff {
+        if let Err(message) = diff::diff_sweeps(a, b, &output_dir) {
+            eprintln!("{message}");
+            process::exit(2);
+        }
+        return;
+    }
     if let Some(count) = options.random {
-        random_blows(count, options.seed, &options.tools, &output_dir);
+        random_blows(
+            count,
+            options.seed,
+            &options.tools,
+            &output_dir,
+            options.shrink,
+        );
         return;
     }
 
@@ -203,11 +270,27 @@ fn main() {
     if let Some(dir) = &options.sound {
         listen(&selected, dir);
     } else if options.sweep {
-        sweep(&selected, &output_dir, options.custom.is_some());
+        sweep(
+            &selected,
+            &output_dir,
+            options.custom.is_some(),
+            options.quick,
+        );
     } else if options.custom.is_some() {
-        play_custom(&selected[0], &output_dir, options.watch);
+        play_custom(
+            &selected[0],
+            &output_dir,
+            options.watch,
+            options.record.as_deref(),
+        );
     } else {
-        play_scenarios(&selected, &options.csv_path, &output_dir, options.watch);
+        play_scenarios(
+            &selected,
+            &options.csv_path,
+            &output_dir,
+            options.watch,
+            options.record.as_deref(),
+        );
     }
 }
 
@@ -262,11 +345,25 @@ fn parse_options() -> Result<Options, String> {
             rp::ToolMode::Heavy,
             rp::ToolMode::Sharp,
         ],
+        settings: Vec::new(),
+        quick: false,
+        diff: None,
+        record: None,
+        shrink: false,
     };
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--sweep" => options.sweep = true,
+            "--quick" => {
+                options.sweep = true;
+                options.quick = true;
+            }
+            "--diff" => {
+                let a = args.next().ok_or("--diff needs two sweeps' folders")?;
+                let b = args.next().ok_or("--diff needs two sweeps' folders")?;
+                options.diff = Some((PathBuf::from(a), PathBuf::from(b)));
+            }
             "--phases" => options.phases = true,
             "--list" => options.list = true,
             "--sound" => {
@@ -317,6 +414,21 @@ fn parse_options() -> Result<Options, String> {
                         format!("--stance takes a number of frames, got `{every}`")
                     })?);
             }
+            "--set" => {
+                let item = args.next().ok_or("--set needs NAME=VALUE")?;
+                options.settings.push(item);
+            }
+            "--shrink" => options.shrink = true,
+            "--record" => {
+                let path = args.next().ok_or("--record needs a file to record to")?;
+                options.record = Some(PathBuf::from(path));
+            }
+            "--dump" => {
+                let spec = args
+                    .next()
+                    .ok_or("--dump needs bones, joints, vessels, ties, or all")?;
+                options.watch.dump = Some(Dump::parse(&spec)?);
+            }
             "--journal" => options.watch.journal = true,
             "--moved" => options.moved = true,
             "--random" => {
@@ -355,11 +467,18 @@ fn parse_options() -> Result<Options, String> {
             path => options.csv_path = PathBuf::from(path),
         }
     }
+    rp::scenarios::use_settings(rp::parse_settings(&options.settings)?);
     Ok(options)
 }
 
 /// Plays each scenario once with the per-frame CSV, summary, and tuning report.
-fn play_scenarios(selected: &[Scenario], csv_path: &Path, output_dir: &Path, watch: Watch) {
+fn play_scenarios(
+    selected: &[Scenario],
+    csv_path: &Path,
+    output_dir: &Path,
+    watch: Watch,
+    record: Option<&Path>,
+) {
     let summary_path = output_dir.join("strike_summary.csv");
     let report_path = output_dir.join("strike_tuning_report.txt");
     let mut csv = BufWriter::new(File::create(csv_path).expect("create strike CSV"));
@@ -373,6 +492,10 @@ fn play_scenarios(selected: &[Scenario], csv_path: &Path, output_dir: &Path, wat
         let mut last_positions = Vec::new();
         let body = watch.body(scenario);
         let mut watchdogs = rp::inspect::Watchdogs::new(&body);
+        // Only a lone scenario is recorded: a recording is for looking into one run.
+        let mut recorder = record
+            .filter(|_| selected.len() == 1)
+            .and_then(|path| Recorder::start(path, scenario.name, &body));
         let (world, result) = run_on(
             body,
             scenario,
@@ -381,6 +504,9 @@ fn play_scenarios(selected: &[Scenario], csv_path: &Path, output_dir: &Path, wat
             |frame, input, world| {
                 watch.report(scenario.name, frame, world, &last_positions);
                 watchdogs.check(frame, world);
+                if let Some(recorder) = recorder.as_mut() {
+                    recorder.frame(frame, world, watchdogs.trips());
+                }
                 if write_error.is_none() {
                     write_error =
                         write_frame(&mut csv, scenario, frame, input, world, &mut last_positions)
@@ -388,6 +514,9 @@ fn play_scenarios(selected: &[Scenario], csv_path: &Path, output_dir: &Path, wat
                 }
             },
         );
+        if let Some(recorder) = recorder {
+            recorder.finish();
+        }
         if let Some(error) = write_error {
             panic!("write strike CSV: {error}");
         }
@@ -429,7 +558,7 @@ fn play_scenarios(selected: &[Scenario], csv_path: &Path, output_dir: &Path, wat
 
 /// Plays one custom swing or gesture and prints what it did, with its
 /// frame-by-frame telemetry in `strike_custom_frames.csv`.
-fn play_custom(scenario: &Scenario, output_dir: &Path, watch: Watch) {
+fn play_custom(scenario: &Scenario, output_dir: &Path, watch: Watch, record: Option<&Path>) {
     let frames_path = output_dir.join("strike_custom_frames.csv");
     let mut frames = BufWriter::new(File::create(&frames_path).expect("create custom frames"));
     write_frame_header(&mut frames).expect("write frame header");
@@ -437,6 +566,7 @@ fn play_custom(scenario: &Scenario, output_dir: &Path, watch: Watch) {
     let mut last_positions = Vec::new();
     let body = watch.body(scenario);
     let mut watchdogs = rp::inspect::Watchdogs::new(&body);
+    let mut recorder = record.and_then(|path| Recorder::start(path, scenario.name, &body));
     let (world, result) = run_on(
         body,
         scenario,
@@ -445,6 +575,9 @@ fn play_custom(scenario: &Scenario, output_dir: &Path, watch: Watch) {
         |frame, input, world| {
             watch.report(scenario.name, frame, world, &last_positions);
             watchdogs.check(frame, world);
+            if let Some(recorder) = recorder.as_mut() {
+                recorder.frame(frame, world, watchdogs.trips());
+            }
             if write_error.is_none() {
                 write_error = write_frame(
                     &mut frames,
@@ -460,6 +593,9 @@ fn play_custom(scenario: &Scenario, output_dir: &Path, watch: Watch) {
     );
     if let Some(error) = write_error {
         panic!("write custom frames: {error}");
+    }
+    if let Some(recorder) = recorder {
+        recorder.finish();
     }
     println!("{}", scenario.play);
     println!("  {}", headline(&result));

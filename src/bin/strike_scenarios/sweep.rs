@@ -3,6 +3,7 @@
 //! all its runs against real life.
 
 use super::*;
+use diff::{borderline, run_numbers, RUNS_FILE};
 use rp::inspect::Watchdog;
 
 /// How far a sweep moves each swing along its path and across it, in body
@@ -58,14 +59,25 @@ pub(crate) fn flagged(
     flagged
 }
 
+/// The quick sweep's offsets along the path: 9 runs a scenario instead of
+/// 45, to see a change's direction in a fifth of the time before the whole
+/// sweep judges it.
+const QUICK_ALONG: [f64; 3] = [-0.005, 0.0, 0.005];
+
 /// Replays each scenario with its swing moved by every combination of
-/// `SWEEP_ALONG` and `SWEEP_ACROSS`, on all cores, and reports the spread.
-pub(crate) fn sweep(selected: &[Scenario], output_dir: &Path, custom: bool) {
+/// `SWEEP_ALONG` and `SWEEP_ACROSS` (with `quick`, `QUICK_ALONG` alone), on
+/// all cores, and reports the spread.
+pub(crate) fn sweep(selected: &[Scenario], output_dir: &Path, custom: bool, quick: bool) {
+    let (along, across): (&[f64], &[f64]) = if quick {
+        (&QUICK_ALONG, &[0.0])
+    } else {
+        (&SWEEP_ALONG, &SWEEP_ACROSS)
+    };
     let jobs: Vec<(usize, f64, f64, f64)> = (0..selected.len())
         .flat_map(|index| {
             SWEEP_STRENGTH.iter().flat_map(move |&strength| {
-                SWEEP_ALONG.iter().flat_map(move |&along| {
-                    SWEEP_ACROSS
+                along.iter().flat_map(move |&along| {
+                    across
                         .iter()
                         .map(move |&across| (index, along, across, strength))
                 })
@@ -157,15 +169,44 @@ pub(crate) fn sweep(selected: &[Scenario], output_dir: &Path, custom: bool) {
         .expect("write sweep CSV");
     }
 
+    write_runs(selected, &runs, output_dir);
+
     let mut report = String::new();
+    let settings = rp::scenarios::settings_used();
+    if !settings.is_empty() {
+        report.push_str(&format!(
+            "Settings changed from the defaults: {}
+",
+            settings.join(", ")
+        ));
+    }
+    if quick {
+        report.push_str("Quick sweep: 9 runs a scenario (3 along, 3 bone strengths); the full sweep judges a change.
+");
+    }
     let mut mismatches = Vec::new();
     let mut gaps = Vec::new();
+    let mut borderlines = Vec::new();
     for (index, scenario) in selected.iter().enumerate() {
         let mine: Vec<&SweepRun> = runs.iter().filter(|run| run.scenario == index).collect();
         report.push_str(&sweep_summary(scenario, &mine, custom));
         let results: Vec<&ScenarioResult> = mine.iter().map(|run| &run.result).collect();
         mismatches.extend(scenario.sweep_violations(&results));
         gaps.extend(scenario.sweep_gaps(&results));
+        for check in scenario.real {
+            let hits = results
+                .iter()
+                .filter(|result| check.outcome.happened(result))
+                .count();
+            if let Some(note) = borderline(check.often, hits, results.len()) {
+                borderlines.push(format!(
+                    "{}: {} ({}), {note}",
+                    scenario.name,
+                    check.outcome.describe(),
+                    check.often.name()
+                ));
+            }
+        }
     }
     if !custom && !gaps.is_empty() {
         report.push_str("Known gaps, still short of real life:\n");
@@ -185,6 +226,18 @@ pub(crate) fn sweep(selected: &[Scenario], output_dir: &Path, custom: bool) {
             }
         }
     }
+    if !custom && !borderlines.is_empty() {
+        report.push_str(
+            "Borderline, where a few runs more or fewer could carry a real-life check across its limit:
+",
+        );
+        for line in &borderlines {
+            report.push_str(&format!(
+                "  {line}
+"
+            ));
+        }
+    }
     report.push_str(&watchdog_summary(selected, &runs));
     let report_path = output_dir.join("strike_sweep_report.txt");
     fs::write(&report_path, &report).expect("write sweep report");
@@ -197,6 +250,55 @@ pub(crate) fn sweep(selected: &[Scenario], output_dir: &Path, custom: bool) {
             mismatches.len()
         );
     }
+}
+
+/// Writes every run's outcomes one to a line (`RUNS_FILE`), for `--diff` to
+/// set two sweeps side by side: whether it stayed in band and each band it
+/// missed, each real-life check, each watchdog, and the numbers that most
+/// often move (`run_numbers`).
+fn write_runs(selected: &[Scenario], runs: &[SweepRun], output_dir: &Path) {
+    let path = output_dir.join(RUNS_FILE);
+    let mut out = BufWriter::new(File::create(&path).expect("create sweep runs"));
+    let mut lines = vec![
+        format!("# settings: {}", rp::scenarios::settings_used().join(" ")),
+        "scenario,along,across,strength,kind,name,value".to_string(),
+    ];
+    for run in runs {
+        let scenario = &selected[run.scenario];
+        let key = format!(
+            "{},{:.4},{:.4},{:.2}",
+            scenario.name, run.along, run.across, run.strength
+        );
+        lines.push(format!(
+            "{key},band,in_band,{}",
+            u8::from(run.violations.is_empty())
+        ));
+        for violation in &run.violations {
+            lines.push(format!("{key},band,{},1", violated_metric(violation)));
+        }
+        for check in scenario.real {
+            lines.push(format!(
+                "{key},real,{},{}",
+                check.outcome.slug(),
+                u8::from(check.outcome.happened(&run.result))
+            ));
+        }
+        for watchdog in Watchdog::ALL {
+            let tripped = run.flagged.iter().any(|(kind, _, _)| *kind == watchdog);
+            lines.push(format!(
+                "{key},watchdog,{},{}",
+                watchdog.slug(),
+                u8::from(tripped)
+            ));
+        }
+        for (name, value) in run_numbers(&run.result) {
+            lines.push(format!("{key},number,{name},{value:.4}"));
+        }
+    }
+    for line in lines {
+        writeln!(out, "{line}").expect("write sweep runs");
+    }
+    println!("wrote {}", path.display());
 }
 
 /// For each scenario, how many runs each watchdog tripped in, with one to
@@ -413,4 +515,31 @@ fn violated_metric(violation: &str) -> &str {
         .split_once(": ")
         .map_or(violation, |(_, rest)| rest);
     after_name.split('=').next().unwrap_or(after_name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The sweep's unmoved swing is the swing as tuned, unmoved and on bones
+    /// of their own strength, not the first unmoved run it played: it was
+    /// the run at 0.8 of their strength, so the report could call the tuned
+    /// swing out of band when it was in, and the other way.
+    #[test]
+    fn the_unmoved_swing_is_the_tuned_one() {
+        let scenario = scenarios()[0];
+        let run = |strength: f64, violations: Vec<String>| SweepRun {
+            scenario: 0,
+            along: 0.0,
+            across: 0.0,
+            strength,
+            result: ScenarioResult::default(),
+            violations,
+            flagged: Vec::new(),
+        };
+        let weaker = run(0.8, vec!["bone_pieces_out=1".to_string()]);
+        let tuned = run(1.0, Vec::new());
+        let summary = sweep_summary(&scenario, &[&weaker, &tuned], false);
+        assert!(summary.contains("(unmoved swing in band)"), "{summary}");
+    }
 }

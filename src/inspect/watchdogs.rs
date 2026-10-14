@@ -28,8 +28,9 @@ pub enum Watchdog {
     ClosedPieceOut,
     /// A whole bone outside the skin.
     WholeBoneOut,
-    /// A whole joint whose two ends are more than a point spacing further
-    /// apart than at rest, with no rule having loosened it.
+    /// A whole joint whose second bone's end has moved more than a point
+    /// spacing from where it was built on the first, pulled open or pushed
+    /// aside, with no rule having loosened it.
     JointApart,
     /// Living flesh turned inside out: a triangle facing the other way from
     /// how it was built, by at least a quarter of its area. Less is a crease
@@ -48,6 +49,44 @@ pub enum Watchdog {
 }
 
 impl Watchdog {
+    /// Every watchdog, in the order reports list them.
+    pub const ALL: [Watchdog; 10] = [
+        Watchdog::NotFinite,
+        Watchdog::Flung,
+        Watchdog::BoneLeftBody,
+        Watchdog::ClosedPieceOut,
+        Watchdog::WholeBoneOut,
+        Watchdog::JointApart,
+        Watchdog::InsideOut,
+        Watchdog::Restless,
+        Watchdog::GuardLost,
+        Watchdog::BloodLedger,
+    ];
+
+    /// A short name for files, such as `whole_bone_out`.
+    pub fn slug(self) -> &'static str {
+        match self {
+            Watchdog::NotFinite => "not_finite",
+            Watchdog::Flung => "flung",
+            Watchdog::BoneLeftBody => "bone_left_body",
+            Watchdog::ClosedPieceOut => "closed_piece_out",
+            Watchdog::WholeBoneOut => "whole_bone_out",
+            Watchdog::JointApart => "joint_apart",
+            Watchdog::InsideOut => "inside_out",
+            Watchdog::Restless => "restless",
+            Watchdog::GuardLost => "guard_lost",
+            Watchdog::BloodLedger => "blood_ledger",
+        }
+    }
+
+    /// The watchdog with short name `slug`.
+    pub fn from_slug(slug: &str) -> Option<Watchdog> {
+        Watchdog::ALL
+            .iter()
+            .copied()
+            .find(|watchdog| watchdog.slug() == slug)
+    }
+
     pub fn describe(self) -> &'static str {
         match self {
             Watchdog::NotFinite => "not at a finite place",
@@ -79,7 +118,9 @@ impl Watchdog {
             }
             Watchdog::BoneLeftBody => format!("{value:.0} px from all flesh (limit {limit:.0})"),
             Watchdog::ClosedPieceOut | Watchdog::WholeBoneOut => "outside".to_string(),
-            Watchdog::JointApart => format!("ends {value:.0} px apart (limit {limit:.0})"),
+            Watchdog::JointApart => {
+                format!("its bone's end {value:.0} px off its place (limit {limit:.0})")
+            }
             Watchdog::InsideOut => {
                 format!("{:.0}% of its area turned over", value * 100.0)
             }
@@ -405,16 +446,18 @@ impl Watchdogs {
                 y: bone.a.y + (bone.b.y - bone.a.y) * t,
             };
             let (from, to) = (along(a, joint.t_a), along(b, joint.t_b));
-            let gap = span(from, to);
-            let limit = joint.rest + spacing;
-            if gap > limit {
+            // How far the second bone's end has moved from where it was built
+            // on the first, any way: a joint held as a hinge can be pushed
+            // off its place sideways as well as pulled open.
+            let slip = world.joint_slip(index).unwrap_or(0.0);
+            if slip > spacing {
                 self.trip(
                     Watchdog::JointApart,
                     Subject::Joint(index),
                     frame,
                     midpoint(from, to),
-                    gap,
-                    limit,
+                    slip,
+                    spacing,
                 );
             }
         }

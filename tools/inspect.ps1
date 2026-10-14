@@ -55,6 +55,8 @@ param(
     [switch]$Why,
     # Save the frame as shown to this PNG and exit.
     [string]$Shot = "",
+    # Settings changed from the defaults, "NAME=VALUE,NAME=VALUE" (strike_scenarios --set).
+    [string]$Set = "",
     [switch]$NoBuild
 )
 
@@ -74,6 +76,7 @@ if ($Frame -ge 0) { $arguments += @("--frame", "$Frame") }
 if ($Overlays) { $arguments += @("--overlays", $Overlays) }
 if ($Select) { $arguments += @("--select", $Select) }
 if ($Why) { $arguments += "--why" }
+if ($Set) { $arguments += @("--set", $Set) }
 if ($Shot) {
     $path = if ([IO.Path]::IsPathRooted($Shot)) { $Shot } else { Join-Path $repoRoot $Shot }
     $arguments += @("--shot", $path)

@@ -97,7 +97,9 @@ function Invoke-Diagnostics([string]$Tree, [string]$TargetDir, [string]$Results,
 
 # The commit's side, built once in a worktree and cached by commit.
 $baseTree = Get-CommitWorktree $sha
-$baseSweeps = $Sweep -and (Test-SourceHas $baseTree "src\bin\strike_scenarios.rs" "--sweep")
+# The scenario tool was one file until it became a folder (d6bddae).
+$baseSweeps = $Sweep -and ((Test-SourceHas $baseTree "src\bin\strike_scenarios.rs" "--sweep") -or
+    (Test-SourceHas $baseTree "src\bin\strike_scenarios\main.rs" "--sweep"))
 $baseDone = Join-Path $baseResults "done.txt"
 $haveBase = (Test-Path -LiteralPath $baseDone) -and
     ((-not $baseSweeps) -or (Test-Path -LiteralPath (Join-Path $baseResults "strike_sweep.csv")))
@@ -224,6 +226,21 @@ if ($Sweep) {
             $values = @($Rows | ForEach-Object { [double]$_.$Column } | Sort-Object)
             if (-not $values) { return "-" }
             return $values[[int][Math]::Floor($values.Count / 2)]
+        }
+        # With both sides' runs written one to a line, the scenario tool sets
+        # them side by side with how likely chance is to move each as far.
+        $baseRunsFile = Join-Path $baseResults "strike_sweep_runs.csv"
+        $currentRunsFile = Join-Path $currentResults "strike_sweep_runs.csv"
+        if ((Test-Path -LiteralPath $baseRunsFile) -and (Test-Path -LiteralPath $currentRunsFile)) {
+            $diff = & (Join-Path $repoRoot "target\release\strike_scenarios.exe") (Join-Path $Out "strike_scenarios.csv") --diff $baseResults $currentResults 2>&1
+            Add-Line "Sweep, every change with how sure it is (sweep_diff.txt):" -Headline
+            foreach ($line in $diff | Where-Object { $_ -notmatch "^wrote " }) {
+                Add-Line "  $line" -Headline
+            }
+            Add-Line "" -Headline
+            Add-Line "Sweep, runs in band and medians:" -Headline
+        } else {
+            Add-Line "Sweep: $short writes no strike_sweep_runs.csv, so only bands and medians compare:" -Headline
         }
         foreach ($name in (@($baseRuns.scenario) + @($currentRuns.scenario) | Select-Object -Unique)) {
             $b = @($baseRuns | Where-Object { $_.scenario -eq $name })
