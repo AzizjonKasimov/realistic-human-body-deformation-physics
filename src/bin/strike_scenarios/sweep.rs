@@ -257,6 +257,7 @@ fn write_runs(selected: &[Scenario], runs: &[SweepRun], output_dir: &Path) {
     let mut out = BufWriter::new(File::create(&path).expect("create sweep runs"));
     let mut lines = vec![
         format!("# settings: {}", rp::scenarios::settings_used().join(" ")),
+        format!("# trying: {}", env::var("RP_TRY").unwrap_or_default()),
         "scenario,along,across,strength,kind,name,value".to_string(),
     ];
     for run in runs {

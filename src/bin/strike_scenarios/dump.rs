@@ -13,6 +13,8 @@ pub(crate) struct Dump {
     pub(crate) joints: bool,
     pub(crate) vessels: bool,
     pub(crate) ties: bool,
+    /// The flesh held to this bone, point by point.
+    pub(crate) flesh: Option<usize>,
     pub(crate) frame: i32,
 }
 
@@ -38,6 +40,12 @@ impl Dump {
                 "joints" => dump.joints = true,
                 "vessels" => dump.vessels = true,
                 "ties" => dump.ties = true,
+                flesh if flesh.starts_with("flesh=") => {
+                    let bone = &flesh["flesh=".len()..];
+                    dump.flesh = Some(bone.parse().map_err(|_| {
+                        format!("--dump flesh=N takes a bone's number, got `{flesh}`")
+                    })?);
+                }
                 "all" => {
                     dump.bones = true;
                     dump.joints = true;
@@ -46,7 +54,7 @@ impl Dump {
                 }
                 other => {
                     return Err(format!(
-                        "--dump takes bones, joints, vessels, ties, or all, got `{other}`"
+                        "--dump takes bones, joints, vessels, ties, flesh=N, or all, got `{other}`"
                     ))
                 }
             }
@@ -117,6 +125,9 @@ impl Dump {
                 );
             }
         }
+        if let Some(bone) = self.flesh {
+            report_flesh(world, bone, &at);
+        }
         if self.ties {
             // Each bone's muscle ties: how many, how many torn, and how far
             // the flesh of the rest has slid off its place on the bone.
@@ -152,5 +163,69 @@ impl Dump {
                 );
             }
         }
+    }
+}
+
+/// Each point of flesh held to `bone` (its place on the skeleton mostly on
+/// it, or a muscle tie to it): where it is, how far from its place, what
+/// ties it to bone, and the points the fat ties it to across the layers.
+fn report_flesh(world: &rp::World, bone: usize, at: &dyn Fn(rp::Vec2) -> String) {
+    println!(
+        "  flesh held to bone {bone} ({}):",
+        rp::inspect::bone_name(world, bone)
+    );
+    for (index, point) in world.points().iter().enumerate() {
+        let binding = point.posture;
+        let bound = (0..2).any(|slot| binding.bones[slot] == bone && binding.weights[slot] >= 0.5);
+        let ties: Vec<String> = world
+            .bone_attachments()
+            .iter()
+            .filter(|tie| tie.point == index)
+            .map(|tie| format!("{}{}", tie.bone, if tie.broken { " torn" } else { "" }))
+            .collect();
+        let tied = world
+            .bone_attachments()
+            .iter()
+            .any(|tie| tie.point == index && tie.bone == bone);
+        if !bound && !tied {
+            continue;
+        }
+        let fat: Vec<String> = world
+            .attachments()
+            .iter()
+            .filter(|tie| tie.skin_point == index || tie.muscle_point == index)
+            .map(|tie| {
+                let other = if tie.skin_point == index {
+                    tie.muscle_point
+                } else {
+                    tie.skin_point
+                };
+                format!("{other}{}", if tie.broken { " torn" } else { "" })
+            })
+            .collect();
+        let off = world
+            .posture_target(index)
+            .map_or("-".to_string(), |place| {
+                format!(
+                    "{:.1}",
+                    (point.position.x - place.x).hypot(point.position.y - place.y)
+                )
+            });
+        println!(
+            "    point {index} {:?}{} at {} {off} px off its place; tied to bone {}; fat to {}",
+            point.layer,
+            if point.is_ghost() { ", a ghost" } else { "" },
+            at(point.position),
+            if ties.is_empty() {
+                "-".to_string()
+            } else {
+                ties.join(", ")
+            },
+            if fat.is_empty() {
+                "-".to_string()
+            } else {
+                fat.join(", ")
+            },
+        );
     }
 }

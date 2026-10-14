@@ -160,6 +160,8 @@ fn stars(p: f64) -> &'static str {
 /// One sweep's runs as its file holds them.
 struct Runs {
     settings: String,
+    /// The experiments it tried (`RP_TRY`).
+    trying: String,
     /// For each scenario, its runs by their variant (along, across, strength).
     variants: BTreeMap<String, BTreeSet<String>>,
     /// For each scenario, kind, and name, each run's value by its variant.
@@ -182,12 +184,17 @@ impl Runs {
     fn parse(text: &str) -> Result<Runs, String> {
         let mut runs = Runs {
             settings: String::new(),
+            trying: String::new(),
             variants: BTreeMap::new(),
             values: HashMap::new(),
         };
         for line in text.lines() {
             if let Some(settings) = line.strip_prefix("# settings:") {
                 runs.settings = settings.trim().to_string();
+                continue;
+            }
+            if let Some(tried) = line.strip_prefix("# trying:") {
+                runs.trying = tried.trim().to_string();
                 continue;
             }
             if line.starts_with('#') || line.starts_with("scenario,") || line.is_empty() {
@@ -262,21 +269,28 @@ fn median(mut values: Vec<f64>) -> f64 {
 /// the numbers that did not move too.
 pub(crate) fn diff_sweeps(a: &Path, b: &Path, output: &Path) -> Result<(), String> {
     let (left, right) = (Runs::read(a)?, Runs::read(b)?);
+    // What each side changed: its settings, and the experiments it tried.
+    let changed = |runs: &Runs| {
+        let mut parts = Vec::new();
+        if !runs.settings.is_empty() {
+            parts.push(runs.settings.clone());
+        }
+        if !runs.trying.is_empty() {
+            parts.push(format!("trying {}", runs.trying));
+        }
+        if parts.is_empty() {
+            "defaults".to_string()
+        } else {
+            parts.join("; ")
+        }
+    };
     let mut report = String::new();
     report.push_str(&format!(
         "Sweep A: {} ({})\nSweep B: {} ({})\n",
         a.display(),
-        if left.settings.is_empty() {
-            "defaults"
-        } else {
-            &left.settings
-        },
+        changed(&left),
         b.display(),
-        if right.settings.is_empty() {
-            "defaults"
-        } else {
-            &right.settings
-        },
+        changed(&right),
     ));
     report.push_str(
         "Counts are runs out of each sweep's runs; * a difference chance gives under 5% of the time, ** under 1% (Fisher's exact test; numbers by the sign test on the same runs).\n\n",

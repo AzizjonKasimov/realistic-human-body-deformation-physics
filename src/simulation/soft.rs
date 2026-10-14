@@ -182,13 +182,29 @@ impl World {
             self.timed("attachments", Self::judge_attachments);
             self.timed("bone joints", Self::judge_bone_joints);
             if self.materials.warm_starting {
-                self.timed("warm start", |world| world.warm_start_soft(h));
+                self.warm_start_soft(h);
             } else {
                 self.forget_soft_impulses();
             }
             for pass in 0..self.materials.contact_passes.max(1) {
-                self.timed("soft solve", |world| world.solve_soft(h));
-                self.timed("stance", |world| world.solve_stance(h, pass == 0));
+                // The tissue's soft constraints, then how the body holds its
+                // stance (`stance.rs`) and its joints, each kind a phase of its
+                // own. A joint's muscles come before its limit and its hold on
+                // the bones, as Box2D orders a joint's rows. The tissue's soft
+                // hold on the skeleton, a spring of a hertz or two, is taken
+                // on the substep's first pass only: it moves a point by a hair
+                // a pass, and the warm start carries what it gave from one
+                // substep to the next.
+                self.timed("fibers", |world| world.solve_soft_springs(h));
+                self.timed("fat", |world| world.solve_soft_attachments(h));
+                self.timed("muscle ties", |world| world.solve_soft_bone_ties(h));
+                self.timed("areas", |world| world.solve_soft_areas(h));
+                if pass == 0 {
+                    self.timed("posture", |world| world.solve_posture(h));
+                }
+                self.timed("hip hold", |world| world.solve_hip_hold(h));
+                self.timed("joint muscles", |world| world.solve_joint_drives(h));
+                self.timed("joints", |world| world.solve_soft_joints(h));
                 self.timed("tool contact", Self::solve_tool_contact);
                 self.timed("bones", Self::solve_bones);
                 self.timed("fragment-bone", Self::solve_bone_fragment_bone_contacts);
@@ -371,8 +387,24 @@ impl World {
     }
 
     /// Gives every soft constraint the impulse it ended the last substep with,
-    /// as Box2D's warm start does, so a held load is carried from the start.
+    /// as Box2D's warm start does, so a held load is carried from the start:
+    /// each kind a phase of its own, so a trace names which carried what.
     fn warm_start_soft(&mut self, h: f64) {
+        self.timed("warm start: fibers", |world| world.warm_start_fibers(h));
+        self.timed("warm start: areas", |world| world.warm_start_areas(h));
+        self.timed("warm start: fat", |world| world.warm_start_fat(h));
+        self.timed("warm start: muscle ties", |world| {
+            world.warm_start_muscle_ties(h)
+        });
+        self.timed("warm start: posture", |world| world.warm_start_posture(h));
+        self.timed("warm start: hip hold", |world| world.warm_start_hip_hold(h));
+        self.timed("warm start: joint muscles", |world| {
+            world.warm_start_joint_drives(h)
+        });
+        self.timed("warm start: joints", |world| world.warm_start_joints(h));
+    }
+
+    fn warm_start_fibers(&mut self, h: f64) {
         for index in 0..self.springs.len() {
             let spring = self.springs[index];
             if spring.broken || spring.impulse == 0.0 {
@@ -389,6 +421,9 @@ impl World {
             speed_up(&mut self.points[spring.a], scale(push, -wa), h);
             speed_up(&mut self.points[spring.b], scale(push, wb), h);
         }
+    }
+
+    fn warm_start_areas(&mut self, h: f64) {
         for index in 0..self.areas.len() {
             let area = self.areas[index];
             if area.impulse == 0.0 || !self.area_alive(&area) {
@@ -404,6 +439,9 @@ impl World {
                 );
             }
         }
+    }
+
+    fn warm_start_fat(&mut self, h: f64) {
         for index in 0..self.attachments.len() {
             let attachment = self.attachments[index];
             if attachment.broken || attachment.impulse == 0.0 {
@@ -430,6 +468,9 @@ impl World {
                 h,
             );
         }
+    }
+
+    fn warm_start_muscle_ties(&mut self, h: f64) {
         for index in 0..self.bone_attachments.len() {
             let attachment = self.bone_attachments[index];
             if attachment.broken
@@ -440,9 +481,9 @@ impl World {
             }
             self.apply_bone_tie(index, attachment.impulse, h);
         }
-        self.warm_start_posture(h);
-        self.warm_start_hip_hold(h);
-        self.warm_start_joint_drives(h);
+    }
+
+    fn warm_start_joints(&mut self, h: f64) {
         for index in 0..self.bone_joints.len() {
             let joint = self.bone_joints[index];
             let Some(hold) = self.joint_hold(&joint) else {
@@ -520,29 +561,6 @@ impl World {
                 point.posture_impulse = Vec2::default();
             }
         }
-    }
-
-    /// One pass over the tissue's soft constraints.
-    fn solve_soft(&mut self, h: f64) {
-        self.solve_soft_springs(h);
-        self.solve_soft_attachments(h);
-        self.solve_soft_bone_ties(h);
-        self.solve_soft_areas(h);
-    }
-
-    /// One pass over how the body holds its stance (`stance.rs`) and its
-    /// joints. A joint's muscles come before its limit and its hold on the
-    /// bones, as Box2D orders a joint's rows. The tissue's soft hold on the
-    /// skeleton, a spring of a hertz or two, is taken on the substep's first
-    /// pass only: it moves a point by a hair a pass, and the warm start
-    /// carries what it gave from one substep to the next.
-    fn solve_stance(&mut self, h: f64, first_pass: bool) {
-        if first_pass {
-            self.solve_posture(h);
-        }
-        self.solve_hip_hold(h);
-        self.solve_joint_drives(h);
-        self.solve_soft_joints(h);
     }
 
     /// How far whole joint `joint` has let its second bone's anchor move
