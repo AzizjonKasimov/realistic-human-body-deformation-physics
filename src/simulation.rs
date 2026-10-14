@@ -8,6 +8,7 @@ mod bruises;
 mod cover;
 mod cuts;
 mod grid;
+mod journal;
 mod motion;
 mod outline;
 mod phases;
@@ -22,6 +23,7 @@ pub use body::{
 };
 pub use cover::Cover;
 pub use cuts::{OpenedCut, Piece, TriangleCut};
+pub use journal::{Actor, Event, EventKind, Journal, Measure, StepNote, Subject};
 pub use motion::MotionSnapshot;
 pub use phases::{PhaseClock, PhaseTime, PhaseTimes, Traced, TracedStage};
 pub use stance::{HipHold, JointDrive, Limb, PostureBinding};
@@ -1025,6 +1027,8 @@ pub struct BoneSegment {
     /// when no one way.
     pub break_t: f64,
     pub break_normal: Vec2,
+    /// What put that load on it, for the journal (journal.rs).
+    pub break_by: Actor,
     pub angular_velocity: f64,
     pub fractured: bool,
     pub broken_start: bool,
@@ -1070,6 +1074,7 @@ impl Default for BoneSegment {
             break_load: 0.0,
             break_t: 0.5,
             break_normal: Vec2::default(),
+            break_by: Actor::Tissue,
             angular_velocity: 0.0,
             fractured: false,
             broken_start: false,
@@ -1796,10 +1801,15 @@ pub struct World {
     /// ([`World::time_phases`]), and what it measured.
     phase_clock: Option<PhaseClock>,
     phase_times: PhaseTimes,
-    /// What `strike_scenarios --trace` follows through each phase, and what
-    /// each phase of the last step did to it (`phases.rs`).
-    traced: Option<Traced>,
+    /// What `strike_scenarios --trace` and `--why` follow through each
+    /// phase, what each phase of the last step did to them, and how far
+    /// through the step the phase being run is (`phases.rs`).
+    traced: Vec<Traced>,
     traced_stages: Vec<TracedStage>,
+    trace_time: f64,
+    /// What has happened to the body, when a journal is kept
+    /// ([`World::keep_journal`]).
+    journal: Option<Journal>,
     /// The spatial grid the contact passes rebuild for each search, kept so
     /// its arrays are reused.
     grid: grid::SpatialGrid,
@@ -1867,8 +1877,10 @@ impl World {
             topology_version: 0,
             phase_clock: None,
             phase_times: PhaseTimes::default(),
-            traced: None,
+            traced: Vec::new(),
             traced_stages: Vec::new(),
+            trace_time: 0.0,
+            journal: None,
             grid: grid::SpatialGrid::default(),
             solver_dt: materials.fixed_dt,
             solver_progress: 1.0,
@@ -1887,6 +1899,23 @@ impl World {
     /// Lays the floor at `floor_y` pixels down the window.
     pub fn set_floor_y(&mut self, floor_y: f64) {
         self.floor_y = floor_y;
+    }
+
+    /// Sets every point and bone moving at `velocity`, in pixels per second,
+    /// as though the whole body were thrown.
+    pub fn set_body_velocity(&mut self, velocity: Vec2) {
+        let travel = scale(velocity, self.materials.fixed_dt);
+        for point in &mut self.points {
+            if !point.pinned {
+                point.previous = subtract(point.position, travel);
+            }
+        }
+        for bone in &mut self.bones {
+            if !bone.pinned {
+                bone.previous_a = subtract(bone.a, travel);
+                bone.previous_b = subtract(bone.b, travel);
+            }
+        }
     }
 
     /// The ends of the pelvis held up where the body stands.
@@ -2344,6 +2373,7 @@ impl World {
             blood_turgor_scale: self.blood_turgor_scale_internal(),
             ..ContactDebug::default()
         };
+        self.begin_journal_step();
 
         self.timed("exposure", Self::update_exposure);
         self.timed("predict", |world| world.predict_step(dt, width, floor_y));
@@ -2354,7 +2384,9 @@ impl World {
         });
         self.timed("wounds", |world| world.update_wounds(dt));
         self.fresh_skin_cuts.clear();
+        self.acting(Actor::Tool);
         self.timed("tool sweep", |world| world.move_tool(input, dt));
+        self.acting(Actor::Tissue);
         self.timed("organs", |world| {
             world.update_organ_anchors();
             world.update_cavities(dt);
@@ -2394,6 +2426,7 @@ impl World {
                 .max(world.free_fragment_count() as i32);
             world.debug.sleeping_fragments = world.sleeping_fragment_count() as i32;
         });
+        self.end_journal_step();
     }
 
     pub fn triangle_alive(&self, triangle: &Triangle) -> bool {
@@ -2776,6 +2809,15 @@ impl World {
             max_contusion = max_contusion.max(point.contusion);
         }
         self.stats.internal_bleeding += count;
+        self.note(
+            EventKind::BledUnderSkin,
+            Subject::Nothing,
+            center,
+            None,
+            Measure::Count,
+            f64::from(count),
+            0.0,
+        );
         if bruised {
             self.stats.contusion_events += 1;
             self.debug.contusion_events += 1;
@@ -3061,6 +3103,21 @@ impl World {
             self.debug.wound_reopens += 1;
         } else if !was_active {
             self.stats.opened_wounds += 1;
+        }
+        if reopening || !was_active {
+            self.note(
+                if reopening {
+                    EventKind::WoundReopened
+                } else {
+                    EventKind::WoundOpened
+                },
+                Subject::Wound(index),
+                merged_position,
+                None,
+                Measure::Pressure,
+                clamped_pressure,
+                0.0,
+            );
         }
         true
     }
@@ -3359,8 +3416,19 @@ impl World {
             );
             wound.age = wound.age.min(0.40);
             wound.active = true;
+            let at = wound.position;
             self.stats.wound_reopens += 1;
             self.debug.wound_reopens += 1;
+            Journal::note(
+                &mut self.journal,
+                EventKind::WoundReopened,
+                Subject::Wound(wound_index),
+                at,
+                None,
+                Measure::Load,
+                threshold * (1.0 + severity),
+                threshold,
+            );
             self.debug.max_wound_pressure = self.debug.max_wound_pressure.max(wound.pressure);
             self.debug.max_wound_clot = self.debug.max_wound_clot.max(wound.clot);
         }
@@ -3706,6 +3774,15 @@ impl World {
             );
             self.stats.cavity_ruptures += 1;
             self.debug.cavity_ruptures += 1;
+            self.note(
+                EventKind::CavityRuptured,
+                Subject::Nothing,
+                position,
+                Some(Actor::Pressure),
+                Measure::Pressure,
+                pressure,
+                self.materials.cavity_rupture_pressure,
+            );
         }
     }
 
@@ -3797,6 +3874,15 @@ impl World {
                 ) {
                     self.stats.contusion_events += 1;
                     self.debug.contusion_events += 1;
+                    self.note(
+                        EventKind::Bruised,
+                        Subject::Point(point_index),
+                        self.points[point_index].position,
+                        Some(Actor::Pressure),
+                        Measure::Load,
+                        contusion_load,
+                        self.materials.contusion_load_threshold,
+                    );
                     self.debug.max_contusion = self
                         .debug
                         .max_contusion
@@ -3898,6 +3984,19 @@ impl World {
                     .max(load_damage.max(fragment_damage));
                 self.stats.organ_damage_events += 1;
                 self.debug.organ_damage_events += 1;
+                self.note(
+                    EventKind::OrganHurt,
+                    Subject::Organ(index),
+                    organ.center,
+                    Some(if pressure_damage >= load_damage.max(fragment_damage) {
+                        Actor::Pressure
+                    } else {
+                        Actor::Tissue
+                    }),
+                    Measure::Damage,
+                    self.organs[index].damage,
+                    self.materials.organ_rupture_damage,
+                );
             }
             self.debug.max_organ_damage =
                 self.debug.max_organ_damage.max(self.organs[index].damage);
@@ -3955,6 +4054,15 @@ impl World {
         );
         self.stats.organ_ruptures += 1;
         self.debug.organ_ruptures += 1;
+        self.note(
+            EventKind::OrganRuptured,
+            Subject::Nothing,
+            position,
+            None,
+            Measure::Damage,
+            damage,
+            self.materials.organ_rupture_damage,
+        );
     }
 
     fn organ_cavity_pressure(&self, organ: OrganRegion) -> f64 {
@@ -4108,6 +4216,15 @@ impl World {
             self.debug.organ_damage_events += 1;
             self.stats.rib_organ_punctures += 1;
             self.debug.rib_organ_punctures += 1;
+            self.note(
+                EventKind::OrganPierced,
+                Subject::Organ(index),
+                path_point,
+                None,
+                Measure::Load,
+                drive,
+                threshold,
+            );
             self.debug.max_organ_damage = self.debug.max_organ_damage.max(new_damage);
 
             if new_damage >= self.materials.organ_rupture_damage
@@ -4211,10 +4328,11 @@ impl World {
                 wound_pressure,
                 wound_radius,
                 1.10 + severity * 0.12,
+                (drive, threshold),
             ));
         }
 
-        for (index, position, direction, pressure, radius, depth) in events {
+        for (index, position, direction, pressure, radius, depth, (drive, threshold)) in events {
             if self.open_wound_of_kind(
                 position,
                 direction,
@@ -4230,6 +4348,15 @@ impl World {
                 self.stats.vessel_lacerations += 1;
                 self.debug.vessel_lacerations += 1;
                 self.debug.max_wound_pressure = self.debug.max_wound_pressure.max(pressure);
+                self.note(
+                    EventKind::ArteryCut,
+                    Subject::Vessel(index),
+                    position,
+                    Some(Actor::Tool),
+                    Measure::Load,
+                    drive,
+                    threshold,
+                );
             }
         }
     }
@@ -4325,10 +4452,11 @@ impl World {
                 wound_pressure,
                 wound_radius,
                 1.04 + severity * 0.14,
+                drive,
             ));
         }
 
-        for (index, position, direction, pressure, radius, depth) in events {
+        for (index, position, direction, pressure, radius, depth, drive) in events {
             if self.open_wound_of_kind(
                 position,
                 direction,
@@ -4346,6 +4474,15 @@ impl World {
                 self.debug.vessel_lacerations += 1;
                 self.debug.fragment_vessel_lacerations += 1;
                 self.debug.max_wound_pressure = self.debug.max_wound_pressure.max(pressure);
+                self.note(
+                    EventKind::ArteryCut,
+                    Subject::Vessel(index),
+                    position,
+                    None,
+                    Measure::Load,
+                    drive,
+                    threshold,
+                );
             }
         }
     }
@@ -4405,6 +4542,15 @@ impl World {
             self.debug.organ_damage_events += 1;
             self.stats.organ_penetrations += 1;
             self.debug.organ_penetrations += 1;
+            self.note(
+                EventKind::OrganPierced,
+                Subject::Organ(index),
+                contact.tool_point,
+                Some(Actor::Tool),
+                Measure::Load,
+                drive,
+                threshold,
+            );
             self.debug.max_organ_damage = self.debug.max_organ_damage.max(new_damage);
 
             if new_damage >= self.materials.organ_rupture_damage
@@ -4479,6 +4625,15 @@ impl World {
             if fatigue_delta > 0.0048 {
                 self.stats.tissue_fatigue_events += 1;
                 self.debug.tissue_fatigue_events += 1;
+                self.note(
+                    EventKind::Tired,
+                    Subject::Spring(i),
+                    midpoint(a.position, b.position),
+                    None,
+                    Measure::Stretch,
+                    body_stretch,
+                    self.materials.tissue_fatigue_stretch_threshold,
+                );
             }
             self.debug.max_tissue_fatigue = self.debug.max_tissue_fatigue.max(fatigue);
 
@@ -4506,6 +4661,15 @@ impl World {
                         ((new_rest - reference) / reference).abs().clamp(0.0, 1.0);
                     self.stats.tissue_plastic_events += 1;
                     self.debug.tissue_plastic_events += 1;
+                    self.note(
+                        EventKind::Set,
+                        Subject::Spring(i),
+                        midpoint(a.position, b.position),
+                        None,
+                        Measure::Stretch,
+                        body_stretch,
+                        self.materials.tissue_plastic_stretch_threshold,
+                    );
                     stretch_ratio = len / new_rest.max(EPSILON);
                     body_stretch = stretch_ratio / spring.prestretch.max(EPSILON);
                 }
@@ -4554,6 +4718,24 @@ impl World {
                     x: -tangent.y,
                     y: tangent.x - 0.35,
                 };
+                let (measure, value, limit) = if body_stretch > tear_stretch {
+                    (Measure::Stretch, body_stretch, tear_stretch)
+                } else {
+                    (Measure::Load, endpoint_load, tear_impulse)
+                };
+                self.note(
+                    if spring.layer == TissueLayer::Skin {
+                        EventKind::SkinTorn
+                    } else {
+                        EventKind::MuscleTorn
+                    },
+                    Subject::Spring(i),
+                    midpoint,
+                    None,
+                    measure,
+                    value,
+                    limit,
+                );
                 self.break_spring(i);
                 // Tissue a fast blow tears by stretching alone splits open
                 // across the fiber once the solver is done, as a laceration
@@ -4722,6 +4904,15 @@ impl World {
             self.stats.broken_skin += 1;
             self.stats.tear_propagations += 1;
             self.debug.tear_propagations += 1;
+            self.note(
+                EventKind::TearRanOn,
+                Subject::Spring(index),
+                midpoint(a.position, b.position),
+                None,
+                Measure::Load,
+                endpoint_load,
+                self.materials.tear_propagation_load_threshold,
+            );
             self.bump_point_exposure_load(spring.a, 1.0, endpoint_load * 0.22);
             self.bump_point_exposure_load(spring.b, 1.0, endpoint_load * 0.22);
             events.push((midpoint(a.position, b.position), normal, endpoint_load));
@@ -4864,6 +5055,15 @@ impl World {
             self.stats.broken_attachments += 1;
             self.stats.skin_flap_detachments += 1;
             self.debug.skin_flap_detachments += 1;
+            self.note(
+                EventKind::SkinFlap,
+                Subject::SkinTie(index),
+                midpoint(skin.position, muscle.position),
+                None,
+                Measure::Load,
+                load,
+                load_threshold,
+            );
             self.bump_point_exposure_load(attachment.skin_point, 1.0, load * 0.18);
             self.bump_point_exposure_load(attachment.muscle_point, 1.0, load * 0.24);
             events.push((midpoint(skin.position, muscle.position), normal, load));
@@ -4900,6 +5100,19 @@ impl World {
             {
                 self.attachments[i].broken = true;
                 self.stats.broken_attachments += 1;
+                self.note(
+                    EventKind::SkinLoosened,
+                    Subject::SkinTie(i),
+                    midpoint(skin.position, muscle.position),
+                    None,
+                    Measure::Shear,
+                    shear,
+                    if shear > self.materials.fat_tear_shear {
+                        self.materials.fat_tear_shear
+                    } else {
+                        self.materials.fat_loaded_tear_shear
+                    },
+                );
                 self.bump_point_exposure_load(attachment.skin_point, 1.0, impulse * 0.2);
                 self.bump_point_exposure_load(attachment.muscle_point, 1.0, impulse * 0.2);
                 events.push((
@@ -4955,6 +5168,7 @@ impl World {
                     transfer * self.bending_share(attachment.bone, attachment.t),
                     attachment.t,
                     normalized(subtract(raw_anchor, point.position), Vec2::default()),
+                    Actor::Flesh,
                 );
             }
             let current_distance = distance(point.position, raw_anchor);
@@ -4980,6 +5194,27 @@ impl World {
             if torn_loose {
                 self.bone_attachments[i].broken = true;
                 self.stats.broken_bone_attachments += 1;
+                let (measure, value, limit) = if attachment.holds_piece {
+                    if stretch_ratio > PIECE_HOLD_BREAK_STRETCH {
+                        (Measure::Stretch, stretch_ratio, PIECE_HOLD_BREAK_STRETCH)
+                    } else {
+                        // The flesh holding the piece was torn away.
+                        (Measure::None, 0.0, 0.0)
+                    }
+                } else if slip > self.materials.bone_tie_tear_mm {
+                    (Measure::Slip, slip, self.materials.bone_tie_tear_mm)
+                } else {
+                    (Measure::Slip, slip, self.materials.bone_tie_loaded_tear_mm)
+                };
+                self.note(
+                    EventKind::MuscleOffBone,
+                    Subject::BoneTie(i),
+                    midpoint(point.position, raw_anchor),
+                    None,
+                    measure,
+                    value,
+                    limit,
+                );
                 self.bump_point_exposure_load(attachment.point, 0.85, impulse * 0.2);
                 events.push((
                     midpoint(point.position, raw_anchor),
@@ -5045,6 +5280,19 @@ impl World {
                 joint.broken = true;
                 self.stats.broken_bone_joints += 1;
                 self.bone_joints[i] = joint;
+                self.note(
+                    EventKind::JointTorn,
+                    Subject::Joint(i),
+                    midpoint(anchor_a, anchor_b),
+                    None,
+                    Measure::Stretch,
+                    stretch_ratio,
+                    if stretch_ratio > self.materials.bone_joint_break_stretch {
+                        self.materials.bone_joint_break_stretch
+                    } else {
+                        1.35
+                    },
+                );
                 continue;
             }
             if overextension > self.materials.bone_joint_angular_break
@@ -5054,6 +5302,19 @@ impl World {
                 joint.broken = true;
                 self.stats.broken_bone_joints += 1;
                 self.bone_joints[i] = joint;
+                self.note(
+                    EventKind::JointTorn,
+                    Subject::Joint(i),
+                    midpoint(anchor_a, anchor_b),
+                    None,
+                    Measure::Overbend,
+                    overextension,
+                    if overextension > self.materials.bone_joint_angular_break {
+                        self.materials.bone_joint_angular_break
+                    } else {
+                        self.materials.bone_joint_angular_break * 0.45
+                    },
+                );
                 continue;
             }
             let stretch_subluxation = ((stretch_ratio
@@ -5095,6 +5356,36 @@ impl World {
                     self.stats.bone_joint_subluxations += 1;
                     self.debug.bone_joint_subluxations += 1;
                     let center = midpoint(anchor_a, anchor_b);
+                    let (measure, value, limit) = if angular_subluxation >= stretch_subluxation
+                        && angular_subluxation >= impulse_subluxation
+                    {
+                        (
+                            Measure::Overbend,
+                            overextension,
+                            self.materials.bone_joint_subluxation_angular,
+                        )
+                    } else if stretch_subluxation >= impulse_subluxation {
+                        (
+                            Measure::Stretch,
+                            stretch_ratio,
+                            self.materials.bone_joint_subluxation_stretch,
+                        )
+                    } else {
+                        (
+                            Measure::Load,
+                            impulse,
+                            self.materials.bone_joint_subluxation_impulse,
+                        )
+                    };
+                    self.note(
+                        EventKind::JointSlipped,
+                        Subject::Joint(i),
+                        center,
+                        None,
+                        measure,
+                        value,
+                        limit,
+                    );
                     let event_load = impulse
                         .max(self.materials.bone_joint_subluxation_impulse * 0.65)
                         * (0.55 + subluxation_drive.clamp(0.0, 1.0) * 0.65);
@@ -5565,6 +5856,7 @@ impl World {
                     fragment_bending,
                     closest.t_a,
                     Vec2::default(),
+                    Actor::Bone(bone_index),
                 );
                 let support_bending =
                     contact_load * 0.54 * self.bending_share(bone_index, closest.t_b);
@@ -5572,6 +5864,7 @@ impl World {
                     support_bending,
                     closest.t_b,
                     Vec2::default(),
+                    Actor::Bone(fragment_index),
                 );
                 self.debug.fragment_bone_contacts += 1;
                 if resting_contact {
@@ -5816,6 +6109,7 @@ impl World {
             return;
         }
         self.debug.max_fragment_impulse = self.debug.max_fragment_impulse.max(impulse);
+        let acted = self.acting(Actor::Bone(bone_index));
         let tip_normal = normalized(normal, Vec2 { x: 0.0, y: -1.0 });
         if bone.kind == BoneKind::Rib {
             self.puncture_organs_from_rib_tip(bone, tip, previous_tip, tip_normal, impulse, radius);
@@ -5930,6 +6224,15 @@ impl World {
                 let puncture_threshold =
                     self.materials.fragment_skin_puncture_impulse * (1.0 - exposed * 0.18);
                 if puncture_drive > puncture_threshold {
+                    self.note(
+                        EventKind::SkinPiercedByBone,
+                        Subject::Spring(i),
+                        mid,
+                        None,
+                        Measure::Load,
+                        puncture_drive,
+                        puncture_threshold,
+                    );
                     self.break_spring(i);
                     self.springs[i].stress = 1.0;
                     self.bump_point_exposure_load(spring.a, 1.0, puncture_drive * 0.42);
@@ -5963,6 +6266,15 @@ impl World {
             if impulse * contact <= threshold {
                 continue;
             }
+            self.note(
+                EventKind::FleshTornByBone,
+                Subject::Spring(i),
+                mid,
+                None,
+                Measure::Load,
+                impulse * contact,
+                threshold,
+            );
             self.break_spring(i);
             self.bump_point_exposure_load(spring.a, 1.0, impulse * contact * 0.35);
             self.bump_point_exposure_load(spring.b, 1.0, impulse * contact * 0.35);
@@ -5990,6 +6302,15 @@ impl World {
             self.bone_attachments[i].stress = self.bone_attachments[i]
                 .stress
                 .max(impulse / self.materials.bone_attachment_break_impulse.max(1.0));
+            self.note(
+                EventKind::MuscleOffBone,
+                Subject::BoneTie(i),
+                point.position,
+                None,
+                Measure::Load,
+                impulse,
+                self.materials.bone_attachment_break_impulse * 0.38,
+            );
             self.bump_point_exposure_load(attachment.point, 0.95, impulse * 0.32);
             self.stats.broken_bone_attachments += 1;
             self.stats.fragment_tissue_tears += 1;
@@ -6021,6 +6342,15 @@ impl World {
                 (self.triangles[i].damage + contact * impulse / 1800.0).min(1.35);
             if self.triangles[i].damage > 1.0 {
                 self.triangles[i].failed = true;
+                self.note(
+                    EventKind::MusclePulped,
+                    Subject::Triangle(i),
+                    centroid,
+                    None,
+                    Measure::Damage,
+                    self.triangles[i].damage,
+                    1.0,
+                );
                 self.bump_point_exposure_load(triangle.a, 1.0, impulse * 0.12);
                 self.bump_point_exposure_load(triangle.b, 1.0, impulse * 0.12);
                 self.bump_point_exposure_load(triangle.c, 1.0, impulse * 0.12);
@@ -6097,6 +6427,7 @@ impl World {
                 },
             );
         }
+        self.acting(acted);
     }
 
     fn constrain_to_world(&mut self, width: f64, floor_y: f64) {
@@ -6206,6 +6537,18 @@ impl World {
             self.triangles[i].damage = damage;
             if damage > 1.0 {
                 self.triangles[i].failed = true;
+                self.note(
+                    EventKind::MusclePulped,
+                    Subject::Triangle(i),
+                    Vec2 {
+                        x: (a.position.x + b.position.x + c.position.x) / 3.0,
+                        y: (a.position.y + b.position.y + c.position.y) / 3.0,
+                    },
+                    None,
+                    Measure::Damage,
+                    damage,
+                    1.0,
+                );
                 let rupture_drive = load
                     .max(edge_fatigue * self.materials.tissue_fatigue_load_threshold * 1.25)
                     .max(damage * self.materials.muscle_crush_rupture_load_threshold);
@@ -6441,8 +6784,23 @@ impl World {
         let second_index = self.bones.len();
         self.bones.push(second);
 
+        self.note(
+            if open {
+                EventKind::BoneBrokenOpen
+            } else {
+                EventKind::BoneBroken
+            },
+            Subject::Bone(bone_index),
+            crack,
+            Some(old.break_by),
+            Measure::Strength,
+            raw_overload + 1.0,
+            1.0,
+        );
+        // What the break does to the flesh and joints around it, it does.
+        let acted = self.acting(Actor::Bone(bone_index));
         let fracture_bruise_load = self.materials.contusion_load_threshold * 1.6;
-        for attachment in &mut self.bone_attachments {
+        for (tie, attachment) in self.bone_attachments.iter_mut().enumerate() {
             if attachment.bone != bone_index || attachment.broken {
                 continue;
             }
@@ -6468,6 +6826,18 @@ impl World {
                         .max((old.load * 0.35).min(fracture_bruise_load));
                 }
                 self.stats.broken_bone_attachments += 1;
+                Journal::note(
+                    &mut self.journal,
+                    EventKind::MuscleOffBone,
+                    Subject::BoneTie(tie),
+                    self.points
+                        .get(attachment.point)
+                        .map_or(crack, |point| point.position),
+                    None,
+                    Measure::None,
+                    0.0,
+                    0.0,
+                );
                 continue;
             }
             if original_t < break_t {
@@ -6487,7 +6857,7 @@ impl World {
             }
         }
 
-        for joint in &mut self.bone_joints {
+        for (index, joint) in self.bone_joints.iter_mut().enumerate() {
             if joint.broken {
                 continue;
             }
@@ -6519,6 +6889,16 @@ impl World {
             if joint.broken {
                 joint.stress = 1.0 + overload;
                 self.stats.broken_bone_joints += 1;
+                Journal::note(
+                    &mut self.journal,
+                    EventKind::JointTorn,
+                    Subject::Joint(index),
+                    crack,
+                    None,
+                    Measure::None,
+                    0.0,
+                    0.0,
+                );
             }
             if affected && joint.a < self.bones.len() && joint.b < self.bones.len() {
                 joint.torque_stress = 0.0;
@@ -6595,6 +6975,7 @@ impl World {
             if butterfly {
                 self.chip_butterfly(&old, crack, previous_crack, home_crack, dir, normal);
             }
+            self.acting(acted);
             return;
         }
 
@@ -6640,6 +7021,7 @@ impl World {
         if butterfly {
             self.chip_butterfly(&old, crack, previous_crack, home_crack, dir, normal);
         }
+        self.acting(acted);
     }
 
     /// A violent break also chips a splinter that flies out from the crack.
@@ -6712,6 +7094,15 @@ impl World {
             .max_bone_angular_speed
             .max(splinter.angular_velocity.abs());
         self.bones.push(splinter);
+        self.note(
+            EventKind::ChipBrokenOff,
+            Subject::Bone(self.bones.len() - 1),
+            midpoint(splinter.a, splinter.b),
+            None,
+            Measure::None,
+            0.0,
+            0.0,
+        );
         self.hold_piece_in_flesh(self.bones.len() - 1);
     }
 
@@ -6852,9 +7243,18 @@ impl World {
                 self.stats.muscle_fiber_tears += 1;
                 self.debug.muscle_fiber_tears += 1;
             }
+            self.note(
+                EventKind::MuscleTorn,
+                Subject::Spring(i),
+                midpoint(a, b),
+                None,
+                Measure::None,
+                0.0,
+                0.0,
+            );
         }
         let severity = (load / self.materials.bone_fracture_impulse.max(1.0)).clamp(0.5, 2.0);
-        for point in &mut self.points {
+        for (index, point) in self.points.iter_mut().enumerate() {
             let d = distance(point.position, center);
             if d > bruise_radius {
                 continue;
@@ -6870,6 +7270,16 @@ impl World {
                 self.stats.contusion_events += 1;
                 self.debug.contusion_events += 1;
                 self.debug.max_contusion = self.debug.max_contusion.max(point.contusion);
+                Journal::note(
+                    &mut self.journal,
+                    EventKind::Bruised,
+                    Subject::Point(index),
+                    point.position,
+                    None,
+                    Measure::Load,
+                    bruise,
+                    self.materials.contusion_load_threshold,
+                );
             }
         }
     }
@@ -6888,6 +7298,15 @@ impl World {
             let d = distance_to_segment(center, a.position, b.position);
             if spring.layer == TissueLayer::Muscle && d <= radius {
                 let mid = midpoint(a.position, b.position);
+                self.note(
+                    EventKind::MuscleTorn,
+                    Subject::Spring(i),
+                    mid,
+                    None,
+                    Measure::None,
+                    0.0,
+                    0.0,
+                );
                 self.break_spring(i);
                 self.springs[i].stress = 1.0;
                 self.bump_point_exposure_load(spring.a, 1.0, impulse * 0.30);
@@ -6913,6 +7332,15 @@ impl World {
                 && impulse > self.materials.skin_tear_impulse * 1.18
             {
                 let mid = midpoint(a.position, b.position);
+                self.note(
+                    EventKind::SkinTorn,
+                    Subject::Spring(i),
+                    mid,
+                    None,
+                    Measure::Load,
+                    impulse,
+                    self.materials.skin_tear_impulse * 1.18,
+                );
                 self.break_spring(i);
                 self.springs[i].stress = 1.0;
                 self.bump_point_exposure_load(spring.a, 1.0, impulse * 0.18);
@@ -6946,6 +7374,15 @@ impl World {
             let muscle_d = distance_sq(muscle.position, center);
             if skin_d.min(muscle_d) <= radius_sq {
                 let mid = midpoint(skin.position, muscle.position);
+                self.note(
+                    EventKind::SkinLoosened,
+                    Subject::SkinTie(i),
+                    mid,
+                    None,
+                    Measure::None,
+                    0.0,
+                    0.0,
+                );
                 self.attachments[i].broken = true;
                 self.bump_point_exposure_load(attachment.skin_point, 1.0, impulse * 0.15);
                 self.bump_point_exposure_load(attachment.muscle_point, 1.0, impulse * 0.15);
@@ -6985,6 +7422,15 @@ impl World {
             if distance_sq(centroid, center) <= radius_sq {
                 self.triangles[i].damage = self.triangles[i].damage.max(1.08);
                 self.triangles[i].failed = true;
+                self.note(
+                    EventKind::MusclePulped,
+                    Subject::Triangle(i),
+                    centroid,
+                    None,
+                    Measure::None,
+                    0.0,
+                    0.0,
+                );
                 self.bump_point_exposure_load(triangle.a, 1.0, impulse * 0.12);
                 self.bump_point_exposure_load(triangle.b, 1.0, impulse * 0.12);
                 self.bump_point_exposure_load(triangle.c, 1.0, impulse * 0.12);
@@ -7036,6 +7482,15 @@ impl World {
             self.stats.contusion_events += 1;
             self.debug.contusion_events += 1;
             self.debug.max_contusion = self.debug.max_contusion.max(max_contusion);
+            self.note(
+                EventKind::Bruised,
+                Subject::Point(index),
+                self.points[index].position,
+                None,
+                Measure::Load,
+                load,
+                self.materials.contusion_load_threshold,
+            );
         }
     }
 
@@ -7051,7 +7506,7 @@ impl World {
         let materials = self.materials;
         let mut contusion_events = 0;
         let mut max_contusion = self.debug.max_contusion;
-        for point in &mut self.points {
+        for (index, point) in self.points.iter_mut().enumerate() {
             if point.layer != TissueLayer::Muscle {
                 continue;
             }
@@ -7072,6 +7527,16 @@ impl World {
             ) {
                 contusion_events += 1;
                 max_contusion = max_contusion.max(point.contusion);
+                Journal::note(
+                    &mut self.journal,
+                    EventKind::Bruised,
+                    Subject::Point(index),
+                    point.position,
+                    None,
+                    Measure::Load,
+                    local_load,
+                    materials.contusion_load_threshold,
+                );
             }
         }
         if contusion_events > 0 {

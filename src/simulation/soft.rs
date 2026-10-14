@@ -165,9 +165,16 @@ impl World {
         for substep in 0..substeps {
             self.solver_dt = h;
             self.solver_progress = (substep + 1) as f64 / substeps as f64;
+            self.mark_trace_time(substep as f64 / substeps as f64);
+            // Points, the outline's hold on them, the cuts' ghosts, then the
+            // bones: each a phase of its own, so a trace names which moved
+            // what.
             self.timed("integrate", |world| {
-                world.integrate_substep(h, substeps, width, floor_y)
+                world.integrate_points(h, substeps, floor_y)
             });
+            self.timed("outline hold", |world| world.pull_outline_round(h));
+            self.timed("ghosts", Self::carry_ghosts_with_their_flesh);
+            self.timed("integrate", |world| world.integrate_bones(h, substeps));
             // What tears this substep tears before the rest are warm started:
             // a tie that let go gives none of the pull it carried, which
             // nothing would take back.
@@ -196,6 +203,7 @@ impl World {
         self.join_substeps(substeps);
         self.solver_dt = dt;
         self.solver_progress = 1.0;
+        self.mark_trace_time(1.0);
     }
 
     /// Puts each point and bone back where it began the step, moving at the
@@ -247,10 +255,9 @@ impl World {
         }
     }
 
-    /// Moves every point and bone through one substep at its velocity, under
-    /// gravity and a little drag, and spins loose pieces of bone.
-    fn integrate_substep(&mut self, h: f64, substeps: usize, width: f64, floor_y: f64) {
-        let _ = width;
+    /// Moves every point through one substep at its velocity, under gravity
+    /// and a little drag, onto the floor at the most.
+    fn integrate_points(&mut self, h: f64, substeps: usize, floor_y: f64) {
         let keep = 1.0 / (1.0 + h * self.materials.linear_drag);
         let fall = self.materials.gravity * h * h;
         let floor_keep = libm::pow(self.materials.floor_friction, 1.0 / substeps as f64);
@@ -270,8 +277,12 @@ impl World {
                     point.position.x + (point.previous.x - point.position.x) * floor_keep;
             }
         }
-        self.pull_outline_round(h);
-        self.carry_ghosts_with_their_flesh();
+    }
+
+    /// Moves every bone through one substep at its velocity, under gravity
+    /// and a little drag, and spins loose pieces of bone.
+    fn integrate_bones(&mut self, h: f64, substeps: usize) {
+        let fall = self.materials.gravity * h * h;
         let bone_keep = libm::pow(self.materials.bone_damping, 1.0 / substeps as f64);
         let spin_keep = libm::pow(self.materials.bone_angular_damping, 1.0 / substeps as f64);
         for index in 0..self.bones.len() {

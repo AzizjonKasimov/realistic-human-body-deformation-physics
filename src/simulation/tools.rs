@@ -1101,6 +1101,7 @@ impl World {
                     load * self.bending_share(index, after.t_b),
                     after.t_b,
                     normalized(self.tool.velocity, to.direction),
+                    Actor::Tool,
                 );
             }
             if load > self.materials.fragment_wake_load {
@@ -1142,6 +1143,22 @@ impl World {
         strike: ToolStrike,
     ) {
         let spring = self.springs[spring_index];
+        self.note(
+            if spring.layer == TissueLayer::Skin {
+                EventKind::SkinCut
+            } else {
+                EventKind::MuscleCut
+            },
+            Subject::Spring(spring_index),
+            midpoint(
+                self.points[spring.a].position,
+                self.points[spring.b].position,
+            ),
+            Some(Actor::Tool),
+            Measure::Load,
+            pressure,
+            spring.tear_impulse * self.materials.sharp_tool_tear_pressure,
+        );
         self.cut_spring(spring_index, cut_at);
         let skin = spring.layer == TissueLayer::Skin;
         let exposure = if skin { 0.92 } else { 1.0 };
@@ -1238,6 +1255,16 @@ impl World {
                 self.stats.contusion_events += 1;
                 self.debug.contusion_events += 1;
                 self.debug.max_contusion = self.debug.max_contusion.max(point.contusion);
+                Journal::note(
+                    &mut self.journal,
+                    EventKind::Bruised,
+                    Subject::Point(index),
+                    point.position,
+                    Some(Actor::Tool),
+                    Measure::Load,
+                    contact_load,
+                    self.materials.contusion_load_threshold,
+                );
             }
             self.debug.tissue_contacts += 1;
             if depth > self.debug.max_depth {
@@ -1335,6 +1362,16 @@ impl World {
                 self.stats.contusion_events += 1;
                 self.debug.contusion_events += 1;
                 self.debug.max_contusion = self.debug.max_contusion.max(point.contusion);
+                Journal::note(
+                    &mut self.journal,
+                    EventKind::Bruised,
+                    Subject::Point(index),
+                    point.position,
+                    Some(Actor::Tool),
+                    Measure::Load,
+                    bruise,
+                    self.materials.contusion_load_threshold,
+                );
             }
             self.debug.tissue_contacts += 1;
             self.debug.max_point_load = self.debug.max_point_load.max(point.load);
@@ -1395,6 +1432,16 @@ impl World {
                 self.stats.contusion_events += 1;
                 self.debug.contusion_events += 1;
                 self.debug.max_contusion = self.debug.max_contusion.max(point.contusion);
+                Journal::note(
+                    &mut self.journal,
+                    EventKind::Bruised,
+                    Subject::Point(index),
+                    point.position,
+                    Some(Actor::Tool),
+                    Measure::Load,
+                    load * falloff,
+                    self.materials.contusion_load_threshold,
+                );
             }
         }
     }
@@ -1533,7 +1580,7 @@ impl World {
             );
             let (share, worst) = self.break_share(i, from, to, normal);
             let blow = force * share;
-            bone.bear_break_load(blow, worst, normal);
+            bone.bear_break_load(blow, worst, normal, Actor::Tool);
             self.debug.max_bone_load = self.debug.max_bone_load.max(bone.load);
             if !touches {
                 let should_fracture =
@@ -1728,6 +1775,19 @@ impl World {
             if pressure <= threshold {
                 continue;
             }
+            self.note(
+                if spring.layer == TissueLayer::Skin {
+                    EventKind::SkinCrushed
+                } else {
+                    EventKind::MuscleCrushed
+                },
+                Subject::Spring(spring_index),
+                center,
+                Some(Actor::Tool),
+                Measure::Load,
+                pressure,
+                threshold,
+            );
             self.break_spring(spring_index);
             let exposure = if spring.layer == TissueLayer::Skin {
                 0.92

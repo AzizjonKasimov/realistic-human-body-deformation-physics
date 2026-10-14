@@ -20,7 +20,7 @@ path = "src/bin/anatomy_diagnostics.rs"
 
 [[bin]]
 name = "strike_scenarios"
-path = "src/bin/strike_scenarios.rs"
+path = "src/bin/strike_scenarios/main.rs"
 
 [[bin]]
 name = "visual_damage_diagnostics"

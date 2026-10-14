@@ -439,6 +439,17 @@ impl World {
 
         self.follow_rest_places(&homes_before, &origin);
         self.stats.cut_openings += origin.len() as i32;
+        for &node in &origin {
+            self.note(
+                EventKind::CutOpened,
+                Subject::Point(node),
+                self.points[node].position,
+                Some(Actor::Tool),
+                Measure::None,
+                0.0,
+                0.0,
+            );
+        }
         self.finish_topology_change(&origin);
     }
 
@@ -1086,6 +1097,15 @@ impl World {
 
         self.follow_split_outline(point, &member);
         self.stats.cut_openings += (groups - 1) as i32;
+        self.note(
+            EventKind::CutOpened,
+            Subject::Point(point),
+            self.points[point].position,
+            None,
+            Measure::Count,
+            (groups - 1) as f64,
+            0.0,
+        );
         Some(member.into_iter().zip(toward).collect())
     }
 

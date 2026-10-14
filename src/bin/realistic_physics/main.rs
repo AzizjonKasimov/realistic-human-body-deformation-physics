@@ -6,6 +6,8 @@ mod analytics;
 mod audio;
 #[cfg(not(target_arch = "wasm32"))]
 mod capture;
+#[cfg(not(target_arch = "wasm32"))]
+mod inspector;
 mod selftest;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -293,6 +295,11 @@ async fn run() {
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(request) = capture::request() {
         capture::run(request).await;
+        return;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(request) = inspector::request() {
+        inspector::run(request).await;
         return;
     }
     if selftest::requested() {

@@ -90,6 +90,15 @@ impl Strike {
         }
     }
 
+    /// The same swing mirrored left to right across the body's middle.
+    pub fn mirrored(&self) -> Strike {
+        Strike {
+            start: (-self.start.0, self.start.1),
+            end: (-self.end.0, self.end.1),
+            ..*self
+        }
+    }
+
     /// Parses `tool:u0,v0:u1,v1`, optionally followed by `:frames=16` (strike
     /// frames), `:windup=6`, `:settle=60`, and `:power=P` to try a strength
     /// other than the tool's swing power. Tools are `bat`, `knife`, or `hammer`
@@ -265,6 +274,26 @@ impl Gesture {
         }
     }
 
+    /// The same gesture mirrored left to right across the body's middle,
+    /// its steps leaked as [`Gesture::shifted`]'s are.
+    pub fn mirrored(&self) -> Gesture {
+        let steps: Vec<GestureStep> = self
+            .steps
+            .iter()
+            .map(|step| match *step {
+                GestureStep::Move { to, frames } => GestureStep::Move {
+                    to: (-to.0, to.1),
+                    frames,
+                },
+                other => other,
+            })
+            .collect();
+        Gesture {
+            steps: Vec::leak(steps),
+            ..*self
+        }
+    }
+
     /// Parses `tool:` followed by steps separated by `:`: `u,v` puts the hand
     /// there at once, `u,v/N` moves it there over N steps, `down` and `up`
     /// press and release the button, and `wait=N` holds still for N steps.
@@ -400,6 +429,17 @@ impl Play {
                 followup.map(|followup| followup.shifted(along, across)),
             ),
             Play::Gesture(gesture) => Play::Gesture(gesture.shifted(along, across)),
+        }
+    }
+
+    /// The play mirrored left to right across the body's middle.
+    pub fn mirrored(&self) -> Play {
+        match self {
+            Play::Swing(strike, followup) => Play::Swing(
+                strike.mirrored(),
+                followup.map(|followup| followup.mirrored()),
+            ),
+            Play::Gesture(gesture) => Play::Gesture(gesture.mirrored()),
         }
     }
 }
@@ -764,6 +804,15 @@ impl Scenario {
         }
     }
 
+    /// The scenario mirrored left to right across the body's middle: the
+    /// mirror image of its blow on the mirror image of the body.
+    pub fn mirrored(&self) -> Scenario {
+        Scenario {
+            play: self.play.mirrored(),
+            ..*self
+        }
+    }
+
     /// The scenario on a body whose bones are `strength` times as strong as
     /// tuned.
     pub fn with_bone_strength(&self, strength: f64) -> Scenario {
@@ -845,7 +894,7 @@ impl Scenario {
 
     /// What a run did against real life: the scenario's own checks that one
     /// run can judge (never and always), and rules for every play.
-    fn real_world_problems(&self, result: &ScenarioResult) -> Vec<String> {
+    pub fn real_world_problems(&self, result: &ScenarioResult) -> Vec<String> {
         let r = result;
         let mut problems = Vec::new();
         for check in self.real.iter().filter(|check| check.gap.is_empty()) {

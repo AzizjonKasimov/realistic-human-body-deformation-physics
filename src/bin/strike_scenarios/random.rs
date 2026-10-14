@@ -1,0 +1,342 @@
+//! Random testing: thousands of random blows with every tool at every part of
+//! the body, swung from every side at every speed and pressed, held, and
+//! dragged, each watched by the watchdogs and judged by the rules every play
+//! follows. The scenarios try what someone thought to try; this tries what
+//! no one did. Every play is written out in the syntax `--strike` and
+//! `--gesture` read, rounded as written, so any of them replays exactly.
+
+use super::*;
+use rp::inspect::{Watchdog, Watchdogs};
+use rp::scenarios::GestureStep;
+use std::f64::consts::TAU;
+
+/// A small generator that throws the same plays for the same seed
+/// (SplitMix64, Steele, Lea, and Flood 2014).
+struct Dice(u64);
+
+impl Dice {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// A number from `low` up to `high`.
+    fn range(&mut self, low: f64, high: f64) -> f64 {
+        low + (high - low) * ((self.next() >> 11) as f64 / (1u64 << 53) as f64)
+    }
+
+    /// A whole number from `low` to `high`, both included.
+    fn whole(&mut self, low: i32, high: i32) -> i32 {
+        low + (self.next() % (high - low + 1) as u64) as i32
+    }
+
+    fn pick<T: Copy>(&mut self, items: &[T]) -> T {
+        items[(self.next() % items.len() as u64) as usize]
+    }
+}
+
+/// A number as the plays are written, to three decimals, so a written play
+/// replays the very run it came from.
+fn written(value: f64) -> f64 {
+    (value * 1000.0).round() / 1000.0
+}
+
+/// Where blows can land and start from: every point of skin on the body as
+/// built, in body coordinates, and the body to tell which places lie
+/// inside it.
+struct Targets {
+    skin: Vec<(f64, f64)>,
+    body: rp::World,
+    frame: rp::BodyFrame,
+}
+
+impl Targets {
+    fn new() -> Self {
+        let body =
+            rp::create_layered_body(SCENARIO_WIDTH, SCENARIO_HEIGHT, rp::Materials::default());
+        let frame = rp::body_frame(SCENARIO_WIDTH, SCENARIO_HEIGHT);
+        let skin = body
+            .points()
+            .iter()
+            .filter(|point| point.layer == rp::TissueLayer::Skin && !point.is_ghost())
+            .map(|point| frame.body_coords(point.home))
+            .collect();
+        Self { skin, body, frame }
+    }
+
+    fn inside(&self, at: (f64, f64)) -> bool {
+        inside_the_skin(&self.body, self.frame.point(at.0, at.1))
+    }
+
+    /// A place outside the body `reach` body heights back from `target`
+    /// along `-direction`, further back until it is outside.
+    fn approach(&self, target: (f64, f64), direction: (f64, f64), reach: f64) -> (f64, f64) {
+        let mut reach = reach;
+        loop {
+            let at = (
+                written(target.0 - direction.0 * reach),
+                written(target.1 - direction.1 * reach),
+            );
+            if !self.inside(at) || reach > 1.0 {
+                return at;
+            }
+            reach += 0.05;
+        }
+    }
+}
+
+/// One random play: a swing with any tool through any point of skin from
+/// any side at any speed, or the tool pressed into it, held, and dragged.
+fn random_play(dice: &mut Dice, targets: &Targets, tools: &[rp::ToolMode]) -> Play {
+    let tool = dice.pick(tools);
+    let target = dice.pick(&targets.skin);
+    let angle = dice.range(0.0, TAU);
+    let direction = (angle.cos(), angle.sin());
+    let start = targets.approach(target, direction, dice.range(0.30, 0.45));
+    if dice.range(0.0, 1.0) < 0.7 {
+        let through = dice.range(0.05, 0.25);
+        let (fastest, slowest) = match tool {
+            rp::ToolMode::Sharp => (6, 24),
+            _ => (5, 18),
+        };
+        return Play::Swing(
+            Strike {
+                tool,
+                start,
+                end: (
+                    written(target.0 + direction.0 * through),
+                    written(target.1 + direction.1 * through),
+                ),
+                windup_frames: 6,
+                strike_frames: dice.whole(fastest, slowest),
+                settle_frames: dice.whole(40, 90),
+                power: rp::swing_power(tool),
+            },
+            None,
+        );
+    }
+    // Pressed in, held a while, maybe dragged on, and let go.
+    let mut steps = vec![
+        GestureStep::Move {
+            to: start,
+            frames: 0,
+        },
+        GestureStep::Wait(10),
+        GestureStep::Press(true),
+        GestureStep::Move {
+            to: (written(target.0), written(target.1)),
+            frames: dice.whole(6, 40),
+        },
+        GestureStep::Wait(dice.whole(0, 30)),
+    ];
+    if dice.range(0.0, 1.0) < 0.5 {
+        steps.push(GestureStep::Move {
+            to: (
+                written(target.0 + dice.range(-0.12, 0.12)),
+                written(target.1 + dice.range(-0.12, 0.12)),
+            ),
+            frames: dice.whole(10, 40),
+        });
+    }
+    steps.push(GestureStep::Press(false));
+    steps.push(GestureStep::Wait(dice.whole(30, 60)));
+    Play::Gesture(Gesture {
+        tool,
+        power: rp::swing_power(tool),
+        steps: Vec::leak(steps),
+    })
+}
+
+/// What one random play did and what it broke of the rules.
+struct Played {
+    play: Play,
+    result: ScenarioResult,
+    /// The rules every play follows that it broke.
+    broken: Vec<String>,
+    /// The first trip of each watchdog: the frame and the thing, as
+    /// `--why` takes it and by name.
+    flagged: Vec<(Watchdog, i32, String)>,
+}
+
+/// The rule a line from `Scenario::real_world_problems` names.
+fn rule_name(problem: &str) -> &str {
+    problem.split('=').next().unwrap_or(problem)
+}
+
+/// Plays `count` random blows from `seed` with `tools`, on all cores, and
+/// reports what broke the rules and what the watchdogs flagged, with plays
+/// to replay.
+pub(crate) fn random_blows(count: usize, seed: u64, tools: &[rp::ToolMode], output_dir: &Path) {
+    let started = Instant::now();
+    let targets = Targets::new();
+    let mut dice = Dice(seed);
+    let plays: Vec<Play> = (0..count)
+        .map(|_| random_play(&mut dice, &targets, tools))
+        .collect();
+    let next = AtomicUsize::new(0);
+    let finished = Mutex::new(Vec::with_capacity(plays.len()));
+    let workers = thread::available_parallelism().map_or(4, |count| count.get());
+    thread::scope(|scope| {
+        for _ in 0..workers.min(plays.len()) {
+            scope.spawn(|| loop {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(&play) = plays.get(index) else {
+                    break;
+                };
+                let scenario = Scenario::custom(play);
+                let body =
+                    rp::create_layered_body(SCENARIO_WIDTH, SCENARIO_HEIGHT, scenario.materials());
+                let mut watchdogs = Watchdogs::new(&body);
+                let (world, result) = run_on(
+                    body,
+                    &scenario,
+                    SCENARIO_WIDTH,
+                    SCENARIO_HEIGHT,
+                    |frame, _, world| watchdogs.check(frame, world),
+                );
+                let broken = scenario.real_world_problems(&result);
+                let flagged = flagged(&world, watchdogs.trips());
+                finished.lock().expect("random results").push((
+                    index,
+                    Played {
+                        play,
+                        result,
+                        broken,
+                        flagged,
+                    },
+                ));
+            });
+        }
+    });
+    let mut played = finished.into_inner().expect("random results");
+    played.sort_by_key(|(index, _)| *index);
+    let played: Vec<Played> = played.into_iter().map(|(_, played)| played).collect();
+
+    let csv_path = output_dir.join("random_blows.csv");
+    let mut csv = BufWriter::new(File::create(&csv_path).expect("create random CSV"));
+    writeln!(
+        csv,
+        "index,play,tool,bones_broken,skin_torn,muscle_torn,arteries_cut,blood_lost_ml,rules_broken,watchdogs"
+    )
+    .expect("write random CSV");
+    for (index, run) in played.iter().enumerate() {
+        let rules: Vec<&str> = run.broken.iter().map(|line| rule_name(line)).collect();
+        let watchdogs: Vec<String> = run
+            .flagged
+            .iter()
+            .map(|(watchdog, frame, _)| format!("{watchdog:?}@{frame}"))
+            .collect();
+        writeln!(
+            csv,
+            "{index},\"{}\",{},{},{},{},{},{:.2},{},{}",
+            run.play,
+            tool_name(run.play.tool()),
+            run.result.bone_fractures,
+            run.result.skin_tears,
+            run.result.muscle_tears,
+            run.result.vessel_lacerations,
+            run.result.blood_loss * rp::scenarios::BLOOD_VOLUME_ML,
+            rules.join(";"),
+            watchdogs.join(";")
+        )
+        .expect("write random CSV");
+    }
+
+    let option = |play: &Play| match play {
+        Play::Swing(..) => format!("--strike \"{play}\""),
+        Play::Gesture(_) => format!("--gesture \"{play}\""),
+    };
+    let mut report = format!(
+        "Random blows: {} plays from seed {seed} ({}), in {:.0} s\n",
+        played.len(),
+        tools
+            .iter()
+            .map(|&tool| {
+                let n = played.iter().filter(|run| run.play.tool() == tool).count();
+                format!("{} {n}", tool_name(tool))
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        started.elapsed().as_secs_f64()
+    );
+    let mut rules: Vec<&str> = played
+        .iter()
+        .flat_map(|run| run.broken.iter().map(|line| rule_name(line)))
+        .collect();
+    rules.sort();
+    rules.dedup();
+    if rules.is_empty() {
+        report.push_str("Every play kept the rules every play follows.\n");
+    } else {
+        report.push_str("The rules every play follows, broken:\n");
+        for rule in rules {
+            let breaking: Vec<&Played> = played
+                .iter()
+                .filter(|run| run.broken.iter().any(|line| rule_name(line) == rule))
+                .collect();
+            report.push_str(&format!(
+                "  {rule} in {} plays; e.g. {}: {}\n",
+                breaking.len(),
+                option(&breaking[0].play),
+                breaking[0]
+                    .broken
+                    .iter()
+                    .find(|line| rule_name(line) == rule)
+                    .map_or("", |line| line.as_str())
+            ));
+        }
+    }
+    let mut kinds: Vec<Watchdog> = played
+        .iter()
+        .flat_map(|run| run.flagged.iter().map(|(watchdog, _, _)| *watchdog))
+        .collect();
+    kinds.sort();
+    kinds.dedup();
+    if kinds.is_empty() {
+        report.push_str("The watchdogs flagged nothing.\n");
+    } else {
+        report.push_str("What the watchdogs flagged:\n");
+        for kind in kinds {
+            let tripped: Vec<&Played> = played
+                .iter()
+                .filter(|run| run.flagged.iter().any(|(watchdog, _, _)| *watchdog == kind))
+                .collect();
+            let by_tool: Vec<String> = tools
+                .iter()
+                .map(|&tool| {
+                    format!(
+                        "{} {}",
+                        tool_name(tool),
+                        tripped.iter().filter(|run| run.play.tool() == tool).count()
+                    )
+                })
+                .collect();
+            report.push_str(&format!(
+                "  {}{} in {} plays ({})\n",
+                kind.describe(),
+                if kind.known_gap() { " [known gap]" } else { "" },
+                tripped.len(),
+                by_tool.join(", ")
+            ));
+            for run in tripped.iter().take(3) {
+                let (_, frame, what) = run
+                    .flagged
+                    .iter()
+                    .find(|(watchdog, _, _)| *watchdog == kind)
+                    .expect("it tripped");
+                report.push_str(&format!(
+                    "    {} from frame {frame}: {what}\n",
+                    option(&run.play)
+                ));
+            }
+        }
+    }
+    let report_path = output_dir.join("random_blows_report.txt");
+    fs::write(&report_path, &report).expect("write random report");
+    print!("{report}");
+    println!("wrote {}", csv_path.display());
+    println!("wrote {}", report_path.display());
+}

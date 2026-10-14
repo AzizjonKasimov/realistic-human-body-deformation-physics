@@ -62,7 +62,7 @@ pub struct JointDrive {
 const LIMP_DAMPING_SHARE: f64 = 0.25;
 
 /// A limb, on the viewer's left or right, or none for the head and trunk.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Limb {
     #[default]
     None,
@@ -403,6 +403,12 @@ impl World {
         }
     }
 
+    /// Lets go of the hips: nothing holds the body up any more, as when it
+    /// is thrown or falls.
+    pub fn release_hips(&mut self) {
+        self.hip_holds.clear();
+    }
+
     pub(super) fn warm_start_hip_hold(&mut self, h: f64) {
         for index in 0..self.hip_holds.len() {
             let hold = self.hip_holds[index];
@@ -490,6 +496,17 @@ impl World {
         let Some(index) = limb.index().filter(|_| limb.falls_when_broken(part)) else {
             return;
         };
+        if !self.limp_limbs[index] {
+            self.note(
+                EventKind::LimbWentLimp,
+                Subject::Limb(limb),
+                Vec2::default(),
+                None,
+                Measure::None,
+                0.0,
+                0.0,
+            );
+        }
         self.limp_limbs[index] = true;
         // The pull the muscles carried goes with them.
         for joint in &mut self.bone_joints {

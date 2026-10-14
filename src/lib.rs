@@ -1,3 +1,4 @@
+pub mod inspect;
 mod mesh;
 pub mod scenarios;
 mod silhouette;

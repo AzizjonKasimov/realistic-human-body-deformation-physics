@@ -22,6 +22,11 @@ Close a running realistic_physics.exe that would block -BuildApp.
 .PARAMETER SoundCheck
 Also check that the root realistic_physics.exe's sound reaches the speakers
 (tools\sound_check.ps1; it briefly opens the app window). Runs after -BuildApp.
+
+.PARAMETER Deep
+Also play 2000 random blows and run the moved-body tests (strike_scenarios
+--random and --moved; about 12 more minutes), which find what the tuned
+scenarios do not try.
 #>
 param(
     [switch]$SkipDiagnostics,
@@ -29,7 +34,8 @@ param(
     [switch]$Capture,
     [switch]$BuildApp,
     [switch]$StopRunningApp,
-    [switch]$SoundCheck
+    [switch]$SoundCheck,
+    [switch]$Deep
 )
 
 . "$PSScriptRoot\common.ps1"
@@ -51,6 +57,11 @@ Measure-Step "quad-snd tests" { Invoke-Cargo -Arguments @("test", "--manifest-pa
 Measure-Step "Strike scenarios" { Invoke-Cargo -Arguments @("run", "--release", "--bin", "strike_scenarios", "--", "output\strike_scenarios.csv") -Label "Run Rust strike scenarios" }
 if (-not $SkipSweep) {
     Measure-Step "Strike sweep" { Invoke-Cargo -Arguments @("run", "--release", "--bin", "strike_scenarios", "--", "output\strike_scenarios.csv", "--sweep") -Label "Sweep strike scenarios (swing moved slightly)" }
+}
+
+if ($Deep) {
+    Measure-Step "Random blows" { Invoke-Cargo -Arguments @("run", "--release", "--bin", "strike_scenarios", "--", "output\strike_scenarios.csv", "--random", "2000") -Label "Play 2000 random blows" }
+    Measure-Step "Moved-body tests" { Invoke-Cargo -Arguments @("run", "--release", "--bin", "strike_scenarios", "--", "output\strike_scenarios.csv", "--moved") -Label "Replay the sweeps with the body moved" }
 }
 
 if (-not $SkipDiagnostics) {
@@ -80,6 +91,10 @@ $timings | ForEach-Object { Write-Host "  $_" }
 Write-Host "Strike tuning report: $repoRoot\output\strike_tuning_report.txt"
 if (-not $SkipSweep) {
     Write-Host "Strike sweep report: $repoRoot\output\strike_sweep_report.txt"
+}
+if ($Deep) {
+    Write-Host "Random blows report: $repoRoot\output\random_blows_report.txt"
+    Write-Host "Moved-body report: $repoRoot\output\strike_moved_report.txt"
 }
 if (-not $SkipDiagnostics) {
     Write-Host "Anatomy snapshot: $repoRoot\output\anatomy_debug.svg"
