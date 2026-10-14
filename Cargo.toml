@@ -4,7 +4,7 @@ name = "realistic_physics"
 # what each one changed, and README.md's Versions section says when to bump it.
 version = "0.8.2"
 edition = "2021"
-license = "MIT"
+license = "PolyForm-Noncommercial-1.0.0 OR PolyForm-Small-Business-1.0.0"
 
 [lib]
 name = "realistic_physics"

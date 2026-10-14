@@ -415,4 +415,11 @@ The primary build now uses Rust and Cargo. The app frontend uses `macroquad` for
 
 ## License
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE).
+The engine is source-available: free for people and small businesses, with a paid license for bigger companies. Use it under whichever of these licenses fits your use ([LICENSE](LICENSE) has the details):
+
+- [PolyForm Noncommercial 1.0.0](LICENSES/PolyForm-Noncommercial-1.0.0.md): personal use, study, hobby projects, and noncommercial organizations such as schools and charities.
+- [PolyForm Small Business 1.0.0](LICENSES/PolyForm-Small-Business-1.0.0.md): a company with fewer than 100 people and under 1,000,000 USD (2019) revenue in its last tax year may use it in its work, including in games it sells.
+
+A bigger company needs a commercial license; ask for one through [my website](https://azizjonkasimov.github.io/#contact). Versions published before 2026-10-14 were released under the MIT License.
+
+Code by others keeps its own license: the patched quad-snd in `vendor\quad-snd` is MIT. By sending a pull request, you agree that your contribution may be licensed the same way as the engine, commercial licenses included.
