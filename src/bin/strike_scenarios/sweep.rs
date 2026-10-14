@@ -175,14 +175,14 @@ pub(crate) fn sweep(selected: &[Scenario], output_dir: &Path, custom: bool, quic
     let settings = rp::scenarios::settings_used();
     if !settings.is_empty() {
         report.push_str(&format!(
-            "Settings changed from the defaults: {}
-",
+            "Settings changed from the defaults: {}\n",
             settings.join(", ")
         ));
     }
     if quick {
-        report.push_str("Quick sweep: 9 runs a scenario (3 along, 3 bone strengths); the full sweep judges a change.
-");
+        report.push_str(
+            "Quick sweep: 9 runs a scenario (3 along, 3 bone strengths); the full sweep judges a change.\n",
+        );
     }
     let mut mismatches = Vec::new();
     let mut gaps = Vec::new();
@@ -228,14 +228,10 @@ pub(crate) fn sweep(selected: &[Scenario], output_dir: &Path, custom: bool, quic
     }
     if !custom && !borderlines.is_empty() {
         report.push_str(
-            "Borderline, where a few runs more or fewer could carry a real-life check across its limit:
-",
+            "Borderline, where a few runs more or fewer could carry a real-life check across its limit:\n",
         );
         for line in &borderlines {
-            report.push_str(&format!(
-                "  {line}
-"
-            ));
+            report.push_str(&format!("  {line}\n"));
         }
     }
     report.push_str(&watchdog_summary(selected, &runs));
