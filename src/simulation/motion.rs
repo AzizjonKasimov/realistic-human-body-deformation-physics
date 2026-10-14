@@ -93,10 +93,10 @@ mod tests {
             y: 300.0,
             ..InputState::default()
         };
-        world.step(dt, &hand, width, height);
+        world.step(dt, &hand, width);
         let mut earlier = MotionSnapshot::default();
         world.capture_motion(&mut earlier);
-        world.step(dt, &InputState { x: 360.0, ..hand }, width, height);
+        world.step(dt, &InputState { x: 360.0, ..hand }, width);
         let tissue: Vec<Vec2> = world.points.iter().map(|point| point.position).collect();
         let tool = world.tool.position;
         let tool_before = earlier.tool.expect("the tool is in play").0;

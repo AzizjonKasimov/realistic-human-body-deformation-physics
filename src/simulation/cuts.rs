@@ -1383,10 +1383,10 @@ mod tests {
                 power: swing_power(ToolMode::Sharp),
                 tool: ToolMode::Sharp,
             };
-            world.step(dt, &input, 640.0, 480.0);
+            world.step(dt, &input, 640.0);
         }
         for _ in 0..60 {
-            world.step(dt, &InputState::default(), 640.0, 480.0);
+            world.step(dt, &InputState::default(), 640.0);
         }
     }
 

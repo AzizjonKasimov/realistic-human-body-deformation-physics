@@ -557,6 +557,14 @@ pub struct ScenarioExpectations {
     pub free_lag: DoubleBand,
     /// How far the tool may be from the hand at the end, in pixels.
     pub final_lag: DoubleBand,
+    /// The most the head turns on the neck off the guard, in degrees.
+    pub head_turn: DoubleBand,
+    /// The farthest a fist is knocked from its place in the guard, and how
+    /// far from it the farther fist ends, in pixels.
+    pub fist_shift: DoubleBand,
+    pub fist_offset: DoubleBand,
+    /// How far below its place in the guard the lower fist ends, in pixels.
+    pub fist_drop: DoubleBand,
 }
 
 /// A tool whose axis turns more than this in one step has snapped round
@@ -641,7 +649,15 @@ pub enum Outcome {
     OpenFracture,
     /// The skin splits though no bone breaks.
     SplitsSkinWithoutBreak,
+    /// A fist drops out of the guard: the arm hangs.
+    DropsGuard,
 }
+
+/// How far from its place in the guard a fist ends when its arm hangs, in
+/// pixels: about 7 cm, past how far its weight sags it in the guard (about 4
+/// cm) and where a struck arm comes back to. A hanging arm's forearm may fold
+/// up against it, so the fist need not end much lower.
+pub const GUARD_DROP_PX: f64 = 22.0;
 
 impl Outcome {
     /// Whether it happened in `result`.
@@ -658,6 +674,7 @@ impl Outcome {
             Outcome::SplitsSkinWithoutBreak => {
                 result.bone_fractures == 0 && Outcome::OpensSkin.happened(result)
             }
+            Outcome::DropsGuard => result.final_fist_offset >= GUARD_DROP_PX,
         }
     }
 
@@ -670,6 +687,7 @@ impl Outcome {
             Outcome::Bruises => "the flesh bruises".to_string(),
             Outcome::OpenFracture => "a bone breaks open through the skin".to_string(),
             Outcome::SplitsSkinWithoutBreak => "the skin splits over unbroken bone".to_string(),
+            Outcome::DropsGuard => "a fist drops out of the guard".to_string(),
         }
     }
 
@@ -683,6 +701,7 @@ impl Outcome {
             Outcome::Bruises => "bruises".to_string(),
             Outcome::OpenFracture => "open_fracture".to_string(),
             Outcome::SplitsSkinWithoutBreak => "splits_skin_without_break".to_string(),
+            Outcome::DropsGuard => "drops_guard".to_string(),
         }
     }
 }
@@ -1134,6 +1153,10 @@ impl Scenario {
             real("max_point_speed", r.max_point_speed, e.point_speed),
             real("max_free_lag", r.max_free_lag, e.free_lag),
             real("final_lag", r.final_lag, e.final_lag),
+            real("max_head_turn", r.max_head_turn, e.head_turn),
+            real("max_fist_shift", r.max_fist_shift, e.fist_shift),
+            real("final_fist_offset", r.final_fist_offset, e.fist_offset),
+            real("final_fist_drop", r.final_fist_drop, e.fist_drop),
         ];
         let mut problems: Vec<String> = checks.into_iter().flatten().collect();
         problems.extend(self.real_world_problems(r));
@@ -1306,6 +1329,14 @@ pub struct ScenarioResult {
     pub part_peak_load: [f64; BONE_PARTS],
     /// Fastest the tool moved, in pixels per second.
     pub max_tool_speed: f64,
+    /// The most the head turned on the neck off the guard, in degrees.
+    pub max_head_turn: f64,
+    /// The farthest a fist was knocked from its place in the guard, how far
+    /// from it the farther fist ended, and how far below it the lower fist
+    /// ended, in pixels.
+    pub max_fist_shift: f64,
+    pub final_fist_offset: f64,
+    pub final_fist_drop: f64,
     /// Steps since the body first lost blood.
     pub bleed_frames: i32,
     last_positions: Vec<Vec2>,
@@ -1347,6 +1378,10 @@ impl ScenarioResult {
             *count += fresh;
         }
         self.max_tool_speed = self.max_tool_speed.max(debug.striker_speed);
+        self.max_head_turn = self.max_head_turn.max(head_turn_degrees(world));
+        for (shift, _) in fist_offsets(world) {
+            self.max_fist_shift = self.max_fist_shift.max(shift);
+        }
         for bone in world.bones() {
             let share = bone.break_load / bone.fracture_impulse.max(1.0);
             let peak = &mut self.part_peak_load[bone.part.index()];
@@ -1524,6 +1559,10 @@ impl ScenarioResult {
         self.bone_pieces_out = bone_pieces_out(world);
         self.closed_pieces_out = closed_pieces_out(world);
         self.whole_bones_out = whole_bones_out(world);
+        for (shift, drop) in fist_offsets(world) {
+            self.final_fist_offset = self.final_fist_offset.max(shift);
+            self.final_fist_drop = self.final_fist_drop.max(drop);
+        }
         self.measure_cut(world);
     }
 
@@ -1659,7 +1698,7 @@ pub fn run_on(
     let body = body_frame(width, height);
     for frame in 0..scenario.frames() {
         let input = scenario.input(frame, dt, body);
-        world.step(dt, &input, width, height);
+        world.step(dt, &input, width);
         result.accumulate(&world, &input);
         observe(frame, &input, &world);
     }
@@ -1753,10 +1792,12 @@ pub fn spinning_fragment_count(world: &World) -> i32 {
 const BONE_OUT_REACH: f64 = 3.0;
 
 /// Pieces of broken bone that have left the body: pieces whose middle lies
-/// farther than `BONE_OUT_REACH` point spacings from all flesh, as one flung
-/// out onto the floor.
+/// farther than `BONE_OUT_REACH` point spacings from all of the body's
+/// tissue, as one flung out onto the floor. Flesh a blow crushed counts:
+/// drawn as crushed flesh, it is still the limb, and a piece lying in a limb
+/// smashed to pulp, which the guard holds away from the trunk, has not left
+/// the body.
 pub fn bone_pieces_out(world: &World) -> i32 {
-    let flesh = world.flesh_points();
     let points = world.points();
     let reach = world.materials().point_spacing * BONE_OUT_REACH;
     world
@@ -1767,23 +1808,22 @@ pub fn bone_pieces_out(world: &World) -> i32 {
             let middle = midpoint(bone.a, bone.b);
             !points
                 .iter()
-                .zip(&flesh)
-                .any(|(point, &flesh)| flesh && span(point.position, middle) <= reach)
+                .any(|point| !point.is_ghost() && span(point.position, middle) <= reach)
         })
         .count() as i32
 }
 
-/// Pieces of a closed break whose middle lies outside the skin. A closed
-/// break leaves the skin whole, so its pieces belong inside it, but a hard
-/// blow can squeeze the flat body's flesh off a broken bone and leave a
-/// piece bare beside the limb; this counts how often, for the sweep to
-/// report until the flesh holds them (splinters and an open break's pieces
-/// may poke out).
+/// Pieces of a closed break, the chips it broke off included, whose middle
+/// lies outside the skin. A closed break leaves the skin whole, so its
+/// pieces belong inside it, but a hard blow can squeeze the flat body's
+/// flesh off a broken bone and leave a piece bare beside the limb; this
+/// counts how often, for the sweep to report until the flesh holds them (an
+/// open break's pieces may poke out).
 pub fn closed_pieces_out(world: &World) -> i32 {
     world
         .bones()
         .iter()
-        .filter(|bone| bone.fractured && !bone.splinter && !bone.open_break)
+        .filter(|bone| (bone.fractured || bone.splinter) && !bone.open_break)
         .filter(|bone| !inside_the_skin(world, midpoint(bone.a, bone.b)))
         .count() as i32
 }
@@ -1803,7 +1843,7 @@ pub fn whole_bones_out(world: &World) -> i32 {
 
 /// Whether `at` lies within the skin as drawn, torn or crushed skin
 /// included.
-fn inside_the_skin(world: &World, at: Vec2) -> bool {
+pub fn inside_the_skin(world: &World, at: Vec2) -> bool {
     let points = world.points();
     world
         .triangles()
@@ -1815,6 +1855,41 @@ fn inside_the_skin(world: &World, at: Vec2) -> bool {
             let (ab, bc, ca) = (side(a, b), side(b, c), side(c, a));
             (ab >= 0.0 && bc >= 0.0 && ca >= 0.0) || (ab <= 0.0 && bc <= 0.0 && ca <= 0.0)
         })
+}
+
+/// How far the head is turned on the neck off the guard, in degrees: the
+/// skull's angle against the spine's, now against when the body was built.
+pub fn head_turn_degrees(world: &World) -> f64 {
+    let bones = world.bones();
+    let first = |part: BonePart| bones.iter().find(|bone| bone.part == part);
+    let (Some(skull), Some(spine)) = (first(BonePart::Skull), first(BonePart::Spine)) else {
+        return 0.0;
+    };
+    let angle = |a: Vec2, b: Vec2| libm::atan2(b.y - a.y, b.x - a.x);
+    let now = angle(skull.a, skull.b) - angle(spine.a, spine.b);
+    let built = angle(skull.home_a, skull.home_b) - angle(spine.home_a, spine.home_b);
+    let mut turn = now - built;
+    while turn > std::f64::consts::PI {
+        turn -= 2.0 * std::f64::consts::PI;
+    }
+    while turn < -std::f64::consts::PI {
+        turn += 2.0 * std::f64::consts::PI;
+    }
+    turn.abs().to_degrees()
+}
+
+/// How far each fist is from its place in the guard, and how far below it,
+/// in pixels: the end of each hand's bone against where it was built.
+pub fn fist_offsets(world: &World) -> Vec<(f64, f64)> {
+    world
+        .bones()
+        .iter()
+        .filter(|bone| bone.part == BonePart::Hand && !bone.splinter)
+        .map(|bone| {
+            let (dx, dy) = (bone.b.x - bone.home_b.x, bone.b.y - bone.home_b.y);
+            (libm::hypot(dx, dy), dy)
+        })
+        .collect()
 }
 
 pub fn sleeping_fragment_count(world: &World) -> i32 {
@@ -1850,17 +1925,17 @@ const CARRY_ACROSS: &[GestureStep] = &[
     GestureStep::Wait(10),
 ];
 
-/// Pressed into the side of the chest from outside the arm, then dragged down
-/// the body to the hip and let go.
+/// Pressed into the waist below the guard's elbow and the ribs, then dragged
+/// down the body to the hip and let go.
 const DRAG_DOWN_THE_SIDE: &[GestureStep] = &[
     GestureStep::Move {
-        to: (-0.30, 0.30),
+        to: (-0.30, 0.40),
         frames: 0,
     },
     GestureStep::Wait(10),
     GestureStep::Press(true),
     GestureStep::Move {
-        to: (-0.08, 0.30),
+        to: (-0.08, 0.40),
         frames: 15,
     },
     GestureStep::Move {
@@ -1872,8 +1947,8 @@ const DRAG_DOWN_THE_SIDE: &[GestureStep] = &[
     GestureStep::Wait(30),
 ];
 
-/// From outside the arm into the middle of the chest at about 400 px/s,
-/// leaning there, then letting go.
+/// From outside the guard's elbow, through it, into the middle of the chest at
+/// about 400 px/s, leaning there, then letting go.
 const PUSH_INTO_CHEST_SLOWLY: &[GestureStep] = &push_into_chest(33);
 /// The same at about 800 px/s.
 const SWING_INTO_CHEST_MODERATELY: &[GestureStep] = &push_into_chest(16);
@@ -1883,13 +1958,13 @@ const SWING_INTO_CHEST_FIRMLY: &[GestureStep] = &push_into_chest(8);
 const fn push_into_chest(frames: i32) -> [GestureStep; 7] {
     [
         GestureStep::Move {
-            to: (-0.35, 0.34),
+            to: (-0.35, 0.31),
             frames: 0,
         },
         GestureStep::Wait(10),
         GestureStep::Press(true),
         GestureStep::Move {
-            to: (0.0, 0.34),
+            to: (0.0, 0.31),
             frames,
         },
         GestureStep::Wait(40),
@@ -2045,6 +2120,11 @@ const BONE_STAYS: &str =
 const BAT_OPEN: &str = "Bryant et al. 1992: a fifth of fractures from bat blows were open";
 const IRON_OPEN: &str =
     "Nolan et al. 2000: 44% of fractures from clubs were open; Eames et al. 1997: 70% of iron-bar victims had open fractures";
+const SKULL: &str =
+    "Allsop et al. 1991: the side of the skull breaks at about 5 kN; AAFS 2018: 5.2 kN under bats";
+const ARM_DROPS: &str =
+    "Pecci and Kreher 2008; AAOS OrthoInfo: with a broken collarbone or arm bone the arm cannot be held up";
+const ARM_HELD: &str = "Bennett et al. 1992: an arm held against a push springs back";
 const BLUNT_SPLIT: &str =
     "Sharkey et al. 2012: blunt blows split skin over bone; Barnes et al. 2022: 47 J left a thigh unsplit";
 
@@ -2069,22 +2149,22 @@ macro_rules! check {
     };
 }
 
-/// A knife slashed fast into the upper arm, about 7 m/s, held there, and drawn
-/// back.
+/// A knife slashed fast into the forearm raised in the guard, about 7 m/s,
+/// held there, and drawn back.
 const SLASH_INTO_THE_ARM_FAST: &[GestureStep] = &[
     GestureStep::Move {
-        to: (-0.42, 0.34),
+        to: (-0.42, 0.255),
         frames: 0,
     },
     GestureStep::Wait(10),
     GestureStep::Press(true),
     GestureStep::Move {
-        to: (0.0, 0.34),
+        to: (0.0, 0.255),
         frames: 6,
     },
     GestureStep::Wait(60),
     GestureStep::Move {
-        to: (-0.42, 0.34),
+        to: (-0.42, 0.255),
         frames: 20,
     },
     GestureStep::Press(false),
@@ -2166,9 +2246,9 @@ pub fn scenarios() -> Vec<Scenario> {
                 strike(ToolMode::Blunt, (-0.360, 0.330), (0.200, 0.330), 9, 60),
                 None,
             ),
-            // A bat swung at about 7 m/s, about 21 J, across the upper arm into
-            // the chest: a moderate swing, since an ordinary man's hard swing
-            // reaches 15.5 m/s.
+            // A bat swung at about 7 m/s, about 21 J, across the guard's elbow
+            // into the chest: a moderate swing, since an ordinary man's hard
+            // swing reaches 15.5 m/s.
             expectations: e,
             real: &[
                 check!(Bruises, Always, BRUISE),
@@ -2182,11 +2262,11 @@ pub fn scenarios() -> Vec<Scenario> {
             region: "torso",
             intent: "high",
             play: Play::Swing(
-                strike(ToolMode::Heavy, (-0.260, 0.340), (0.300, 0.340), 6, 60),
+                strike(ToolMode::Heavy, (-0.400, 0.340), (0.300, 0.340), 8, 60),
                 None,
             ),
             // The sledgehammer at its top speed, 10.6 m/s, about 250 J, through
-            // the upper arm into the chest.
+            // the guard's elbow, the lower end of the upper arm, into the chest.
             expectations: e,
             real: &[
                 check!(Bruises, Always, BRUISE),
@@ -2204,11 +2284,9 @@ pub fn scenarios() -> Vec<Scenario> {
                 strike(ToolMode::Sharp, (-0.040, 0.360), (0.060, 0.500), 16, 60),
                 None,
             ),
-            // A knife drawn slowly down and across the belly, about 1 m/s.
-            // The belly is narrow between the hanging arms, and the blade
-            // trails about 20 cm behind the hand, so a slash straight across
-            // would cut the arm's artery; this one trails up toward the
-            // chest. The cut opens rather than leaving a line of torn skin.
+            // A knife drawn slowly down and across the belly, about 1 m/s, the
+            // blade trailing about 20 cm behind the hand, up toward the chest.
+            // The cut opens rather than leaving a line of torn skin.
             // It misses the big vessels, so in its first second its blood
             // only wells out along it in beads, a few drops' worth; trickles
             // come once more has bled.
@@ -2246,17 +2324,16 @@ pub fn scenarios() -> Vec<Scenario> {
             region: "arm",
             intent: "cut",
             play: Play::Swing(
-                strike(ToolMode::Sharp, (-0.086, 0.240), (-0.128, 0.460), 24, 48),
+                strike(ToolMode::Sharp, (-0.115, 0.255), (-0.205, 0.330), 24, 72),
                 None,
             ),
-            // A knife drawn slowly from the armpit down the inside of the arm,
-            // over the artery there; the artery's blood comes out of the cut
-            // and runs down the arm, some 15-20 cm within the second. It
-            // starts clear of the shoulder's bones, which could catch the
-            // blade.
+            // A knife drawn slowly from the armpit along the underside of the
+            // upper arm raised in the guard, over the artery there. The
+            // artery's blood comes out of the cut and runs along the skin, or
+            // drips straight off where the cut faces down. It starts clear of
+            // the shoulder's bones, which could catch the blade.
             expectations: ScenarioExpectations {
                 cut_openings: IntBand::at_least(1),
-                blood_trail_length: DoubleBand::range(45.0, f64::INFINITY),
                 ..e
             },
             real: &[check!(OpensSkin, Always, SKIN_CUT)],
@@ -2270,8 +2347,7 @@ pub fn scenarios() -> Vec<Scenario> {
                 strike(ToolMode::Heavy, (-0.340, 0.660), (0.100, 0.660), 7, 60),
                 None,
             ),
-            // The sledgehammer into the thigh at about 7.7 m/s, about 130 J,
-            // below the hanging hand, which took half its speed before.
+            // The sledgehammer into the thigh at about 7.7 m/s, about 130 J.
             expectations: e,
             real: &[
                 check!(Bruises, Always, BRUISE),
@@ -2302,9 +2378,9 @@ pub fn scenarios() -> Vec<Scenario> {
             // A knife cut down the outer thigh clots, then a bat swung into the
             // thigh strikes the healed cut. The blade runs ahead of the hand, so
             // the cut lies a little below the hand's path; the bat aims at its
-            // lower half, below the hanging hand.
+            // lower half.
             play: Play::Swing(
-                strike(ToolMode::Sharp, (-0.075, 0.585), (-0.075, 0.685), 16, 260),
+                strike(ToolMode::Sharp, (-0.086, 0.585), (-0.086, 0.685), 16, 260),
                 Some(strike(
                     ToolMode::Blunt,
                     (-0.340, 0.700),
@@ -2316,8 +2392,9 @@ pub fn scenarios() -> Vec<Scenario> {
             expectations: ScenarioExpectations {
                 // A fresh clot is weak, so the blow makes the cut bleed again.
                 wound_reopens: IntBand::range(1, 30),
-                // The cut's blood beads and starts to run down the leg.
-                blood_trail_length: DoubleBand::range(30.0, f64::INFINITY),
+                // The cut's blood beads and starts to run down the leg; one aim
+                // of the sweep opens a long cut that lets out little.
+                blood_trail_length: DoubleBand::range(10.0, f64::INFINITY),
                 ..e
             },
             real: &[
@@ -2331,7 +2408,7 @@ pub fn scenarios() -> Vec<Scenario> {
             region: "torso",
             intent: "settle",
             play: Play::Swing(
-                strike(ToolMode::Heavy, (-0.260, 0.340), (0.300, 0.340), 6, 260),
+                strike(ToolMode::Heavy, (-0.400, 0.340), (0.300, 0.340), 8, 260),
                 None,
             ),
             // The pieces of bone broken by a full-force sledgehammer blow to the
@@ -2369,8 +2446,12 @@ pub fn scenarios() -> Vec<Scenario> {
             play: gesture(ToolMode::Blunt, DRAG_DOWN_THE_SIDE),
             // A bat pressed against the side and dragged down the body slides
             // along it nearly upright; it does not swing round into the body
-            // like a spear. At about 1.6 m/s it carries about 1 J.
-            expectations: held,
+            // like a spear. At about 1.6 m/s it carries about 1 J. It turns up
+            // to about 45 degrees all told following the waist and the hip.
+            expectations: ScenarioExpectations {
+                tool_turning: DoubleBand::range(0.0, 50.0),
+                ..held
+            },
             real: &[check!(BreaksAnyBone, Never, FOREARM)],
             bone_strength: 1.0,
         },
@@ -2381,8 +2462,8 @@ pub fn scenarios() -> Vec<Scenario> {
             play: gesture(ToolMode::Blunt, SWING_ACROSS_AND_BACK),
             // A bat swung across the chest and back keeps its barrel across
             // the swing both ways instead of spinning round at the turn. It
-            // turns up to about 45 degrees all told as it bounces off the arm,
-            // which hangs from its own collarbone.
+            // turns up to about 45 degrees all told as it bounces off the
+            // guard's elbow.
             expectations: ScenarioExpectations {
                 tool_turning: DoubleBand::range(0.0, 50.0),
                 ..held
@@ -2423,8 +2504,8 @@ pub fn scenarios() -> Vec<Scenario> {
             region: "torso",
             intent: "speed",
             play: gesture(ToolMode::Heavy, SWING_INTO_CHEST_MODERATELY),
-            // Swung at about 2.5 m/s, about 14 J, into the upper arm and chest:
-            // a bruise.
+            // Swung at about 2.5 m/s, about 14 J, into the guard's elbow and the
+            // chest: a bruise.
             expectations: held,
             real: &[
                 check!(Bruises, Always, BRUISE),
@@ -2438,12 +2519,14 @@ pub fn scenarios() -> Vec<Scenario> {
             region: "torso",
             intent: "speed",
             play: gesture(ToolMode::Heavy, SWING_INTO_CHEST_FIRMLY),
-            // Swung firmly, about 5 m/s and 54 J, into the upper arm and chest:
-            // a deep bruise, and sometimes a broken upper arm.
+            // Swung firmly, about 5 m/s and 54 J, into the guard's elbow and the
+            // chest: a deep bruise, and usually a broken forearm, which stands
+            // in front of the upper arm in the guard and takes the blow at 2.7
+            // times what breaks one.
             expectations: held,
             real: &[
                 check!(Bruises, Always, BRUISE),
-                check!(Breaks(BonePart::UpperArm), Sometimes, UPPER_ARM),
+                check!(Breaks(BonePart::Forearm), Usually, FOREARM),
                 check!(SplitsSkinWithoutBreak, Rarely, BLUNT_SPLIT),
                 // A break it only just makes seldom comes out open.
                 check!(OpenFracture, Rarely, IRON_OPEN),
@@ -2496,10 +2579,12 @@ pub fn scenarios() -> Vec<Scenario> {
             // the sledgehammer comes to the hand: flesh torn away is not there
             // to hold it back, as it used to, like a swamp, 33 px behind. Where
             // the blows left the arm's outer flesh whole, the hammer rests on
-            // it up to 20 px out.
+            // it; where the arm keeps its guard, the elbow it smashed stops
+            // the hammer short of the hand, up to about 57 px out (median
+            // 3 px across the sweep).
             expectations: ScenarioExpectations {
                 contacts: IntBand::at_least(1),
-                final_lag: DoubleBand::range(0.0, 25.0),
+                final_lag: DoubleBand::range(0.0, 60.0),
                 ..steady
             },
             real: &[],
@@ -2510,9 +2595,9 @@ pub fn scenarios() -> Vec<Scenario> {
             region: "torso",
             intent: "speed",
             play: gesture(ToolMode::Blunt, SWING_INTO_CHEST_FIRMLY),
-            // The lighter bat swung at about 5 m/s, about 10 J: a bruise. Its
-            // barrel reaches down to the forearm, which half that energy
-            // rarely breaks.
+            // The lighter bat swung at about 5 m/s, about 10 J, into the guard's
+            // elbow: a bruise. Its barrel reaches up the raised forearm, which
+            // half that energy rarely breaks.
             expectations: held,
             real: &[
                 check!(Bruises, Always, BRUISE),
@@ -2531,7 +2616,7 @@ pub fn scenarios() -> Vec<Scenario> {
                 None,
             ),
             // An ordinary man's hard bat swing, about 16 m/s and 110 J, across
-            // the upper arm into the chest.
+            // the guard's elbow into the chest.
             expectations: e,
             real: &[
                 check!(Bruises, Always, BRUISE),
@@ -2547,16 +2632,23 @@ pub fn scenarios() -> Vec<Scenario> {
             region: "arm",
             intent: "high",
             play: Play::Swing(
-                strike(ToolMode::Blunt, (-0.700, 0.440), (0.200, 0.440), 6, 60),
+                strike(ToolMode::Blunt, (-0.700, 0.190), (0.200, 0.190), 6, 60),
                 None,
             ),
-            // The same hard swing into the hanging forearm, the bone bats break
-            // most often.
+            // The same hard swing into the forearm raised in the guard, the
+            // bone bats break most often: a forearm raised to ward off a blow
+            // breaks (the nightstick fracture, the ulna broken by a blow it
+            // blocked). The upright bat's barrel hangs below the point the
+            // hand drives, so the swing runs level with the wrist to land the
+            // barrel on the forearm and fist; level with the forearm's middle
+            // it also struck the elbow below and broke the upper arm in 39
+            // of 45 runs.
             expectations: e,
             real: &[
                 check!(Bruises, Always, BRUISE),
                 check!(Breaks(BonePart::Forearm), Always, BAT_ASSAULTS),
                 check!(OpenFracture, Rarely, BAT_OPEN),
+                check!(DropsGuard, Always, ARM_DROPS),
             ],
             bone_strength: 1.0,
         },
@@ -2565,11 +2657,11 @@ pub fn scenarios() -> Vec<Scenario> {
             region: "arm",
             intent: "medium",
             play: Play::Swing(
-                strike(ToolMode::Blunt, (-0.360, 0.440), (0.200, 0.440), 9, 60),
+                strike(ToolMode::Blunt, (-0.360, 0.255), (0.200, 0.255), 9, 60),
                 None,
             ),
-            // A bat at about 7 m/s, about 21 J, into the hanging forearm: about
-            // what breaks one.
+            // A bat at about 7 m/s, about 21 J, into the forearm raised in the
+            // guard: about what breaks one.
             expectations: e,
             real: &[
                 check!(Bruises, Always, BRUISE),
@@ -2583,12 +2675,12 @@ pub fn scenarios() -> Vec<Scenario> {
             region: "arm",
             intent: "medium",
             play: Play::Swing(
-                strike(ToolMode::Heavy, (-0.300, 0.440), (0.050, 0.440), 12, 60),
+                strike(ToolMode::Heavy, (-0.300, 0.255), (0.050, 0.255), 12, 60),
                 None,
             ),
-            // The sledgehammer at about 3 m/s, about 20 J, into the hanging
-            // forearm: the blow that broke forearms in the laboratory, where
-            // they were held still.
+            // The sledgehammer at about 3 m/s, about 20 J, into the forearm
+            // raised in the guard: the blow that broke forearms in the
+            // laboratory, where they were held still.
             expectations: e,
             real: &[
                 check!(Bruises, Always, BRUISE),
@@ -2621,7 +2713,7 @@ pub fn scenarios() -> Vec<Scenario> {
             region: "arm",
             intent: "cut",
             play: gesture(ToolMode::Sharp, SLASH_INTO_THE_ARM_FAST),
-            // A knife slashed into the upper arm at about 7 m/s, a real
+            // A knife slashed into the raised forearm at about 7 m/s, a real
             // slash's speed: it cuts deep but breaks no bone.
             expectations: steady,
             real: &[check!(OpensSkin, Always, SKIN_CUT)],
@@ -2636,6 +2728,53 @@ pub fn scenarios() -> Vec<Scenario> {
             // breaks no bone.
             expectations: steady,
             real: &[check!(OpensSkin, Always, SKIN_CUT)],
+            bone_strength: 1.0,
+        },
+        Scenario {
+            name: "bat_to_the_head",
+            region: "head",
+            intent: "stance",
+            play: Play::Swing(
+                strike(ToolMode::Blunt, (-0.400, -0.240), (0.100, 0.160), 9, 90),
+                None,
+            ),
+            // A bat at about 8 m/s, about 20 J, brought down on the side of
+            // the head over the guard's fist. The head is thrown aside on the
+            // neck, short of the neck's full sideways bend of about 42 degrees
+            // (normative range of motion), and the neck's muscles bring it
+            // back; the skull holds, since its side breaks at about 5 kN
+            // (Allsop et al. 1991).
+            expectations: ScenarioExpectations {
+                head_turn: DoubleBand::range(6.0, 45.0),
+                ..e
+            },
+            real: &[
+                check!(Bruises, Always, BRUISE),
+                check!(Breaks(BonePart::Skull), Rarely, SKULL),
+            ],
+            bone_strength: 1.0,
+        },
+        Scenario {
+            name: "bat_tap_on_the_guard",
+            region: "arm",
+            intent: "stance",
+            play: Play::Swing(
+                strike(ToolMode::Blunt, (-0.400, 0.255), (0.000, 0.255), 15, 90),
+                None,
+            ),
+            // A bat at about 3 m/s, about 4 J, into the forearm raised in the
+            // guard. It knocks the fist aside, and the arm's muscles bring it
+            // back into the guard within the next second and a half, as an arm
+            // held against a push springs back (Bennett et al. 1992).
+            expectations: ScenarioExpectations {
+                fist_shift: DoubleBand::range(15.0, f64::INFINITY),
+                fist_offset: DoubleBand::range(0.0, 16.0),
+                ..e
+            },
+            real: &[
+                check!(BreaksAnyBone, Never, FOREARM),
+                check!(DropsGuard, Never, ARM_HELD),
+            ],
             bone_strength: 1.0,
         },
     ]

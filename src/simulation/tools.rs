@@ -442,6 +442,41 @@ fn segment_crossing(a0: Vec2, a1: Vec2, b0: Vec2, b1: Vec2) -> Option<(f64, f64)
     ((0.0..=1.0).contains(&t) && (0.0..=1.0).contains(&u)).then_some((t, u))
 }
 
+/// The side of the tool's axis a point came from, as a unit vector across
+/// the axis, if the axis ran past it while the point moved from `then`
+/// (against the tool at `before`) to `now` (against the tool at `shape`):
+/// beside the axis both times, but on its other side now. Past either end
+/// of the axis the point only rounds it.
+fn side_crossed(
+    then: Vec2,
+    before: &ToolContactShape,
+    now: Vec2,
+    shape: &ToolContactShape,
+) -> Option<Vec2> {
+    let t_then = segment_t(then, before.axis_start, before.axis_end);
+    let t_now = segment_t(now, shape.axis_start, shape.axis_end);
+    if t_then <= 0.0 || t_then >= 1.0 || t_now <= 0.0 || t_now >= 1.0 {
+        return None;
+    }
+    let along = subtract(shape.axis_end, shape.axis_start);
+    let across = Vec2 {
+        x: -along.y,
+        y: along.x,
+    };
+    let offset_then = subtract(then, lerp(before.axis_start, before.axis_end, t_then));
+    let offset_now = subtract(now, lerp(shape.axis_start, shape.axis_end, t_now));
+    let (side_then, side_now) = (dot(offset_then, across), dot(offset_now, across));
+    if side_then * side_now >= 0.0 {
+        return None;
+    }
+    let side = normalized(across, shape.blade_normal);
+    Some(if side_then > 0.0 {
+        side
+    } else {
+        scale(side, -1.0)
+    })
+}
+
 /// The part of `velocity` along `along`, scaled by `keep`.
 fn slide_along(velocity: Vec2, along: Vec2, keep: f64) -> Vec2 {
     let along = normalized(along, Vec2 { x: 1.0, y: 0.0 });
@@ -1600,7 +1635,8 @@ impl World {
         };
         let shift = self.tool.solver_shift;
         let progress = self.solver_progress;
-        let shape = ToolContactShape {
+        let began = (progress - 1.0 / self.materials.substeps.max(1) as f64).max(0.0);
+        let at = |progress: f64| ToolContactShape {
             axis_start: add(
                 lerp(contact.start.axis_start, contact.shape.axis_start, progress),
                 shift,
@@ -1611,15 +1647,26 @@ impl World {
             ),
             ..contact.shape
         };
+        let (shape, before) = (at(progress), at(began));
         let surface = shape.radius + 1.0;
         let tool_weight = 1.0 / contact.inertia.max(EPSILON);
         let mut pushed_back = Vec2::default();
         for &index in &contact.candidates {
             let point = &mut self.points[index];
-            let point_contact = sample_point_contact(point.position, &shape);
-            let depth = surface - point_contact.distance;
+            let mut point_contact = sample_point_contact(point.position, &shape);
+            let mut depth = surface - point_contact.distance;
             if depth <= 0.0 {
                 continue;
+            }
+            // Tissue the tool's axis ran past since the substep began, held
+            // back by the flesh it is part of, still lies on the side it
+            // came from and goes back out there, ahead of the tool, as a fast
+            // tool shoves a bone (`shove_bones`); pushed out the nearest way,
+            // out behind the tool, a braced forearm's skin was dragged back
+            // across its bone and tore.
+            if let Some(side) = side_crossed(point.previous, &before, point.position, &shape) {
+                point_contact.normal = side;
+                depth = surface + point_contact.distance;
             }
             let correction = depth * TOOL_CONTACT_STIFFNESS;
             let point_weight = 1.0 / point.mass.max(EPSILON);
@@ -1732,5 +1779,48 @@ fn side_toward(heading: Vec2, previous: Vec2) -> Vec2 {
         perpendicular
     } else {
         scale(perpendicular, -1.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A bat's striking part standing upright at `x`.
+    fn upright_at(x: f64) -> ToolContactShape {
+        ToolContactShape {
+            axis_start: Vec2 { x, y: 40.0 },
+            axis_end: Vec2 { x, y: -40.0 },
+            direction: Vec2 { x: 1.0, y: 0.0 },
+            blade_normal: Vec2 { x: 1.0, y: 0.0 },
+            radius: 12.0,
+            influence: 17.0,
+            cutting_edge: false,
+        }
+    }
+
+    #[test]
+    fn tissue_the_tool_runs_past_goes_out_ahead_of_it() {
+        let mut world = World::new(Materials {
+            substeps: 1,
+            ..Materials::default()
+        });
+        let point = world.add_point(Vec2 { x: 10.0, y: 0.0 }, TissueLayer::Skin, false);
+        // Held back by its flesh, the point fell behind the tool's axis
+        // while the tool ran from x = 0 to x = 20 within the substep.
+        world.points[point].position = Vec2 { x: 18.0, y: 0.0 };
+        world.tool.contact = Some(ToolSolverContact {
+            start: upright_at(0.0),
+            shape: upright_at(20.0),
+            inertia: 1000.0,
+            candidates: vec![point],
+        });
+        world.solver_progress = 1.0;
+        world.solve_tool_contact();
+        let x = world.points[point].position.x;
+        assert!(
+            x > 20.0,
+            "the point goes back out ahead of the tool, not out behind it: x = {x:.1}"
+        );
     }
 }

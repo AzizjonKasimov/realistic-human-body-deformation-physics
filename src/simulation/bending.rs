@@ -212,6 +212,7 @@ impl World {
         let mut wedge = BoneSegment {
             kind: old.kind,
             part: old.part,
+            limb: old.limb,
             a: subtract(center, along),
             b: add(center, along),
             previous_a: subtract(previous_center, along),
@@ -516,6 +517,47 @@ mod tests {
             "the wedge lies on the struck side: {center:?} against the crack {crack:?}"
         );
         assert!(wedge.radius < bone.radius);
+    }
+
+    #[test]
+    fn a_break_along_the_bone_leaves_its_joints_whole() {
+        let (mut world, _, forearm, hand) = arm();
+        let bone = world.bones[forearm];
+        world.bones[forearm].break_load = bone.fracture_impulse * 1.3;
+        world.fracture_bone(
+            forearm,
+            0.5,
+            Vec2 { x: 1.0, y: 0.0 },
+            bone.fracture_impulse * 1.3,
+        );
+        assert!(world.bones[forearm].fractured);
+        // The elbow and the wrist, not the link across the break.
+        let joints: Vec<_> = world
+            .bone_joints
+            .iter()
+            .filter(|joint| !joint.fracture_link)
+            .filter(|joint| {
+                [joint.a, joint.b]
+                    .iter()
+                    .any(|&b| world.bones[b].part == BonePart::Forearm)
+            })
+            .collect();
+        assert_eq!(joints.len(), 2);
+        for joint in joints {
+            assert!(
+                !joint.broken && !joint.post_fracture_limited && world.joint_holds(joint),
+                "a broken forearm leaves the elbow and wrist whole: {joint:?}"
+            );
+        }
+        let wrist = world
+            .bone_joints
+            .iter()
+            .find(|joint| joint.b == hand)
+            .expect("the wrist");
+        assert_ne!(
+            wrist.a, forearm,
+            "the wrist joins the piece that carries the forearm's wrist end"
+        );
     }
 
     #[test]

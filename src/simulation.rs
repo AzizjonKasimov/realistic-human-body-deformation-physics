@@ -12,6 +12,7 @@ mod motion;
 mod outline;
 mod phases;
 mod soft;
+mod stance;
 mod tissue;
 mod tools;
 
@@ -23,6 +24,7 @@ pub use cover::Cover;
 pub use cuts::{OpenedCut, Piece, TriangleCut};
 pub use motion::MotionSnapshot;
 pub use phases::{PhaseClock, PhaseTime, PhaseTimes, Traced, TracedStage};
+pub use stance::{HipHold, JointDrive, Limb, PostureBinding};
 pub use tissue::SpringKind;
 pub use tools::{swing_power, tool_geometry, tool_pose, ToolGeometry, ToolPose, ToolReach};
 
@@ -53,6 +55,7 @@ pub const MISSING_ANCHOR: usize = usize::MAX;
 pub const MISSING_SPRING: usize = usize::MAX;
 pub const MISSING_POINT: usize = usize::MAX;
 pub const MISSING_COVER: usize = usize::MAX;
+pub const MISSING_BONE: usize = usize::MAX;
 /// How hard a bone must be loaded to break, before `bone_strength` scales it
 /// for each part.
 const BONE_FRACTURE_IMPULSE: f64 = 2400.0;
@@ -268,14 +271,20 @@ pub struct Materials {
     /// out through the flesh; below it a fracture stays closed and bruised.
     pub open_fracture_overload: f64,
     pub direct_muscle_contact: f64,
-    /// How firmly the body holds its pose, as the frequency at which a point
-    /// or whole bone moved off where it rests springs back, in hertz, and how
-    /// fast that motion dies away, as a damping ratio: muscle tone holding
-    /// the limbs, as the body hangs from its crown.
+    /// How firmly tissue keeps its place on the skeleton, as the frequency at
+    /// which a point moved off it springs back, in hertz, and how fast that
+    /// motion dies away, as a damping ratio: the tissue holding its shape
+    /// round the bones, which the flat body's sheets need where no bone is
+    /// near (`stance.rs`).
     pub skin_posture_hertz: f64,
     pub muscle_posture_hertz: f64,
-    pub bone_posture_hertz: f64,
     pub posture_damping_ratio: f64,
+    /// How firmly the hips are held where the body stands, as the frequency
+    /// at which the whole body would spring back on them, in hertz, and how
+    /// fast that dies away: legs hold a body up about this firmly, and the
+    /// body does not keep its own balance yet.
+    pub hip_hold_hertz: f64,
+    pub hip_hold_damping_ratio: f64,
     /// The dermis's shear modulus at small strain, in pascals, and its
     /// thickness, in metres; it stiffens `skin_stiffening_ratio` times once
     /// stretched past `skin_stiffening_stretch` of its length (`tissue.rs`).
@@ -408,11 +417,15 @@ pub struct Materials {
     pub bone_joint_break_stretch: f64,
     pub bone_joint_break_impulse: f64,
     pub bone_joint_angular_break: f64,
-    pub post_fracture_joint_stiffness: f64,
-    pub post_fracture_joint_angular_stiffness: f64,
     pub post_fracture_joint_max_stretch: f64,
     pub post_fracture_joint_slack: f64,
     pub post_fracture_joint_angle_slack: f64,
+    /// How far a broken bone's pieces may shift apart at the break, in
+    /// pixels, and bend there past `FRACTURE_LINK_ANGLE`, in radians: the
+    /// periosteum and the muscle round a break hold its pieces together,
+    /// displaced and angled but not apart (`fracture_bone`).
+    pub fracture_link_slack: f64,
+    pub fracture_link_angle_slack: f64,
     pub bone_impact_transfer: f64,
     pub bone_direct_contact: f64,
     pub max_active_bone_fragments: usize,
@@ -512,8 +525,9 @@ impl Default for Materials {
             direct_muscle_contact: 0.18,
             skin_posture_hertz: 1.05,
             muscle_posture_hertz: 1.65,
-            bone_posture_hertz: 0.85,
             posture_damping_ratio: 0.2,
+            hip_hold_hertz: 6.0,
+            hip_hold_damping_ratio: 1.0,
             // Living skin's Young's modulus is about 0.5-0.6 MPa at small
             // strain (Lakhani et al. 2021), and tissue that keeps its volume
             // shears at a third of that; 70 times stiffer once stretched
@@ -646,11 +660,11 @@ impl Default for Materials {
             bone_joint_break_stretch: 2.15,
             bone_joint_break_impulse: 2600.0,
             bone_joint_angular_break: 1.20,
-            post_fracture_joint_stiffness: 0.13,
-            post_fracture_joint_angular_stiffness: 0.052,
             post_fracture_joint_max_stretch: 2.6,
             post_fracture_joint_slack: 34.0,
             post_fracture_joint_angle_slack: 0.78,
+            fracture_link_slack: 6.0,
+            fracture_link_angle_slack: 0.45,
             bone_impact_transfer: 0.62,
             bone_direct_contact: 0.86,
             max_active_bone_fragments: 48,
@@ -755,7 +769,9 @@ pub struct Point {
     /// attached to them, and only the flesh of their pieces is drawn (see
     /// `cuts.rs`).
     pub ghost_of: usize,
-    /// The impulse that held the point in its pose last substep (`soft.rs`).
+    /// Where the point keeps its place on the skeleton (`stance.rs`), and the
+    /// impulse that held it there last substep.
+    pub posture: PostureBinding,
     pub posture_impulse: Vec2,
     /// How hard the skin that runs on round the back, and the flesh inside,
     /// hold this point of the outline against the stretch the skin rests at
@@ -788,6 +804,7 @@ impl Default for Point {
             surface_depth: 0.0,
             on_cut: false,
             ghost_of: MISSING_POINT,
+            posture: PostureBinding::default(),
             posture_impulse: Vec2::default(),
             wrap: Vec2::default(),
         }
@@ -1029,11 +1046,10 @@ pub struct BoneSegment {
     pub cover_from: f64,
     pub cover_to: f64,
     /// What the bone weighs, in the engine's unit of mass, half at each end
-    /// (`tissue.rs`), and the impulses that held each end in its pose last
-    /// substep.
+    /// (`tissue.rs`).
     pub mass: f64,
-    pub posture_impulse_a: Vec2,
-    pub posture_impulse_b: Vec2,
+    /// The limb the bone is part of, if any; its pieces keep it.
+    pub limb: Limb,
 }
 
 impl Default for BoneSegment {
@@ -1070,8 +1086,7 @@ impl Default for BoneSegment {
             cover_from: 0.0,
             cover_to: 1.0,
             mass: 2.0,
-            posture_impulse_a: Vec2::default(),
-            posture_impulse_b: Vec2::default(),
+            limb: Limb::None,
         }
     }
 }
@@ -1096,6 +1111,9 @@ pub struct BoneAttachment {
     /// follows the flesh rather than the flesh the piece, and only flesh
     /// torn away lets it go (`hold_piece_in_flesh`).
     pub holds_piece: bool,
+    /// The flesh holding the piece was crushed all round it when it took
+    /// the piece, so being torn away does not let the piece go.
+    pub in_crushed_flesh: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1120,6 +1138,13 @@ pub struct BoneJoint {
     /// substep (`soft.rs`).
     pub impulse: f64,
     pub angular_impulse: f64,
+    /// The muscles across the joint, which hold it at `rest_angle`
+    /// (`stance.rs`), and the impulse they gave last substep.
+    pub drive: JointDrive,
+    pub drive_impulse: f64,
+    /// It joins the two pieces of a broken bone at the break: the tissue
+    /// round a break keeps its pieces together (`fracture_bone`).
+    pub fracture_link: bool,
 }
 
 impl Default for BoneJoint {
@@ -1143,6 +1168,9 @@ impl Default for BoneJoint {
             post_fracture_rest_angle: 0.0,
             impulse: 0.0,
             angular_impulse: 0.0,
+            drive: JointDrive::default(),
+            drive_impulse: 0.0,
+            fracture_link: false,
         }
     }
 }
@@ -1287,6 +1315,10 @@ const BLOOD_DROP_ML: f64 = 0.05;
 const PIECE_HOLD_REACH: f64 = 2.7;
 /// How many muscle points hold a new piece of bone.
 const PIECE_HOLD_POINTS: usize = 4;
+/// How far a broken bone's pieces bend at the break either way before the
+/// tissue round it holds them, in radians, short of
+/// `Materials::fracture_link_angle_slack` more.
+const FRACTURE_LINK_ANGLE: f64 = 0.25;
 /// How far a hold stretches, against its length at rest, before it lets the
 /// piece go; the flesh holding it lets go sooner only if it is torn away.
 const PIECE_HOLD_BREAK_STRETCH: f64 = 12.0;
@@ -1778,6 +1810,14 @@ pub struct World {
     solver_progress: f64,
     /// Skin has torn or been cut since the outline's hold was measured.
     outline_wrap_stale: bool,
+    /// Where the floor the body stands on lies, in pixels down the window;
+    /// infinitely far down for a world with no floor.
+    floor_y: f64,
+    /// The ends of the pelvis, held up where the body stands (`stance.rs`).
+    hip_holds: Vec<HipHold>,
+    /// Which limbs hang from a broken bone, their muscles let go, in the
+    /// order of [`Limb::index`].
+    limp_limbs: [bool; 4],
 }
 
 impl Default for World {
@@ -1833,6 +1873,46 @@ impl World {
             solver_dt: materials.fixed_dt,
             solver_progress: 1.0,
             outline_wrap_stale: false,
+            floor_y: f64::INFINITY,
+            hip_holds: Vec::new(),
+            limp_limbs: [false; 4],
+        }
+    }
+
+    /// Where the floor the body stands on lies, in pixels down the window.
+    pub fn floor_y(&self) -> f64 {
+        self.floor_y
+    }
+
+    /// Lays the floor at `floor_y` pixels down the window.
+    pub fn set_floor_y(&mut self, floor_y: f64) {
+        self.floor_y = floor_y;
+    }
+
+    /// The ends of the pelvis held up where the body stands.
+    pub fn hip_holds(&self) -> &[HipHold] {
+        &self.hip_holds
+    }
+
+    /// Holds end `b` (or else `a`) of bone `bone` up where it lies now, as
+    /// the hips are held (`stance.rs`).
+    pub fn hold_hip(&mut self, bone: usize, end_b: bool) {
+        let Some(segment) = self.bones.get(bone) else {
+            return;
+        };
+        self.hip_holds.push(HipHold {
+            bone,
+            end_b,
+            home: if end_b { segment.b } else { segment.a },
+            impulse: Vec2::default(),
+        });
+    }
+
+    /// Gives joint `joint` the muscles `drive`, which hold it at the angle
+    /// it was built at.
+    pub fn drive_bone_joint(&mut self, joint: usize, drive: JointDrive) {
+        if let Some(joint) = self.bone_joints.get_mut(joint) {
+            joint.drive = drive;
         }
     }
 
@@ -2164,9 +2244,13 @@ impl World {
             stress: 0.0,
             broken: false,
             holds_piece: false,
+            in_crushed_flesh: false,
         });
     }
 
+    /// Joins bone `a` at `t_a` along it to bone `b` at `t_b`, free to turn
+    /// from `min_angle` to `max_angle` off the angle between them now; the
+    /// new joint's index, or `None` for bones that cannot be joined.
     pub fn add_bone_joint(
         &mut self,
         a: usize,
@@ -2175,9 +2259,9 @@ impl World {
         t_b: f64,
         min_angle: f64,
         max_angle: f64,
-    ) {
+    ) -> Option<usize> {
         if a >= self.bones.len() || b >= self.bones.len() || a == b {
-            return;
+            return None;
         }
         let t_a = t_a.clamp(0.0, 1.0);
         let t_b = t_b.clamp(0.0, 1.0);
@@ -2196,6 +2280,7 @@ impl World {
             max_angle: min_angle.max(max_angle),
             ..BoneJoint::default()
         });
+        Some(self.bone_joints.len() - 1)
     }
 
     pub fn add_vessel_segment(&mut self, a: Vec2, b: Vec2, radius: f64, pressure: f64) -> usize {
@@ -2217,18 +2302,21 @@ impl World {
         index
     }
 
-    pub fn step(&mut self, dt: f64, input: &InputState, width: f64, height: f64) {
-        self.timed_step(|world| world.run_step(dt, input, width, height));
+    /// One step of `dt` seconds with this input, in a window `width` pixels
+    /// wide, whose sides nothing passes; the body stands on its own floor
+    /// ([`World::floor_y`]).
+    pub fn step(&mut self, dt: f64, input: &InputState, width: f64) {
+        self.timed_step(|world| world.run_step(dt, input, width));
     }
 
     /// One step, phase by phase; [`World::time_phases`] can time each.
-    fn run_step(&mut self, dt: f64, input: &InputState, width: f64, height: f64) {
+    fn run_step(&mut self, dt: f64, input: &InputState, width: f64) {
         self.timed("flesh mask", |world| {
             world.refresh_open_skin();
             world.refresh_flesh();
         });
         self.fresh_blood_used = 0;
-        let floor_y = height - 38.0;
+        let floor_y = self.floor_y;
         let profile = tool_profile(input.tool);
         let striker_radius = tool_geometry(input.tool).contact_radius;
         let striker_mass = self.materials.striker_mass * input.power * profile.mass_scale;
@@ -4163,7 +4251,14 @@ impl World {
         let severe_body_drive = self.debug.tool == ToolMode::Heavy
             || impulse >= threshold * 2.2
             || (bone.splinter && impulse >= threshold * 1.45);
-        if budget == 0
+        // Only an open break's pieces and chips cut a major vessel, as only
+        // they cut the skin: arteries are torn by breaks displaced far enough
+        // to come out open, and a closed break from a blow rarely injures
+        // one. Judged by how fast its pieces move, a closed forearm break
+        // under a hard bat cut the artery in every run once flesh no longer
+        // held its pieces back by more than it weighs.
+        if !bone.open_break
+            || budget == 0
             || self.vessels.is_empty()
             || (!bone.fractured && !bone.splinter)
             || (self.debug.fragment_vessel_lacerations as usize) >= budget
@@ -4870,8 +4965,10 @@ impl World {
             self.bone_attachments[i].stress = (self.bone_attachments[i].stress * 0.73)
                 .max(slip / self.materials.bone_tie_tear_mm.max(EPSILON));
             let torn_loose = if attachment.holds_piece {
-                // Flesh lets go of a piece only once it is torn away.
-                !is_flesh(&self.flesh, attachment.point) || stretch_ratio > PIECE_HOLD_BREAK_STRETCH
+                // Flesh lets go of a piece only once it is torn away, and
+                // crushed flesh only once the piece is pulled far from it.
+                (!attachment.in_crushed_flesh && !is_flesh(&self.flesh, attachment.point))
+                    || stretch_ratio > PIECE_HOLD_BREAK_STRETCH
             } else {
                 // Flesh crushed onto its bone tears off it sooner; a blow
                 // landing elsewhere on the bone does not loosen every tie on
@@ -5077,110 +5174,6 @@ impl World {
         }
     }
 
-    fn solve_post_fracture_joints(&mut self) {
-        for i in 0..self.bone_joints.len() {
-            let mut joint = self.bone_joints[i];
-            if (!joint.broken && !joint.post_fracture_limited)
-                || joint.a >= self.bones.len()
-                || joint.b >= self.bones.len()
-            {
-                continue;
-            }
-            let a = self.bones[joint.a];
-            let b = self.bones[joint.b];
-            if a.splinter || b.splinter || (a.pinned && b.pinned) {
-                continue;
-            }
-            let inv_mass_a = if a.pinned {
-                0.0
-            } else {
-                1.0 / (a.rest_length * a.radius * a.radius).max(1.0)
-            };
-            let inv_mass_b = if b.pinned {
-                0.0
-            } else {
-                1.0 / (b.rest_length * b.radius * b.radius).max(1.0)
-            };
-            let inv_mass_sum = inv_mass_a + inv_mass_b;
-            if inv_mass_sum <= EPSILON {
-                continue;
-            }
-            let share_a = inv_mass_a / inv_mass_sum;
-            let share_b = inv_mass_b / inv_mass_sum;
-            let rest = if joint.post_fracture_rest > 0.0 {
-                joint.post_fracture_rest
-            } else {
-                joint.rest
-            }
-            .max(1.0);
-            let rest_angle = if joint.post_fracture_rest > 0.0 {
-                joint.post_fracture_rest_angle
-            } else {
-                joint.rest_angle
-            };
-            let anchor_a = bone_point(a, joint.t_a);
-            let anchor_b = bone_point(b, joint.t_b);
-            let delta = subtract(anchor_b, anchor_a);
-            let len = hypot(delta.x, delta.y);
-            let mut corrected = false;
-            if len > EPSILON {
-                let max_len = (rest + self.materials.post_fracture_joint_slack)
-                    .max(rest * self.materials.post_fracture_joint_max_stretch);
-                let stretch_ratio = len / rest;
-                self.debug.max_post_fracture_joint_stretch = self
-                    .debug
-                    .max_post_fracture_joint_stretch
-                    .max(stretch_ratio);
-                joint.stress = (joint.stress * 0.94).max((stretch_ratio - 1.0).max(0.0));
-                if len > max_len {
-                    let correction = scale(
-                        delta,
-                        (len - max_len) / len * self.materials.post_fracture_joint_stiffness,
-                    );
-                    self.apply_bone_anchor_delta_idx(
-                        joint.a,
-                        joint.t_a,
-                        correction.x * share_a,
-                        correction.y * share_a,
-                    );
-                    self.apply_bone_anchor_delta_idx(
-                        joint.b,
-                        joint.t_b,
-                        -correction.x * share_b,
-                        -correction.y * share_b,
-                    );
-                    corrected = true;
-                }
-            }
-            let relative_angle = wrap_angle(
-                bone_angle(self.bones[joint.b]) - bone_angle(self.bones[joint.a]) - rest_angle,
-            );
-            let min_angle = joint.min_angle - self.materials.post_fracture_joint_angle_slack;
-            let max_angle = joint.max_angle + self.materials.post_fracture_joint_angle_slack;
-            let clamped_angle = relative_angle.clamp(min_angle, max_angle);
-            let angle_violation = relative_angle - clamped_angle;
-            let overextension = angle_violation.abs();
-            self.debug.max_post_fracture_joint_angle = self
-                .debug
-                .max_post_fracture_joint_angle
-                .max(relative_angle.abs());
-            joint.torque_stress = (joint.torque_stress * 0.94).max(overextension);
-            if overextension > EPSILON {
-                let correction =
-                    angle_violation * self.materials.post_fracture_joint_angular_stiffness;
-                self.rotate_bone_around_anchor_idx(joint.a, joint.t_a, correction * share_a);
-                self.rotate_bone_around_anchor_idx(joint.b, joint.t_b, -correction * share_b);
-                self.bones[joint.a].angular_velocity *= 1.0 - 0.08 * share_a;
-                self.bones[joint.b].angular_velocity *= 1.0 - 0.08 * share_b;
-                corrected = true;
-            }
-            if corrected {
-                self.debug.post_fracture_joint_corrections += 1;
-            }
-            self.bone_joints[i] = joint;
-        }
-    }
-
     fn solve_bone_fragment_tissue_contacts(&mut self) {
         let fragment_indices = self.budgeted_fragment_indices();
         if fragment_indices.is_empty() {
@@ -5292,14 +5285,12 @@ impl World {
                     * FRAGMENT_TISSUE_RESISTANCE
                     * layer_resistance
                     * sharp_slip;
-                let mut bone_share = if point.layer == TissueLayer::Skin {
-                    0.58
-                } else {
-                    0.43
-                };
-                if bone.splinter {
-                    bone_share *= 0.86;
-                }
+                // Bone and flesh part by their masses, as the solver moves
+                // the ends of every constraint. Shared out in fixed parts, a
+                // heavy piece of bone pushed off light flesh climbed through
+                // it, and lifted a smashed arm with it.
+                let bone_weight = bone.inverse_end_mass() * ((1.0 - t) * (1.0 - t) + t * t);
+                let bone_share = bone_weight / (bone_weight + point.inverse_mass()).max(EPSILON);
                 let point_share = 1.0 - bone_share;
 
                 let previous_anchor = lerp(bone.previous_a, bone.previous_b, t);
@@ -5367,6 +5358,7 @@ impl World {
                 damp_bone_velocity_against_contact(
                     &mut bone,
                     normal,
+                    point_velocity,
                     (contact * FRAGMENT_TISSUE_NORMAL_DAMPING * layer_resistance).min(0.86),
                     (contact * FRAGMENT_TISSUE_TANGENTIAL_FRICTION * layer_resistance).min(0.62),
                 );
@@ -5537,6 +5529,7 @@ impl World {
                         damp_bone_velocity_against_contact(
                             bone,
                             scale(normal, -1.0),
+                            velocity_support,
                             normal_damping,
                             tangential_friction,
                         );
@@ -5553,6 +5546,7 @@ impl World {
                             damp_bone_velocity_against_contact(
                                 bone,
                                 normal,
+                                velocity_fragment,
                                 normal_damping * 0.45,
                                 tangential_friction * 0.45,
                             );
@@ -5701,6 +5695,7 @@ impl World {
                         damp_bone_velocity_against_contact(
                             bone,
                             scale(normal, -1.0),
+                            velocity_b,
                             normal_damping,
                             tangential_friction,
                         );
@@ -5716,6 +5711,7 @@ impl World {
                         damp_bone_velocity_against_contact(
                             bone,
                             normal,
+                            velocity_a,
                             normal_damping,
                             tangential_friction,
                         );
@@ -5768,6 +5764,24 @@ impl World {
         }
     }
 
+    /// How far the flesh within `radius` of `at` moved this step, on average,
+    /// or `None` with none there.
+    fn flesh_travel_near(&self, at: Vec2, radius: f64) -> Option<Vec2> {
+        let mut total = Vec2::default();
+        let mut count = 0.0;
+        for (index, point) in self.points.iter().enumerate() {
+            if point.pinned
+                || !is_flesh(&self.flesh, index)
+                || distance(point.position, at) > radius
+            {
+                continue;
+            }
+            total = add(total, subtract(point.position, point.previous));
+            count += 1.0;
+        }
+        (count > 0.0).then(|| scale(total, 1.0 / count))
+    }
+
     fn process_fragment_tip(
         &mut self,
         bone_index: usize,
@@ -5780,12 +5794,22 @@ impl World {
             return;
         }
         let bone = self.bones[bone_index];
-        let travel = distance(tip, previous_tip);
-        let speed = travel / self.materials.fixed_dt.max(EPSILON);
         let radius = self
             .materials
             .fragment_contact_radius
             .max(bone.radius * (if strong_tip { 1.75 } else { 1.25 }));
+        // A broken end damages flesh by moving through it: it must move, and
+        // move against the flesh round it. A limb hanging limp carries its
+        // broken pieces and their flesh alike, and judged by how fast its
+        // pieces moved alone, it ground itself to pulp as it swung down;
+        // just after a blow the flesh the tool drove still runs on past the
+        // bone it left behind, which cuts nothing.
+        let travel = subtract(tip, previous_tip);
+        let through = self
+            .flesh_travel_near(tip, radius)
+            .map_or(travel, |flesh| subtract(travel, flesh));
+        let speed = hypot(travel.x, travel.y).min(hypot(through.x, through.y))
+            / self.materials.fixed_dt.max(EPSILON);
         let impulse =
             bone.load * 0.22 + speed * bone.radius * (if bone.splinter { 0.75 } else { 1.0 });
         if impulse < self.materials.fragment_damage_impulse * 0.34 {
@@ -5884,16 +5908,18 @@ impl World {
                 continue;
             }
             let contact = 1.0 - d / (radius * 1.18);
-            // Only the pieces of a break that came out open, and sharp chips,
-            // cut through the skin from inside; a closed break leaves it whole.
-            let cuts_skin = bone.open_break || bone.splinter;
+            // Only the pieces of a break that came out open, its chips
+            // included, cut through the skin from inside. A closed break
+            // leaves the skin whole, with any wedge it chipped: a piece that
+            // pierced the skin would have made it an open one.
+            let cuts_skin = bone.open_break;
             if spring.layer == TissueLayer::Skin
                 && cuts_skin
                 && (self.debug.fragment_skin_punctures as usize)
                     < self.materials.max_fragment_skin_punctures_per_step
             {
                 let to_skin = normalized(subtract(mid, tip), tip_normal);
-                let travel_dir = normalized(subtract(tip, previous_tip), tip_normal);
+                let travel_dir = normalized(through, tip_normal);
                 let tip_alignment = dot(tip_normal, to_skin).clamp(0.0, 1.0);
                 let travel_alignment = dot(travel_dir, to_skin).clamp(0.0, 1.0);
                 let exposed = a.exposure.max(b.exposure).clamp(0.0, 1.0);
@@ -6400,6 +6426,7 @@ impl World {
             fracture_generation: first.fracture_generation,
             open_break: first.open_break,
             pinned: old.pinned,
+            limb: old.limb,
             cover: old.cover,
             cover_from: cover_break,
             cover_to: old.cover_to,
@@ -6494,22 +6521,51 @@ impl World {
                 self.stats.broken_bone_joints += 1;
             }
             if affected && joint.a < self.bones.len() && joint.b < self.bones.len() {
-                let remapped_rest = distance(
-                    bone_point(self.bones[joint.a], joint.t_a),
-                    bone_point(self.bones[joint.b], joint.t_b),
-                )
-                .max(1.0);
-                let remapped_rest_angle =
-                    wrap_angle(bone_angle(self.bones[joint.b]) - bone_angle(self.bones[joint.a]));
-                joint.post_fracture_limited = true;
-                joint.post_fracture_rest = remapped_rest;
-                joint.post_fracture_rest_angle = remapped_rest_angle;
                 joint.torque_stress = 0.0;
-                if !joint.broken {
-                    joint.rest = remapped_rest;
-                    joint.rest_angle = remapped_rest_angle;
+                // A broken bone holds nothing up: the muscles across its
+                // joints let go, and the limb beyond drops. The pull the
+                // joint carried was for the whole bone, not its lighter piece.
+                joint.drive_impulse = 0.0;
+                joint.impulse = 0.0;
+                joint.angular_impulse = 0.0;
+                // A break at the joint tore it apart, and what is left of it
+                // holds the pieces loosely. A break along the bone leaves the
+                // joint at its end whole, as a broken forearm leaves the
+                // elbow: it joins the piece that carries that end, at the
+                // same place and angle, so nothing about it changes.
+                if joint.broken {
+                    joint.post_fracture_limited = true;
+                    joint.post_fracture_rest = distance(
+                        bone_point(self.bones[joint.a], joint.t_a),
+                        bone_point(self.bones[joint.b], joint.t_b),
+                    )
+                    .max(1.0);
+                    joint.post_fracture_rest_angle = wrap_angle(
+                        bone_angle(self.bones[joint.b]) - bone_angle(self.bones[joint.a]),
+                    );
                 }
             }
+        }
+        self.split_stance_at_break(bone_index, second_index, break_t);
+        self.let_go_of_broken_limb(old.limb, old.part);
+        // The periosteum and the muscle round a break hold its pieces
+        // together: they bend and shift at the break but do not come apart.
+        // Once the body stood free of the pins that held each piece near
+        // where it was built, a broken arm hanging limp scattered its pieces
+        // through flesh the blow had torn.
+        if let Some(link) = self.add_bone_joint(
+            bone_index,
+            1.0,
+            second_index,
+            0.0,
+            -FRACTURE_LINK_ANGLE,
+            FRACTURE_LINK_ANGLE,
+        ) {
+            let joint = &mut self.bone_joints[link];
+            joint.post_fracture_limited = true;
+            joint.post_fracture_rest = joint.rest;
+            joint.post_fracture_rest_angle = joint.rest_angle;
+            joint.fracture_link = true;
         }
 
         self.debug.max_bone_angular_speed = self.debug.max_bone_angular_speed.max(
@@ -6527,7 +6583,12 @@ impl World {
             self.stats.open_fractures += 1;
         }
         // Chips break off once the break has torn the flesh around it, so
-        // the flesh left there is what holds them.
+        // the flesh left there is what holds them; they come out open or
+        // closed as their break did.
+        let old = BoneSegment {
+            open_break: old.open_break || open,
+            ..old
+        };
         if !open {
             self.bruise_tissue_around_fracture(crack, old.radius, load);
             self.count_fracture(old.part, old.kind, load);
@@ -6598,6 +6659,8 @@ impl World {
         let chip_length = (old.radius * 1.8).max(8.0).min(len * 0.13);
         let mut splinter = BoneSegment {
             kind: old.kind,
+            part: old.part,
+            limb: old.limb,
             a: Vec2 {
                 x: crack.x - dir.x * chip_length * 0.45 + normal.x * snap * 0.35,
                 y: crack.y - dir.y * chip_length * 0.45 + normal.y * snap * 0.35,
@@ -6616,6 +6679,7 @@ impl World {
             broken_end_normal: normal,
             fracture_generation: self.materials.max_bone_fracture_depth,
             splinter: true,
+            open_break: old.open_break,
             angular_velocity: (spin * 1.65).clamp(-42.0, 42.0),
             ..BoneSegment::default()
         };
@@ -6669,18 +6733,49 @@ impl World {
         let reach = self.materials.point_spacing * PIECE_HOLD_REACH;
         // The flesh as it is now: a break tears what lies round it mid-step.
         let flesh = self.flesh_points();
-        let mut near = Vec::new();
-        for (index, point) in self.points.iter().enumerate() {
-            if point.layer != TissueLayer::Muscle || !flesh[index] {
-                continue;
+        // Flesh that keeps its place on a chip's own bone holds it before
+        // other flesh about as near, which counts a point spacing farther, so
+        // the chip moves with its own limb: held by the nearest flesh
+        // whatever bone it lay on, a forearm's chip beside the elbow was left
+        // in the gap between forearm and upper arm as the elbow opened. The
+        // larger pieces keep the nearest flesh: held by their own bone's
+        // flesh, the pieces of a smashed arm were dragged out after it.
+        let on_own_bone = |point: &Point| {
+            let binding = point.posture;
+            let slot = usize::from(binding.weights[1] > binding.weights[0]);
+            self.bones
+                .get(binding.bones[slot])
+                .is_some_and(|own| own.part == bone.part && own.limb == bone.limb)
+        };
+        let near_flesh = |crushed: bool| {
+            let mut near = Vec::new();
+            for (index, point) in self.points.iter().enumerate() {
+                if point.layer != TissueLayer::Muscle || point.is_ghost() || flesh[index] == crushed
+                {
+                    continue;
+                }
+                let t = segment_t(point.position, bone.a, bone.b);
+                let gap = distance(point.position, bone_point(bone, t));
+                if gap <= reach {
+                    let elsewhere = if !bone.splinter || on_own_bone(point) {
+                        0.0
+                    } else {
+                        self.materials.point_spacing
+                    };
+                    near.push((gap + elsewhere, index, t));
+                }
             }
-            let t = segment_t(point.position, bone.a, bone.b);
-            let gap = distance(point.position, bone_point(bone, t));
-            if gap <= reach {
-                near.push((gap, index, t));
-            }
+            near.sort_by(|a: &(f64, usize, f64), b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            near
+        };
+        let mut near = near_flesh(false);
+        // A piece lying where all the flesh is crushed is held by the crushed
+        // flesh, as pulp still holds the chips of a smashed bone; it would
+        // otherwise drop out of a limb raised in the guard.
+        let crushed = near.is_empty();
+        if crushed {
+            near = near_flesh(true);
         }
-        near.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
         // Holds this piece lost before make room for the new ones, so a piece
         // held again and again does not lengthen the list.
         let spent: Vec<usize> = (0..self.bone_attachments.len())
@@ -6696,6 +6791,7 @@ impl World {
                 continue;
             };
             hold.holds_piece = true;
+            hold.in_crushed_flesh = crushed;
             match spent.get(n) {
                 Some(&slot) => self.bone_attachments[slot] = hold,
                 None => self.bone_attachments.push(hold),
@@ -6924,12 +7020,6 @@ impl World {
     fn apply_bone_anchor_delta_idx(&mut self, index: usize, t: f64, dx: f64, dy: f64) {
         if let Some(bone) = self.bones.get_mut(index) {
             apply_bone_anchor_delta(bone, t, dx, dy);
-        }
-    }
-
-    fn rotate_bone_around_anchor_idx(&mut self, index: usize, t: f64, angle: f64) {
-        if let Some(bone) = self.bones.get_mut(index) {
-            rotate_bone_around_anchor(bone, t, angle);
         }
     }
 
@@ -7198,12 +7288,7 @@ mod tests {
         world.points[muscle].position = Vec2 { x: 170.0, y: 100.0 };
         world.points[muscle].previous = world.points[muscle].position;
         for _ in 0..10 {
-            world.step(
-                world.materials.fixed_dt,
-                &InputState::default(),
-                1000.0,
-                1000.0,
-            );
+            world.step(world.materials.fixed_dt, &InputState::default(), 1000.0);
         }
 
         assert!(
@@ -7604,31 +7689,30 @@ mod tests {
         materials.blood_volume_capacity = 1.0;
         materials.blood_turgor_min_scale = 0.25;
 
-        let mut full = World::new(materials);
-        let full_point = full.add_point(Vec2 { x: 100.0, y: 100.0 }, TissueLayer::Skin, false);
-        full.points[full_point].position.x = 200.0;
-        full.points[full_point].previous = full.points[full_point].position;
-
-        let mut depleted = World::new(materials);
-        depleted.blood_volume = 0.0;
-        let depleted_point =
-            depleted.add_point(Vec2 { x: 100.0, y: 100.0 }, TissueLayer::Skin, false);
-        depleted.points[depleted_point].position.x = 200.0;
-        depleted.points[depleted_point].previous = depleted.points[depleted_point].position;
+        // A point of skin kept in its place on a bone held still, pulled
+        // off it.
+        let pulled_off = |blood_volume: f64| {
+            let mut world = World::new(materials);
+            world.blood_volume = blood_volume;
+            let point = world.add_point(Vec2 { x: 100.0, y: 100.0 }, TissueLayer::Skin, false);
+            world.add_bone_segment(
+                Vec2 { x: 80.0, y: 60.0 },
+                Vec2 { x: 80.0, y: 140.0 },
+                4.0,
+                1.0e9,
+                true,
+            );
+            world.bind_posture(|_| vec![0]);
+            world.points[point].position.x = 200.0;
+            world.points[point].previous = world.points[point].position;
+            (world, point)
+        };
+        let (mut full, full_point) = pulled_off(1.0);
+        let (mut depleted, depleted_point) = pulled_off(0.0);
 
         for _ in 0..3 {
-            full.step(
-                full.materials.fixed_dt,
-                &InputState::default(),
-                400.0,
-                400.0,
-            );
-            depleted.step(
-                depleted.materials.fixed_dt,
-                &InputState::default(),
-                400.0,
-                400.0,
-            );
+            full.step(full.materials.fixed_dt, &InputState::default(), 400.0);
+            depleted.step(depleted.materials.fixed_dt, &InputState::default(), 400.0);
         }
 
         assert!(
@@ -7676,18 +7760,8 @@ mod tests {
         let mut depleted = build_area_world(materials, 0.0);
         let initial_error = area_error(&full, 0);
 
-        full.step(
-            full.materials.fixed_dt,
-            &InputState::default(),
-            1000.0,
-            1000.0,
-        );
-        depleted.step(
-            depleted.materials.fixed_dt,
-            &InputState::default(),
-            1000.0,
-            1000.0,
-        );
+        full.step(full.materials.fixed_dt, &InputState::default(), 1000.0);
+        depleted.step(depleted.materials.fixed_dt, &InputState::default(), 1000.0);
 
         let full_error = area_error(&full, 0);
         let depleted_error = area_error(&depleted, 0);
@@ -8184,8 +8258,9 @@ mod tests {
         assert_eq!(world.debug.fragment_tissue_budget_skips, 0);
     }
 
-    #[test]
-    fn moving_splinter_tip_punctures_intact_skin_spring() {
+    /// A loaded splinter driven at skin, from a break that came out open or
+    /// a closed one.
+    fn splinter_tip_world(open_break: bool) -> World {
         let mut materials = Materials::default();
         materials.max_fluid_particles = 0;
         materials.max_wound_sources = 0;
@@ -8204,6 +8279,7 @@ mod tests {
         );
         world.bones[bone].fractured = true;
         world.bones[bone].splinter = true;
+        world.bones[bone].open_break = open_break;
         world.bones[bone].broken_end = true;
         world.bones[bone].broken_end_normal = Vec2 { x: 0.0, y: 1.0 };
         world.bones[bone].load = 900.0;
@@ -8216,15 +8292,30 @@ mod tests {
             world.bones[bone].broken_end_normal,
             true,
         );
+        world
+    }
 
+    #[test]
+    fn moving_splinter_tip_punctures_intact_skin_spring() {
+        let world = splinter_tip_world(true);
         assert!(
             world.springs[0].broken,
-            "a loaded splinter tip should puncture nearby intact skin"
+            "a loaded splinter tip of an open break should puncture nearby intact skin"
         );
         assert_eq!(world.stats.broken_skin, 1);
         assert_eq!(world.stats.fragment_tissue_tears, 1);
         assert_eq!(world.stats.fragment_skin_punctures, 1);
         assert_eq!(world.debug.fragment_skin_punctures, 1);
+    }
+
+    #[test]
+    fn closed_break_chip_leaves_skin_whole() {
+        let world = splinter_tip_world(false);
+        assert!(
+            !world.springs[0].broken,
+            "a chip of a closed break stays under the skin"
+        );
+        assert_eq!(world.stats.broken_skin, 0);
     }
 
     #[test]
@@ -8917,7 +9008,7 @@ mod tests {
                 power: swing_power(tool),
                 tool,
             };
-            world.step(dt, &input, 640.0, 480.0);
+            world.step(dt, &input, 640.0);
             contacts += world.debug.tissue_contacts;
         }
         (contacts, hand - world.tool.position.x)
@@ -9294,8 +9385,9 @@ mod tests {
         assert_eq!(world.stats.opened_wounds, 0);
     }
 
-    #[test]
-    fn fractured_fragment_tip_can_lacerate_major_vessel() {
+    /// A loaded broken end driven across a major vessel, from a break that
+    /// came out open or a closed one.
+    fn fragment_tip_across_vessel(open_break: bool) -> World {
         let mut materials = Materials::default();
         materials.fragment_vessel_laceration_impulse = 90.0;
         materials.fragment_vessel_laceration_radius = 8.0;
@@ -9316,6 +9408,7 @@ mod tests {
             false,
         );
         world.bones[fragment].fractured = true;
+        world.bones[fragment].open_break = open_break;
         world.bones[fragment].broken_end = true;
         world.bones[fragment].load = 420.0;
 
@@ -9326,7 +9419,19 @@ mod tests {
             Vec2 { x: 1.0, y: 0.0 },
             true,
         );
+        world
+    }
 
+    #[test]
+    fn closed_break_leaves_major_vessel_whole() {
+        let world = fragment_tip_across_vessel(false);
+        assert!(!world.vessels[0].lacerated);
+        assert_eq!(world.stats.vessel_lacerations, 0);
+    }
+
+    #[test]
+    fn fractured_fragment_tip_can_lacerate_major_vessel() {
+        let world = fragment_tip_across_vessel(true);
         assert!(world.vessels[0].lacerated);
         assert_eq!(world.stats.vessel_lacerations, 1);
         assert_eq!(world.stats.fragment_vessel_lacerations, 1);
@@ -10054,15 +10159,6 @@ fn shift_bone_anchor(bone: &mut BoneSegment, t: f64, delta: Vec2) {
     bone.previous_b = add(bone.previous_b, shift_b);
 }
 
-fn rotate_bone_around_anchor(bone: &mut BoneSegment, t: f64, angle: f64) {
-    if bone.pinned || angle.abs() <= EPSILON {
-        return;
-    }
-    let anchor = bone_point(*bone, t.clamp(0.0, 1.0));
-    bone.a = rotate_around(bone.a, anchor, angle);
-    bone.b = rotate_around(bone.b, anchor, angle);
-}
-
 fn rotate_bone_around_center(bone: &mut BoneSegment, angle: f64) {
     if bone.pinned || angle.abs() <= EPSILON {
         return;
@@ -10117,9 +10213,14 @@ fn fragment_tissue_fallback_normal(bone: BoneSegment, point: Vec2, t: f64) -> Ve
     normal
 }
 
+/// Damps how fast `bone` moves against what it presses on across `normal`,
+/// which travels `against` in the same time: into it, and along it. Damped
+/// against the world instead, a broken piece lying in a limb stood still in
+/// the air, and held the limb up with it once the body stood free.
 fn damp_bone_velocity_against_contact(
     bone: &mut BoneSegment,
     normal: Vec2,
+    against: Vec2,
     normal_damping: f64,
     tangential_damping: f64,
 ) {
@@ -10130,6 +10231,7 @@ fn damp_bone_velocity_against_contact(
         bone.a,
         &mut bone.previous_a,
         normal,
+        against,
         normal_damping,
         tangential_damping,
     );
@@ -10137,6 +10239,7 @@ fn damp_bone_velocity_against_contact(
         bone.b,
         &mut bone.previous_b,
         normal,
+        against,
         normal_damping,
         tangential_damping,
     );
@@ -10146,10 +10249,11 @@ fn damp_bone_endpoint_velocity(
     current: Vec2,
     previous: &mut Vec2,
     normal: Vec2,
+    against: Vec2,
     normal_damping: f64,
     tangential_damping: f64,
 ) {
-    let velocity = subtract(current, *previous);
+    let velocity = subtract(subtract(current, *previous), against);
     let normal_speed = dot(velocity, normal);
     let normal_velocity = scale(normal, normal_speed);
     let tangent_velocity = subtract(velocity, normal_velocity);
@@ -10160,7 +10264,7 @@ fn damp_bone_endpoint_velocity(
     };
     let kept_tangent = scale(tangent_velocity, 1.0 - tangential_damping.clamp(0.0, 0.84));
     let damped = add(kept_normal, kept_tangent);
-    *previous = subtract(current, damped);
+    *previous = subtract(current, add(damped, against));
 }
 
 fn point_in_triangle(p: Vec2, a: Vec2, b: Vec2, c: Vec2) -> bool {

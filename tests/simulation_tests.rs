@@ -183,12 +183,28 @@ fn generated_body_mirrors_across_its_midline() {
         }
     }
     for bone in world.bones() {
-        let (a, b) = (mirrored(bone.a), mirrored(bone.b));
+        let (a, b) = (mirrored(bone.home_a), mirrored(bone.home_b));
         if !world.bones().iter().any(|other| {
-            (near(other.a, a) && near(other.b, b)) || (near(other.a, b) && near(other.b, a))
+            (near(other.home_a, a) && near(other.home_b, b))
+                || (near(other.home_a, b) && near(other.home_b, a))
         }) {
             panic!(
                 "FAIL: bone from ({:.1}, {:.1}) to ({:.1}, {:.1}) has no mirror image",
+                bone.home_a.x, bone.home_a.y, bone.home_b.x, bone.home_b.y
+            );
+        }
+    }
+    // Settled under its weight, the body stays about as even: the solver
+    // takes one side's joints before the other's, which leans the light
+    // ribs a couple of pixels.
+    let close = |a: rp::Vec2, b: rp::Vec2| (a.x - b.x).hypot(a.y - b.y) < 3.0;
+    for bone in world.bones() {
+        let (a, b) = (mirrored(bone.a), mirrored(bone.b));
+        if !world.bones().iter().any(|other| {
+            (close(other.a, a) && close(other.b, b)) || (close(other.a, b) && close(other.b, a))
+        }) {
+            panic!(
+                "FAIL: the settled bone from ({:.1}, {:.1}) to ({:.1}, {:.1}) leans off its mirror image",
                 bone.a.x, bone.a.y, bone.b.x, bone.b.y
             );
         }
@@ -306,11 +322,13 @@ fn generated_body_has_expected_layers_and_anatomy() {
         fail("every generated skin point should have at least one muscle attachment");
     }
     // Bands are fractions of the skin's height, so they line up with the body's
-    // landmark heights: chin ~0.13, shoulders ~0.20, armpits ~0.30, waist ~0.40,
-    // wrists ~0.51, crotch ~0.54, knees ~0.72.
+    // landmark heights: chin ~0.13, fists ~0.13-0.22 in the guard, shoulders
+    // ~0.20, elbows ~0.32, waist ~0.40, crotch ~0.54, knees ~0.72. The guard's
+    // raised arms reach past the shoulders, so the shoulders are measured
+    // inside them.
     let head_width = skin_band_width(&world, 0.03, 0.11);
     let neck_width = central_skin_band_width(&world, 0.125, 0.150);
-    let shoulder_width = skin_band_width(&world, 0.20, 0.24);
+    let shoulder_width = central_skin_band_width(&world, 0.20, 0.24);
     let waist_width = skin_band_width_with_filter(&world, 0.38, 0.42, 0.088);
     let hip_width = skin_band_width_with_filter(&world, 0.48, 0.53, 0.12);
     let (left_leg_points, lower_leg_gap_points, right_leg_points) =
@@ -346,15 +364,13 @@ fn generated_body_has_expected_layers_and_anatomy() {
     if lower_leg_gap_points >= left_leg_points.min(right_leg_points) {
         fail("separated legs should keep a readable center gap below the pelvis");
     }
-    let elbow_runs = skin_band_clusters(&world, 0.40, 0.44);
+    let elbow_runs = skin_band_clusters(&world, 0.30, 0.33);
     if elbow_runs != 3 {
-        panic!(
-            "FAIL: arms should hang separately beside the torso at elbow height: runs={elbow_runs}"
-        );
+        panic!("FAIL: the guard's elbows should stand out clear of the chest: runs={elbow_runs}");
     }
-    let hand_runs = skin_band_clusters(&world, 0.565, 0.60);
-    if hand_runs != 4 {
-        panic!("FAIL: mitten hands should hang beside the separated thighs: runs={hand_runs}");
+    let fist_runs = skin_band_clusters(&world, 0.15, 0.18);
+    if fist_runs != 3 {
+        panic!("FAIL: the fists should be up beside the head and neck: runs={fist_runs}");
     }
 
     let anatomy = rp::validate_anatomy(&world, 16);
@@ -371,7 +387,6 @@ fn rest_simulation_stays_stable_and_idle() {
             world.materials().fixed_dt,
             &rp::InputState::default(),
             1280.0,
-            720.0,
         );
     }
 
@@ -506,7 +521,7 @@ fn strike_single_spring(tool: rp::ToolMode, a: rp::Vec2, b: rp::Vec2) -> rp::Wor
         power: 3.0,
         tool,
     };
-    world.step(world.materials().fixed_dt, &input, 640.0, 480.0);
+    world.step(world.materials().fixed_dt, &input, 640.0);
     world
 }
 
@@ -556,12 +571,12 @@ fn knife_stroke_down_abdomen(first_vx: f64, first_vy: f64) -> i32 {
         power: 2.0,
         tool: rp::ToolMode::Sharp,
     };
-    world.step(dt, &input, width, height);
+    world.step(dt, &input, width);
     for step in 1..=20 {
         input.vx = 0.0;
         input.vy = 300.0;
         input.y = start.y + 300.0 * dt * f64::from(step);
-        world.step(dt, &input, width, height);
+        world.step(dt, &input, width);
     }
     world.stats().broken_skin
 }
@@ -618,7 +633,7 @@ fn direct_bone_strike_fractures_and_emits_fluid() {
         power: 4.0,
         tool: rp::ToolMode::Blunt,
     };
-    world.step(world.materials().fixed_dt, &input, 1280.0, 720.0);
+    world.step(world.materials().fixed_dt, &input, 1280.0);
     if world.stats().fractured_bones <= 0 || world.bones().len() <= initial_bones {
         fail("direct striker contact should fracture a bone");
     }
@@ -660,7 +675,7 @@ fn press_knife_on_fiber(world: &mut rp::World, lead: f64, ease: f64, frames: i32
             power: 2.0,
             tool: rp::ToolMode::Sharp,
         };
-        world.step(dt, &input, 640.0, 480.0);
+        world.step(dt, &input, 640.0);
         if let Some(pose) = world.current_tool_pose() {
             furthest_tip = furthest_tip.max(pose.contact_end.x);
         }
@@ -685,7 +700,7 @@ fn knife_rests_against_skin_until_pressed_hard_enough_to_cut() {
         power: 2.0,
         tool: rp::ToolMode::Sharp,
     };
-    world.step(world.materials().fixed_dt, &start, 640.0, 480.0);
+    world.step(world.materials().fixed_dt, &start, 640.0);
 
     // The hand eases the blade onto the skin, about 60 px/s, and leans on it.
     let gentle_tip = press_knife_on_fiber(&mut world, 12.0, 1.0, 90);
@@ -733,7 +748,7 @@ fn knife_stops_at_bone_without_breaking_it() {
             power: 4.0,
             tool: rp::ToolMode::Sharp,
         };
-        world.step(dt, &input, 640.0, 480.0);
+        world.step(dt, &input, 640.0);
         if let Some(pose) = world.current_tool_pose() {
             furthest_tip = furthest_tip.max(pose.contact_end.x);
         }
@@ -772,7 +787,7 @@ fn bat_swing_stops_in_a_leg_and_bruises_without_tearing() {
             power: 2.0,
             tool: rp::ToolMode::Blunt,
         };
-        world.step(dt, &input, width, height);
+        world.step(dt, &input, width);
         furthest = furthest.max(world.tool_position().x);
     }
     if furthest > far_side {
@@ -801,7 +816,7 @@ fn resting_body_carries_no_hidden_motion() {
     let mut world = rp::create_layered_body(width, height, rp::Materials::default());
     let dt = world.materials().fixed_dt;
     for _ in 0..300 {
-        world.step(dt, &rp::InputState::default(), width, height);
+        world.step(dt, &rp::InputState::default(), width);
     }
     // A point's previous position is where it was a step ago, so at rest the
     // speed it carries into the next step is nearly zero.
@@ -818,31 +833,54 @@ fn resting_body_carries_no_hidden_motion() {
     }
 }
 
-#[test]
-fn arm_pressed_against_the_chest_stays_outside_it() {
+/// Plays `gesture` on a body whose bones are `strength` times as strong as
+/// tuned, and returns how many times its outline met itself and how far it
+/// got in at most, in pixels.
+fn outline_contact_under(gesture: &str, strength: f64) -> (i32, f64, f64) {
     let (width, height) = (1280.0, 720.0);
-    // Bones too strong to break: a firm swing can break the upper arm, as in
-    // real life, and a broken arm folds instead of being driven against the
-    // chest. This checks how body parts meet, not fractures.
     let mut materials = rp::Materials::default();
-    materials.bone_fracture_impulse *= 4.0;
+    materials.bone_fracture_impulse *= strength;
     let mut world = rp::create_layered_body(width, height, materials);
     let dt = world.materials().fixed_dt;
     let body = rp::body_frame(width, height);
-    // A firm hammer swing into the outside of the arm, leaning on it after:
-    // the flesh gives under the hammer, so a swing has to drive the arm in.
-    let gesture =
-        rp::scenarios::Gesture::parse("hammer:-0.35,0.34:wait=10:down:0.0,0.34/4:wait=60").unwrap();
+    let gesture = rp::scenarios::Gesture::parse(gesture).unwrap();
     let (mut contacts, mut deepest) = (0, 0.0f64);
     for frame in 0..gesture.frames() {
-        world.step(dt, &gesture.input(frame, body), width, height);
+        world.step(dt, &gesture.input(frame, body), width);
         contacts += world.debug().outline_contacts;
         deepest = deepest.max(world.debug().max_outline_overlap);
     }
+    (contacts, deepest, world.materials().point_spacing)
+}
+
+#[test]
+fn leg_pressed_against_the_other_stays_outside_it() {
+    // A firm hammer swing into the outside of the thigh, leaning on it after,
+    // drives it against the other thigh. Bones too strong to break: this
+    // checks how body parts meet, not fractures.
+    let (contacts, deepest, spacing) =
+        outline_contact_under("hammer:-0.45,0.62:wait=10:down:0.05,0.62/4:wait=60", 4.0);
     if contacts == 0 {
-        fail("the arm should be driven against the chest and meet it");
+        fail("the thigh should be driven against the other and meet it");
     }
-    if deepest > world.materials().point_spacing {
-        panic!("FAIL: the arm should press against the chest, not pass into it: it got {deepest:.1} px in");
+    if deepest > spacing {
+        panic!(
+            "FAIL: the thighs should press together, not pass into each other: {deepest:.1} px in"
+        );
+    }
+}
+
+#[test]
+fn broken_arm_falls_against_the_chest_and_stays_outside_it() {
+    // The guard holds an arm off the chest; a hammer driven hard into the
+    // elbow breaks the upper arm, and the arm hanging from the break falls
+    // against the side of the chest, as a broken arm is held against the body.
+    let (contacts, deepest, spacing) =
+        outline_contact_under("hammer:-0.45,0.32:wait=10:down:0.10,0.32/4:wait=60", 1.0);
+    if contacts == 0 {
+        fail("the broken arm should fall against the chest and meet it");
+    }
+    if deepest > spacing {
+        panic!("FAIL: the arm should rest against the chest, not pass into it: it got {deepest:.1} px in");
     }
 }

@@ -133,7 +133,11 @@ impl World {
         }
         for outline in &self.outlines {
             for &point in &outline.points {
-                if self.points[point].layer == TissueLayer::Skin && joined[point] {
+                // Where a tear or a cut runs through the outline, the skin
+                // round the back is open there too, and holds nothing: a
+                // light scrap of torn skin held as if whole was thrown.
+                let skin = &self.points[point];
+                if skin.layer == TissueLayer::Skin && joined[point] && !skin.on_cut {
                     self.points[point].wrap = scale(force[point], -1.0);
                 }
             }
@@ -141,10 +145,10 @@ impl World {
         self.outline_wrap_stale = false;
     }
 
-    /// Which skin points the body's skin still holds: those its intact
-    /// springs join to the crown, where the body hangs.
+    /// Which skin points the body's skin still holds: the largest piece of
+    /// skin its intact springs join together. A flap cut free is a piece of
+    /// its own.
     fn skin_joined_to_body(&self) -> Vec<bool> {
-        let mut joined = vec![false; self.points.len()];
         let mut neighbours: Vec<Vec<usize>> = vec![Vec::new(); self.points.len()];
         for spring in &self.springs {
             if spring.broken || spring.layer != TissueLayer::Skin {
@@ -156,24 +160,35 @@ impl World {
             neighbours[spring.a].push(spring.b);
             neighbours[spring.b].push(spring.a);
         }
-        let mut stack: Vec<usize> = (0..self.points.len())
-            .filter(|&index| {
-                let point = &self.points[index];
-                point.pinned && point.layer == TissueLayer::Skin
-            })
-            .collect();
-        for &index in &stack {
-            joined[index] = true;
-        }
-        while let Some(index) = stack.pop() {
-            for &next in &neighbours[index] {
-                if !joined[next] {
-                    joined[next] = true;
-                    stack.push(next);
+        // Each skin point's piece, numbered in the order the pieces are met.
+        let mut piece = vec![usize::MAX; self.points.len()];
+        let mut sizes = Vec::new();
+        for start in 0..self.points.len() {
+            if piece[start] != usize::MAX || self.points[start].layer != TissueLayer::Skin {
+                continue;
+            }
+            let number = sizes.len();
+            let mut size = 0usize;
+            let mut stack = vec![start];
+            piece[start] = number;
+            while let Some(index) = stack.pop() {
+                size += 1;
+                for &next in &neighbours[index] {
+                    if piece[next] == usize::MAX {
+                        piece[next] = number;
+                        stack.push(next);
+                    }
                 }
             }
+            sizes.push(size);
         }
-        joined
+        // The first of the largest pieces, so the choice is the same in
+        // every build.
+        let body = (0..sizes.len()).fold(None, |best: Option<usize>, number| match best {
+            Some(best) if sizes[best] >= sizes[number] => Some(best),
+            _ => Some(number),
+        });
+        piece.iter().map(|&number| Some(number) == body).collect()
     }
 
     /// The net pull the skin's springs and triangles that still hold real
@@ -235,19 +250,52 @@ impl World {
     }
 
     /// Holds each point of the skin's outline against the pull its skin
-    /// carried at rest (`measure_outline_wrap`), as a steady load: one that
-    /// turned with the outline would drive it round in a flutter.
+    /// carried at rest (`measure_outline_wrap`), as a steady load that turns
+    /// with the bones the point keeps its place on, so it holds a raised or
+    /// lowered limb's skin as it held it in the guard: one that turned with
+    /// the outline itself would drive it round in a flutter.
     pub(super) fn pull_outline_round(&mut self, h: f64) {
         if self.outline_wrap_stale {
             self.measure_outline_wrap();
         }
-        for (index, point) in self.points.iter_mut().enumerate() {
+        let turns = self.bone_turns();
+        for index in 0..self.points.len() {
+            let point = self.points[index];
             if point.wrap == Vec2::default() || point.pinned || !is_flesh(&self.flesh, index) {
                 continue;
             }
-            let shift = scale(point.wrap, h * h / point.mass.max(EPSILON));
-            point.position = add(point.position, shift);
+            let binding = point.posture;
+            let mut wrap = Vec2::default();
+            let mut held = 0.0;
+            for slot in 0..2 {
+                let Some(&(cos, sin)) = turns.get(binding.bones[slot]) else {
+                    continue;
+                };
+                let weight = binding.weights[slot];
+                wrap.x += weight * (point.wrap.x * cos - point.wrap.y * sin);
+                wrap.y += weight * (point.wrap.x * sin + point.wrap.y * cos);
+                held += weight;
+            }
+            if held <= 0.0 {
+                wrap = point.wrap;
+            }
+            let shift = scale(wrap, h * h / point.mass.max(EPSILON));
+            self.points[index].position = add(point.position, shift);
         }
+    }
+
+    /// How far each bone has turned since the body was built, as the cosine
+    /// and sine of the angle.
+    fn bone_turns(&self) -> Vec<(f64, f64)> {
+        self.bones
+            .iter()
+            .map(|bone| {
+                let now = subtract(bone.b, bone.a);
+                let built = subtract(bone.home_b, bone.home_a);
+                let lengths = (dot(now, now) * dot(built, built)).sqrt().max(EPSILON);
+                (dot(built, now) / lengths, cross(built, now) / lengths)
+            })
+            .collect()
     }
 
     /// Finds the points and stretches of outline close enough to touch on

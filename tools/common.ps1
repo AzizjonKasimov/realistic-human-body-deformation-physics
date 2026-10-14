@@ -49,6 +49,32 @@ function Get-CommitWorktree([string]$Sha) {
     return $tree
 }
 
+# The app built from commit $Sha (`Resolve-Commit`), built once in the cached
+# worktree that compare.ps1 uses, with that commit's own Cargo.toml, and kept
+# in target\compare\apps\<commit>.
+function Get-CommitApp([string]$Sha, [string]$Label) {
+    $repoRoot = Get-RepoRoot
+    $short = $Sha.Substring(0, 10)
+    $exe = Join-Path $repoRoot "target\compare\apps\$short\realistic_physics.exe"
+    if (Test-Path -LiteralPath $exe) {
+        return $exe
+    }
+    $tree = Get-CommitWorktree $Sha
+    $targetDir = Join-Path $repoRoot "target\compare\target"
+    $cargo = Get-CargoPath
+    Invoke-Checked -Label "Build $Label app (Release)" -Command {
+        Push-Location $tree
+        try {
+            & $cargo build --release --bin realistic_physics --target-dir $targetDir
+        } finally {
+            Pop-Location
+        }
+    }
+    New-Item -ItemType Directory -Force (Split-Path -Parent $exe) | Out-Null
+    Copy-Item -LiteralPath (Join-Path $targetDir "release\realistic_physics.exe") -Destination $exe
+    return $exe
+}
+
 function Invoke-Checked {
     param(
         [Parameter(Mandatory = $true)]

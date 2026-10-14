@@ -2,6 +2,13 @@
 
 What each version of Realistic Physics changed, newest first. The game shows its version on the start screen and in its bottom-left corner, and every Short made from the game shows the version it was made with. Only the newest version is online.
 
+## v0.9 (2026-10-14)
+
+- The body stands in a fighting guard, fists up beside its head, and its flesh moves with its bones.
+- Blows move it: a bat to the head snaps it aside and rocks the body, and a fist knocked out of the guard comes back.
+- An arm or leg with a broken bone drops out of the guard and hangs.
+- A broken bone stays under unbroken skin more often, and a hard bat no longer tears open the skin over a closed break.
+
 ## v0.8.2 (2026-10-13)
 
 - How to install the game as an app now shows right under the Start button, so you see it first.

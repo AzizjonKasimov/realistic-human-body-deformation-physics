@@ -55,24 +55,8 @@ if ($BaseExe) {
     $baseLabel = Get-ExeLabel $BaseExe
 } else {
     $sha = Resolve-Commit $Ref
-    $short = $sha.Substring(0, 10)
-    $baseLabel = "$Ref ($short)"
-    $BaseExe = Join-Path $repoRoot "target\compare\apps\$short\realistic_physics.exe"
-    if (-not (Test-Path -LiteralPath $BaseExe)) {
-        $tree = Get-CommitWorktree $sha
-        $targetDir = Join-Path $repoRoot "target\compare\target"
-        $cargo = Get-CargoPath
-        Invoke-Checked -Label "Build $baseLabel app (Release)" -Command {
-            Push-Location $tree
-            try {
-                & $cargo build --release --bin realistic_physics --target-dir $targetDir
-            } finally {
-                Pop-Location
-            }
-        }
-        New-Item -ItemType Directory -Force (Split-Path -Parent $BaseExe) | Out-Null
-        Copy-Item -LiteralPath (Join-Path $targetDir "release\realistic_physics.exe") -Destination $BaseExe
-    }
+    $baseLabel = "$Ref ($($sha.Substring(0, 10)))"
+    $BaseExe = Get-CommitApp $sha $baseLabel
 }
 if ($Exe) {
     $label = Get-ExeLabel $Exe

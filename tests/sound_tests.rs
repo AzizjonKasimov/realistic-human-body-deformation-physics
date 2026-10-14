@@ -37,7 +37,7 @@ fn resting_body_makes_no_sound() {
     let mut foley = Foley::new();
     let dt = world.materials().fixed_dt;
     for _ in 0..120 {
-        world.step(dt, &rp::InputState::default(), 1280.0, 720.0);
+        world.step(dt, &rp::InputState::default(), 1280.0);
         let heard = foley.hear(&world);
         assert_eq!(heard, Heard::default(), "a body at rest made a sound");
     }
@@ -112,7 +112,7 @@ fn a_new_body_is_heard_silently() {
     foley.hear(&hurt);
     let mut fresh = rp::create_layered_body(1280.0, 720.0, rp::Materials::default());
     let dt = fresh.materials().fixed_dt;
-    fresh.step(dt, &rp::InputState::default(), 1280.0, 720.0);
+    fresh.step(dt, &rp::InputState::default(), 1280.0);
     assert_eq!(foley.hear(&fresh), Heard::default());
 }
 

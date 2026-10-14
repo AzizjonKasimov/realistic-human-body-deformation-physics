@@ -228,7 +228,7 @@ pub async fn run(request: CaptureRequest) {
             };
         }
         app.pointer_down = input.down;
-        step_world(&mut app, &input, width, height);
+        step_world(&mut app, &input, width);
         if let Some((foley, mix)) = sound.as_mut() {
             mix.step(&foley.hear(&app.world));
         }

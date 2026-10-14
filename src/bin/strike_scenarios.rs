@@ -34,6 +34,11 @@
 //!                                     or bone N (its middle), on frames FROM to
 //!                                     TO: how far it moved it and how it changed
 //!                                     its speed, to find what throws it
+//!   --stance N                        also print, every N frames, how the body
+//!                                     holds its stance: each joint's turn off
+//!                                     the guard and its muscles' torque, the
+//!                                     hips' and fists' offsets, and the fastest
+//!                                     tissue
 //!   --list                            print the scenarios and their plays
 //!   --phases                          instead, time each phase of a step over the
 //!                                     selected scenarios (or the custom play) and
@@ -44,9 +49,9 @@
 
 use realistic_physics as rp;
 use rp::scenarios::{
-    active_fluid_count, fastest_point_speed, free_fragment_count, run, run_on, scenarios,
-    spinning_fragment_count, tool_axis, tool_lag, tool_name, tool_touching, Gesture, Play,
-    Scenario, ScenarioResult, Strike, SCENARIO_HEIGHT, SCENARIO_WIDTH,
+    active_fluid_count, fastest_point_speed, free_fragment_count, inside_the_skin, run, run_on,
+    scenarios, spinning_fragment_count, tool_axis, tool_lag, tool_name, tool_touching, Gesture,
+    Play, Scenario, ScenarioResult, Strike, SCENARIO_HEIGHT, SCENARIO_WIDTH,
 };
 use rp::sound::{wav_bytes, CueKind, Foley, Heard, Mixdown, SoundBank};
 use std::env;
@@ -94,6 +99,8 @@ struct Watch {
     fastest: Option<f64>,
     /// Follow a point or bone through each phase of these frames.
     trace: Option<(rp::Traced, i32, i32)>,
+    /// Print how the body holds its stance every this many frames.
+    stance: Option<i32>,
 }
 
 impl Watch {
@@ -115,6 +122,134 @@ impl Watch {
                 report_trace(name, frame, world, traced);
             }
         }
+        if let Some(every) = self.stance {
+            if (frame + 1) % every.max(1) == 0 {
+                report_stance(name, frame, world, last_positions);
+            }
+        }
+    }
+}
+
+/// Prints how the body holds its stance on `frame`: each joint's turn off
+/// the guard, in degrees, and its muscles' torque, in newton metres; how far
+/// the hips and the fists are from where they stood; and the fastest tissue.
+fn report_stance(name: &str, frame: i32, world: &rp::World, last_positions: &[rp::Vec2]) {
+    let bones = world.bones();
+    let midline = bones
+        .iter()
+        .find(|bone| bone.part == rp::BonePart::Spine)
+        .map_or(0.0, |spine| spine.home_a.x);
+    let mut joints = Vec::new();
+    for (index, joint) in world.bone_joints().iter().enumerate() {
+        let (Some(a), Some(b)) = (bones.get(joint.a), bones.get(joint.b)) else {
+            continue;
+        };
+        if b.part == rp::BonePart::Rib && !joint.fracture_link {
+            continue;
+        }
+        let side = if b.home_b.x < midline - 1.0 {
+            "L "
+        } else if b.home_b.x > midline + 1.0 {
+            "R "
+        } else {
+            ""
+        };
+        let turn = world.joint_turn(index).unwrap_or(0.0).to_degrees();
+        let anchor = |bone: &rp::BoneSegment, t: f64| rp::Vec2 {
+            x: bone.a.x + (bone.b.x - bone.a.x) * t,
+            y: bone.a.y + (bone.b.y - bone.a.y) * t,
+        };
+        let (from, to) = (anchor(a, joint.t_a), anchor(b, joint.t_b));
+        let gap = (to.x - from.x).hypot(to.y - from.y);
+        let loose = |what: &str| {
+            format!(
+                " {what}{} {gap:.0}/{:.0}px",
+                if joint.fracture_link { " link" } else { "" },
+                joint.post_fracture_rest.max(joint.rest)
+            )
+        };
+        let state = if joint.broken {
+            loose("broken")
+        } else if joint.post_fracture_limited {
+            loose("loose")
+        } else {
+            String::new()
+        };
+        joints.push(format!(
+            "{side}{}-{} {turn:+.1}deg {:+.1}Nm{state}",
+            a.part.name(),
+            b.part.name(),
+            world.joint_torque(index)
+        ));
+    }
+    let hips: Vec<String> = world
+        .hip_holds()
+        .iter()
+        .filter_map(|hold| {
+            let bone = bones.get(hold.bone)?;
+            let at = if hold.end_b { bone.b } else { bone.a };
+            Some(format!(
+                "{:.1}",
+                (at.x - hold.home.x).hypot(at.y - hold.home.y)
+            ))
+        })
+        .collect();
+    let fists: Vec<String> = bones
+        .iter()
+        .filter(|bone| bone.part == rp::BonePart::Hand)
+        .map(|bone| {
+            format!(
+                "({:+.1}, {:+.1})",
+                bone.b.x - bone.home_b.x,
+                bone.b.y - bone.home_b.y
+            )
+        })
+        .collect();
+    // How far the body leans off its mirror image: for each whole bone, how
+    // far its mirror image lies from the nearest whole bone.
+    let whole: Vec<&rp::BoneSegment> = bones
+        .iter()
+        .filter(|bone| !bone.fractured && !bone.splinter)
+        .collect();
+    let uneven = whole
+        .iter()
+        .map(|bone| {
+            let flip = |p: rp::Vec2| rp::Vec2 {
+                x: 2.0 * midline - p.x,
+                y: p.y,
+            };
+            let gap = |p: rp::Vec2, q: rp::Vec2| (p.x - q.x).hypot(p.y - q.y);
+            let (a, b) = (flip(bone.a), flip(bone.b));
+            let off = whole
+                .iter()
+                .map(|other| {
+                    (gap(other.a, a).max(gap(other.b, b))).min(gap(other.a, b).max(gap(other.b, a)))
+                })
+                .fold(f64::INFINITY, f64::min);
+            (off, bone.part)
+        })
+        .fold((0.0, rp::BonePart::Other), |best, here| {
+            if here.0 > best.0 {
+                here
+            } else {
+                best
+            }
+        });
+    println!(
+        "{name} frame {frame}: most uneven bone {} off its mirror by {:.1} px",
+        uneven.1.name(),
+        uneven.0
+    );
+    println!(
+        "{name} frame {frame}: hips off {} px, fists off {} px, fastest tissue {:.0} px/s, outline contacts {} (deepest {:.1} px)",
+        hips.join(" "),
+        fists.join(" "),
+        fastest_point_speed(world, last_positions),
+        world.debug().outline_contacts,
+        world.debug().max_outline_overlap,
+    );
+    for row in joints.chunks(4) {
+        println!("    {}", row.join("  |  "));
     }
 }
 
@@ -239,7 +374,7 @@ fn report_trace(name: &str, frame: i32, world: &rp::World, traced: rp::Traced) {
     let place = match traced {
         rp::Traced::Point(index) => world.points().get(index).map(|point| {
             format!(
-                "point {index} ({:?}{}, {:.0} g) at ({:.1}, {:.1})",
+                "point {index} ({:?}{}, {:.0} g) at ({:.1}, {:.1}), outline hold ({:.0}, {:.0}), on bones {:?} by {:.2?}",
                 point.layer,
                 if point.is_ghost() {
                     ", a cut's ghost"
@@ -248,7 +383,11 @@ fn report_trace(name: &str, frame: i32, world: &rp::World, traced: rp::Traced) {
                 },
                 point.mass * 100.0,
                 point.position.x,
-                point.position.y
+                point.position.y,
+                point.wrap.x,
+                point.wrap.y,
+                point.posture.bones,
+                point.posture.weights,
             )
         }),
         rp::Traced::Bone(index) => world.bones().get(index).map(|bone| {
@@ -378,6 +517,13 @@ fn parse_options() -> Result<Options, String> {
                 let spec = args.next().ok_or("--trace needs point:N or bone:N")?;
                 options.watch.trace = Some(parse_trace(&spec)?);
             }
+            "--stance" => {
+                let every = args.next().ok_or("--stance needs a number of frames")?;
+                options.watch.stance =
+                    Some(every.parse::<i32>().map_err(|_| {
+                        format!("--stance takes a number of frames, got `{every}`")
+                    })?);
+            }
             flag if flag.starts_with("--") => return Err(format!("unknown option `{flag}`")),
             path => options.csv_path = PathBuf::from(path),
         }
@@ -398,7 +544,7 @@ fn play_scenarios(selected: &[Scenario], csv_path: &Path, output_dir: &Path, wat
     for scenario in selected {
         let mut write_error = None;
         let mut last_positions = Vec::new();
-        let (_, result) = run_on(
+        let (world, result) = run_on(
             watch.body(scenario),
             scenario,
             SCENARIO_WIDTH,
@@ -414,6 +560,12 @@ fn play_scenarios(selected: &[Scenario], csv_path: &Path, output_dir: &Path, wat
         );
         if let Some(error) = write_error {
             panic!("write strike CSV: {error}");
+        }
+        // One scenario on its own, as `--only` or `--variant` plays it, also
+        // lists where its broken bone ended up.
+        if selected.len() == 1 {
+            println!("{}:", scenario.name);
+            report_pieces_out(&world);
         }
         writeln!(summary, "{}", summary_fields(scenario, &result).join(","))
             .expect("write summary row");
@@ -476,6 +628,7 @@ fn play_custom(scenario: &Scenario, output_dir: &Path, watch: Watch) {
         println!("  {}", cut_quality(&result));
     }
     println!("  {}", steadiness(&result));
+    report_pieces_out(&world);
     let path = output_dir.join("strike_custom.csv");
     let mut out = BufWriter::new(File::create(&path).expect("create custom CSV"));
     writeln!(out, "{SUMMARY_HEADER}").expect("write custom CSV");
@@ -778,6 +931,12 @@ fn sweep_summary(scenario: &Scenario, runs: &[&SweepRun], custom: bool) -> Strin
         spread("free lag", &|r| r.max_free_lag, 0),
         spread("final lag", &|r| r.final_lag, 0),
         spread("point speed", &|r| r.max_point_speed, 0),
+        spread("head turn", &|r| r.max_head_turn, 0),
+        spread("fist knocked", &|r| r.max_fist_shift, 0),
+        spread("fist off guard", &|r| r.final_fist_offset, 0),
+        spread("fist dropped", &|r| r.final_fist_drop, 0),
+        spread("cut open", &|r| r.cut_openings as f64, 0),
+        spread("blood trail", &|r| r.blood_trail_length, 0),
     ];
     if !scenario.real.is_empty() {
         let tallies: Vec<String> = scenario
@@ -959,6 +1118,92 @@ fn time_phases(selected: &[Scenario], output_dir: &Path) {
     println!("wrote {}", path.display());
 }
 
+/// Lists each piece of broken bone at the end: what it is, which way it
+/// lies, what holds it (ties to its own flesh, holds of the flesh around it,
+/// holds of crushed flesh), and, for a piece away from all flesh, how far.
+fn report_pieces_out(world: &rp::World) {
+    let flesh = world.flesh_points();
+    let points = world.points();
+    let spacing = world.materials().point_spacing;
+    for (index, bone) in world.bones().iter().enumerate() {
+        if !bone.fractured && !bone.splinter {
+            continue;
+        }
+        let holds = |kind: fn(&rp::BoneAttachment) -> bool| {
+            world
+                .bone_attachments()
+                .iter()
+                .filter(|tie| tie.bone == index && !tie.broken && kind(tie))
+                .count()
+        };
+        let middle = rp::Vec2 {
+            x: (bone.a.x + bone.b.x) * 0.5,
+            y: (bone.a.y + bone.b.y) * 0.5,
+        };
+        println!(
+            "  piece {index} ({}{}{}, {:.0} px long) at {:.0} degrees, middle ({:.0}, {:.0}) {} the skin: ties {}, flesh holds {}, crushed holds {}",
+            bone.part.name(),
+            if bone.splinter { ", a splinter" } else { "" },
+            if bone.open_break { ", open" } else { "" },
+            bone.rest_length,
+            (bone.b.y - bone.a.y).atan2(bone.b.x - bone.a.x).to_degrees(),
+            middle.x,
+            middle.y,
+            if inside_the_skin(world, middle) { "inside" } else { "OUTSIDE" },
+            holds(|tie| !tie.holds_piece),
+            holds(|tie| tie.holds_piece && !tie.in_crushed_flesh),
+            holds(|tie| tie.holds_piece && tie.in_crushed_flesh),
+        );
+        // The tissue that keeps its place on a piece outside the skin, and
+        // how far it lies from that place.
+        if !bone.splinter && !inside_the_skin(world, middle) {
+            for (point_index, point) in points.iter().enumerate() {
+                let binding = point.posture;
+                let Some(slot) = (0..2).find(|&slot| binding.bones[slot] == index) else {
+                    continue;
+                };
+                let Some(target) = world.posture_target(point_index) else {
+                    continue;
+                };
+                let other = binding.bones[1 - slot];
+                println!(
+                    "    {:?} point {point_index}{} at ({:.0}, {:.0}), {:.0}% on it{}, {:.1} px off its place",
+                    point.layer,
+                    if point.is_ghost() { " (ghost)" } else { "" },
+                    point.position.x,
+                    point.position.y,
+                    binding.weights[slot] * 100.0,
+                    world.bones().get(other).map_or(String::new(), |bone| format!(
+                        " and {:.0}% on bone {other} ({})",
+                        binding.weights[1 - slot] * 100.0,
+                        bone.part.name()
+                    )),
+                    (point.position.x - target.x).hypot(point.position.y - target.y),
+                );
+            }
+        }
+        let nearest = points
+            .iter()
+            .zip(&flesh)
+            .filter(|(_, &flesh)| flesh)
+            .map(|(point, _)| (point.position.x - middle.x).hypot(point.position.y - middle.y))
+            .fold(f64::INFINITY, f64::min);
+        if nearest <= spacing * 3.0 {
+            continue;
+        }
+        println!(
+            "  piece {index} ({}{}{}, {:.0} px long) at ({:.0}, {:.0}) lies {:.1} spacings from all flesh",
+            bone.part.name(),
+            if bone.splinter { ", a splinter" } else { "" },
+            if bone.open_break { ", open" } else { "" },
+            bone.rest_length,
+            middle.x,
+            middle.y,
+            nearest / spacing
+        );
+    }
+}
+
 /// How steady the tool was, in one line.
 fn steadiness(result: &ScenarioResult) -> String {
     format!(
@@ -1073,7 +1318,7 @@ fn headline(result: &ScenarioResult) -> String {
 }
 
 /// Columns of a summary row: the scenario, then its result.
-const SUMMARY_HEADER: &str = "scenario,region,intent,tool,tissue_contacts,bone_contacts,skin_tears,muscle_tears,muscle_fiber_tears,contusion_events,tissue_fatigue_events,tissue_plastic_events,tear_propagations,muscle_crush_ruptures,cavity_pressure_events,cavity_ruptures,organ_damage_events,organ_penetrations,rib_organ_punctures,organ_ruptures,skin_flap_detachments,cut_openings,blade_path_length,slit_length,slit_off_path,skin_gap_middle,skin_gap_max,muscle_gap_max,vessel_lacerations,fragment_vessel_lacerations,wound_reopens,max_active_contusions,detachments,bone_detachments,bone_joint_breaks,bone_joint_subluxations,joint_ligament_damage_events,bone_fractures,rib_fractures,fracture_marrow_sources,butterfly_fragments,final_bones,fluid_emitted,wound_fluid,blood_loss,final_blood_volume,final_blood_turgor,blood_stain_deposits,max_active_blood_stains,skin_blood_drops,blood_drips,blood_trail_length,opened_wounds,max_active_wounds,wound_leaks,fragment_hits,fragment_tears,fragment_skin_punctures,fragment_bone_contacts,fragment_bone_damping_events,fragment_bone_resting_contacts,fragment_pair_contacts,fragment_pair_damping_events,fragment_pair_resting_contacts,fragment_floor_contacts,fragment_floor_resting_contacts,post_fracture_joint_corrections,max_impact,max_bone_load,max_point_load,max_depth,max_fragment_depth,max_fragment_impulse,max_fragment_overlap,max_post_fracture_joint_stretch,max_post_fracture_joint_angle,max_bone_joint_subluxation,max_wound_pressure,max_wound_clot,max_cavity_pressure,max_cavity_collapse,max_organ_damage,max_contusion,max_tissue_softening,max_tissue_fatigue,max_tissue_plasticity,max_bone_angular_speed,final_free_fragments,bone_pieces_out,closed_pieces_out,whole_bones_out,final_spinning_fragments,final_sleeping_fragments,max_active_fragments,max_sleeping_fragments,fragment_sleep_events,fragment_wake_events,fragment_budget_skips,fracture_budget_blocks,fragment_bone_checks,fragment_bone_budget_skips,fragment_pair_checks,fragment_pair_budget_skips,fragment_tissue_checks,fragment_tissue_budget_skips,fluid_budget_replacements,blood_stain_budget_replacements,wound_budget_replacements,max_solver_iterations,max_tool_turn,tool_snaps,tool_turning,contact_toggles,max_point_speed,max_free_lag,internal_bleeding,final_lag";
+const SUMMARY_HEADER: &str = "scenario,region,intent,tool,tissue_contacts,bone_contacts,skin_tears,muscle_tears,muscle_fiber_tears,contusion_events,tissue_fatigue_events,tissue_plastic_events,tear_propagations,muscle_crush_ruptures,cavity_pressure_events,cavity_ruptures,organ_damage_events,organ_penetrations,rib_organ_punctures,organ_ruptures,skin_flap_detachments,cut_openings,blade_path_length,slit_length,slit_off_path,skin_gap_middle,skin_gap_max,muscle_gap_max,vessel_lacerations,fragment_vessel_lacerations,wound_reopens,max_active_contusions,detachments,bone_detachments,bone_joint_breaks,bone_joint_subluxations,joint_ligament_damage_events,bone_fractures,rib_fractures,fracture_marrow_sources,butterfly_fragments,final_bones,fluid_emitted,wound_fluid,blood_loss,final_blood_volume,final_blood_turgor,blood_stain_deposits,max_active_blood_stains,skin_blood_drops,blood_drips,blood_trail_length,opened_wounds,max_active_wounds,wound_leaks,fragment_hits,fragment_tears,fragment_skin_punctures,fragment_bone_contacts,fragment_bone_damping_events,fragment_bone_resting_contacts,fragment_pair_contacts,fragment_pair_damping_events,fragment_pair_resting_contacts,fragment_floor_contacts,fragment_floor_resting_contacts,post_fracture_joint_corrections,max_impact,max_bone_load,max_point_load,max_depth,max_fragment_depth,max_fragment_impulse,max_fragment_overlap,max_post_fracture_joint_stretch,max_post_fracture_joint_angle,max_bone_joint_subluxation,max_wound_pressure,max_wound_clot,max_cavity_pressure,max_cavity_collapse,max_organ_damage,max_contusion,max_tissue_softening,max_tissue_fatigue,max_tissue_plasticity,max_bone_angular_speed,final_free_fragments,bone_pieces_out,closed_pieces_out,whole_bones_out,final_spinning_fragments,final_sleeping_fragments,max_active_fragments,max_sleeping_fragments,fragment_sleep_events,fragment_wake_events,fragment_budget_skips,fracture_budget_blocks,fragment_bone_checks,fragment_bone_budget_skips,fragment_pair_checks,fragment_pair_budget_skips,fragment_tissue_checks,fragment_tissue_budget_skips,fluid_budget_replacements,blood_stain_budget_replacements,wound_budget_replacements,max_solver_iterations,max_tool_turn,tool_snaps,tool_turning,contact_toggles,max_point_speed,max_free_lag,internal_bleeding,final_lag,max_head_turn,max_fist_shift,final_fist_offset,final_fist_drop";
 
 fn summary_fields(scenario: &Scenario, result: &ScenarioResult) -> Vec<String> {
     vec![
@@ -1194,6 +1439,10 @@ fn summary_fields(scenario: &Scenario, result: &ScenarioResult) -> Vec<String> {
         format!("{:.3}", result.max_free_lag),
         result.internal_bleeding.to_string(),
         format!("{:.3}", result.final_lag),
+        format!("{:.3}", result.max_head_turn),
+        format!("{:.3}", result.max_fist_shift),
+        format!("{:.3}", result.final_fist_offset),
+        format!("{:.3}", result.final_fist_drop),
     ]
 }
 

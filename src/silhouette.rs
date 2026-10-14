@@ -4,9 +4,14 @@
 //! exactly mirror-symmetric, faces straight ahead, and stays a neutral
 //! mannequin without anatomical detail: an egg-shaped head, a smooth neck and
 //! torso outline, and limbs shaped as tapered capsules around the skeleton's
-//! joints, ending in mitten hands and simple feet. The parts are blended into
-//! one signed distance field. `simulation::body` builds the limb bones on the
+//! joints, ending in fists and simple feet. The parts are blended into one
+//! signed distance field. `simulation::body` builds the limb bones on the
 //! same joints, so every bone runs down the middle of its limb.
+//!
+//! It stands in a fighting guard, the pose its joints hold: feet apart, the
+//! upper arms out from the shoulders and the elbows bent, so the fists are up
+//! beside the head. Seen from the front a flat figure cannot hold its fists in
+//! front of its face, where a boxer does, so they rise beside it.
 //!
 //! Coordinates: `u` is horizontal from the body midline (positive toward the
 //! viewer's right), `v` runs down from the top of the head; both are in body
@@ -22,29 +27,31 @@ pub(crate) type Landmark = (f64, f64);
 /// A circle in body coordinates: center and radius.
 type Circle = (Landmark, f64);
 
-// Joints of the viewer's right limbs; the left limbs mirror them.
+// Joints of the viewer's right limbs; the left limbs mirror them. In the
+// guard the upper arm runs out from the shoulder 50 degrees from hanging
+// straight down, and the elbow is bent so the forearm rises 46 degrees from
+// the upper arm, leaning 4 degrees in toward the head.
 pub(crate) const SHOULDER: Landmark = (0.106, 0.215);
-pub(crate) const ELBOW: Landmark = (0.126, 0.378);
-pub(crate) const WRIST: Landmark = (0.152, 0.508);
-/// End of the hand bone, most of the way from the wrist to the fingertips.
-pub(crate) const KNUCKLES: Landmark = lerp(WRIST, FINGERTIPS, 0.6);
+pub(crate) const ELBOW: Landmark = (0.2318, 0.3206);
+pub(crate) const WRIST: Landmark = (0.2226, 0.1883);
+/// End of the hand bone, inside the fist.
+pub(crate) const KNUCKLES: Landmark = along_forearm(0.040);
 pub(crate) const HIP: Landmark = (0.050, 0.505);
-pub(crate) const KNEE: Landmark = (0.055, 0.718);
-pub(crate) const ANKLE: Landmark = (0.058, 0.942);
+pub(crate) const KNEE: Landmark = (0.072, 0.718);
+pub(crate) const ANKLE: Landmark = (0.092, 0.942);
 /// End of the foot bone. Seen from the front the foot points at the viewer,
 /// so it shows as a short block below the ankle, turned out slightly.
-pub(crate) const TOES: Landmark = (0.062, 0.984);
-
-const FINGERTIPS: Landmark = (0.166, 0.612);
+pub(crate) const TOES: Landmark = (0.097, 0.984);
 
 /// Limb radii at the joint each limb starts from and at the joint it ends at.
-const UPPER_ARM_RADII: (f64, f64) = (0.030, 0.023);
-const FOREARM_RADII: (f64, f64) = (0.024, 0.016);
+const UPPER_ARM_RADII: (f64, f64) = (0.032, 0.025);
+const FOREARM_RADII: (f64, f64) = (0.026, 0.018);
 const THIGH_RADII: (f64, f64) = (0.042, 0.030);
 const SHIN_RADII: (f64, f64) = (0.031, 0.018);
-/// The mitten hand widens from the wrist to the palm, then tapers to the fingertips.
-const PALM: Circle = (lerp(WRIST, FINGERTIPS, 0.42), 0.019);
-const FINGERTIP_RADIUS: f64 = 0.015;
+/// The fist: a short, thick capsule on from the wrist along the forearm,
+/// about 9 cm across and 11 cm from the wrist to the knuckles' top.
+const FIST_BASE: Circle = (along_forearm(0.018), 0.025);
+const FIST_TOP: Circle = (along_forearm(0.038), 0.025);
 /// The foot: a block centered under `TOES` from just above the ankle down to
 /// the sole, a little wider at the sole, with rounded corners.
 const FOOT_TOP: f64 = 0.928;
@@ -91,15 +98,16 @@ const TORSO_EXACT_MARGIN: f64 = 0.05;
 /// separate cleanly from the torso.
 const NECK_BLEND: f64 = 0.030;
 const JOINT_BLEND: f64 = 0.012;
-const PALM_BLEND: f64 = 0.006;
+const FIST_BLEND: f64 = 0.010;
 const ANKLE_BLEND: f64 = 0.020;
 const ARM_BLEND: f64 = 0.010;
 const LEG_BLEND: f64 = 0.012;
 
 /// Field samples per body height; under a pixel at the default 560 px body.
 const FIELD_RESOLUTION: f64 = 640.0;
-/// The field reaches at least this far either side of the midline.
-const FIELD_HALF_WIDTH: f64 = 0.27;
+/// The field reaches at least this far either side of the midline, past the
+/// elbows of the guard.
+pub(crate) const FIELD_HALF_WIDTH: f64 = 0.31;
 const FIELD_V_RANGE: (f64, f64) = (-0.02, 1.02);
 
 pub(crate) struct SilhouetteField {
@@ -270,18 +278,48 @@ pub(crate) fn human_silhouette() -> &'static SilhouetteField {
     FIELD.get_or_init(build_field)
 }
 
+/// The smoothed torso outline, built on first use.
+fn torso_outline() -> &'static TorsoOutline {
+    static TORSO: OnceLock<TorsoOutline> = OnceLock::new();
+    TORSO.get_or_init(TorsoOutline::new)
+}
+
+/// A part of the figure: the head and trunk, an arm, or a leg.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FigurePart {
+    Trunk,
+    Arm,
+    Leg,
+}
+
+/// Which part of the figure (`u`, `v`) belongs to: the one it lies deepest
+/// in, or nearest outside, before the parts are blended together.
+pub(crate) fn figure_part(u: f64, v: f64) -> FigurePart {
+    let p = (u.abs(), v);
+    let trunk = capsule(p, CROWN, CHIN).min(torso_outline().distance(p));
+    let arm = arm_distance(p);
+    let leg = leg_distance(p);
+    if arm < trunk && arm <= leg {
+        FigurePart::Arm
+    } else if leg < trunk {
+        FigurePart::Leg
+    } else {
+        FigurePart::Trunk
+    }
+}
+
 fn build_field() -> SilhouetteField {
     let cell = 1.0 / FIELD_RESOLUTION;
     let half_cols = (FIELD_HALF_WIDTH / cell).ceil() as usize;
     let cols = 2 * half_cols + 1;
     let rows = ((FIELD_V_RANGE.1 - FIELD_V_RANGE.0) / cell).ceil() as usize + 1;
-    let torso = TorsoOutline::new();
+    let torso = torso_outline();
     let mut sdf = Vec::with_capacity(cols * rows);
     let mut right_half = vec![0.0; half_cols + 1];
     for row in 0..rows {
         let v = FIELD_V_RANGE.0 + row as f64 * cell;
         for (k, value) in right_half.iter_mut().enumerate() {
-            *value = figure_distance((k as f64 * cell, v), &torso);
+            *value = figure_distance((k as f64 * cell, v), torso);
         }
         sdf.extend((0..cols).map(|col| right_half[col.abs_diff(half_cols)]));
     }
@@ -299,16 +337,31 @@ fn build_field() -> SilhouetteField {
 fn figure_distance(p: Landmark, torso: &TorsoOutline) -> f64 {
     let head = capsule(p, CROWN, CHIN);
     let trunk = smooth_union(head, torso.distance(p), NECK_BLEND);
-    let arm = smooth_union(
+    smooth_union(
+        smooth_union(trunk, arm_distance(p), ARM_BLEND),
+        leg_distance(p),
+        LEG_BLEND,
+    )
+}
+
+/// Signed distance from a point on the right half to the arm: upper arm,
+/// forearm, and fist.
+fn arm_distance(p: Landmark) -> f64 {
+    smooth_union(
         smooth_union(
             capsule(p, (SHOULDER, UPPER_ARM_RADII.0), (ELBOW, UPPER_ARM_RADII.1)),
             capsule(p, (ELBOW, FOREARM_RADII.0), (WRIST, FOREARM_RADII.1)),
             JOINT_BLEND,
         ),
-        hand(p),
-        JOINT_BLEND,
-    );
-    let leg = smooth_union(
+        fist(p),
+        FIST_BLEND,
+    )
+}
+
+/// Signed distance from a point on the right half to the leg: thigh, shin,
+/// and foot.
+fn leg_distance(p: Landmark) -> f64 {
+    smooth_union(
         smooth_union(
             capsule(p, (HIP, THIGH_RADII.0), (KNEE, THIGH_RADII.1)),
             capsule(p, (KNEE, SHIN_RADII.0), (ANKLE, SHIN_RADII.1)),
@@ -316,21 +369,23 @@ fn figure_distance(p: Landmark, torso: &TorsoOutline) -> f64 {
         ),
         foot(p),
         ANKLE_BLEND,
-    );
-    smooth_union(smooth_union(trunk, arm, ARM_BLEND), leg, LEG_BLEND)
+    )
 }
 
-fn hand(p: Landmark) -> f64 {
-    let (along_u, along_v) = (FINGERTIPS.0 - WRIST.0, FINGERTIPS.1 - WRIST.1);
-    let length = libm::hypot(along_u, along_v);
-    let tip = (
-        FINGERTIPS.0 - along_u / length * FINGERTIP_RADIUS,
-        FINGERTIPS.1 - along_v / length * FINGERTIP_RADIUS,
-    );
-    smooth_union(
-        capsule(p, (WRIST, FOREARM_RADII.1), PALM),
-        capsule(p, PALM, (tip, FINGERTIP_RADIUS)),
-        PALM_BLEND,
+/// The fist, closed and held up with the knuckles at the top.
+fn fist(p: Landmark) -> f64 {
+    capsule(p, FIST_BASE, FIST_TOP)
+}
+
+/// The forearm's length from the elbow to the wrist, in body heights.
+const FOREARM_LENGTH: f64 = 0.1326195;
+
+/// The point `distance` body heights on past the wrist, along the forearm.
+const fn along_forearm(distance: f64) -> Landmark {
+    let share = distance / FOREARM_LENGTH;
+    (
+        WRIST.0 + (WRIST.0 - ELBOW.0) * share,
+        WRIST.1 + (WRIST.1 - ELBOW.1) * share,
     )
 }
 
@@ -385,6 +440,7 @@ fn smooth_union(a: f64, b: f64, width: f64) -> f64 {
     a.min(b) - h * h * width * 0.25
 }
 
+#[cfg(test)]
 const fn lerp(a: Landmark, b: Landmark, t: f64) -> Landmark {
     (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
 }
@@ -500,12 +556,23 @@ mod tests {
         assert!(field.distance(TOES.0, 1.01) > 0.0, "feet end at the sole");
         assert_eq!(spans_at(field, 0.06), 1, "one head");
         assert_eq!(
-            spans_at(field, 0.42),
+            spans_at(field, ELBOW.1),
             3,
-            "two arms beside the torso at elbow height"
+            "two elbows out beside the chest in the guard"
         );
+        assert_eq!(
+            spans_at(field, FIST_TOP.0 .1),
+            3,
+            "two fists up beside the head"
+        );
+        assert_eq!(spans_at(field, 0.42), 1, "the waist, the arms raised");
         assert_eq!(spans_at(field, 0.78), 2, "two separated legs");
-        assert_eq!(spans_at(field, 0.585), 4, "mitten hands beside the thighs");
+    }
+
+    #[test]
+    fn forearm_length_matches_its_joints() {
+        let length = libm::hypot(WRIST.0 - ELBOW.0, WRIST.1 - ELBOW.1);
+        assert!((length - FOREARM_LENGTH).abs() < 1.0e-6, "{length}");
     }
 
     #[test]

@@ -180,24 +180,24 @@ fn visual_scenarios() -> Vec<VisualScenario> {
             name: "torso_heavy_settle_visual",
             intent: "settle",
             strike: tuned_strike("torso_heavy_fragment_settle"),
-            // A full-force sledgehammer blow to the chest, left to settle:
-            // the upper arm breaks (ribs only sometimes), with deep bruising
-            // and torn muscle. The skin mostly holds over a closed break, so
-            // it bleeds a little, and that runs down the skin. Breaking the
-            // arm takes much of the blow, so the organs behind it are at most
-            // bruised, in some swings and not others (the sweep's organ damage).
-            // With the skin's real stiffness it splits in only a couple of
-            // places, and the chest's cavity takes a pressure the sweep
-            // spreads from about 0.07 to 0.9 (from 0.09 before), this swing's
-            // near the low end.
+            // A full-force sledgehammer blow through the guard's elbow into
+            // the chest, left to settle: the arm breaks (ribs only
+            // sometimes), with deep bruising and torn muscle. The skin mostly
+            // holds over a closed break, so it bleeds a little, and that runs
+            // down the skin. Breaking the arm takes much of the blow, so the
+            // organs behind it are at most bruised, in some swings and not
+            // others (the sweep's organ damage). With the skin's real
+            // stiffness it splits in only a couple of places, and the chest's
+            // cavity takes a pressure the sweep spreads from about 0.04 to
+            // 0.34, this swing's near the low end.
             expectations: VisualExpectations {
                 min_skin_wound_edges: 2,
                 min_muscle_fiber_tears: 10,
-                min_failed_muscle_voids: 20,
+                min_failed_muscle_voids: 15,
                 min_bruised_points: 25,
                 min_fractured_bones: 2,
                 min_fracture_caps: 2,
-                min_cavity_pressure: 0.05,
+                min_cavity_pressure: 0.035,
                 ..VisualExpectations::default()
             },
         },
@@ -205,10 +205,10 @@ fn visual_scenarios() -> Vec<VisualScenario> {
             name: "arm_sharp_cut_visual",
             intent: "cut",
             strike: tuned_strike("arm_sharp"),
-            // A knife drawn down the inside of the arm opens the artery that
-            // runs under the skin there, which spurts, then bleeds steadily
-            // down the arm; no bone breaks. The cut runs along the arm's
-            // muscle fibers, so it parts them rather than severing them.
+            // A knife drawn along the underside of the raised arm opens the
+            // artery that runs under the skin there, which spurts, then bleeds
+            // steadily; no bone breaks. The cut runs along the arm's muscle
+            // fibers, so it parts them rather than severing them.
             expectations: VisualExpectations {
                 min_skin_wound_edges: 8,
                 min_incision_segments: 15,
@@ -230,7 +230,7 @@ fn run_scenario(scenario: &VisualScenario) -> (rp::World, f64, f64, f64) {
     let body = rp::body_frame(WIDTH, HEIGHT);
     for frame in 0..scenario.strike.frames() {
         let input = scenario.strike.input(frame, dt, body);
-        world.step(dt, &input, WIDTH, HEIGHT);
+        world.step(dt, &input, WIDTH);
         let debug = world.debug();
         peak_cavity_pressure = peak_cavity_pressure.max(debug.max_cavity_pressure);
         peak_cavity_collapse = peak_cavity_collapse.max(debug.max_cavity_collapse);

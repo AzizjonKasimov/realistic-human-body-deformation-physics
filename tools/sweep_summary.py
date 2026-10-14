@@ -4,7 +4,13 @@ the skin, and broken bone thrown clear), so two sweeps can be compared at a
 glance.
 
     python tools\\sweep_summary.py [output\\strike_sweep_report.txt ...]
+
+With --columns, it sums up columns of a sweep CSV instead: each scenario's
+lowest, middle, and highest value of each, to see how a change spreads them.
+
+    python tools\\sweep_summary.py --columns max_head_turn,final_fist_drop [output\\strike_sweep.csv]
 """
+import csv
 import re
 import sys
 
@@ -43,5 +49,27 @@ def summarize(path):
         print('   ', problem)
 
 
-for path in sys.argv[1:] or ['output/strike_sweep_report.txt']:
-    summarize(path)
+def summarize_columns(path, columns):
+    rows = list(csv.DictReader(open(path, encoding='utf-8')))
+    print(path)
+    scenarios = []
+    for row in rows:
+        if row['scenario'] not in scenarios:
+            scenarios.append(row['scenario'])
+    for scenario in scenarios:
+        mine = [row for row in rows if row['scenario'] == scenario]
+        parts = []
+        for column in columns:
+            values = sorted(float(row[column]) for row in mine)
+            middle = values[len(values) // 2]
+            parts.append(f'{column} {values[0]:.4g}..{values[-1]:.4g} (median {middle:.4g})')
+        print(f'  {scenario} ({len(mine)} runs): ' + ', '.join(parts))
+
+
+arguments = sys.argv[1:]
+if arguments[:1] == ['--columns'] and len(arguments) >= 2:
+    for path in arguments[2:] or ['output/strike_sweep.csv']:
+        summarize_columns(path, arguments[1].split(','))
+else:
+    for path in arguments or ['output/strike_sweep_report.txt']:
+        summarize(path)

@@ -256,6 +256,8 @@ struct RenderContext<'a> {
     palette: RenderPalette,
     width: f32,
     height: f32,
+    /// Where the floor the body stands on lies, which the ground is drawn
+    /// down from and blood pools on.
     floor_y: f32,
     anatomy: bool,
 }
@@ -433,7 +435,7 @@ fn step_simulation(app: &mut AppState, frame_dt: f64, audio: &mut audio::Audio) 
             tool: app.tool,
         };
         app.world.capture_motion(&mut app.earlier);
-        step_world(app, &input, screen_width() as f64, screen_height() as f64);
+        step_world(app, &input, screen_width() as f64);
         audio.hear(&app.world);
         analytics::step(&app.world);
         app.accumulator -= fixed_dt;
@@ -444,9 +446,9 @@ fn step_simulation(app: &mut AppState, frame_dt: f64, audio: &mut audio::Audio) 
 }
 
 /// One fixed simulation step with this input, plus the blood the tool picks up.
-fn step_world(app: &mut AppState, input: &rp::InputState, width: f64, height: f64) {
+fn step_world(app: &mut AppState, input: &rp::InputState, width: f64) {
     let fixed_dt = app.world.materials().fixed_dt;
-    app.world.step(fixed_dt, input, width, height);
+    app.world.step(fixed_dt, input, width);
     // A cut that opened rejoined the mesh, so the outline is rebuilt.
     if app.skin_rim.version != app.world.topology_version() {
         app.skin_rim = skin_rim(&app.world);
@@ -466,7 +468,7 @@ fn draw_app(app: &AppState) {
         palette: render_palette(),
         width: screen_width(),
         height: screen_height(),
-        floor_y: screen_floor_y(),
+        floor_y: ground_y(app),
         anatomy: app.view_mode == ViewMode::Anatomy,
     };
 
@@ -527,8 +529,20 @@ fn render_palette() -> RenderPalette {
     }
 }
 
+/// The bottom strip of the window the control buttons stand above.
 fn screen_floor_y() -> f32 {
     screen_height() - FLOOR_HEIGHT
+}
+
+/// Where the ground begins: the floor the body stands on, at its soles, or
+/// the window's bottom strip before there is a body.
+fn ground_y(app: &AppState) -> f32 {
+    let floor = app.world.floor_y();
+    if floor.is_finite() {
+        (floor as f32).min(screen_floor_y())
+    } else {
+        screen_floor_y()
+    }
 }
 
 fn draw_background(ctx: &RenderContext) {
@@ -540,7 +554,15 @@ fn draw_background(ctx: &RenderContext) {
         ctx.height * 0.46,
         ctx.palette.background_low,
     );
-    draw_rectangle(0.0, ctx.floor_y, ctx.width, FLOOR_HEIGHT, ctx.palette.floor);
+    // The ground the body stands on, down to the window's bottom; the
+    // control buttons lie on it.
+    draw_rectangle(
+        0.0,
+        ctx.floor_y,
+        ctx.width,
+        ctx.height - ctx.floor_y,
+        ctx.palette.floor,
+    );
     draw_line(
         0.0,
         ctx.floor_y,
@@ -2219,7 +2241,7 @@ fn layout_control_hints(
 
 fn draw_controls_hint(ctx: &RenderContext) {
     let hints = control_hints(ctx.app, &ctx.palette);
-    let layout = layout_control_hints(&hints, ctx.width, ctx.floor_y, ctx.app.touch_ui);
+    let layout = layout_control_hints(&hints, ctx.width, screen_floor_y(), ctx.app.touch_ui);
     let panel = layout.panel;
     draw_panel(ctx, panel.x, panel.y, panel.w, panel.h);
 

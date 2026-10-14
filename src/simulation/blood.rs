@@ -720,6 +720,8 @@ mod tests {
             ..Materials::default()
         };
         let mut world = World::new(materials);
+        // The floor under the strip, where a 480 px window's lay.
+        world.set_floor_y(442.0);
         let m = world.materials;
         for row in 0..rows {
             for column in 0..columns {
@@ -769,7 +771,7 @@ mod tests {
     fn run(world: &mut World, steps: usize) {
         let dt = world.materials.fixed_dt;
         for _ in 0..steps {
-            world.step(dt, &InputState::default(), 640.0, 480.0);
+            world.step(dt, &InputState::default(), 640.0);
         }
     }
 

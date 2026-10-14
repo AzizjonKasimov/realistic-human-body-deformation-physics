@@ -47,8 +47,9 @@ const HAMMER_SCALE: f64 = 2.0;
 const HAMMER_TILT: f64 = 0.35;
 /// Space left between the head's face and the arm, in body heights.
 const HAMMER_GAP: f64 = 0.012;
-/// Where the head aims: the outside of the viewer's left upper arm.
-const TARGET: Vec2 = (-0.140, 0.270);
+/// Where the head aims: the outside of the viewer's left forearm, raised in
+/// the guard.
+const TARGET: Vec2 = (-0.247, 0.240);
 /// Body height below which the figure may leave a maskable icon's safe
 /// circle: the legs run on out of the frame.
 const LEGS: f64 = 0.55;
@@ -92,7 +93,7 @@ const ICONS: [Icon; 6] = [
         file: "icon-maskable-192.png",
         size: 192,
         corner: 0.0,
-        zoom: 0.86,
+        zoom: 0.78,
         crown: 0.15,
         maskable: true,
     },
@@ -100,7 +101,7 @@ const ICONS: [Icon; 6] = [
         file: "icon-maskable-512.png",
         size: 512,
         corner: 0.0,
-        zoom: 0.86,
+        zoom: 0.78,
         crown: 0.15,
         maskable: true,
     },

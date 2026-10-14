@@ -37,7 +37,7 @@ const LIMB_DEPTH_RATIO: f64 = 1.0;
 const TRUNK_DEPTH_RATIO: f64 = 0.73;
 const HEAD_DEPTH_RATIO: f64 = 1.25;
 /// The person the body stands for weighs this much, in kilograms.
-const BODY_MASS_KG: f64 = 72.5;
+pub(super) const BODY_MASS_KG: f64 = 72.5;
 
 /// What kind of fiber a spring is, which sets its stiffness and how it
 /// stiffens as it stretches.
@@ -477,6 +477,11 @@ impl Materials {
 /// part are estimates from typical bone weights; the whole skeleton weighs
 /// about 15% of a man (Clarys et al. 1984). The figure's ribs are four a side
 /// for a real twelve, and its spine the column from the neck to the pelvis.
+/// Its collarbone stands for the shoulder girdle, the collarbone and the
+/// shoulder blade behind it, which the front view does not show; the arm
+/// hangs on both, and a bone as light as the collarbone alone, between the
+/// spine and the arm, would let the joints on it stretch and the shoulder's
+/// muscles hold the arm too weakly (Box2D's `docs/loose_ends.md`).
 fn bone_mass_kg(part: BonePart) -> f64 {
     let segment = |share_of_body: f64, share_bone: f64| BODY_MASS_KG * share_of_body * share_bone;
     match part {
@@ -486,7 +491,7 @@ fn bone_mass_kg(part: BonePart) -> f64 {
         BonePart::Thigh => segment(0.100, 0.10),
         BonePart::Shin => segment(0.0465, 0.18),
         BonePart::Foot => segment(0.0145, 0.28),
-        BonePart::Collarbone => 0.03,
+        BonePart::Collarbone => 0.15,
         BonePart::Rib => 0.15,
         BonePart::Spine => 1.2,
         BonePart::Pelvis => 0.9,

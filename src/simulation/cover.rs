@@ -400,9 +400,17 @@ mod tests {
     fn the_shin_has_muscle_outside_and_little_inside() {
         let world = body();
         let shin = part_index(&world, BonePart::Shin, true);
-        let outside = world.bone_cover(shin, 0.5, Vec2 { x: -1.0, y: 0.0 });
-        let inside = world.bone_cover(shin, 0.5, Vec2 { x: 1.0, y: 0.0 });
-        // The shin slants a little, so straight out is not quite its side.
+        // Straight out from the left shin's sides, which slant with the
+        // stance.
+        let bone = world.bones[shin];
+        // Down the shin from the knee; a quarter turn from that is outward.
+        let along = normalized(subtract(bone.b, bone.a), Vec2 { x: 0.0, y: 1.0 });
+        let out = Vec2 {
+            x: -along.y,
+            y: along.x,
+        };
+        let outside = world.bone_cover(shin, 0.5, out);
+        let inside = world.bone_cover(shin, 0.5, scale(out, -1.0));
         assert!((outside.real - 30.0).abs() < 0.5, "{}", outside.real);
         assert!((inside.real - 12.0).abs() < 0.5, "{}", inside.real);
         assert!(outside.figure > 0.0 && inside.figure > 0.0);

@@ -41,6 +41,7 @@ fn main() {
     );
 
     print_bone_covers(&world);
+    print_outline_holds(&world, rp::body_frame(width, height));
 
     if let Some(parent) = output.parent() {
         if !parent.as_os_str().is_empty() {
@@ -54,6 +55,38 @@ fn main() {
         std::process::exit(0);
     }
     std::process::exit(2);
+}
+
+/// How hard the hold on the skin's outline, which stands for the skin running
+/// on round the back (`outline.rs`), pulls each outline point for its weight,
+/// in pixels per second squared: where the outline curves tightly over light
+/// points, a hold out of balance throws them.
+fn print_outline_holds(world: &rp::World, frame: rp::BodyFrame) {
+    let mut pulls: Vec<(f64, rp::Vec2)> = world
+        .points()
+        .iter()
+        .filter(|point| point.wrap != rp::Vec2::default())
+        .map(|point| {
+            (
+                point.wrap.x.hypot(point.wrap.y) / point.mass.max(1.0e-9),
+                point.home,
+            )
+        })
+        .collect();
+    if pulls.is_empty() {
+        return;
+    }
+    pulls.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let at = |share: f64| pulls[((pulls.len() - 1) as f64 * share) as usize].0;
+    let (strongest, place) = pulls[pulls.len() - 1];
+    let (u, v) = frame.body_coords(place);
+    println!(
+        "outline hold for its weight, px/s^2: median {:.0}, 90% {:.0}, most {:.0} at body ({u:.3}, {v:.3}), over {} points",
+        at(0.5),
+        at(0.9),
+        strongest,
+        pulls.len()
+    );
 }
 
 /// The flesh over each bone on the figure's right (the screen's left) and

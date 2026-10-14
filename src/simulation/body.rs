@@ -12,8 +12,8 @@ use std::collections::HashMap;
 use super::*;
 use crate::mesh::{delaunay, hex_lattice, resample_loop, P2};
 use crate::silhouette::{
-    human_silhouette, Landmark, SilhouetteField, ANKLE, ELBOW, HIP, KNEE, KNUCKLES, SHOULDER, TOES,
-    WRIST,
+    figure_part, human_silhouette, FigurePart, Landmark, SilhouetteField, ANKLE, ELBOW,
+    FIELD_HALF_WIDTH, HIP, KNEE, KNUCKLES, SHOULDER, TOES, WRIST,
 };
 
 /// Outline points are spaced this many point spacings apart.
@@ -24,8 +24,6 @@ const LATTICE_EDGE_SCALE: f64 = 1.12;
 const LATTICE_CLEARANCE_SCALE: f64 = 0.55;
 /// The muscle sheet's outline sits this many point spacings inside the skin outline.
 const MUSCLE_INSET_SCALE: f64 = 0.35;
-/// Tissue above this height (the crown of the head) is pinned and holds the body up.
-const PIN_V: f64 = 0.035;
 /// Muscle edges within this angle of the local bone direction act as fibers.
 const FIBER_ALIGNMENT: f64 = 0.80;
 /// Muscle edges further than this from the bone direction act as cross fibers.
@@ -73,6 +71,19 @@ const CAVITY_V: (f64, f64) = (0.215, 0.505);
 /// The landmark on the viewer's left matching one on the right.
 const fn mirrored((u, v): Landmark) -> Landmark {
     (-u, v)
+}
+
+/// The point `t` of the way from `a` to `b`, moved `offset` body heights off
+/// that line, to the side a quarter turn from the way it runs: for an arm
+/// raised out to the viewer's right, below the upper arm, and outward from
+/// a forearm rising from the elbow.
+fn off_line(a: Landmark, b: Landmark, t: f64, offset: f64) -> Landmark {
+    let (du, dv) = (b.0 - a.0, b.1 - a.1);
+    let length = (du * du + dv * dv).sqrt().max(1.0e-9);
+    (
+        a.0 + du * t - dv / length * offset,
+        a.1 + dv * t + du / length * offset,
+    )
 }
 
 /// Placement of the body in the world.
@@ -209,7 +220,7 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
         },
     );
 
-    add_skeleton(&mut world, frame, materials);
+    let skeleton = add_skeleton(&mut world, frame, materials);
     cover::measure_bone_covers(&mut world, frame, field);
 
     for &muscle_point in &muscle.points {
@@ -236,37 +247,104 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
     let aorta =
         world.add_vessel_segment(frame.point(0.0, 0.155), frame.point(0.0, 0.490), 4.1, 1.65);
     world.vessels[aorta].laceration_impulse *= AORTA_DEPTH_SCALE;
-    for side in [-1.0, 1.0] {
-        world.add_vessel_segment(
-            frame.point(side * 0.030, 0.515),
-            frame.point(side * 0.056, 0.860),
-            3.0,
-            1.22,
-        );
-        // The brachial artery runs down the inside of the upper arm between the
-        // bone and the skin, and on down the inside of the forearm.
-        world.add_vessel_segment(
-            frame.point(side * 0.088, 0.240),
-            frame.point(side * 0.110, 0.380),
-            2.5,
-            1.05,
-        );
-        world.add_vessel_segment(
-            frame.point(side * 0.110, 0.380),
-            frame.point(side * 0.133, 0.480),
+    // The arteries of the limbs, described on the viewer's right and mirrored.
+    // The femoral artery runs from the groin down the inside of the thigh to
+    // the top of the shin. The subclavian runs from the base of the neck out
+    // under the collarbone to the armpit, and the brachial on along the
+    // underside of the raised upper arm, between the bone and the skin, to
+    // the elbow, then up the inner side of the forearm, toward the head.
+    let shin_at = |v: f64| off_line(KNEE, ANKLE, (v - KNEE.1) / (ANKLE.1 - KNEE.1), 0.0);
+    let armpit = off_line(SHOULDER, ELBOW, 0.15, 0.017);
+    let arteries = [
+        ((0.030, 0.515), shin_at(0.860), 3.0, 1.22),
+        ((0.016, 0.125), armpit, 2.6, 1.10),
+        (armpit, off_line(SHOULDER, ELBOW, 1.0, 0.004), 2.5, 1.05),
+        (
+            off_line(SHOULDER, ELBOW, 1.0, 0.004),
+            off_line(ELBOW, WRIST, 0.75, -0.012),
             2.0,
             0.95,
-        );
-        world.add_vessel_segment(
-            frame.point(side * 0.016, 0.125),
-            frame.point(side * 0.089, 0.228),
-            2.6,
-            1.10,
-        );
+        ),
+    ];
+    for side in [-1.0, 1.0] {
+        for (from, to, radius, pressure) in arteries {
+            world.add_vessel_segment(
+                frame.point(side * from.0, from.1),
+                frame.point(side * to.0, to.1),
+                radius,
+                pressure,
+            );
+        }
     }
 
     world.give_tissue_physical_properties(frame);
+    // Tissue keeps its place on the bones of its own part of the body: the
+    // flesh of an arm on the arm's bones, the chest's on the trunk's.
+    world.bind_posture(|point| {
+        let (u, v) = frame.body_coords(point.home);
+        skeleton.bones_of(figure_part(u, v), u)
+    });
+    // The body stands on the floor at its soles, and its hips are held up.
+    world.set_floor_y(frame.point(0.0, 1.0).y);
+    world.hold_hip(skeleton.pelvis, false);
+    world.hold_hip(skeleton.pelvis, true);
+    // It is built in the guard as drawn, without its weight; it settles
+    // into the guard its muscles hold under that weight before anything
+    // happens to it, rather than sinking at the start of play.
+    let dt = world.materials.fixed_dt;
+    let width = frame.origin.x * 2.0 + frame.height;
+    for _ in 0..SETTLE_STEPS {
+        world.step(dt, &InputState::default(), width);
+    }
     world
+}
+
+/// How many steps a new body settles under its own weight, a second and a
+/// half: the guard's slowest sway dies away in about a second.
+const SETTLE_STEPS: usize = 90;
+
+/// The bones the body's parts hang on, the viewer's left one first where
+/// there are two.
+struct Skeleton {
+    skull: usize,
+    spine: usize,
+    pelvis: usize,
+    collarbones: [usize; 2],
+    upper_arms: [usize; 2],
+    forearms: [usize; 2],
+    hands: [usize; 2],
+    thighs: [usize; 2],
+    shins: [usize; 2],
+    feet: [usize; 2],
+}
+
+impl Skeleton {
+    /// The bones the tissue of `part` keeps its place on, on the side of the
+    /// midline `u` lies on. The ribs move with the spine and are left out.
+    fn bones_of(&self, part: FigurePart, u: f64) -> Vec<usize> {
+        let side = usize::from(u >= 0.0);
+        match part {
+            FigurePart::Trunk => vec![
+                self.skull,
+                self.spine,
+                self.pelvis,
+                self.collarbones[0],
+                self.collarbones[1],
+            ],
+            FigurePart::Arm => vec![
+                self.collarbones[side],
+                self.upper_arms[side],
+                self.forearms[side],
+                self.hands[side],
+            ],
+            FigurePart::Leg => vec![
+                self.pelvis,
+                self.thighs[side],
+                self.shins[side],
+                self.feet[side],
+            ],
+        }
+    }
 }
 
 /// The bones' directions in `frame`, which steer the muscle's fibers and the
@@ -319,7 +397,11 @@ fn bone_strength(part: BonePart) -> f64 {
         BonePart::UpperArm => FOREARM * 2.14,
         BonePart::Shin => FOREARM * 2.25,
         BonePart::Thigh => FOREARM * 2.5,
-        BonePart::Skull => FOREARM * 1.04,
+        // The side of the skull breaks at about 5 kN under a small face
+        // (Allsop et al. 1991, 5.0 kN on average for 31 heads struck at the
+        // temple) and 5.2 kN under bats and other implements (AAFS 2018),
+        // against the forearm's 1.37 kN.
+        BonePart::Skull => FOREARM * 3.65,
         BonePart::Spine => FOREARM * 1.39,
         BonePart::Pelvis => FOREARM * 1.25,
         BonePart::Hand => FOREARM * 0.83,
@@ -329,7 +411,136 @@ fn bone_strength(part: BonePart) -> f64 {
     }
 }
 
-fn add_skeleton(world: &mut World, frame: BodyFrame, materials: Materials) {
+/// The joints of the frontal plane the figure moves in.
+#[derive(Clone, Copy)]
+enum Joint {
+    Neck,
+    Back,
+    Collarbone,
+    Rib,
+    Shoulder,
+    Elbow,
+    Wrist,
+    Hip,
+    Knee,
+    Ankle,
+}
+
+/// How long, in seconds, the muscles' damping is for each newton metre per
+/// radian of their stiffness: 0.03-0.09 s at the arm (Gomi and Osu 1998),
+/// and taken the same where it was not measured.
+const DRIVE_DAMPING_TIME: f64 = 0.05;
+
+/// The muscles across `joint` in the guard, braced for a blow, holding it
+/// in the frontal plane: how stiffly, in newton metres per radian, and how
+/// strongly at most, in newton metres, for a healthy man
+/// (`docs/INJURY_REFERENCE.md`, Holding the guard).
+fn joint_drive(joint: Joint) -> JointDrive {
+    let (stiffness, max_torque) = match joint {
+        // Bending the neck sideways: 36 N·m at most (Vasavada, Li, and Delp
+        // 2001); braced, an estimate between the relaxed neck's 1-3 N·m/rad
+        // and the tensed neck's 216 bending forward (Portero et al. 2013).
+        Joint::Neck => (40.0, 36.0),
+        // The trunk bending sideways: 80-172 N·m across postures, and
+        // 1300-1800 N·m/rad (Gardner-Morse and Stokes 2001, 14.5-19.8 N/mm at
+        // the chest).
+        Joint::Back => (1500.0, 130.0),
+        // The shoulder girdle lifting and dropping, an estimate: a shrug
+        // holds well over the arm's weight.
+        Joint::Collarbone => (100.0, 60.0),
+        // The rib cage holds each rib to the spine and the breastbone, an
+        // estimate.
+        Joint::Rib => (30.0, 50.0),
+        // Raising and lowering the arm: 61 N·m raising it (Harbo, Brincks, and
+        // Andersen 2012), and 10.8 + 3.2 N·m/rad for each N·m held (Gomi and
+        // Osu 1998), stiffer braced.
+        Joint::Shoulder => (40.0, 61.0),
+        // The elbow: 47-51 N·m (Harbo et al. 2012), 8.7 + 6.2 N·m/rad for
+        // each N·m held (Gomi and Osu 1998) and 40-60 tensed both ways (Osu
+        // and Gomi 1999).
+        Joint::Elbow => (30.0, 47.0),
+        // Tilting the fist sideways: about 10 N·m (Delp, Grierson, and
+        // Buchanan 1996), 5-15 N·m/rad clenched, an estimate.
+        Joint::Wrist => (10.0, 9.5),
+        // The hip holding the leg out or in: about 120 N·m, and 300-400
+        // N·m/rad, enough that the hips' muscles alone hold the body
+        // upright sideways (Winter et al. 1998); both estimates.
+        Joint::Hip => (350.0, 120.0),
+        // The knee does not bend sideways much: its ligaments hold it, an
+        // estimate; its extensors give 247 N·m (Harbo et al. 2012).
+        Joint::Knee => (300.0, 247.0),
+        // Turning the foot in and out: 26-36 N·m (Cybex norms for young men),
+        // 40-80 N·m/rad (Lee et al. 2014), an estimate.
+        Joint::Ankle => (60.0, 26.0),
+    };
+    JointDrive {
+        stiffness,
+        damping: stiffness * DRIVE_DAMPING_TIME,
+        max_torque,
+        limb: Limb::None,
+    }
+}
+
+/// How far `joint` turns either way from the guard, in radians, on the
+/// viewer's right side: its range of motion in the frontal plane (AAOS
+/// normal ranges, Greene and Heckman 1994). The left side mirrors it.
+fn joint_range(joint: Joint) -> (f64, f64) {
+    match joint {
+        // Bending the neck sideways, about 42 degrees each way (Youdas et
+        // al. 1992 found 41-42 in young adults).
+        Joint::Neck => (-0.75, 0.75),
+        // The trunk bending sideways, about 30 degrees each way.
+        Joint::Back => (-0.52, 0.52),
+        // A collarbone lifts about 45 degrees at the breastbone but drops only
+        // about 10.
+        Joint::Collarbone => (-0.55, 0.2),
+        Joint::Rib => (-0.40, 0.40),
+        // From the guard the arm rises until it is overhead, about 130
+        // degrees, and drops to the side and a little past.
+        Joint::Shoulder => (-2.2, 1.0),
+        // The elbow, bent 134 degrees in the guard, bends about 11 more to
+        // its full 145 and straightens all the way.
+        Joint::Elbow => (-0.19, 2.40),
+        // The wrist tilts about 20 degrees one way and 30 the other.
+        Joint::Wrist => (-0.45, 0.45),
+        // The leg goes out 45 degrees and in 30 past the midline; the stance
+        // already sets it 6 degrees out.
+        Joint::Hip => (-0.79, 0.63),
+        // The knee gives a few degrees sideways before its ligaments tear.
+        Joint::Knee => (-0.15, 0.15),
+        // The foot turns in and out, about 30 and 20 degrees.
+        Joint::Ankle => (-0.45, 0.45),
+    }
+}
+
+/// Joins bone `a` at `t_a` along it to bone `b` at `t_b` with the range and
+/// the muscles of `joint`, which move `limb`, on the viewer's left side
+/// (`left`) or right.
+#[allow(clippy::too_many_arguments)]
+fn add_joint(
+    world: &mut World,
+    a: usize,
+    t_a: f64,
+    b: usize,
+    t_b: f64,
+    joint: Joint,
+    left: bool,
+    limb: Limb,
+) {
+    let (min, max) = joint_range(joint);
+    let (min, max) = if left { (-max, -min) } else { (min, max) };
+    if let Some(index) = world.add_bone_joint(a, t_a, b, t_b, min, max) {
+        world.drive_bone_joint(
+            index,
+            JointDrive {
+                limb,
+                ..joint_drive(joint)
+            },
+        );
+    }
+}
+
+fn add_skeleton(world: &mut World, frame: BodyFrame, materials: Materials) -> Skeleton {
     let at = |landmark: Landmark| frame.point(landmark.0, landmark.1);
     let strength = materials.bone_fracture_impulse;
     let bone = |world: &mut World, a: Landmark, b: Landmark, radius: f64, part: BonePart| {
@@ -339,15 +550,7 @@ fn add_skeleton(world: &mut World, frame: BodyFrame, materials: Materials) {
         index
     };
 
-    // The skull is pinned with the crown, so it must stay at index 0 and the spine at 1.
-    let head = world.add_bone_segment(
-        at(SKULL[0]),
-        at(SKULL[1]),
-        8.2,
-        strength * bone_strength(BonePart::Skull),
-        true,
-    );
-    world.bones[head].part = BonePart::Skull;
+    let head = bone(world, SKULL[0], SKULL[1], 8.2, BonePart::Skull);
     let spine = world.add_bone_segment_with_kind(
         at(SPINE[0]),
         at(SPINE[1]),
@@ -433,55 +636,138 @@ fn add_skeleton(world: &mut World, frame: BodyFrame, materials: Materials) {
     let left_foot = below_joint(world, LEFT_ANKLE, LEFT_TOES, 4.0, BonePart::Foot);
     let right_foot = below_joint(world, RIGHT_ANKLE, RIGHT_TOES, 4.0, BonePart::Foot);
 
-    world.add_bone_joint(head, 1.0, spine, 0.0, -0.45, 0.45);
-    // A collarbone lifts about 45 degrees at the breastbone but drops only
-    // about 10.
-    for (collarbone, (min, max)) in [
-        (left_collarbone, (-0.2, 0.55)),
-        (right_collarbone, (-0.55, 0.2)),
+    // Each limb's bones, the shoulder girdle with its arm.
+    let limbs = [
+        (
+            Limb::LeftArm,
+            [left_collarbone, left_upper_arm, left_forearm, left_hand],
+        ),
+        (
+            Limb::RightArm,
+            [right_collarbone, right_upper_arm, right_forearm, right_hand],
+        ),
+        (Limb::LeftLeg, [left_thigh, left_shin, left_foot, left_foot]),
+        (
+            Limb::RightLeg,
+            [right_thigh, right_shin, right_foot, right_foot],
+        ),
+    ];
+    for (limb, bones) in limbs {
+        for bone in bones {
+            world.bones[bone].limb = limb;
+        }
+    }
+    let none = Limb::None;
+    add_joint(world, head, 1.0, spine, 0.0, Joint::Neck, false, none);
+    for (collarbone, left, limb) in [
+        (left_collarbone, true, Limb::LeftArm),
+        (right_collarbone, false, Limb::RightArm),
     ] {
-        world.add_bone_joint(
+        let t = spine_t(SHOULDER_GIRDLE[0].1);
+        add_joint(
+            world,
             spine,
-            spine_t(SHOULDER_GIRDLE[0].1),
+            t,
             collarbone,
             0.0,
-            min,
-            max,
+            Joint::Collarbone,
+            left,
+            limb,
         );
     }
-    world.add_bone_joint(spine, 1.0, pelvis, 0.5, -0.45, 0.45);
+    add_joint(world, spine, 1.0, pelvis, 0.5, Joint::Back, false, none);
     for (rib, root_v) in ribs {
-        world.add_bone_joint(spine, spine_t(root_v), rib, 0.0, -0.40, 0.40);
+        add_joint(
+            world,
+            spine,
+            spine_t(root_v),
+            rib,
+            0.0,
+            Joint::Rib,
+            false,
+            none,
+        );
     }
     let along = |segment: [Landmark; 2], u: f64| {
         ((u - segment[0].0) / (segment[1].0 - segment[0].0)).clamp(0.0, 1.0)
     };
-    world.add_bone_joint(left_collarbone, 1.0, left_upper_arm, 0.0, -1.25, 1.05);
-    world.add_bone_joint(left_upper_arm, 1.0, left_forearm, 0.0, -1.10, 1.10);
-    world.add_bone_joint(left_forearm, 1.0, left_hand, 0.0, -0.90, 0.90);
-    world.add_bone_joint(right_collarbone, 1.0, right_upper_arm, 0.0, -1.05, 1.25);
-    world.add_bone_joint(right_upper_arm, 1.0, right_forearm, 0.0, -1.10, 1.10);
-    world.add_bone_joint(right_forearm, 1.0, right_hand, 0.0, -0.90, 0.90);
-    world.add_bone_joint(
+    let arms = [
+        (
+            true,
+            Limb::LeftArm,
+            left_collarbone,
+            left_upper_arm,
+            left_forearm,
+            left_hand,
+        ),
+        (
+            false,
+            Limb::RightArm,
+            right_collarbone,
+            right_upper_arm,
+            right_forearm,
+            right_hand,
+        ),
+    ];
+    for (left, limb, collarbone, upper_arm, forearm, hand) in arms {
+        add_joint(
+            world,
+            collarbone,
+            1.0,
+            upper_arm,
+            0.0,
+            Joint::Shoulder,
+            left,
+            limb,
+        );
+        add_joint(
+            world,
+            upper_arm,
+            1.0,
+            forearm,
+            0.0,
+            Joint::Elbow,
+            left,
+            limb,
+        );
+        add_joint(world, forearm, 1.0, hand, 0.0, Joint::Wrist, left, limb);
+    }
+    let legs = [
+        (
+            true,
+            Limb::LeftLeg,
+            LEFT_HIP,
+            left_thigh,
+            left_shin,
+            left_foot,
+        ),
+        (
+            false,
+            Limb::RightLeg,
+            RIGHT_HIP,
+            right_thigh,
+            right_shin,
+            right_foot,
+        ),
+    ];
+    for (left, limb, hip, thigh, shin, foot) in legs {
+        let t = along(PELVIS, hip.0);
+        add_joint(world, pelvis, t, thigh, 0.0, Joint::Hip, left, limb);
+        add_joint(world, thigh, 1.0, shin, 0.0, Joint::Knee, left, limb);
+        add_joint(world, shin, 1.0, foot, 0.0, Joint::Ankle, left, limb);
+    }
+    Skeleton {
+        skull: head,
+        spine,
         pelvis,
-        along(PELVIS, LEFT_HIP.0),
-        left_thigh,
-        0.0,
-        -0.78,
-        0.78,
-    );
-    world.add_bone_joint(left_thigh, 1.0, left_shin, 0.0, -0.85, 0.85);
-    world.add_bone_joint(left_shin, 1.0, left_foot, 0.0, -0.60, 0.60);
-    world.add_bone_joint(
-        pelvis,
-        along(PELVIS, RIGHT_HIP.0),
-        right_thigh,
-        0.0,
-        -0.78,
-        0.78,
-    );
-    world.add_bone_joint(right_thigh, 1.0, right_shin, 0.0, -0.85, 0.85);
-    world.add_bone_joint(right_shin, 1.0, right_foot, 0.0, -0.60, 0.60);
+        collarbones: [left_collarbone, right_collarbone],
+        upper_arms: [left_upper_arm, right_upper_arm],
+        forearms: [left_forearm, right_forearm],
+        hands: [left_hand, right_hand],
+        thighs: [left_thigh, right_thigh],
+        shins: [left_shin, right_shin],
+        feet: [left_foot, right_foot],
+    }
 }
 
 struct LayerMesh {
@@ -532,8 +818,8 @@ fn build_layer_mesh(
         (a < next_on_outline.len() && next_on_outline[a] == b)
             || (b < next_on_outline.len() && next_on_outline[b] == a)
     };
-    let min = frame.point(-0.27, -0.01);
-    let max = frame.point(0.27, 1.01);
+    let min = frame.point(-FIELD_HALF_WIDTH, -0.01);
+    let max = frame.point(FIELD_HALF_WIDTH, 1.01);
     candidates.extend(
         hex_lattice((min.x, min.y), (max.x, max.y), lattice_edge)
             .into_iter()
@@ -575,8 +861,7 @@ fn build_layer_mesh(
                 x: candidates[candidate].0,
                 y: candidates[candidate].1,
             };
-            let pinned = frame.body_coords(position).1 < PIN_V;
-            let index = world.add_point(position, layer, pinned);
+            let index = world.add_point(position, layer, false);
             world.points[index].surface_depth = depth(candidates[candidate]).max(0.0);
             index_of[candidate] = index;
             points.push(index);
