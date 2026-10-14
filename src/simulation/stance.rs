@@ -53,6 +53,10 @@ pub struct JointDrive {
     pub damping: f64,
     pub max_torque: f64,
     pub limb: Limb,
+    /// How far past the angle it was built at the muscles aim, in radians:
+    /// learned as the body settles, so that the weight they carry leaves the
+    /// joint at that angle (`learn_the_guards_weight`).
+    pub aim: f64,
 }
 
 /// How much of its braced damping a joint keeps in a limb hanging limp: a
@@ -109,9 +113,19 @@ pub struct HipHold {
     /// Which end of the bone: its `b` end, or else its `a` end.
     pub end_b: bool,
     pub home: Vec2,
+    /// How far from `home` the hold aims: learned as the body settles, so
+    /// that the body's weight leaves the hips at `home` rather than sunk
+    /// (`learn_the_guards_weight`).
+    pub aim: Vec2,
     /// The impulse it gave last substep, which warm starts the next.
     pub impulse: Vec2,
 }
+
+/// How much of a joint's turn off its guard, and of the hips' sinking, the
+/// muscles take up on each step of a new body's settling: a twelfth, so the
+/// body learns its weight within its second of settling, more slowly than
+/// its limbs sway.
+const LEARN_WEIGHT_RATE: f64 = 0.08;
 
 /// How a point's place on the skeleton lies when the substep began, how fast
 /// it moves, and how hard it is to move against the point.
@@ -382,7 +396,7 @@ impl World {
                 (bone.a, bone.previous_a)
             };
             let softness = Softness::of_stiffness(stiffness, damping, mass, h);
-            let error = subtract(previous, hold.home);
+            let error = subtract(previous, add(hold.home, hold.aim));
             let speed = scale(subtract(place, previous), 1.0 / h);
             let impulse = Vec2 {
                 x: softness.impulse(mass, speed.x, error.x, hold.impulse.x),
@@ -419,6 +433,72 @@ impl World {
             if w > 0.0 && hold.impulse != Vec2::default() {
                 self.push_hip(hold, scale(hold.impulse, w * h));
             }
+        }
+    }
+
+    /// The muscles learn the guard's weight as a new body settles: on each
+    /// step every held joint aims a share further past the angle it was
+    /// built at, the way its weight turns it off, and the hold on the hips a
+    /// share higher as the body sinks on it, until the weight leaves the
+    /// body in the guard as built. A person sets the muscles holding a limb
+    /// for the load it carries, so that it rests where they mean it to, and
+    /// the muscles' stiffness resists only a change from there (Feldman 1986,
+    /// the equilibrium-point model). Each joint's hold learns it as well: a
+    /// soft joint gives a few pixels under the weight it carries, where a
+    /// real one gives under a millimetre, so it holds its second bone that
+    /// much past where it was built, and the bone rests there.
+    ///
+    /// The hips' hold learns only how far the pelvis sinks as a whole, both
+    /// ends alike, never how it tilts: the trunk stands on the pelvis like
+    /// an upturned pendulum, and a hold that also learned to tilt the pelvis
+    /// back under it rocked it further each time, until at full gravity the
+    /// body fell over within six seconds of settling.
+    pub(super) fn learn_the_guards_weight(&mut self) {
+        for index in 0..self.bone_joints.len() {
+            let joint = self.bone_joints[index];
+            if !self.joint_holds(&joint) {
+                continue;
+            }
+            let (a, b) = (self.bones[joint.a], self.bones[joint.b]);
+            let built = |bone: BoneSegment| BoneSegment {
+                a: bone.home_a,
+                b: bone.home_b,
+                ..bone
+            };
+            let off = joint_hold_offset(&a, joint.t_a, bone_point(b, joint.t_b), 0.0);
+            let meant = joint_hold_offset(
+                &built(a),
+                joint.t_a,
+                bone_point(built(b), joint.t_b),
+                joint.rest,
+            );
+            self.bone_joints[index].hold =
+                subtract(joint.hold, scale(subtract(off, meant), LEARN_WEIGHT_RATE));
+            if joint.drive.stiffness <= 0.0 {
+                continue;
+            }
+            if let Some(turn) = self.joint_turn(index) {
+                self.bone_joints[index].drive.aim -= LEARN_WEIGHT_RATE * turn;
+            }
+        }
+        let sunk: Vec<Vec2> = self
+            .hip_holds
+            .iter()
+            .filter_map(|hold| {
+                let bone = self.bones.get(hold.bone)?;
+                let at = if hold.end_b { bone.b } else { bone.a };
+                Some(subtract(at, hold.home))
+            })
+            .collect();
+        if sunk.is_empty() {
+            return;
+        }
+        let sunk = scale(
+            sunk.iter().fold(Vec2::default(), |sum, &end| add(sum, end)),
+            1.0 / sunk.len() as f64,
+        );
+        for hold in &mut self.hip_holds {
+            hold.aim = subtract(hold.aim, scale(sunk, LEARN_WEIGHT_RATE));
         }
     }
 
@@ -466,7 +546,7 @@ impl World {
             let stiffness = (stiffness * newton_metres).min(mass * cap * cap);
             let damping = damping * newton_metres;
             let softness = Softness::of_stiffness(stiffness, damping, mass, h);
-            let angle = wrap_angle(turn.angle - joint.rest_angle);
+            let angle = wrap_angle(turn.angle - joint.rest_angle - joint.drive.aim);
             let speed = turn.speed(&self.bones, h);
             let given = joint.drive_impulse.clamp(-limit, limit);
             let total = (given + softness.impulse(mass, speed, angle, given)).clamp(-limit, limit);
@@ -557,5 +637,33 @@ impl World {
                 hold.bone = second;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// However long a new body goes on learning its weight, it stands in the
+    /// guard as built: when the hips' hold learned to tilt the pelvis too,
+    /// the body rocked further each time and fell over within six seconds
+    /// at full gravity.
+    #[test]
+    fn learning_the_weight_longer_keeps_the_guard() {
+        let mut world = create_layered_body(1280.0, 720.0, Materials::default());
+        let dt = world.materials.fixed_dt;
+        for _ in 0..270 {
+            world.step(dt, &InputState::default(), 1280.0);
+            world.learn_the_guards_weight();
+        }
+        let worst = world
+            .bones
+            .iter()
+            .map(|bone| distance(bone.a, bone.home_a).max(distance(bone.b, bone.home_b)))
+            .fold(0.0, f64::max);
+        assert!(
+            worst < 2.0,
+            "a bone stands {worst:.1} px from where it was built"
+        );
     }
 }

@@ -930,7 +930,7 @@ mod tests {
     #[test]
     fn drawn_blood_is_the_blood_let_out() {
         let mut world = skin_strip(4, 12);
-        world.materials.gravity = 920.0;
+        world.materials.gravity = STANDARD_GRAVITY;
         for _ in 0..6 {
             world.well_blood(
                 Vec2 { x: 215.0, y: 95.0 },

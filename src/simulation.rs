@@ -243,6 +243,9 @@ impl Default for InputState {
     }
 }
 
+/// The Earth's standard gravity, in metres per second squared (CGPM 1901).
+pub const STANDARD_GRAVITY: f64 = 9.80665;
+
 #[derive(Clone, Copy, Debug)]
 pub struct Materials {
     pub fixed_dt: f64,
@@ -253,6 +256,9 @@ pub struct Materials {
     /// Whether each substep starts the soft constraints from the impulses they
     /// ended the last one with, as Box2D does.
     pub warm_starting: bool,
+    /// How fast things fall, in metres per second squared; the world turns
+    /// it into pixels at the body's scale (`World::gravity_px`), so the body
+    /// and its blood fall as a 1.75 m person's do however large it is drawn.
     pub gravity: f64,
     /// How fast moving tissue and bone slow by themselves, per second, apart
     /// from what the tissue's own springs damp.
@@ -514,7 +520,7 @@ impl Default for Materials {
             substeps: 4,
             contact_passes: 3,
             warm_starting: true,
-            gravity: 920.0,
+            gravity: STANDARD_GRAVITY,
             linear_drag: 0.4,
             point_spacing: 11.5,
             floor_friction: 0.78,
@@ -1128,6 +1134,14 @@ pub struct BoneJoint {
     pub t_a: f64,
     pub t_b: f64,
     pub rest: f64,
+    /// Where a whole joint holds its second bone's anchor from its first's,
+    /// `rest` from it: along the first bone and across it (a quarter turn
+    /// counterclockwise from its `a` to its `b`), in pixels at the first
+    /// bone's rest length, as a muscle tie holds its flesh. Held there, the
+    /// second bone turns about its anchor and cannot swing round the
+    /// first's, as a joint holding only the gap between them lets it
+    /// (`soft.rs`).
+    pub hold: Vec2,
     pub rest_angle: f64,
     pub min_angle: f64,
     pub max_angle: f64,
@@ -1140,8 +1154,11 @@ pub struct BoneJoint {
     pub post_fracture_rest: f64,
     pub post_fracture_rest_angle: f64,
     /// The impulses that held the joint together and in its range last
-    /// substep (`soft.rs`).
+    /// substep (`soft.rs`): `impulse` along the gap while it holds only the
+    /// gap, loosened, and `hold_impulse` while it holds its second bone at
+    /// `hold`.
     pub impulse: f64,
+    pub hold_impulse: Vec2,
     pub angular_impulse: f64,
     /// The muscles across the joint, which hold it at `rest_angle`
     /// (`stance.rs`), and the impulse they gave last substep.
@@ -1160,6 +1177,7 @@ impl Default for BoneJoint {
             t_a: 0.0,
             t_b: 0.0,
             rest: 0.0,
+            hold: Vec2::default(),
             rest_angle: 0.0,
             min_angle: -0.95,
             max_angle: 0.95,
@@ -1172,6 +1190,7 @@ impl Default for BoneJoint {
             post_fracture_rest: 0.0,
             post_fracture_rest_angle: 0.0,
             impulse: 0.0,
+            hold_impulse: Vec2::default(),
             angular_impulse: 0.0,
             drive: JointDrive::default(),
             drive_impulse: 0.0,
@@ -1933,6 +1952,7 @@ impl World {
             bone,
             end_b,
             home: if end_b { segment.b } else { segment.a },
+            aim: Vec2::default(),
             impulse: Vec2::default(),
         });
     }
@@ -2294,16 +2314,16 @@ impl World {
         }
         let t_a = t_a.clamp(0.0, 1.0);
         let t_b = t_b.clamp(0.0, 1.0);
+        let anchor_b = bone_point(self.bones[b], t_b);
+        let rest = distance(bone_point(self.bones[a], t_a), anchor_b)
+            .max(self.materials.point_spacing * 0.70);
         self.bone_joints.push(BoneJoint {
             a,
             b,
             t_a,
             t_b,
-            rest: distance(
-                bone_point(self.bones[a], t_a),
-                bone_point(self.bones[b], t_b),
-            )
-            .max(self.materials.point_spacing * 0.70),
+            rest,
+            hold: joint_hold_offset(&self.bones[a], t_a, anchor_b, rest),
             rest_angle: wrap_angle(bone_angle(self.bones[b]) - bone_angle(self.bones[a])),
             min_angle: min_angle.min(max_angle),
             max_angle: min_angle.max(max_angle),
@@ -3491,6 +3511,7 @@ impl World {
 
         self.update_blood_stains(dt);
         let mm = self.mm_per_px();
+        let fall = self.gravity_px() * self.materials.fluid_gravity_scale * dt * dt;
         let mut landings = Vec::new();
         for fluid in &mut self.fluids {
             if fluid.life <= 0.0 {
@@ -3511,8 +3532,7 @@ impl World {
             let vy = (fluid.position.y - fluid.previous.y) * self.materials.fluid_damping;
             fluid.previous = fluid.position;
             fluid.position.x += vx;
-            fluid.position.y +=
-                vy + self.materials.gravity * self.materials.fluid_gravity_scale * dt * dt;
+            fluid.position.y += vy + fall;
             if fluid.position.x < radius {
                 fluid.position.x = radius;
                 fluid.previous.x = fluid.position.x + vx * self.materials.fluid_wall_bounce;
@@ -5881,11 +5901,59 @@ impl World {
         self.grid = intact_grid;
     }
 
+    /// Where a break's two pieces are hinged together (its fracture link),
+    /// for each pair of pieces, the lower index first: the anchor along each
+    /// and the gap the link keeps between them.
+    fn breaks_between(&self) -> HashMap<(usize, usize), (f64, f64, f64)> {
+        let mut breaks = HashMap::new();
+        for joint in &self.bone_joints {
+            if !joint.fracture_link || joint.a >= self.bones.len() || joint.b >= self.bones.len() {
+                continue;
+            }
+            let gap = joint.post_fracture_rest.max(joint.rest);
+            let at = if joint.a < joint.b {
+                (joint.t_a, joint.t_b, gap)
+            } else {
+                (joint.t_b, joint.t_a, gap)
+            };
+            breaks.insert((joint.a.min(joint.b), joint.a.max(joint.b)), at);
+        }
+        breaks
+    }
+
+    /// Whether pieces `i` and `j` touch at `closest` (from `i` to `j`) at
+    /// the break they were one bone across (`breaks_between`), where they do
+    /// not collide: the hinge there holds them, as the periosteum and the
+    /// muscle round a break do, and a contact at the break shoved them apart
+    /// as hard as the hinge pulled them back, until it threw a piece out of
+    /// the arm. Away from the break, folded onto each other, they collide.
+    fn touch_at_their_break(
+        &self,
+        breaks: &HashMap<(usize, usize), (f64, f64, f64)>,
+        i: usize,
+        j: usize,
+        closest: &SegmentClosestPoints,
+    ) -> bool {
+        let Some(&(t_low, t_high, gap)) = breaks.get(&(i.min(j), i.max(j))) else {
+            return false;
+        };
+        let (bone_i, bone_j) = (self.bones[i], self.bones[j]);
+        let (t_i, t_j) = if i < j {
+            (t_low, t_high)
+        } else {
+            (t_high, t_low)
+        };
+        let reach = bone_i.radius + bone_j.radius + gap;
+        distance(closest.point_a, bone_point(bone_i, t_i)) <= reach
+            && distance(closest.point_b, bone_point(bone_j, t_j)) <= reach
+    }
+
     fn solve_bone_fragment_repulsion(&mut self) {
         let fragment_indices = self.budgeted_fragment_indices();
         if fragment_indices.is_empty() {
             return;
         }
+        let breaks = self.breaks_between();
         let mut fragment_grid = std::mem::take(&mut self.grid);
         fragment_grid.build_boxes(
             self.fragment_pair_cell_size(),
@@ -5912,7 +5980,9 @@ impl World {
                 let b = self.bones[j];
                 let closest = closest_segment_points(a.a, a.b, b.a, b.b);
                 let target_distance = a.radius + b.radius + self.materials.fragment_repulsion_slop;
-                if closest.distance >= target_distance {
+                if closest.distance >= target_distance
+                    || self.touch_at_their_break(&breaks, i, j, &closest)
+                {
                     continue;
                 }
                 let normal = normalized(
@@ -6907,6 +6977,7 @@ impl World {
                 // joint carried was for the whole bone, not its lighter piece.
                 joint.drive_impulse = 0.0;
                 joint.impulse = 0.0;
+                joint.hold_impulse = Vec2::default();
                 joint.angular_impulse = 0.0;
                 // A break at the joint tore it apart, and what is left of it
                 // holds the pieces loosely. A break along the bone leaves the
@@ -10304,7 +10375,6 @@ mod tests {
     #[test]
     fn landed_blood_lies_on_the_floor() {
         let mut materials = Materials::default();
-        materials.gravity = 920.0;
         materials.max_fluid_particles = 4;
         materials.max_blood_stains = 8;
         let mut world = World::new(materials);
@@ -10817,6 +10887,25 @@ fn bone_tie_frame(bone: &BoneSegment, t: f64, point: Vec2) -> (f64, f64) {
             },
         ),
     )
+}
+
+/// Where `anchor` lies from the point `t` along `bone`, along the bone and
+/// across it, in pixels, as `BoneJoint::hold` keeps it: stretched to
+/// `reach` from that point, or as it lies for a `reach` of zero.
+fn joint_hold_offset(bone: &BoneSegment, t: f64, anchor: Vec2, reach: f64) -> Vec2 {
+    let (along, across) = bone_tie_frame(bone, t, anchor);
+    let gap = hypot(along, across);
+    let stretch = if reach <= 0.0 {
+        1.0
+    } else if gap > EPSILON {
+        reach / gap
+    } else {
+        0.0
+    };
+    Vec2 {
+        x: along * stretch,
+        y: across * stretch,
+    }
 }
 
 /// A break kicks its pieces by moving their ends and where they were, as a

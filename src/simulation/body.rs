@@ -288,13 +288,15 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
     world.set_floor_y(frame.point(0.0, 1.0).y);
     world.hold_hip(skeleton.pelvis, false);
     world.hold_hip(skeleton.pelvis, true);
-    // It is built in the guard as drawn, without its weight; it settles
-    // into the guard its muscles hold under that weight before anything
-    // happens to it, rather than sinking at the start of play.
+    // It is built in the guard as drawn, without its weight. It settles
+    // under that weight before anything happens to it, and its muscles
+    // learn the weight on the way, so it comes to rest in the guard as
+    // built rather than sinking at the start of play.
     let dt = world.materials.fixed_dt;
     let width = frame.origin.x * 2.0 + frame.height;
     for _ in 0..SETTLE_STEPS {
         world.step(dt, &InputState::default(), width);
+        world.learn_the_guards_weight();
     }
     world
 }
@@ -478,6 +480,7 @@ fn joint_drive(joint: Joint) -> JointDrive {
         damping: stiffness * DRIVE_DAMPING_TIME,
         max_torque,
         limb: Limb::None,
+        aim: 0.0,
     }
 }
 
@@ -550,33 +553,44 @@ fn add_skeleton(world: &mut World, frame: BodyFrame, materials: Materials) -> Sk
         index
     };
 
+    // Joints never rest closer than 0.7 point spacings, so every joined bone
+    // starts that far from the joint, or as far as its landmarks put it. A
+    // bone built closer is shoved away as soon as the body settles: the whole
+    // skeleton shifts before the first blow, and a hanging bone overshoots
+    // into a subluxation while the body is still at rest.
+    let joint_gap = materials.point_spacing * 0.70;
+    // The point a joint's rest gap from `joint`, toward `toward`.
+    let gap_from = |joint: Vec2, toward: Vec2, fallback: Vec2| {
+        add(
+            joint,
+            scale(normalized(subtract(toward, joint), fallback), joint_gap),
+        )
+    };
+    let down = Vec2 { x: 0.0, y: 1.0 };
+
     let head = bone(world, SKULL[0], SKULL[1], 8.2, BonePart::Skull);
+    // The spine runs down to the sacrum, a joint's rest gap below the middle
+    // of the pelvis.
+    let spine_top = at(SPINE[0]);
+    let spine_bottom = gap_from(at((0.0, PELVIS[0].1)), at(SPINE[1]), down);
     let spine = world.add_bone_segment_with_kind(
-        at(SPINE[0]),
-        at(SPINE[1]),
+        spine_top,
+        spine_bottom,
         7.2,
         strength * bone_strength(BonePart::Spine),
         false,
         BoneKind::Spine,
     );
     world.bones[spine].part = BonePart::Spine;
-    // Joints never rest closer than 0.7 point spacings, so a bone hanging from an
-    // elbow, wrist, knee, or ankle starts that far past the joint. Starting it
-    // flush makes the joint shove it away as soon as the body settles and
-    // overshoot into a subluxation while the body is still at rest.
-    let joint_gap = materials.point_spacing * 0.70;
     // Each collarbone runs from the breastbone, beside the top of the spine,
     // out to its shoulder, so a broken one leaves the other shoulder be. It
-    // starts a joint's rest gap off the spine's line.
-    let collarbone = |world: &mut World, lateral: Landmark| {
+    // starts a joint's rest gap off the spine's line and ends one short of
+    // the shoulder.
+    let collarbone = |world: &mut World, lateral: Landmark, shoulder: Landmark| {
         let medial = at((0.0, lateral.1));
-        let end = at(lateral);
-        let gap = scale(
-            normalized(subtract(end, medial), Vec2 { x: 1.0, y: 0.0 }),
-            joint_gap,
-        );
+        let end = gap_from(at(shoulder), at(lateral), Vec2 { x: 0.0, y: -1.0 });
         let index = world.add_bone_segment(
-            add(medial, gap),
+            gap_from(medial, end, Vec2 { x: 1.0, y: 0.0 }),
             end,
             6.2,
             strength * bone_strength(BonePart::Collarbone),
@@ -585,16 +599,25 @@ fn add_skeleton(world: &mut World, frame: BodyFrame, materials: Materials) -> Sk
         world.bones[index].part = BonePart::Collarbone;
         index
     };
-    let left_collarbone = collarbone(world, SHOULDER_GIRDLE[0]);
-    let right_collarbone = collarbone(world, SHOULDER_GIRDLE[1]);
+    let left_collarbone = collarbone(world, SHOULDER_GIRDLE[0], LEFT_SHOULDER);
+    let right_collarbone = collarbone(world, SHOULDER_GIRDLE[1], RIGHT_SHOULDER);
     let pelvis = bone(world, PELVIS[0], PELVIS[1], 6.4, BonePart::Pelvis);
-    let spine_t = |v: f64| ((v - SPINE[0].1) / (SPINE[1].1 - SPINE[0].1)).clamp(0.0, 1.0);
+    let (top_v, bottom_v) = (
+        frame.body_coords(spine_top).1,
+        frame.body_coords(spine_bottom).1,
+    );
+    let spine_t = |v: f64| ((v - top_v) / (bottom_v - top_v)).clamp(0.0, 1.0);
 
     let mut ribs = Vec::new();
     for (root_v, reach, scale) in RIBS {
         for side in [-1.0, 1.0] {
+            // A rib's root sits a joint's rest gap off the spine.
             let rib = world.add_bone_segment_with_kind(
-                frame.point(side * 0.008, root_v),
+                gap_from(
+                    frame.point(0.0, root_v),
+                    frame.point(side, root_v),
+                    Vec2 { x: side, y: 0.0 },
+                ),
                 frame.point(side * reach, root_v + RIB_DROP),
                 3.4,
                 strength * scale,
@@ -607,14 +630,9 @@ fn add_skeleton(world: &mut World, frame: BodyFrame, materials: Materials) -> Sk
     }
     let below_joint =
         |world: &mut World, joint: Landmark, tip: Landmark, radius: f64, part: BonePart| {
-            let start = at(joint);
             let end = at(tip);
-            let gap = scale(
-                normalized(subtract(end, start), Vec2 { x: 0.0, y: 1.0 }),
-                joint_gap,
-            );
             let index = world.add_bone_segment(
-                add(start, gap),
+                gap_from(at(joint), end, down),
                 end,
                 radius,
                 strength * bone_strength(part),

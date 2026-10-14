@@ -96,10 +96,13 @@ fn report_stance(name: &str, frame: i32, world: &rp::World, last_positions: &[rp
                 joint.post_fracture_rest.max(joint.rest)
             )
         };
+        // A whole joint pulled past its rest gap shows by how much.
         let state = if joint.broken {
             loose("broken")
         } else if joint.post_fracture_limited {
             loose("loose")
+        } else if gap > joint.rest + 0.5 {
+            format!(" apart +{:.1}px", gap - joint.rest)
         } else {
             String::new()
         };

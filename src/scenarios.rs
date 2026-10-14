@@ -9,7 +9,7 @@ use std::fmt;
 
 use crate::{
     body_frame, create_layered_body, swing_power, BodyFrame, BonePart, BoneSegment, InputState,
-    Materials, TissueLayer, ToolMode, Vec2, World, BONE_PARTS,
+    Limb, Materials, TissueLayer, ToolMode, Vec2, World, BONE_PARTS,
 };
 
 /// Window size the tuned scenarios are played in.
@@ -1380,9 +1380,9 @@ pub struct ScenarioResult {
     pub max_tool_speed: f64,
     /// The most the head turned on the neck off the guard, in degrees.
     pub max_head_turn: f64,
-    /// The farthest a fist was knocked from its place in the guard, how far
-    /// from it the farther fist ended, and how far below it the lower fist
-    /// ended, in pixels.
+    /// The farthest a fist was knocked from where it stood when the play
+    /// began, how far from there the farther fist ended, and how far below it
+    /// the lower fist ended, in pixels.
     pub max_fist_shift: f64,
     pub final_fist_offset: f64,
     pub final_fist_drop: f64,
@@ -1396,6 +1396,9 @@ pub struct ScenarioResult {
     blade_path: Vec<(Vec2, Vec2)>,
     last_tip: Option<Vec2>,
     last_cuts: i32,
+    /// How far each arm's fist stood from where it was built when the play
+    /// began, which the fist measures leave out.
+    fists_at_start: Option<[Vec2; 2]>,
 }
 
 impl ScenarioResult {
@@ -1410,6 +1413,9 @@ impl ScenarioResult {
     /// Adds one step's events and peaks; `input` is what the step was played
     /// with.
     pub fn accumulate(&mut self, world: &World, input: &InputState) {
+        if self.fists_at_start.is_none() {
+            self.fists_at_start = Some(fists_off_their_place(world));
+        }
         self.accumulate_steadiness(world, input);
         let tip = world.current_tool_pose().map(|pose| pose.contact_end);
         let cuts = world.stats().broken_skin + world.stats().broken_muscle;
@@ -1428,7 +1434,7 @@ impl ScenarioResult {
         }
         self.max_tool_speed = self.max_tool_speed.max(debug.striker_speed);
         self.max_head_turn = self.max_head_turn.max(head_turn_degrees(world));
-        for (shift, _) in fist_offsets(world) {
+        for (shift, _) in fist_offsets(world, self.fists_at_start.unwrap_or_default()) {
             self.max_fist_shift = self.max_fist_shift.max(shift);
         }
         for bone in world.bones() {
@@ -1608,7 +1614,7 @@ impl ScenarioResult {
         self.bone_pieces_out = bone_pieces_out(world);
         self.closed_pieces_out = closed_pieces_out(world);
         self.whole_bones_out = whole_bones_out(world);
-        for (shift, drop) in fist_offsets(world) {
+        for (shift, drop) in fist_offsets(world, self.fists_at_start.unwrap_or_default()) {
             self.final_fist_offset = self.final_fist_offset.max(shift);
             self.final_fist_drop = self.final_fist_drop.max(drop);
         }
@@ -1927,18 +1933,51 @@ pub fn head_turn_degrees(world: &World) -> f64 {
     turn.abs().to_degrees()
 }
 
-/// How far each fist is from its place in the guard, and how far below it,
-/// in pixels: the end of each hand's bone against where it was built.
-pub fn fist_offsets(world: &World) -> Vec<(f64, f64)> {
+/// How far each fist is from where it stood when the play began, and how
+/// far below it, in pixels: the end of each hand's bone against where it was
+/// built, less how far it stood from there then (`at_start`, by arm, from
+/// [`fists_off_their_place`]).
+pub fn fist_offsets(world: &World, at_start: [Vec2; 2]) -> Vec<(f64, f64)> {
     world
         .bones()
         .iter()
         .filter(|bone| bone.part == BonePart::Hand && !bone.splinter)
         .map(|bone| {
-            let (dx, dy) = (bone.b.x - bone.home_b.x, bone.b.y - bone.home_b.y);
+            let start = arm_index(bone.limb).map_or(Vec2::default(), |arm| at_start[arm]);
+            let (dx, dy) = (
+                bone.b.x - bone.home_b.x - start.x,
+                bone.b.y - bone.home_b.y - start.y,
+            );
             (libm::hypot(dx, dy), dy)
         })
         .collect()
+}
+
+/// How far each arm's fist stands from where it was built, the viewer's left
+/// arm first.
+pub fn fists_off_their_place(world: &World) -> [Vec2; 2] {
+    let mut off = [Vec2::default(); 2];
+    for bone in world.bones() {
+        if bone.part != BonePart::Hand || bone.splinter {
+            continue;
+        }
+        if let Some(arm) = arm_index(bone.limb) {
+            off[arm] = Vec2 {
+                x: bone.b.x - bone.home_b.x,
+                y: bone.b.y - bone.home_b.y,
+            };
+        }
+    }
+    off
+}
+
+/// Which arm a limb is, the viewer's left first.
+fn arm_index(limb: Limb) -> Option<usize> {
+    match limb {
+        Limb::LeftArm => Some(0),
+        Limb::RightArm => Some(1),
+        _ => None,
+    }
 }
 
 pub fn sleeping_fragment_count(world: &World) -> i32 {
@@ -2007,13 +2046,13 @@ const SWING_INTO_CHEST_FIRMLY: &[GestureStep] = &push_into_chest(8);
 const fn push_into_chest(frames: i32) -> [GestureStep; 7] {
     [
         GestureStep::Move {
-            to: (-0.35, 0.31),
+            to: (-0.35, 0.295),
             frames: 0,
         },
         GestureStep::Wait(10),
         GestureStep::Press(true),
         GestureStep::Move {
-            to: (0.0, 0.31),
+            to: (0.0, 0.295),
             frames,
         },
         GestureStep::Wait(40),
@@ -2056,17 +2095,17 @@ const FIRST_TOUCH_ON_CHEST: &[GestureStep] = &[
 /// Swung across the chest and straight back.
 const SWING_ACROSS_AND_BACK: &[GestureStep] = &[
     GestureStep::Move {
-        to: (-0.40, 0.35),
+        to: (-0.40, 0.335),
         frames: 0,
     },
     GestureStep::Wait(10),
     GestureStep::Press(true),
     GestureStep::Move {
-        to: (0.30, 0.35),
+        to: (0.30, 0.335),
         frames: 10,
     },
     GestureStep::Move {
-        to: (-0.40, 0.35),
+        to: (-0.40, 0.335),
         frames: 10,
     },
     GestureStep::Wait(10),
@@ -2080,61 +2119,61 @@ const SWING_ACROSS_AND_BACK: &[GestureStep] = &[
 /// there.
 const DRAG_INTO_A_WOUND: &[GestureStep] = &[
     GestureStep::Move {
-        to: (-0.75, 0.34),
+        to: (-0.75, 0.325),
         frames: 0,
     },
     GestureStep::Wait(10),
     GestureStep::Press(true),
     GestureStep::Move {
-        to: (0.0, 0.34),
+        to: (0.0, 0.325),
         frames: 8,
     },
     GestureStep::Wait(15),
     GestureStep::Press(false),
     GestureStep::Move {
-        to: (-0.75, 0.34),
+        to: (-0.75, 0.325),
         frames: 20,
     },
     GestureStep::Wait(5),
     GestureStep::Press(true),
     GestureStep::Move {
-        to: (0.0, 0.34),
+        to: (0.0, 0.325),
         frames: 8,
     },
     GestureStep::Wait(15),
     GestureStep::Press(false),
     GestureStep::Move {
-        to: (-0.75, 0.34),
+        to: (-0.75, 0.325),
         frames: 20,
     },
     GestureStep::Wait(5),
     GestureStep::Press(true),
     GestureStep::Move {
-        to: (0.0, 0.34),
+        to: (0.0, 0.325),
         frames: 8,
     },
     GestureStep::Wait(15),
     GestureStep::Press(false),
     GestureStep::Move {
-        to: (-0.75, 0.34),
+        to: (-0.75, 0.325),
         frames: 20,
     },
     GestureStep::Wait(5),
     GestureStep::Press(true),
     GestureStep::Move {
-        to: (0.0, 0.34),
+        to: (0.0, 0.325),
         frames: 8,
     },
     GestureStep::Wait(15),
     GestureStep::Press(false),
     GestureStep::Move {
-        to: (-0.75, 0.34),
+        to: (-0.75, 0.325),
         frames: 20,
     },
     GestureStep::Wait(30),
     GestureStep::Press(true),
     GestureStep::Move {
-        to: (-0.15, 0.34),
+        to: (-0.15, 0.325),
         frames: 40,
     },
     GestureStep::Wait(20),
@@ -2202,18 +2241,18 @@ macro_rules! check {
 /// held there, and drawn back.
 const SLASH_INTO_THE_ARM_FAST: &[GestureStep] = &[
     GestureStep::Move {
-        to: (-0.42, 0.255),
+        to: (-0.42, 0.240),
         frames: 0,
     },
     GestureStep::Wait(10),
     GestureStep::Press(true),
     GestureStep::Move {
-        to: (0.0, 0.255),
+        to: (0.0, 0.240),
         frames: 6,
     },
     GestureStep::Wait(60),
     GestureStep::Move {
-        to: (-0.42, 0.255),
+        to: (-0.42, 0.240),
         frames: 20,
     },
     GestureStep::Press(false),
@@ -2292,7 +2331,7 @@ pub fn scenarios() -> Vec<Scenario> {
             region: "torso",
             intent: "medium",
             play: Play::Swing(
-                strike(ToolMode::Blunt, (-0.360, 0.330), (0.200, 0.330), 9, 60),
+                strike(ToolMode::Blunt, (-0.360, 0.315), (0.200, 0.315), 9, 60),
                 None,
             ),
             // A bat swung at about 7 m/s, about 21 J, across the guard's elbow
@@ -2311,7 +2350,7 @@ pub fn scenarios() -> Vec<Scenario> {
             region: "torso",
             intent: "high",
             play: Play::Swing(
-                strike(ToolMode::Heavy, (-0.400, 0.340), (0.300, 0.340), 8, 60),
+                strike(ToolMode::Heavy, (-0.400, 0.325), (0.300, 0.325), 8, 60),
                 None,
             ),
             // The sledgehammer at its top speed, 10.6 m/s, about 250 J, through
@@ -2373,7 +2412,7 @@ pub fn scenarios() -> Vec<Scenario> {
             region: "arm",
             intent: "cut",
             play: Play::Swing(
-                strike(ToolMode::Sharp, (-0.115, 0.255), (-0.205, 0.330), 24, 72),
+                strike(ToolMode::Sharp, (-0.115, 0.240), (-0.205, 0.315), 24, 72),
                 None,
             ),
             // A knife drawn slowly from the armpit along the underside of the
@@ -2457,7 +2496,7 @@ pub fn scenarios() -> Vec<Scenario> {
             region: "torso",
             intent: "settle",
             play: Play::Swing(
-                strike(ToolMode::Heavy, (-0.400, 0.340), (0.300, 0.340), 8, 260),
+                strike(ToolMode::Heavy, (-0.400, 0.325), (0.300, 0.325), 8, 260),
                 None,
             ),
             // The pieces of bone broken by a full-force sledgehammer blow to the
@@ -2661,7 +2700,7 @@ pub fn scenarios() -> Vec<Scenario> {
             region: "torso",
             intent: "high",
             play: Play::Swing(
-                strike(ToolMode::Blunt, (-0.700, 0.330), (0.200, 0.330), 6, 60),
+                strike(ToolMode::Blunt, (-0.700, 0.315), (0.200, 0.315), 6, 60),
                 None,
             ),
             // An ordinary man's hard bat swing, about 16 m/s and 110 J, across
@@ -2681,7 +2720,7 @@ pub fn scenarios() -> Vec<Scenario> {
             region: "arm",
             intent: "high",
             play: Play::Swing(
-                strike(ToolMode::Blunt, (-0.700, 0.190), (0.200, 0.190), 6, 60),
+                strike(ToolMode::Blunt, (-0.700, 0.175), (0.200, 0.175), 6, 60),
                 None,
             ),
             // The same hard swing into the forearm raised in the guard, the
@@ -2706,7 +2745,7 @@ pub fn scenarios() -> Vec<Scenario> {
             region: "arm",
             intent: "medium",
             play: Play::Swing(
-                strike(ToolMode::Blunt, (-0.360, 0.255), (0.200, 0.255), 9, 60),
+                strike(ToolMode::Blunt, (-0.360, 0.240), (0.200, 0.240), 9, 60),
                 None,
             ),
             // A bat at about 7 m/s, about 21 J, into the forearm raised in the
@@ -2724,7 +2763,7 @@ pub fn scenarios() -> Vec<Scenario> {
             region: "arm",
             intent: "medium",
             play: Play::Swing(
-                strike(ToolMode::Heavy, (-0.300, 0.255), (0.050, 0.255), 12, 60),
+                strike(ToolMode::Heavy, (-0.300, 0.240), (0.050, 0.240), 12, 60),
                 None,
             ),
             // The sledgehammer at about 3 m/s, about 20 J, into the forearm
@@ -2808,15 +2847,17 @@ pub fn scenarios() -> Vec<Scenario> {
             region: "arm",
             intent: "stance",
             play: Play::Swing(
-                strike(ToolMode::Blunt, (-0.400, 0.255), (0.000, 0.255), 15, 90),
+                strike(ToolMode::Blunt, (-0.400, 0.240), (0.000, 0.240), 15, 90),
                 None,
             ),
             // A bat at about 3 m/s, about 4 J, into the forearm raised in the
-            // guard. It knocks the fist aside, and the arm's muscles bring it
-            // back into the guard within the next second and a half, as an arm
-            // held against a push springs back (Bennett et al. 1992).
+            // guard. It knocks the fist visibly aside, at least 10 px (about
+            // 3 cm; 13 px with the joints held as hinges, 16 px when they let
+            // the bones slide round each other), and the arm's muscles bring
+            // it back into the guard within the next second and a half, as an
+            // arm held against a push springs back (Bennett et al. 1992).
             expectations: ScenarioExpectations {
-                fist_shift: DoubleBand::range(15.0, f64::INFINITY),
+                fist_shift: DoubleBand::range(10.0, f64::INFINITY),
                 fist_offset: DoubleBand::range(0.0, 16.0),
                 ..e
             },

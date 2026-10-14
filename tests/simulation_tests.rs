@@ -159,6 +159,40 @@ fn skin_band_clusters(world: &rp::World, min_t: f64, max_t: f64) -> usize {
     most
 }
 
+/// Every joint is built at the gap it holds its bones at, so the body does
+/// not shove its own bones about as it settles: a spine built into the
+/// pelvis was pushed half a joint's gap down, and the arms with it.
+#[test]
+fn every_joint_is_built_at_its_rest_gap() {
+    let world = rp::create_layered_body(1280.0, 720.0, rp::Materials::default());
+    let bones = world.bones();
+    let at = |bone: &rp::BoneSegment, t: f64| {
+        (
+            bone.home_a.x + (bone.home_b.x - bone.home_a.x) * t,
+            bone.home_a.y + (bone.home_b.y - bone.home_a.y) * t,
+        )
+    };
+    let off: Vec<String> = world
+        .bone_joints()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, joint)| {
+            let (a, b) = (&bones[joint.a], &bones[joint.b]);
+            let (p, q) = (at(a, joint.t_a), at(b, joint.t_b));
+            let built = (q.0 - p.0).hypot(q.1 - p.1);
+            ((built - joint.rest).abs() > 0.5).then(|| {
+                format!(
+                    "joint {index}, {} to {}: built {built:.1} px apart, rests at {:.1}",
+                    a.part.name(),
+                    b.part.name(),
+                    joint.rest
+                )
+            })
+        })
+        .collect();
+    assert!(off.is_empty(), "{}", off.join("\n"));
+}
+
 #[test]
 fn generated_body_mirrors_across_its_midline() {
     let (width, height) = (1280.0, 720.0);

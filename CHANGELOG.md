@@ -2,6 +2,11 @@
 
 What each version of Realistic Physics changed, newest first. The game shows its version on the start screen and in its bottom-left corner, and every Short made from the game shows the version it was made with. Only the newest version is online.
 
+## v0.10 (2026-10-14)
+
+- Gravity is as strong as on Earth: the body, a limb that lets go, and blood fall as fast as they really would. Before, everything fell about three times too slowly.
+- The body stands exactly as it is drawn: its joints hold the bones together like hinges, so the fists stay up in the guard instead of sagging a little under their weight.
+
 ## v0.9 (2026-10-14)
 
 - The body stands in a fighting guard, fists up beside its head, and its flesh moves with its bones.

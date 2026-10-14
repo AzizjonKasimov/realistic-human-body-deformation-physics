@@ -251,9 +251,10 @@ fn watchdog_summary(selected: &[Scenario], runs: &[SweepRun]) -> String {
 fn sweep_summary(scenario: &Scenario, runs: &[&SweepRun], custom: bool) -> String {
     let mut text = String::new();
     let in_band = runs.iter().filter(|run| run.violations.is_empty()).count();
+    // The swing as tuned: unmoved, at the bones' own strength.
     let unmoved = runs
         .iter()
-        .find(|run| run.along == 0.0 && run.across == 0.0)
+        .find(|run| run.along == 0.0 && run.across == 0.0 && run.strength == 1.0)
         .map_or("missing", |run| {
             if run.violations.is_empty() {
                 "in band"
