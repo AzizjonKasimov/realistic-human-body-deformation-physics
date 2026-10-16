@@ -114,6 +114,7 @@
 //!
 //! Outputs go next to the CSV path (default `output/strike_scenarios.csv`).
 
+mod bodies;
 mod diff;
 mod dump;
 mod inspect;
@@ -124,6 +125,7 @@ mod summary;
 mod sweep;
 mod watch;
 
+use bodies::*;
 use dump::*;
 use inspect::*;
 use moved::*;
@@ -131,7 +133,7 @@ use random::*;
 use realistic_physics as rp;
 use record::Recorder;
 use rp::scenarios::{
-    active_fluid_count, fastest_point_speed, free_fragment_count, inside_the_skin, run, run_on,
+    active_fluid_count, fastest_point_speed, free_fragment_count, inside_the_skin, run_on,
     scenarios, spinning_fragment_count, tool_axis, tool_lag, tool_name, tool_touching, Gesture,
     Play, Scenario, ScenarioResult, Strike, SCENARIO_HEIGHT, SCENARIO_WIDTH,
 };
@@ -661,11 +663,18 @@ fn listen(selected: &[Scenario], dir: &Path) {
                 let mut foley = Foley::new();
                 let mut mix = Mixdown::new(&bank, step_seconds);
                 let mut heard_all = Vec::new();
-                run(scenario, SCENARIO_WIDTH, SCENARIO_HEIGHT, |_, _, world| {
-                    let heard = foley.hear(world);
-                    mix.step(&heard);
-                    heard_all.push(heard);
-                });
+                let body = settled_body(SCENARIO_WIDTH, SCENARIO_HEIGHT, scenario.materials());
+                run_on(
+                    body,
+                    scenario,
+                    SCENARIO_WIDTH,
+                    SCENARIO_HEIGHT,
+                    |_, _, world| {
+                        let heard = foley.hear(world);
+                        mix.step(&heard);
+                        heard_all.push(heard);
+                    },
+                );
                 let samples = mix.finish();
                 let path = dir.join(format!("{}.wav", scenario.name));
                 fs::write(&path, wav_bytes(&samples)).expect("write sound");
@@ -740,8 +749,7 @@ fn time_phases(selected: &[Scenario], output_dir: &Path) {
     let mut report = String::new();
     let mut scenario_lines = String::new();
     for scenario in selected {
-        let mut world =
-            rp::create_layered_body(SCENARIO_WIDTH, SCENARIO_HEIGHT, scenario.materials());
+        let mut world = settled_body(SCENARIO_WIDTH, SCENARIO_HEIGHT, scenario.materials());
         world.time_phases(Some(now_ms));
         let (world, _) = run_on(
             world,

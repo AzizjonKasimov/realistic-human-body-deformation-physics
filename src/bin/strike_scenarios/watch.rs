@@ -25,8 +25,7 @@ impl Watch {
     /// The body for `scenario`, following what `--trace` names and keeping
     /// the journal `--journal` asks for.
     pub(crate) fn body(&self, scenario: &Scenario) -> rp::World {
-        let mut world =
-            rp::create_layered_body(SCENARIO_WIDTH, SCENARIO_HEIGHT, scenario.materials());
+        let mut world = settled_body(SCENARIO_WIDTH, SCENARIO_HEIGHT, scenario.materials());
         if let Some((traced, _, _)) = self.trace {
             world.trace(&[traced]);
         }

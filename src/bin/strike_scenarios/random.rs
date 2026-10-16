@@ -56,7 +56,7 @@ struct Targets {
 
 impl Targets {
     fn new() -> Self {
-        let body = rp::create_layered_body(
+        let body = settled_body(
             SCENARIO_WIDTH,
             SCENARIO_HEIGHT,
             rp::scenarios::set_materials(),
@@ -248,7 +248,7 @@ enum Breaks<'a> {
 /// Plays `play` and says whether it broke `what`.
 fn still_breaks(play: Play, what: Breaks) -> bool {
     let scenario = Scenario::custom(play);
-    let body = rp::create_layered_body(SCENARIO_WIDTH, SCENARIO_HEIGHT, scenario.materials());
+    let body = settled_body(SCENARIO_WIDTH, SCENARIO_HEIGHT, scenario.materials());
     let mut watchdogs = Watchdogs::new(&body);
     let (_, result) = run_on(
         body,
@@ -456,8 +456,7 @@ pub(crate) fn random_blows(
                 };
                 let draw = draws[index].clone();
                 let scenario = Scenario::custom(play);
-                let body =
-                    rp::create_layered_body(SCENARIO_WIDTH, SCENARIO_HEIGHT, scenario.materials());
+                let body = settled_body(SCENARIO_WIDTH, SCENARIO_HEIGHT, scenario.materials());
                 let mut watchdogs = Watchdogs::new(&body);
                 let (world, result) = run_on(
                     body,

@@ -228,7 +228,8 @@ pub(crate) fn moved_body_tests(selected: &[Scenario], output_dir: &Path) {
                     .shifted(along, across)
                     .with_bone_strength(strength);
                 let (width, height) = moved.window();
-                let (_, result) = run(&scenario, width, height, |_, _, _| {});
+                let body = settled_body(width, height, scenario.materials());
+                let (_, result) = run_on(body, &scenario, width, height, |_, _, _| {});
                 let ok = scenario.violations(&result).is_empty();
                 finished
                     .lock()
@@ -314,7 +315,7 @@ fn free_body_checks() -> Vec<String> {
 /// A body built in the scenarios' window, its hips let go and its floor
 /// taken away, set moving at `velocity`, after a second.
 fn free_body(name: &str, materials: rp::Materials, velocity: rp::Vec2) -> String {
-    let mut world = rp::create_layered_body(SCENARIO_WIDTH, SCENARIO_HEIGHT, materials);
+    let mut world = settled_body(SCENARIO_WIDTH, SCENARIO_HEIGHT, materials);
     world.release_hips();
     world.set_floor_y(f64::INFINITY);
     world.keep_journal();

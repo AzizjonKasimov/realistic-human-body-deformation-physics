@@ -97,8 +97,7 @@ pub(crate) fn sweep(selected: &[Scenario], output_dir: &Path, custom: bool, quic
                 let scenario = selected[index]
                     .shifted(along, across)
                     .with_bone_strength(strength);
-                let body =
-                    rp::create_layered_body(SCENARIO_WIDTH, SCENARIO_HEIGHT, scenario.materials());
+                let body = settled_body(SCENARIO_WIDTH, SCENARIO_HEIGHT, scenario.materials());
                 let mut watchdogs = rp::inspect::Watchdogs::new(&body);
                 let (world, result) = run_on(
                     body,

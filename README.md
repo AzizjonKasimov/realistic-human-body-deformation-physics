@@ -320,6 +320,8 @@ output\strike_sweep_report.txt
 output\strike_sweep.csv
 ```
 
+Every run of the sweep, the moved-body tests, and the random blows starts from the same body for its window and settings, built and settled under its weight, so the scenario tool builds each such body once and plays every run on a copy of it (`src/bin/strike_scenarios/bodies.rs`): the results are exactly what a body built afresh gives (`a_copied_body_plays_as_one_built_afresh`), and the sweep and the random blows take about half the time.
+
 The sweep report ends with what the watchdogs flagged in each scenario's runs ([Look Into A Run](#look-into-a-run)). `python tools\sweep_summary.py [REPORT...]` sums a sweep report up in a few lines (runs in band, real-life mismatches, closed breaks' pieces and whole bones outside the skin, bone thrown out, and the scenarios behind each), to compare two sweeps at a glance.
 
 The runner also takes options for quick experiments:
