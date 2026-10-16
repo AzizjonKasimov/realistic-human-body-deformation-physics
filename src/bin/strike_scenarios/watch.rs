@@ -17,6 +17,8 @@ pub(crate) struct Watch {
     pub(crate) journal: bool,
     /// Lay the body out in numbers on one frame.
     pub(crate) dump: Option<Dump>,
+    /// Draw the flesh's triangles round a place on one frame.
+    pub(crate) mesh: Option<MeshShot>,
 }
 
 impl Watch {
@@ -52,6 +54,9 @@ impl Watch {
         }
         if let Some(dump) = self.dump {
             dump.report(name, frame, world);
+        }
+        if let Some(mesh) = self.mesh {
+            mesh.draw(name, frame, world);
         }
         if let Some(every) = self.stance {
             if (frame + 1) % every.max(1) == 0 {

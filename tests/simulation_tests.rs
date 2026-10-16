@@ -245,6 +245,111 @@ fn generated_body_mirrors_across_its_midline() {
     }
 }
 
+/// The app draws the body larger on a big screen and smaller on a phone, and
+/// it must settle into its guard at any size. Given its weight all at once,
+/// a body drawn at the app's largest dropped its trunk onto the pelvis and
+/// tore the lower back as it settled, and its arms fell out of the guard.
+#[test]
+fn a_body_of_any_size_settles_in_its_guard() {
+    for (width, height) in [(1600.0, 923.0), (1920.0, 1080.0), (390.0, 844.0)] {
+        let world = rp::create_layered_body(width, height, rp::Materials::default());
+        if let Some(index) = world
+            .bone_joints()
+            .iter()
+            .position(|joint| joint.broken || joint.post_fracture_limited || joint.subluxated)
+        {
+            panic!(
+                "FAIL: {} was hurt as the body settled in a {width}x{height} window",
+                rp::inspect::joint_name(&world, index)
+            );
+        }
+        let worst = world
+            .bones()
+            .iter()
+            .map(|bone| {
+                (bone.a.x - bone.home_a.x)
+                    .hypot(bone.a.y - bone.home_a.y)
+                    .max((bone.b.x - bone.home_b.x).hypot(bone.b.y - bone.home_b.y))
+            })
+            .fold(0.0, f64::max);
+        if worst > 6.0 {
+            panic!(
+                "FAIL: a bone rests {worst:.1} px from its drawing after the settle in a {width}x{height} window"
+            );
+        }
+    }
+}
+
+/// Flesh is tied to flesh and bone only through flesh: no tie of skin to
+/// muscle or muscle to bone, and no spring at the elbow, reaches across a
+/// gap in the figure. Joined across the inner elbow's crease, the fold held
+/// a broken arm's limp forearm up in the guard like a rubber wedge.
+#[test]
+fn flesh_is_tied_only_through_flesh() {
+    let (width, height) = (1280.0, 720.0);
+    let world = rp::create_layered_body(width, height, rp::Materials::default());
+    let frame = rp::body_frame(width, height);
+    let points = world.points();
+    // How far outside the figure, in pixels, the straight way from `a` to
+    // `b` strays at most.
+    let strays = |a: rp::Vec2, b: rp::Vec2| {
+        (1..32)
+            .map(|step| {
+                let t = step as f64 / 32.0;
+                let (u, v) = frame.body_coords(rp::Vec2 {
+                    x: a.x + (b.x - a.x) * t,
+                    y: a.y + (b.y - a.y) * t,
+                });
+                rp::silhouette_distance(u, v) * frame.height
+            })
+            .fold(f64::NEG_INFINITY, f64::max)
+    };
+    let check = |what: &str, a: rp::Vec2, b: rp::Vec2| {
+        let out = strays(a, b);
+        if out > 1.5 {
+            let (u, v) = frame.body_coords(a);
+            panic!("FAIL: a {what} from body ({u:.3}, {v:.3}) runs {out:.1} px outside the figure");
+        }
+    };
+    for tie in world.attachments() {
+        check(
+            "tie of skin to muscle",
+            points[tie.skin_point].home,
+            points[tie.muscle_point].home,
+        );
+    }
+    for tie in world.bone_attachments() {
+        let bone = &world.bones()[tie.bone];
+        let at = points[tie.point].home;
+        let (ax, ay) = (bone.home_b.x - bone.home_a.x, bone.home_b.y - bone.home_a.y);
+        let t = (((at.x - bone.home_a.x) * ax + (at.y - bone.home_a.y) * ay) / (ax * ax + ay * ay))
+            .clamp(0.0, 1.0);
+        let on_bone = rp::Vec2 {
+            x: bone.home_a.x + ax * t,
+            y: bone.home_a.y + ay * t,
+        };
+        check("tie of muscle to bone", at, on_bone);
+    }
+    // A spring between two points of the skin's outline is its surface, and
+    // may cut a corner where the outline turns inward, as round the crease's
+    // end or at the crotch; the others across the inner elbow are checked.
+    let on_outline = |at: rp::Vec2| {
+        let (u, v) = frame.body_coords(at);
+        rp::silhouette_distance(u, v) * frame.height > -1.0
+    };
+    for spring in world.springs() {
+        let (a, b) = (points[spring.a].home, points[spring.b].home);
+        let (u, v) = frame.body_coords(rp::Vec2 {
+            x: (a.x + b.x) * 0.5,
+            y: (a.y + b.y) * 0.5,
+        });
+        let at_elbow = (0.17..0.26).contains(&u.abs()) && (0.24..0.33).contains(&v);
+        if at_elbow && !(on_outline(a) && on_outline(b)) {
+            check("spring at the elbow", a, b);
+        }
+    }
+}
+
 /// The body is meshed for each window size, so check desktop, browser pane,
 /// and phone shapes: at rest no muscle may show past the skin anywhere.
 #[test]
@@ -398,7 +503,9 @@ fn generated_body_has_expected_layers_and_anatomy() {
     if lower_leg_gap_points >= left_leg_points.min(right_leg_points) {
         fail("separated legs should keep a readable center gap below the pelvis");
     }
-    let elbow_runs = skin_band_clusters(&world, 0.30, 0.33);
+    // Below the inner elbow's crease, whose rounded end reaches down to
+    // about 0.302 and splits an arm in two above it.
+    let elbow_runs = skin_band_clusters(&world, 0.305, 0.335);
     if elbow_runs != 3 {
         panic!("FAIL: the guard's elbows should stand out clear of the chest: runs={elbow_runs}");
     }

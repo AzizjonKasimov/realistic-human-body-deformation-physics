@@ -275,7 +275,14 @@ pub fn silhouette_distance(u: f64, v: f64) -> f64 {
 /// The mannequin figure, built on first use.
 pub(crate) fn human_silhouette() -> &'static SilhouetteField {
     static FIELD: OnceLock<SilhouetteField> = OnceLock::new();
-    FIELD.get_or_init(build_field)
+    FIELD.get_or_init(|| build_field(CREASE_HALF_WIDTH))
+}
+
+/// The figure the muscle sheet is cut from: the same, with the elbow's
+/// crease wider by `CREASE_FAT`, built on first use.
+pub(crate) fn muscle_silhouette() -> &'static SilhouetteField {
+    static FIELD: OnceLock<SilhouetteField> = OnceLock::new();
+    FIELD.get_or_init(|| build_field(CREASE_HALF_WIDTH + CREASE_FAT))
 }
 
 /// The smoothed torso outline, built on first use.
@@ -297,7 +304,7 @@ pub(crate) enum FigurePart {
 pub(crate) fn figure_part(u: f64, v: f64) -> FigurePart {
     let p = (u.abs(), v);
     let trunk = capsule(p, CROWN, CHIN).min(torso_outline().distance(p));
-    let arm = arm_distance(p);
+    let arm = arm_distance(p, CREASE_HALF_WIDTH);
     let leg = leg_distance(p);
     if arm < trunk && arm <= leg {
         FigurePart::Arm
@@ -308,7 +315,9 @@ pub(crate) fn figure_part(u: f64, v: f64) -> FigurePart {
     }
 }
 
-fn build_field() -> SilhouetteField {
+/// The figure's field, its elbow's crease `crease_half_width` wide either
+/// side of its line.
+fn build_field(crease_half_width: f64) -> SilhouetteField {
     let cell = 1.0 / FIELD_RESOLUTION;
     let half_cols = (FIELD_HALF_WIDTH / cell).ceil() as usize;
     let cols = 2 * half_cols + 1;
@@ -319,7 +328,7 @@ fn build_field() -> SilhouetteField {
     for row in 0..rows {
         let v = FIELD_V_RANGE.0 + row as f64 * cell;
         for (k, value) in right_half.iter_mut().enumerate() {
-            *value = figure_distance((k as f64 * cell, v), torso);
+            *value = figure_distance((k as f64 * cell, v), torso, crease_half_width);
         }
         sdf.extend((0..cols).map(|col| right_half[col.abs_diff(half_cols)]));
     }
@@ -334,28 +343,92 @@ fn build_field() -> SilhouetteField {
 
 /// Signed distance from a point on the right half (`u` >= 0) to the figure's
 /// outline; negative inside.
-fn figure_distance(p: Landmark, torso: &TorsoOutline) -> f64 {
+fn figure_distance(p: Landmark, torso: &TorsoOutline, crease_half_width: f64) -> f64 {
     let head = capsule(p, CROWN, CHIN);
     let trunk = smooth_union(head, torso.distance(p), NECK_BLEND);
     smooth_union(
-        smooth_union(trunk, arm_distance(p), ARM_BLEND),
+        smooth_union(trunk, arm_distance(p, crease_half_width), ARM_BLEND),
         leg_distance(p),
         LEG_BLEND,
     )
 }
 
 /// Signed distance from a point on the right half to the arm: upper arm,
-/// forearm, and fist.
-fn arm_distance(p: Landmark) -> f64 {
-    smooth_union(
-        smooth_union(
-            capsule(p, (SHOULDER, UPPER_ARM_RADII.0), (ELBOW, UPPER_ARM_RADII.1)),
-            capsule(p, (ELBOW, FOREARM_RADII.0), (WRIST, FOREARM_RADII.1)),
-            JOINT_BLEND,
-        ),
-        fist(p),
-        FIST_BLEND,
-    )
+/// forearm, and fist, its elbow's crease `crease_half_width` wide either
+/// side of its line.
+fn arm_distance(p: Landmark, crease_half_width: f64) -> f64 {
+    let upper = capsule(p, (SHOULDER, UPPER_ARM_RADII.0), (ELBOW, UPPER_ARM_RADII.1));
+    let fore = capsule(p, (ELBOW, FOREARM_RADII.0), (WRIST, FOREARM_RADII.1));
+    let crease = elbow_crease(p, upper, fore, crease_half_width);
+    let arm = smooth_union(upper, fore, JOINT_BLEND).max(-crease);
+    smooth_union(arm, fist(p), FIST_BLEND)
+}
+
+/// Where the inner elbow's crease starts, in body heights from the elbow
+/// joint along the fold: nearer the joint the muscles that cross it (biceps,
+/// brachialis) join forearm to upper arm. Much deeper and the crease comes
+/// within 0.012 of the forearm's bone (`limb_bones_run_inside_their_limbs`;
+/// at 0.025 the sampled field put it a hair inside that); a shallower one,
+/// 0.035, let more broken pieces out of a smashed arm.
+const CREASE_START: f64 = 0.027;
+/// Half the crease's width in body heights, about 3 px on the 560 px body:
+/// wide enough that no triangle of the mesh bridges it.
+const CREASE_HALF_WIDTH: f64 = 0.005;
+/// How much wider the crease is in the muscle sheet, either side, in body
+/// heights (about 1.7 px): fat lines the fold, so the muscle on each side
+/// lies further back from it than the skin. With only the sheets' usual
+/// 4 px between them, the arm's slight sag as the body settled showed
+/// muscle past the skin of the crease in one window size; 3 px more took
+/// enough muscle from round the elbow that a smashed arm's pieces left the
+/// body more often.
+const CREASE_FAT: f64 = 0.003;
+
+/// Outline points along the crease lie this far apart at most, in body
+/// heights: its width. About 10 px apart, as elsewhere on the outline, the
+/// mesh bridged the slit with triangles that were trimmed away and left
+/// holes in the skin either side of it; half its width apart, the points
+/// made sliver triangles with the lattice inside, which turned over under a
+/// light blow.
+pub(crate) const CREASE_POINT_SPACING: f64 = CREASE_HALF_WIDTH * 2.0;
+
+/// Whether (`u`, `v`), a point of the outline `level` inside the figure's
+/// (body heights, negative inward), lies on the inner elbow's crease: inside
+/// the arm as it would be without the crease.
+pub(crate) fn on_elbow_crease(u: f64, v: f64, level: f64) -> bool {
+    let p = (u.abs(), v);
+    let upper = capsule(p, (SHOULDER, UPPER_ARM_RADII.0), (ELBOW, UPPER_ARM_RADII.1));
+    let fore = capsule(p, (ELBOW, FOREARM_RADII.0), (WRIST, FOREARM_RADII.1));
+    smooth_union(upper, fore, JOINT_BLEND) < level - CREASE_HALF_WIDTH * 0.5
+}
+
+/// Signed distance to the crease of the inner elbow, negative inside it,
+/// given the distances to the upper arm's capsule (`upper`) and the
+/// forearm's (`fore`). The guard bends the elbow so far that the forearm's
+/// flesh lies against the upper arm's from near the joint out to where their
+/// outlines part. There they touch but are not one piece, and the crease
+/// opens as the elbow straightens. Filled with one block of flesh, the fold
+/// held the elbow bent like a rubber wedge: a broken arm's limp forearm
+/// stood up in the guard on it, and a blow that turned the forearm about
+/// the elbow left its bone outside its flesh, which the wedge held back.
+/// The crease runs where the two capsules' surfaces meet, where the two
+/// distances are equal.
+fn elbow_crease(p: Landmark, upper: f64, fore: f64, half_width: f64) -> f64 {
+    let unit = |(u, v): Landmark| {
+        let length = libm::hypot(u, v);
+        (u / length, v / length)
+    };
+    let to_shoulder = unit((SHOULDER.0 - ELBOW.0, SHOULDER.1 - ELBOW.1));
+    let to_wrist = unit((WRIST.0 - ELBOW.0, WRIST.1 - ELBOW.1));
+    let fold = unit((to_shoulder.0 + to_wrist.0, to_shoulder.1 + to_wrist.1));
+    // Off the crease's line the two distances part at twice the sine of
+    // half the angle between the bones per unit across.
+    let half_angle_sine = (to_shoulder.0 * fold.1 - to_shoulder.1 * fold.0).abs();
+    let along = (p.0 - ELBOW.0) * fold.0 + (p.1 - ELBOW.1) * fold.1;
+    let across = (upper - fore).abs() / (2.0 * half_angle_sine);
+    // Its inner end is round: a square end in skin that rests stretched
+    // gathers the stretch at its corners, as a crack's tip does, and tore
+    // the skin off the muscle there as the body settled.
+    libm::hypot(across, (CREASE_START - along).max(0.0)) - half_width
 }
 
 /// Signed distance from a point on the right half to the leg: thigh, shin,

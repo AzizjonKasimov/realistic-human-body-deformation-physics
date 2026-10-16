@@ -430,6 +430,12 @@ pub struct Materials {
     pub bone_joint_break_impulse: f64,
     pub bone_joint_angular_break: f64,
     pub post_fracture_joint_max_stretch: f64,
+    /// How far past its rest gap a torn or loosened joint lets its bones
+    /// part, in pixels (at least `post_fracture_joint_max_stretch` times the
+    /// gap): a dislocated joint's ends lie about a joint's width apart, 2-3
+    /// cm, held there by its capsule and the muscles across it. At 34 px
+    /// (11 cm), from the first port, a smashed arm whose shoulder and elbow
+    /// tore hung its bones below its flesh, out of the body.
     pub post_fracture_joint_slack: f64,
     pub post_fracture_joint_angle_slack: f64,
     /// How far a broken bone's pieces may shift apart at the break, in
@@ -673,7 +679,7 @@ impl Default for Materials {
             bone_joint_break_impulse: 2600.0,
             bone_joint_angular_break: 1.20,
             post_fracture_joint_max_stretch: 2.6,
-            post_fracture_joint_slack: 34.0,
+            post_fracture_joint_slack: 10.0,
             post_fracture_joint_angle_slack: 0.78,
             fracture_link_slack: 6.0,
             fracture_link_angle_slack: 0.45,
