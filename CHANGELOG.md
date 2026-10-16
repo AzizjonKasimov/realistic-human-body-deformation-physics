@@ -2,6 +2,13 @@
 
 What each version of Realistic Physics changed, newest first. The game shows its version on the start screen and in its bottom-left corner, and every Short made from the game shows the version it was made with. Only the newest version is online.
 
+## v0.10.1 (2026-10-16)
+
+- A hard blow to the shoulder no longer leaves the forearm's bone poking out of its skin: the arm's muscles hold their bones as firmly as braced muscle does.
+- A dislocated joint keeps its bones close together, so a smashed arm's bones stay inside it.
+- On a big screen the body no longer drops its arms out of the guard as the game starts.
+- A flap of cut skin that falls against the body flies off less often.
+
 ## v0.10 (2026-10-14)
 
 - Gravity is as strong as on Earth: the body, a limb that lets go, and blood fall as fast as they really would. Before, everything fell about three times too slowly.

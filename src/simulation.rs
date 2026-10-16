@@ -327,9 +327,13 @@ pub struct Materials {
     pub muscle_damping_ratio: f64,
     /// How fast muscle on a bone springs back to where it sits on it, in
     /// hertz, and how fast that dies away: soft tissue on the limbs rings at
-    /// 10 to 55 Hz after a jolt and settles within a cycle or two. The
-    /// sole's skin and fat are bound to the foot's bones by fascia over
-    /// little muscle, and hold them at the top of that range
+    /// 10 to 55 Hz after a jolt and settles within a cycle or two, the
+    /// faster the more the muscle is braced, as the guard's is. At 20 Hz,
+    /// against the pinned joints of real gravity, a blow that turned the
+    /// forearm about the elbow dragged its flesh off its bone, leaving the
+    /// bone outside the skin (`shoulder_blunt`, 21 of 45 sweep runs; none
+    /// at 30). The sole's skin and fat are bound to the foot's bones by
+    /// fascia over little muscle, and hold them at the top of that range
     /// (`foot_tie_hertz`): tied as loosely, a bat's barrel catching the foot
     /// dragged its bone out from under its light flesh.
     pub bone_tie_hertz: f64,
@@ -430,6 +434,12 @@ pub struct Materials {
     pub bone_joint_break_impulse: f64,
     pub bone_joint_angular_break: f64,
     pub post_fracture_joint_max_stretch: f64,
+    /// How far past its rest gap a torn or loosened joint lets its bones
+    /// part, in pixels (at least `post_fracture_joint_max_stretch` times the
+    /// gap): a dislocated joint's ends lie about a joint's width apart, 2-3
+    /// cm, held there by its capsule and the muscles across it. At 34 px
+    /// (11 cm), from the first port, a smashed arm whose shoulder and elbow
+    /// tore hung its bones below its flesh, out of the body.
     pub post_fracture_joint_slack: f64,
     pub post_fracture_joint_angle_slack: f64,
     /// How far a broken bone's pieces may shift apart at the break, in
@@ -579,7 +589,7 @@ impl Default for Materials {
             muscle_cross_stiffening_stretch: 1.10,
             muscle_cross_stiffening_ratio: 4.0,
             muscle_damping_ratio: 0.3,
-            bone_tie_hertz: 20.0,
+            bone_tie_hertz: 30.0,
             foot_tie_hertz: 55.0,
             bone_tie_damping_ratio: 0.4,
             muscle_fiber_rupture_damage_floor: 0.0,
@@ -673,7 +683,7 @@ impl Default for Materials {
             bone_joint_break_impulse: 2600.0,
             bone_joint_angular_break: 1.20,
             post_fracture_joint_max_stretch: 2.6,
-            post_fracture_joint_slack: 34.0,
+            post_fracture_joint_slack: 10.0,
             post_fracture_joint_angle_slack: 0.78,
             fracture_link_slack: 6.0,
             fracture_link_angle_slack: 0.45,

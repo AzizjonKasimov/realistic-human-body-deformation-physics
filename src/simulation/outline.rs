@@ -23,6 +23,10 @@ const OUTLINE_CONTACT_DEPTH: f64 = 2.5;
 const OUTLINE_CONTACT_REACH: f64 = 1.6;
 /// Share of an overlap each solver pass removes.
 const OUTLINE_CONTACT_STIFFNESS: f64 = 0.8;
+/// The fastest an overlap is pushed apart, in metres a second: Box2D's
+/// `contactSpeed` (3 m/s), which keeps a deep overlap from throwing what it
+/// pushes out.
+const OUTLINE_PUSH_SPEED: f64 = 3.0;
 
 /// One closed outline of a tissue sheet, in order along the loop.
 #[derive(Clone, Debug)]
@@ -373,6 +377,10 @@ impl World {
     /// pressed into, and those stretches back, split by mass.
     pub(super) fn solve_outline_contacts(&mut self) {
         let max_depth = self.materials.point_spacing * OUTLINE_CONTACT_DEPTH;
+        // An overlap closes no faster than Box2D's contact speed: the moves
+        // are speeds the step keeps, so a cut flap of skin that fell deep
+        // into other skin was thrown out at 2,400 px/s in one substep.
+        let max_push = OUTLINE_PUSH_SPEED * 1000.0 / self.mm_per_px() * self.solver_dt;
         for pair_index in 0..self.outline_pairs.len() {
             let pair = self.outline_pairs[pair_index];
             let outline = &self.outlines[pair.outline];
@@ -412,7 +420,7 @@ impl World {
             if weight <= EPSILON {
                 continue;
             }
-            let push = -separation * OUTLINE_CONTACT_STIFFNESS / weight;
+            let push = (-separation * OUTLINE_CONTACT_STIFFNESS).min(max_push) / weight;
             self.points[pair.point].position = add(p.position, scale(normal, push * wp));
             self.points[ia].position = subtract(a.position, scale(normal, push * wa * (1.0 - t)));
             self.points[ib].position = subtract(b.position, scale(normal, push * wb * t));
@@ -436,4 +444,77 @@ fn outward_normal(a: Vec2, b: Vec2, outward: f64) -> Option<Vec2> {
 fn loop_distance(a: usize, b: usize, count: usize) -> usize {
     let forward = a.abs_diff(b);
     forward.min(count - forward)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A sheet shaped like a C, opening to the right: two arms 20 px apart
+    /// whose inner faces look at each other across the gap, as an arm's
+    /// inside does the chest's side. Its outline points lie 10 px apart,
+    /// each joined to the next by a spring.
+    fn c_shaped_sheet() -> World {
+        let mut world = World::new(Materials::default());
+        world.body_height = 561.6;
+        let corners = [
+            (0.0, 0.0),
+            (100.0, 0.0),
+            (100.0, 20.0),
+            (20.0, 20.0),
+            (20.0, 40.0),
+            (100.0, 40.0),
+            (100.0, 60.0),
+            (0.0, 60.0),
+        ];
+        let mut loop_points = Vec::new();
+        for (index, &(x0, y0)) in corners.iter().enumerate() {
+            let (x1, y1) = corners[(index + 1) % corners.len()];
+            let steps = (libm::hypot(x1 - x0, y1 - y0) / 10.0).round() as usize;
+            for step in 0..steps {
+                let t = step as f64 / steps as f64;
+                let at = Vec2 {
+                    x: x0 + (x1 - x0) * t,
+                    y: y0 + (y1 - y0) * t,
+                };
+                let point = world.add_point(at, TissueLayer::Skin, false);
+                world.points[point].mass = 1.0;
+                loop_points.push(point);
+            }
+        }
+        for index in 0..loop_points.len() {
+            let (a, b) = (
+                loop_points[index],
+                loop_points[(index + 1) % loop_points.len()],
+            );
+            world.add_spring(a, b, TissueLayer::Skin, 1.0, 2.0, 1.0e9, false);
+        }
+        world.add_outline_loop(loop_points);
+        world
+    }
+
+    #[test]
+    fn a_deep_overlap_is_pushed_apart_no_faster_than_the_contact_speed() {
+        let mut world = c_shaped_sheet();
+        // A point of the upper arm's inner face, driven 15 px into the
+        // lower arm, as a falling flap of cut skin can be within a step.
+        let point = world
+            .points
+            .iter()
+            .position(|p| p.home.x == 60.0 && p.home.y == 20.0)
+            .unwrap();
+        world.points[point].position.y = 55.0;
+        world.points[point].previous = world.points[point].position;
+        let h = world.materials.fixed_dt / world.materials.substeps as f64;
+        world.solver_dt = h;
+        world.gather_outline_pairs();
+        world.solve_outline_contacts();
+        let pushed = 55.0 - world.points[point].position.y;
+        let most = OUTLINE_PUSH_SPEED * 1000.0 / world.mm_per_px() * h;
+        assert!(pushed > 0.0, "the overlap should be pushed apart");
+        assert!(
+            pushed <= most + 1.0e-9,
+            "pushed {pushed:.2} px in one pass, more than {most:.2} px at the contact speed"
+        );
+    }
 }

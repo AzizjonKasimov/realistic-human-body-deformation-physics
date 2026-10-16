@@ -146,6 +146,9 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
     let mut world = World::new(materials);
     world.body_height = frame.height;
     let spacing = materials.point_spacing;
+    // Flesh is tied only to what it reaches through flesh, not to what lies
+    // across a gap in the figure, such as the armpit.
+    let through_flesh = |from: Vec2, to: Vec2| reaches_through_flesh(field, frame, from, to);
 
     let skin = build_layer_mesh(&mut world, frame, field, TissueLayer::Skin, 0.0);
     let muscle = build_layer_mesh(
@@ -158,7 +161,13 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
     let fiber_guides = fiber_guides(frame);
     let skin_edges = add_layer_springs(&mut world, &skin, TissueLayer::Skin, &fiber_guides);
     let muscle_edges = add_layer_springs(&mut world, &muscle, TissueLayer::Muscle, &fiber_guides);
-    add_long_fiber_springs(&mut world, &muscle, &muscle_edges, &fiber_guides);
+    add_long_fiber_springs(
+        &mut world,
+        &muscle,
+        &muscle_edges,
+        &fiber_guides,
+        &through_flesh,
+    );
     add_layer_triangles(&mut world, &skin, &skin_edges, TissueLayer::Skin);
     add_layer_triangles(&mut world, &muscle, &muscle_edges, TissueLayer::Muscle);
     for outline in skin.outlines.iter().chain(&muscle.outlines) {
@@ -184,7 +193,7 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
         .collect::<Vec<_>>();
     world.add_cavity_from_areas(cavity_areas);
 
-    attach_skin_to_muscle(&mut world, &skin.points, &muscle.points);
+    attach_skin_to_muscle(&mut world, &skin.points, &muscle.points, &through_flesh);
 
     let h = frame.height;
     world.add_organ_region(
@@ -231,7 +240,7 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
         for (i, bone) in world.bones.iter().enumerate() {
             let t = segment_t(position, bone.a, bone.b);
             let d = distance(position, bone_point(*bone, t));
-            if d < nearest_distance {
+            if d < nearest_distance && through_flesh(position, bone_point(*bone, t)) {
                 nearest_distance = d;
                 nearest_bone = i;
                 nearest_t = t;
@@ -279,10 +288,29 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
 
     world.give_tissue_physical_properties(frame);
     // Tissue keeps its place on the bones of its own part of the body: the
-    // flesh of an arm on the arm's bones, the chest's on the trunk's.
+    // flesh of an arm on the arm's bones, the chest's on the trunk's, and
+    // only on bones it reaches through flesh.
+    let bone_homes: Vec<(Vec2, Vec2)> = world
+        .bones
+        .iter()
+        .map(|bone| (bone.home_a, bone.home_b))
+        .collect();
     world.bind_posture(|point| {
         let (u, v) = frame.body_coords(point.home);
-        skeleton.bones_of(figure_part(u, v), u)
+        let bones = skeleton.bones_of(figure_part(u, v), u);
+        let reached: Vec<usize> = bones
+            .iter()
+            .copied()
+            .filter(|&bone| {
+                let (a, b) = bone_homes[bone];
+                through_flesh(point.home, lerp(a, b, segment_t(point.home, a, b)))
+            })
+            .collect();
+        if reached.is_empty() {
+            bones
+        } else {
+            reached
+        }
     });
     // The body stands on the floor at its soles, and its hips are held up.
     world.set_floor_y(frame.point(0.0, 1.0).y);
@@ -294,16 +322,27 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
     // built rather than sinking at the start of play.
     let dt = world.materials.fixed_dt;
     let width = frame.origin.x * 2.0 + frame.height;
-    for _ in 0..SETTLE_STEPS {
+    // It takes its weight over the settle's first half second: all at once,
+    // the trunk dropped onto the pelvis before the joints and muscles had
+    // learned to carry it, stretching the lower back half again past its gap
+    // (and on a body drawn larger, past where it tears).
+    let gravity = world.materials.gravity;
+    for step in 0..SETTLE_STEPS {
+        let share = ((step + 1) as f64 / WEIGHT_RAMP_STEPS as f64).min(1.0);
+        world.materials.gravity = gravity * share * share * (3.0 - 2.0 * share);
         world.step(dt, &InputState::default(), width);
         world.learn_the_guards_weight();
     }
+    world.materials.gravity = gravity;
     world
 }
 
 /// How many steps a new body settles under its own weight, a second and a
 /// half: the guard's slowest sway dies away in about a second.
 const SETTLE_STEPS: usize = 90;
+
+/// Over how many of those steps the body takes its weight, easing in.
+const WEIGHT_RAMP_STEPS: usize = 30;
 
 /// The bones the body's parts hang on, the viewer's left one first where
 /// there are two.
@@ -1004,6 +1043,7 @@ fn add_long_fiber_springs(
     mesh: &LayerMesh,
     edges: &HashMap<(usize, usize), usize>,
     guides: &[(Vec2, Vec2)],
+    through_flesh: &dyn Fn(Vec2, Vec2) -> bool,
 ) {
     let m = world.materials;
     let lattice_edge = m.point_spacing * LATTICE_EDGE_SCALE;
@@ -1030,7 +1070,10 @@ fn add_long_fiber_springs(
                     continue;
                 }
                 let alignment = dot(delta, fiber) / length;
-                if alignment >= 0.9 && best.is_none_or(|(score, _)| alignment > score) {
+                if alignment >= 0.9
+                    && best.is_none_or(|(score, _)| alignment > score)
+                    && through_flesh(position, world.points[r].position)
+                {
                     best = Some((alignment, r));
                 }
             }
@@ -1093,7 +1136,12 @@ fn add_layer_triangles(
 }
 
 /// Ties each skin point to its nearest muscle points underneath.
-fn attach_skin_to_muscle(world: &mut World, skin_points: &[usize], muscle_points: &[usize]) {
+fn attach_skin_to_muscle(
+    world: &mut World,
+    skin_points: &[usize],
+    muscle_points: &[usize],
+    through_flesh: &dyn Fn(Vec2, Vec2) -> bool,
+) {
     let spacing = world.materials.point_spacing;
     let max_distance = spacing * 3.15;
     for &skin_point in skin_points {
@@ -1101,7 +1149,9 @@ fn attach_skin_to_muscle(world: &mut World, skin_points: &[usize], muscle_points
         let mut nearest = [(usize::MAX, f64::INFINITY); SKIN_ATTACHMENT_CANDIDATES];
         for &muscle_point in muscle_points {
             let d = distance(skin_position, world.points[muscle_point].position);
-            if d > max_distance {
+            if d > max_distance
+                || !through_flesh(skin_position, world.points[muscle_point].position)
+            {
                 continue;
             }
             if let Some(slot) = nearest.iter().position(|&(_, best)| d < best) {
@@ -1123,4 +1173,15 @@ fn attach_skin_to_muscle(world: &mut World, skin_points: &[usize], muscle_points
             }
         }
     }
+}
+
+/// Whether the straight way from `from` to `to` runs through the body's
+/// flesh, within a pixel of its outline: flesh is tied to a bone or to other
+/// flesh through flesh, not across a gap in the figure such as the armpit.
+fn reaches_through_flesh(field: &SilhouetteField, frame: BodyFrame, from: Vec2, to: Vec2) -> bool {
+    let steps = (distance(from, to) / 2.0).ceil().max(1.0) as usize;
+    (1..steps).all(|step| {
+        let (u, v) = frame.body_coords(lerp(from, to, step as f64 / steps as f64));
+        field.distance(u, v) * frame.height < 1.0
+    })
 }

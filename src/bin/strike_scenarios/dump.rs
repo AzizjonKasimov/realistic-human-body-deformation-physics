@@ -229,3 +229,143 @@ fn report_flesh(world: &rp::World, bone: usize, at: &dyn Fn(rp::Vec2) -> String)
         );
     }
 }
+
+/// Where `--mesh U,V[,R][:FRAME]` draws the flesh's triangles: round (`u`,
+/// `v`), in body heights from the crown (negative `u` on the viewer's left),
+/// `radius` either way, on `frame` of the play.
+#[derive(Clone, Copy)]
+pub(crate) struct MeshShot {
+    pub(crate) u: f64,
+    pub(crate) v: f64,
+    pub(crate) radius: f64,
+    pub(crate) frame: i32,
+}
+
+impl MeshShot {
+    /// Reads `U,V` or `U,V,R`, either with `:FRAME`.
+    pub(crate) fn parse(spec: &str) -> Result<MeshShot, String> {
+        let wrong = || format!("--mesh takes U,V[,R][:FRAME] in body heights, got `{spec}`");
+        let (place, frame) = match spec.split_once(':') {
+            Some((place, frame)) => (place, frame.parse().map_err(|_| wrong())?),
+            None => (spec, 0),
+        };
+        let numbers = place
+            .split(',')
+            .map(|number| number.trim().parse::<f64>())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| wrong())?;
+        let (u, v, radius) = match numbers[..] {
+            [u, v] => (u, v, 0.04),
+            [u, v, radius] => (u, v, radius),
+            _ => return Err(wrong()),
+        };
+        Ok(MeshShot {
+            u,
+            v,
+            radius,
+            frame,
+        })
+    }
+
+    /// Draws the skin's triangles and the muscle's side by side round the
+    /// place into `output/mesh_NAME_FRAME.svg`: slivers (quality under 0.3,
+    /// 1 for an equilateral triangle) blue, triangles turned over since the
+    /// body was built red. The mesh's shape where it tears, gapes, or shows
+    /// muscle through the skin is what this shows.
+    pub(crate) fn draw(&self, name: &str, frame: i32, world: &rp::World) {
+        if frame != self.frame {
+            return;
+        }
+        let body = rp::body_frame(SCENARIO_WIDTH, SCENARIO_HEIGHT);
+        let panel = 500.0;
+        let to_panel = |at: rp::Vec2, left: f64| {
+            let (u, v) = body.body_coords(at);
+            (
+                left + (u - self.u + self.radius) / (2.0 * self.radius) * panel,
+                (v - self.v + self.radius) / (2.0 * self.radius) * panel,
+            )
+        };
+        let signed = |a: rp::Vec2, b: rp::Vec2, c: rp::Vec2| {
+            ((b.x - a.x) * (c.y - a.y) - (c.x - a.x) * (b.y - a.y)) * 0.5
+        };
+        let points = world.points();
+        let mut svg = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" font-family=\"sans-serif\" font-size=\"14\">\n<rect width=\"100%\" height=\"100%\" fill=\"white\"/>\n",
+            2.0 * panel + 20.0,
+            panel + 24.0
+        );
+        let mut counts = Vec::new();
+        for (index, layer) in [rp::TissueLayer::Skin, rp::TissueLayer::Muscle]
+            .into_iter()
+            .enumerate()
+        {
+            let left = index as f64 * (panel + 20.0);
+            let (mut shown, mut slivers, mut turned) = (0, 0, 0);
+            for triangle in world.triangles() {
+                if triangle.layer != layer {
+                    continue;
+                }
+                let corners = [triangle.a, triangle.b, triangle.c].map(|i| points[i].position);
+                let near = corners.iter().any(|&at| {
+                    let (u, v) = body.body_coords(at);
+                    (u - self.u).abs() < self.radius * 1.2 && (v - self.v).abs() < self.radius * 1.2
+                });
+                if !near {
+                    continue;
+                }
+                let homes = [triangle.a, triangle.b, triangle.c].map(|i| points[i].home);
+                let area = signed(corners[0], corners[1], corners[2]);
+                let sides: f64 = (0..3)
+                    .map(|k| {
+                        let (p, q) = (corners[k], corners[(k + 1) % 3]);
+                        (q.x - p.x).powi(2) + (q.y - p.y).powi(2)
+                    })
+                    .sum();
+                let quality = 4.0 * 3.0_f64.sqrt() * area.abs() / sides.max(1.0e-9);
+                let fill = if area * signed(homes[0], homes[1], homes[2]) < 0.0 {
+                    turned += 1;
+                    "#ff4040"
+                } else if quality < 0.3 {
+                    slivers += 1;
+                    "#5aa0ff"
+                } else if layer == rp::TissueLayer::Skin {
+                    "#f0c8aa"
+                } else {
+                    "#c87878"
+                };
+                shown += 1;
+                let corners: Vec<String> = corners
+                    .iter()
+                    .map(|&at| {
+                        let (x, y) = to_panel(at, left);
+                        format!("{x:.1},{y:.1}")
+                    })
+                    .collect();
+                svg.push_str(&format!(
+                    "<polygon points=\"{}\" fill=\"{fill}\" stroke=\"#444\" stroke-width=\"0.6\"/>\n",
+                    corners.join(" ")
+                ));
+            }
+            let count =
+                format!("{layer:?}: {shown} triangles, {slivers} slivers, {turned} turned over");
+            svg.push_str(&format!(
+                "<text x=\"{}\" y=\"{}\">{count}</text>\n",
+                left + 6.0,
+                panel + 18.0
+            ));
+            counts.push(count);
+        }
+        svg.push_str("</svg>\n");
+        let path = PathBuf::from("output").join(format!("mesh_{name}_{frame}.svg"));
+        match fs::create_dir_all("output").and_then(|_| fs::write(&path, svg)) {
+            Ok(()) => println!(
+                "{name} frame {frame}: mesh round ({:+.3}, {:.3}): {}; wrote {}",
+                self.u,
+                self.v,
+                counts.join("; "),
+                path.display()
+            ),
+            Err(error) => eprintln!("could not write {}: {error}", path.display()),
+        }
+    }
+}

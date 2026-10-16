@@ -82,7 +82,13 @@
 //!                                     where they lie and how far from where they
 //!                                     were built, joints turned and slipped,
 //!                                     arteries, flesh slid off each bone; WHAT is
-//!                                     bones, joints, vessels, ties, or all
+//!                                     bones, joints, vessels, ties, flesh=N (the
+//!                                     flesh held to bone N), or all
+//!   --mesh U,V[,R][:FRAME]            draw the skin's and the muscle's triangles
+//!                                     round (U, V), R body heights either way
+//!                                     (0.04), on a frame of the play, slivers
+//!                                     and triangles turned over marked
+//!                                     (output/mesh_NAME_FRAME.svg)
 //!   --record FILE.rrd                 record a lone scenario or custom play for
 //!                                     the Rerun viewer: every point, fiber,
 //!                                     bone, joint, the tool, and blood on a
@@ -428,6 +434,10 @@ fn parse_options() -> Result<Options, String> {
                     .next()
                     .ok_or("--dump needs bones, joints, vessels, ties, or all")?;
                 options.watch.dump = Some(Dump::parse(&spec)?);
+            }
+            "--mesh" => {
+                let spec = args.next().ok_or("--mesh needs U,V[,R][:FRAME]")?;
+                options.watch.mesh = Some(MeshShot::parse(&spec)?);
             }
             "--journal" => options.watch.journal = true,
             "--moved" => options.moved = true,
