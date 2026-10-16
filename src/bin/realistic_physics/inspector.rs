@@ -609,21 +609,21 @@ fn draw_stretch(world: &rp::World, which: Stretch) {
         _ => rp::TissueLayer::Skin,
     };
     let points = world.points();
-    for spring in world.springs() {
+    for (spring, wear) in world.springs().iter().zip(world.spring_wear()) {
         if spring.broken || spring.layer != layer {
             continue;
         }
         let (a, b) = (points[spring.a].position, points[spring.b].position);
-        let stretch = length(sub(b, a)) / spring.rest.max(1.0e-6) / spring.prestretch.max(1.0e-6);
+        let stretch = length(sub(b, a)) / spring.rest.max(1.0e-6) / wear.prestretch.max(1.0e-6);
         let color = if stretch < 1.0 {
             mix(
                 rgba(150, 150, 150, 70),
                 rgba(60, 140, 255, 230),
                 ((1.0 - stretch) / 0.15).clamp(0.0, 1.0) as f32,
             )
-        } else if stretch < spring.tear_stretch.max(1.01) {
+        } else if stretch < wear.tear_stretch.max(1.01) {
             let toward =
-                ((stretch - 1.0) / (spring.tear_stretch - 1.0).max(0.01)).clamp(0.0, 1.0) as f32;
+                ((stretch - 1.0) / (wear.tear_stretch - 1.0).max(0.01)).clamp(0.0, 1.0) as f32;
             if toward < 0.5 {
                 mix(
                     rgba(150, 150, 150, 70),

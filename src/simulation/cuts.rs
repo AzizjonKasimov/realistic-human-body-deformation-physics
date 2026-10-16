@@ -201,12 +201,13 @@ impl World {
     /// end. The fiber is marked cut; the cut opens when the knife's step ends
     /// ([`World::open_blade_cuts`]).
     pub(super) fn cut_spring(&mut self, index: usize, cut_at: f64) {
-        let spring = &mut self.springs[index];
-        if spring.broken || spring.cut {
+        let spring = self.springs[index];
+        let wear = &mut self.spring_wear[index];
+        if spring.broken || wear.cut {
             return;
         }
-        spring.cut = true;
-        spring.cut_at = cut_at.clamp(0.0, 1.0);
+        wear.cut = true;
+        wear.cut_at = cut_at.clamp(0.0, 1.0);
         if spring.layer == TissueLayer::Skin {
             self.open_skin.push(index);
         }
@@ -242,11 +243,11 @@ impl World {
                 rest_lips: [lip(triangle, true), lip(partner, true)],
             });
         }
-        for (index, lip) in self.springs.iter().enumerate() {
-            if lip.twin == MISSING_SPRING || lip.twin < index || lip.broken {
+        for (index, (lip, wear)) in self.springs.iter().zip(&self.spring_wear).enumerate() {
+            if wear.twin == MISSING_SPRING || wear.twin < index || lip.broken {
                 continue;
             }
-            let twin = self.springs[lip.twin];
+            let twin = self.springs[wear.twin];
             let points = &self.points;
             opened.push(OpenedCut {
                 layer: lip.layer,
@@ -461,16 +462,19 @@ impl World {
         let edges = [triangle.edge_ab, triangle.edge_bc, triangle.edge_ca];
         let mut crossed = Vec::with_capacity(3);
         for side in 0..3 {
-            let Some(spring) = self.springs.get(edges[side]) else {
+            let (Some(spring), Some(wear)) = (
+                self.springs.get(edges[side]),
+                self.spring_wear.get(edges[side]),
+            ) else {
                 continue;
             };
-            if !spring.cut || spring.broken {
+            if !wear.cut || spring.broken {
                 continue;
             }
             let at = if spring.a == corners[side] {
-                spring.cut_at
+                wear.cut_at
             } else {
-                1.0 - spring.cut_at
+                1.0 - wear.cut_at
             };
             crossed.push((side, at.clamp(CROSSING_MARGIN, 1.0 - CROSSING_MARGIN)));
         }
@@ -623,6 +627,7 @@ impl World {
                 end += 1;
             }
             let spring = self.springs[edge];
+            let wear = self.spring_wear[edge];
             let mut pairs: Vec<(usize, usize)> = Vec::new();
             for want in &wants[start..end] {
                 if !pairs.contains(&want.3) {
@@ -640,14 +645,19 @@ impl World {
                     self.springs[edge].b = b;
                     index_of.push(edge);
                 } else {
-                    self.springs.push(Spring {
-                        a,
-                        b,
-                        impulse: 0.0,
-                        twin: MISSING_SPRING,
-                        ..spring
-                    });
-                    index_of.push(self.springs.len() - 1);
+                    let added = self.push_spring(
+                        Spring {
+                            a,
+                            b,
+                            impulse: 0.0,
+                            ..spring
+                        },
+                        SpringWear {
+                            twin: MISSING_SPRING,
+                            ..wear
+                        },
+                    );
+                    index_of.push(added);
                 }
             }
             for want in &wants[start..end] {
@@ -1010,10 +1020,14 @@ impl World {
                 let mut lip = self.springs[index];
                 replace_end(&mut lip, member[first], member[g]);
                 lip.impulse = 0.0;
-                lip.twin = index;
-                self.springs.push(lip);
-                let lip_index = self.springs.len() - 1;
-                self.springs[index].twin = lip_index;
+                let lip_index = self.push_spring(
+                    lip,
+                    SpringWear {
+                        twin: index,
+                        ..self.spring_wear[index]
+                    },
+                );
+                self.spring_wear[index].twin = lip_index;
                 for i in (0..count).filter(|&i| group[i] == g) {
                     replace_edge(&mut self.triangles[fan[i]], index, lip_index);
                     if let Some(area) = fan_areas[i] {
@@ -1164,13 +1178,13 @@ impl World {
             let now = distance(homes[a], homes[b]);
             (was > EPSILON && now > EPSILON).then(|| now / was)
         };
-        for spring in &mut self.springs {
+        for (spring, wear) in self.springs.iter_mut().zip(&mut self.spring_wear) {
             if !(moved[spring.a] || moved[spring.b]) {
                 continue;
             }
             if let Some(ratio) = ratio(spring.a, spring.b) {
                 spring.rest *= ratio;
-                spring.rest_reference *= ratio;
+                wear.rest_reference *= ratio;
             }
         }
         for area in &mut self.areas {
@@ -1375,13 +1389,13 @@ mod tests {
                 world.add_area(a, b, c, TissueLayer::Skin, 1.0);
             }
         }
-        for spring in &mut world.springs {
+        for (spring, wear) in world.springs.iter_mut().zip(&mut world.spring_wear) {
             let (a, b) = (world.points[spring.a].home, world.points[spring.b].home);
             let along = normalized(subtract(b, a), Vec2 { x: 1.0, y: 0.0 });
             let by = 1.0 + (stretch - 1.0) * along.y * along.y;
             spring.rest /= by;
-            spring.rest_reference = spring.rest;
-            spring.prestretch = by;
+            wear.rest_reference = spring.rest;
+            wear.prestretch = by;
         }
         world
     }
@@ -1448,10 +1462,10 @@ mod tests {
                 [area.edge_ab, area.edge_bc, area.edge_ca],
             );
         }
-        for (index, spring) in world.springs.iter().enumerate() {
-            if spring.twin != MISSING_SPRING {
+        for (index, wear) in world.spring_wear.iter().enumerate() {
+            if wear.twin != MISSING_SPRING {
                 assert_eq!(
-                    world.springs[spring.twin].twin, index,
+                    world.spring_wear[wear.twin].twin, index,
                     "spring {index}'s twin"
                 );
             }

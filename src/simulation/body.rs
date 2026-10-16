@@ -968,19 +968,23 @@ fn push_spring(
     (kind, tear_stretch, tear_impulse): (SpringKind, f64, f64),
 ) -> usize {
     let rest = distance(world.points[a].position, world.points[b].position);
-    world.springs.push(Spring {
-        a,
-        b,
-        rest,
-        rest_reference: rest,
-        kind,
-        tear_stretch,
-        tear_impulse,
-        layer,
-        fiber: matches!(kind, SpringKind::Fiber | SpringKind::LongFiber),
-        ..Spring::default()
-    });
-    world.springs.len() - 1
+    world.push_spring(
+        Spring {
+            a,
+            b,
+            rest,
+            kind,
+            layer,
+            ..Spring::default()
+        },
+        SpringWear {
+            rest_reference: rest,
+            tear_stretch,
+            tear_impulse,
+            fiber: matches!(kind, SpringKind::Fiber | SpringKind::LongFiber),
+            ..SpringWear::default()
+        },
+    )
 }
 
 /// One spring per triangle edge. Muscle edges are fibers, cross fibers, or

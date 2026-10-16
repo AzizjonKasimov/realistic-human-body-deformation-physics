@@ -833,30 +833,58 @@ impl Default for Point {
     }
 }
 
+/// A fiber of tissue as the solver reads it on every pass of every substep:
+/// its ends, the length it pulls toward, how stiff it is, and the impulse it
+/// gave last. What it has been through, and how it wears, tears, and was
+/// cut, lies apart in its [`SpringWear`], which the passes never read: the
+/// tissue's fibers are what the passes stream through most, and the checks
+/// play many bodies at once, each pass as fast as its memory comes in.
 #[derive(Clone, Copy, Debug)]
 pub struct Spring {
     pub a: usize,
     pub b: usize,
     /// The length it pulls toward, at which it carries no load.
     pub rest: f64,
-    pub rest_reference: f64,
     /// How hard it pulls per metre it is stretched at small strain, in
     /// newtons per metre (`tissue.rs`).
     pub stiffness: f64,
     pub kind: SpringKind,
+    pub layer: TissueLayer,
+    pub broken: bool,
+    /// The impulse it gave last substep, which warm starts the next.
+    pub impulse: f64,
+}
+
+impl Default for Spring {
+    fn default() -> Self {
+        Self {
+            a: 0,
+            b: 0,
+            rest: 0.0,
+            stiffness: 0.0,
+            kind: SpringKind::Skin,
+            layer: TissueLayer::Skin,
+            broken: false,
+            impulse: 0.0,
+        }
+    }
+}
+
+/// What a fiber has been through, and how it wears and tears: the rest of
+/// it beside its [`Spring`], at the same index of `World::spring_wear`.
+#[derive(Clone, Copy, Debug)]
+pub struct SpringWear {
+    /// The length it rested at before it set (`World::judge_springs`).
+    pub rest_reference: f64,
     /// How far the body holds it stretched at rest past `rest`, as living
     /// skin is (`tissue.rs`); it tires and sets only past that.
     pub prestretch: f64,
     pub tear_stretch: f64,
     pub tear_impulse: f64,
-    pub layer: TissueLayer,
     pub fiber: bool,
-    pub broken: bool,
     pub stress: f64,
     pub fatigue: f64,
     pub plastic_strain: f64,
-    /// The impulse it gave last substep, which warm starts the next.
-    pub impulse: f64,
     /// A blade cut through this fiber. A fiber of a tissue sheet stays
     /// whole: the cut opens through the triangles the blade crossed instead
     /// (see `cuts.rs`). A lone fiber breaks.
@@ -869,25 +897,17 @@ pub struct Spring {
     pub twin: usize,
 }
 
-impl Default for Spring {
+impl Default for SpringWear {
     fn default() -> Self {
         Self {
-            a: 0,
-            b: 0,
-            rest: 0.0,
             rest_reference: 0.0,
-            stiffness: 0.0,
-            kind: SpringKind::Skin,
             prestretch: 1.0,
             tear_stretch: 0.0,
             tear_impulse: 0.0,
-            layer: TissueLayer::Skin,
             fiber: false,
-            broken: false,
             stress: 0.0,
             fatigue: 0.0,
             plastic_strain: 0.0,
-            impulse: 0.0,
             cut: false,
             cut_at: 0.5,
             twin: MISSING_SPRING,
@@ -1777,6 +1797,8 @@ pub struct World {
     materials: Materials,
     points: Vec<Point>,
     springs: Vec<Spring>,
+    /// Each spring's wear, index for index (`SpringWear`).
+    spring_wear: Vec<SpringWear>,
     areas: Vec<AreaConstraint>,
     attachments: Vec<Attachment>,
     triangles: Vec<Triangle>,
@@ -1875,6 +1897,7 @@ impl World {
             materials,
             points: Vec::new(),
             springs: Vec::new(),
+            spring_wear: Vec::new(),
             areas: Vec::new(),
             attachments: Vec::new(),
             triangles: Vec::new(),
@@ -1991,6 +2014,19 @@ impl World {
         &self.springs
     }
 
+    /// Each spring's wear, at the spring's own index.
+    pub fn spring_wear(&self) -> &[SpringWear] {
+        &self.spring_wear
+    }
+
+    /// Adds `spring` with what it has been through, `wear`, and returns its
+    /// index: the two lists only ever grow, together.
+    fn push_spring(&mut self, spring: Spring, wear: SpringWear) -> usize {
+        self.springs.push(spring);
+        self.spring_wear.push(wear);
+        self.springs.len() - 1
+    }
+
     pub fn areas(&self) -> &[AreaConstraint] {
         &self.areas
     }
@@ -2102,23 +2138,28 @@ impl World {
             return;
         }
         let rest = distance(self.points[a].position, self.points[b].position);
-        self.springs.push(Spring {
-            a,
-            b,
-            rest,
-            rest_reference: rest,
-            stiffness: stiffness * STANDARD_SPRING_STIFFNESS,
-            kind: match (layer, fiber) {
-                (TissueLayer::Skin, _) => SpringKind::Skin,
-                (TissueLayer::Muscle, true) => SpringKind::Fiber,
-                (TissueLayer::Muscle, false) => SpringKind::Shear,
+        self.push_spring(
+            Spring {
+                a,
+                b,
+                rest,
+                stiffness: stiffness * STANDARD_SPRING_STIFFNESS,
+                kind: match (layer, fiber) {
+                    (TissueLayer::Skin, _) => SpringKind::Skin,
+                    (TissueLayer::Muscle, true) => SpringKind::Fiber,
+                    (TissueLayer::Muscle, false) => SpringKind::Shear,
+                },
+                layer,
+                ..Spring::default()
             },
-            tear_stretch,
-            tear_impulse,
-            layer,
-            fiber,
-            ..Spring::default()
-        });
+            SpringWear {
+                rest_reference: rest,
+                tear_stretch,
+                tear_impulse,
+                fiber,
+                ..SpringWear::default()
+            },
+        );
     }
 
     /// Adds a triangle's area constraint over points `a`, `b`, and `c` as
@@ -2764,8 +2805,8 @@ impl World {
 
     fn refresh_open_skin(&mut self) {
         self.open_skin.clear();
-        for (index, spring) in self.springs.iter().enumerate() {
-            if spring.layer == TissueLayer::Skin && spring_opens_skin(spring) {
+        for (index, (spring, wear)) in self.springs.iter().zip(&self.spring_wear).enumerate() {
+            if spring.layer == TissueLayer::Skin && spring_opens_skin(spring, wear) {
                 self.open_skin.push(index);
             }
         }
@@ -3378,12 +3419,12 @@ impl World {
         // A scab also tears when the skin around it is stretched, as a blow
         // that bends the flesh does without loading it hard enough to tear.
         let mut strain = vec![0.0f64; self.points.len()];
-        for spring in &self.springs {
+        for (spring, wear) in self.springs.iter().zip(&self.spring_wear) {
             if spring.broken {
                 continue;
             }
-            strain[spring.a] = strain[spring.a].max(spring.stress);
-            strain[spring.b] = strain[spring.b].max(spring.stress);
+            strain[spring.a] = strain[spring.a].max(wear.stress);
+            strain[spring.b] = strain[spring.b].max(wear.stress);
         }
         let mut events = Vec::new();
         for (wound_index, wound) in self.wounds.iter().enumerate() {
@@ -4620,6 +4661,7 @@ impl World {
             if spring.broken {
                 continue;
             }
+            let wear = self.spring_wear[i];
             let a = self.points[spring.a];
             let b = self.points[spring.b];
             let delta = subtract(b.position, a.position);
@@ -4630,7 +4672,7 @@ impl World {
             let mut stretch_ratio = len / spring.rest.max(EPSILON);
             // Tissue tires, sets, and strains past how far the body holds it
             // at rest, and tears past what it can bear.
-            let mut body_stretch = stretch_ratio / spring.prestretch.max(EPSILON);
+            let mut body_stretch = stretch_ratio / wear.prestretch.max(EPSILON);
             let endpoint_load = a.load.max(b.load);
             let contusion = a.contusion.max(b.contusion).clamp(0.0, 1.0);
             // A fiber to a cut's ghost only holds a piece of a cut triangle in
@@ -4641,6 +4683,7 @@ impl World {
                 tissue_fatigue_delta(
                     self.materials,
                     spring,
+                    wear,
                     body_stretch,
                     endpoint_load,
                     contusion,
@@ -4649,13 +4692,13 @@ impl World {
                 0.0
             };
             let fatigue = if fatigue_delta > 0.0 {
-                (self.springs[i].fatigue + fatigue_delta).min(1.35)
+                (self.spring_wear[i].fatigue + fatigue_delta).min(1.35)
             } else {
-                (self.springs[i].fatigue
+                (self.spring_wear[i].fatigue
                     * (1.0 - self.materials.tissue_fatigue_decay).clamp(0.476, 1.0))
                 .max(0.0)
             };
-            self.springs[i].fatigue = fatigue;
+            self.spring_wear[i].fatigue = fatigue;
             if fatigue_delta > 0.0048 {
                 self.stats.tissue_fatigue_events += 1;
                 self.debug.tissue_fatigue_events += 1;
@@ -4671,19 +4714,20 @@ impl World {
             }
             self.debug.max_tissue_fatigue = self.debug.max_tissue_fatigue.max(fatigue);
 
-            if self.springs[i].rest_reference <= EPSILON {
-                self.springs[i].rest_reference = spring.rest.max(EPSILON);
+            if self.spring_wear[i].rest_reference <= EPSILON {
+                self.spring_wear[i].rest_reference = spring.rest.max(EPSILON);
             }
             let plastic_delta = tissue_plastic_rest_delta(
                 self.materials,
                 spring,
+                wear,
                 body_stretch,
                 endpoint_load,
                 contusion,
                 fatigue,
             );
             if real && self.debug.impact <= EPSILON && plastic_delta.abs() > EPSILON {
-                let reference = self.springs[i].rest_reference.max(EPSILON);
+                let reference = self.spring_wear[i].rest_reference.max(EPSILON);
                 let limit = self.materials.tissue_plastic_limit.clamp(0.0, 0.45);
                 let min_rest = reference * (1.0 - limit * 0.62);
                 let max_rest = reference * (1.0 + limit);
@@ -4691,7 +4735,7 @@ impl World {
                 let new_rest = (old_rest + plastic_delta).clamp(min_rest, max_rest);
                 if (new_rest - old_rest).abs() > 0.006 {
                     self.springs[i].rest = new_rest;
-                    self.springs[i].plastic_strain =
+                    self.spring_wear[i].plastic_strain =
                         ((new_rest - reference) / reference).abs().clamp(0.0, 1.0);
                     self.stats.tissue_plastic_events += 1;
                     self.debug.tissue_plastic_events += 1;
@@ -4705,25 +4749,25 @@ impl World {
                         self.materials.tissue_plastic_stretch_threshold,
                     );
                     stretch_ratio = len / new_rest.max(EPSILON);
-                    body_stretch = stretch_ratio / spring.prestretch.max(EPSILON);
+                    body_stretch = stretch_ratio / wear.prestretch.max(EPSILON);
                 }
             }
             self.debug.max_tissue_plasticity = self
                 .debug
                 .max_tissue_plasticity
-                .max(self.springs[i].plastic_strain);
+                .max(self.spring_wear[i].plastic_strain);
 
             let contusion_tear_weakening = tissue_tear_weakening(self.materials, contusion);
             let fatigue_tear_weakening = tissue_fatigue_tear_weakening(self.materials, fatigue);
             let tear_weakening =
                 (contusion_tear_weakening + fatigue_tear_weakening).clamp(0.0, 0.58);
             let tear_impulse = if spring.layer == TissueLayer::Muscle {
-                spring.tear_impulse * (1.0 - a.exposure.max(b.exposure) * 0.48)
+                wear.tear_impulse * (1.0 - a.exposure.max(b.exposure) * 0.48)
             } else {
-                spring.tear_impulse
+                wear.tear_impulse
             } * (1.0 - tear_weakening).clamp(0.48, 1.0);
             let tear_stretch =
-                spring.tear_stretch * (1.0 - contusion * 0.06 - fatigue * 0.10).clamp(0.76, 1.0);
+                wear.tear_stretch * (1.0 - contusion * 0.06 - fatigue * 0.10).clamp(0.76, 1.0);
             // Loaded tissue tears at less stretch than its limit. Skin
             // stretches 54 +/- 17% before it fails (Ni Annaidh et al. 2012), so
             // even crushed skin must stretch about a third to split; muscle
@@ -4740,8 +4784,8 @@ impl World {
                 .clamp(load_tear_base - 0.08, load_tear_base);
             self.debug.max_tissue_softening = self.debug.max_tissue_softening.max(tear_weakening);
             // How far it was stretched lately, fading over about a step.
-            self.springs[i].stress =
-                (self.springs[i].stress * 0.28).max((body_stretch - 1.0).max(0.0));
+            self.spring_wear[i].stress =
+                (self.spring_wear[i].stress * 0.28).max((body_stretch - 1.0).max(0.0));
             if real
                 && (body_stretch > tear_stretch
                     || (endpoint_load > tear_impulse && body_stretch > load_tear_stretch))
@@ -4799,7 +4843,7 @@ impl World {
                     ));
                 } else {
                     self.stats.broken_muscle += 1;
-                    if spring.fiber {
+                    if wear.fiber {
                         self.stats.muscle_fiber_tears += 1;
                         self.debug.muscle_fiber_tears += 1;
                     }
@@ -4854,8 +4898,8 @@ impl World {
         }
 
         let mut broken_skin_endpoint = vec![false; self.points.len()];
-        for spring in &self.springs {
-            if spring.layer == TissueLayer::Skin && spring_opens_skin(spring) {
+        for (spring, wear) in self.springs.iter().zip(&self.spring_wear) {
+            if spring.layer == TissueLayer::Skin && spring_opens_skin(spring, wear) {
                 if spring.a < broken_skin_endpoint.len() {
                     broken_skin_endpoint[spring.a] = true;
                 }
@@ -4869,9 +4913,9 @@ impl World {
         }
 
         let mut candidates = Vec::new();
-        for (index, spring) in self.springs.iter().enumerate() {
+        for (index, (spring, wear)) in self.springs.iter().zip(&self.spring_wear).enumerate() {
             if spring.broken
-                || spring.cut
+                || wear.cut
                 || spring.layer != TissueLayer::Skin
                 || spring.a >= self.points.len()
                 || spring.b >= self.points.len()
@@ -4888,9 +4932,9 @@ impl World {
             let b = self.points[spring.b];
             let endpoint_load = a.load.max(b.load);
             let exposure = a.exposure.max(b.exposure);
-            let fatigue = spring.fatigue.clamp(0.0, 1.35);
-            let stress = spring.stress.max(0.0);
-            let load_ratio = endpoint_load / spring.tear_impulse.max(1.0);
+            let fatigue = wear.fatigue.clamp(0.0, 1.35);
+            let stress = wear.stress.max(0.0);
+            let load_ratio = endpoint_load / wear.tear_impulse.max(1.0);
             let score = stress + fatigue * 0.72 + exposure * 0.36 + load_ratio * 0.30;
             let stress_threshold = (self.materials.tear_propagation_stress_threshold
                 - exposure * 0.08)
@@ -4911,8 +4955,9 @@ impl World {
         let mut events = Vec::new();
         for (_, index) in candidates.into_iter().take(max_propagations) {
             let spring = self.springs[index];
+            let wear = self.spring_wear[index];
             if spring.broken
-                || spring.cut
+                || wear.cut
                 || spring.a >= self.points.len()
                 || spring.b >= self.points.len()
             {
@@ -4925,7 +4970,7 @@ impl World {
             if len < EPSILON {
                 continue;
             }
-            let endpoint_load = a.load.max(b.load).max(spring.tear_impulse * 0.36);
+            let endpoint_load = a.load.max(b.load).max(wear.tear_impulse * 0.36);
             let tangent = scale(delta, 1.0 / len);
             let normal = Vec2 {
                 x: -tangent.y,
@@ -4934,7 +4979,7 @@ impl World {
             // The tear runs on from the wound's edge across this fiber, and
             // opens as the cut it extends does.
             self.cut_spring(index, 0.5);
-            self.springs[index].stress = 1.0;
+            self.spring_wear[index].stress = 1.0;
             self.stats.broken_skin += 1;
             self.stats.tear_propagations += 1;
             self.debug.tear_propagations += 1;
@@ -4979,8 +5024,8 @@ impl World {
         }
 
         let mut skin_openings = Vec::new();
-        for spring in &self.springs {
-            if !spring_opens_skin(spring)
+        for (spring, wear) in self.springs.iter().zip(&self.spring_wear) {
+            if !spring_opens_skin(spring, wear)
                 || spring.layer != TissueLayer::Skin
                 || spring.a >= self.points.len()
                 || spring.b >= self.points.len()
@@ -6318,7 +6363,7 @@ impl World {
                         puncture_threshold,
                     );
                     self.break_spring(i);
-                    self.springs[i].stress = 1.0;
+                    self.spring_wear[i].stress = 1.0;
                     self.bump_point_exposure_load(spring.a, 1.0, puncture_drive * 0.42);
                     self.bump_point_exposure_load(spring.b, 1.0, puncture_drive * 0.42);
                     self.stats.broken_skin += 1;
@@ -6338,13 +6383,13 @@ impl World {
             if !reachable {
                 continue;
             }
-            let threshold = spring.tear_impulse
+            let threshold = self.spring_wear[i].tear_impulse
                 * (if spring.layer == TissueLayer::Muscle {
                     0.46
                 } else {
                     0.72
                 });
-            self.springs[i].stress = self.springs[i]
+            self.spring_wear[i].stress = self.spring_wear[i]
                 .stress
                 .max(impulse * contact / threshold.max(1.0));
             if impulse * contact <= threshold {
@@ -6599,17 +6644,26 @@ impl World {
             let c = self.points[triangle.c];
             let load = (a.load + b.load + c.load) / 3.0;
             let exposed = (a.exposure + b.exposure + c.exposure) / 3.0;
-            let edge_fatigue = spring_fatigue(&self.springs, triangle.edge_ab)
-                .max(spring_fatigue(&self.springs, triangle.edge_bc))
-                .max(spring_fatigue(&self.springs, triangle.edge_ca));
-            let fiber_rupture_floor = if muscle_fiber_spring_broken(&self.springs, triangle.edge_ab)
-                || muscle_fiber_spring_broken(&self.springs, triangle.edge_bc)
-                || muscle_fiber_spring_broken(&self.springs, triangle.edge_ca)
-            {
-                self.materials.muscle_fiber_rupture_damage_floor
-            } else {
-                0.0
-            };
+            let edge_fatigue = spring_fatigue(&self.spring_wear, triangle.edge_ab)
+                .max(spring_fatigue(&self.spring_wear, triangle.edge_bc))
+                .max(spring_fatigue(&self.spring_wear, triangle.edge_ca));
+            let fiber_rupture_floor =
+                if muscle_fiber_spring_broken(&self.springs, &self.spring_wear, triangle.edge_ab)
+                    || muscle_fiber_spring_broken(
+                        &self.springs,
+                        &self.spring_wear,
+                        triangle.edge_bc,
+                    )
+                    || muscle_fiber_spring_broken(
+                        &self.springs,
+                        &self.spring_wear,
+                        triangle.edge_ca,
+                    )
+                {
+                    self.materials.muscle_fiber_rupture_damage_floor
+                } else {
+                    0.0
+                };
             let impulse_threshold =
                 self.materials.muscle_exposed_tear_impulse + (1.0 - exposed) * 560.0;
             let load_damage = (load - impulse_threshold).max(0.0) / 1500.0;
@@ -7322,9 +7376,9 @@ impl World {
                 continue;
             }
             self.break_spring(i);
-            self.springs[i].stress = 1.0;
+            self.spring_wear[i].stress = 1.0;
             self.stats.broken_muscle += 1;
-            if spring.fiber {
+            if self.spring_wear[i].fiber {
                 self.stats.muscle_fiber_tears += 1;
                 self.debug.muscle_fiber_tears += 1;
             }
@@ -7393,7 +7447,7 @@ impl World {
                     0.0,
                 );
                 self.break_spring(i);
-                self.springs[i].stress = 1.0;
+                self.spring_wear[i].stress = 1.0;
                 self.bump_point_exposure_load(spring.a, 1.0, impulse * 0.30);
                 self.bump_point_exposure_load(spring.b, 1.0, impulse * 0.30);
                 self.stats.broken_muscle += 1;
@@ -7427,7 +7481,7 @@ impl World {
                     self.materials.skin_tear_impulse * 1.18,
                 );
                 self.break_spring(i);
-                self.springs[i].stress = 1.0;
+                self.spring_wear[i].stress = 1.0;
                 self.bump_point_exposure_load(spring.a, 1.0, impulse * 0.18);
                 self.bump_point_exposure_load(spring.b, 1.0, impulse * 0.18);
                 self.stats.broken_skin += 1;
@@ -7672,6 +7726,7 @@ fn tissue_tear_weakening(materials: Materials, contusion: f64) -> f64 {
 fn tissue_fatigue_delta(
     materials: Materials,
     spring: Spring,
+    wear: SpringWear,
     stretch_ratio: f64,
     endpoint_load: f64,
     contusion: f64,
@@ -7681,9 +7736,9 @@ fn tissue_fatigue_delta(
     }
     let stretch_threshold = materials
         .tissue_fatigue_stretch_threshold
-        .min(spring.tear_stretch * 0.86)
+        .min(wear.tear_stretch * 0.86)
         .max(1.0);
-    let stretch_window = (spring.tear_stretch - stretch_threshold).max(0.08);
+    let stretch_window = (wear.tear_stretch - stretch_threshold).max(0.08);
     let stretch_term = ((stretch_ratio - stretch_threshold) / stretch_window).clamp(0.0, 1.35);
 
     let layer_load_scale = if spring.layer == TissueLayer::Muscle {
@@ -7692,7 +7747,7 @@ fn tissue_fatigue_delta(
         1.0
     };
     let load_threshold = materials.tissue_fatigue_load_threshold * layer_load_scale;
-    let load_window = (spring.tear_impulse - load_threshold).max(140.0);
+    let load_window = (wear.tear_impulse - load_threshold).max(140.0);
     let load_term = ((endpoint_load - load_threshold) / load_window).clamp(0.0, 1.45);
 
     let combined = stretch_term * 0.62 + load_term * 0.38 + stretch_term * load_term * 0.28;
@@ -7715,21 +7770,22 @@ fn tissue_fatigue_tear_weakening(materials: Materials, fatigue: f64) -> f64 {
 fn tissue_plastic_rest_delta(
     materials: Materials,
     spring: Spring,
+    wear: SpringWear,
     stretch_ratio: f64,
     endpoint_load: f64,
     contusion: f64,
     fatigue: f64,
 ) -> f64 {
-    if spring.broken || spring.rest_reference <= EPSILON || materials.tissue_plastic_rate <= 0.0 {
+    if spring.broken || wear.rest_reference <= EPSILON || materials.tissue_plastic_rate <= 0.0 {
         return 0.0;
     }
 
     let stretch_threshold = materials
         .tissue_plastic_stretch_threshold
-        .min(spring.tear_stretch * 0.88)
+        .min(wear.tear_stretch * 0.88)
         .max(1.01);
     let stretch_drive = ((stretch_ratio - stretch_threshold)
-        / (spring.tear_stretch - stretch_threshold).max(0.10))
+        / (wear.tear_stretch - stretch_threshold).max(0.10))
     .clamp(0.0, 1.25);
 
     let compression_threshold = materials
@@ -7746,21 +7802,21 @@ fn tissue_plastic_rest_delta(
     };
     let load_threshold = materials.tissue_fatigue_load_threshold * 0.78 * layer_load_scale;
     let load_drive = ((endpoint_load - load_threshold)
-        / (spring.tear_impulse - load_threshold).max(180.0))
+        / (wear.tear_impulse - load_threshold).max(180.0))
     .clamp(0.0, 1.15);
 
     let damage_memory = (fatigue * 0.62 + contusion.clamp(0.0, 1.0) * 0.32).clamp(0.0, 1.0);
     let memory_boost = 0.55 + damage_memory;
     let load_boost = 0.45 + load_drive * 0.55;
     if stretch_drive >= compression_drive && stretch_drive > 0.0 {
-        return spring.rest_reference
+        return wear.rest_reference
             * materials.tissue_plastic_rate
             * stretch_drive
             * memory_boost
             * load_boost;
     }
     if compression_drive > 0.0 && load_drive > 0.0 {
-        return -spring.rest_reference
+        return -wear.rest_reference
             * materials.tissue_plastic_rate
             * 0.62
             * compression_drive
@@ -7770,18 +7826,18 @@ fn tissue_plastic_rest_delta(
     0.0
 }
 
-fn spring_fatigue(springs: &[Spring], index: usize) -> f64 {
-    springs
-        .get(index)
-        .map(|spring| spring.fatigue)
+fn spring_fatigue(wear: &[SpringWear], index: usize) -> f64 {
+    wear.get(index)
+        .map(|wear| wear.fatigue)
         .unwrap_or(0.0)
         .clamp(0.0, 1.35)
 }
 
-fn muscle_fiber_spring_broken(springs: &[Spring], index: usize) -> bool {
+fn muscle_fiber_spring_broken(springs: &[Spring], wear: &[SpringWear], index: usize) -> bool {
     springs
         .get(index)
-        .map(|spring| spring.layer == TissueLayer::Muscle && spring.fiber && spring.broken)
+        .zip(wear.get(index))
+        .map(|(spring, wear)| spring.layer == TissueLayer::Muscle && wear.fiber && spring.broken)
         .unwrap_or(false)
 }
 
@@ -9692,7 +9748,7 @@ mod tests {
             !world.springs[0].broken,
             "a single subcritical load should accumulate fatigue without immediately tearing"
         );
-        assert!(world.springs[0].fatigue > 0.0);
+        assert!(world.spring_wear[0].fatigue > 0.0);
 
         for _ in 0..24 {
             if world.springs[0].broken {
@@ -9726,7 +9782,7 @@ mod tests {
         world.add_spring(b, c, TissueLayer::Muscle, 0.8, 1.9, 1100.0, true);
         world.add_spring(c, a, TissueLayer::Muscle, 0.8, 1.9, 1100.0, true);
         world.add_triangle(a, b, c, TissueLayer::Muscle);
-        world.springs[0].fatigue = 0.80;
+        world.spring_wear[0].fatigue = 0.80;
 
         world.update_triangle_damage();
 
@@ -10061,7 +10117,7 @@ mod tests {
             world.springs[0].rest > initial_rest,
             "loaded overstretch should lengthen the spring rest shape"
         );
-        assert!(world.springs[0].plastic_strain > 0.0);
+        assert!(world.spring_wear[0].plastic_strain > 0.0);
         assert_eq!(world.stats.tissue_plastic_events, 1);
         assert!(world.debug.max_tissue_plasticity > 0.0);
     }
@@ -10090,7 +10146,7 @@ mod tests {
             world.springs[0].rest < initial_rest,
             "loaded compression should shorten the spring rest shape"
         );
-        assert!(world.springs[0].plastic_strain > 0.0);
+        assert!(world.spring_wear[0].plastic_strain > 0.0);
         assert_eq!(world.stats.tissue_plastic_events, 1);
         assert!(world.debug.max_tissue_plasticity > 0.0);
     }
@@ -10113,7 +10169,7 @@ mod tests {
         world.add_spring(a, b, TissueLayer::Skin, 0.8, 1.7, 1000.0, false);
         world.add_spring(b, c, TissueLayer::Skin, 0.8, 1.7, 1000.0, false);
         world.springs[0].broken = true;
-        world.springs[1].stress = 0.34;
+        world.spring_wear[1].stress = 0.34;
 
         world.propagate_skin_tears();
 
@@ -10142,7 +10198,7 @@ mod tests {
         world.add_spring(a, b, TissueLayer::Skin, 0.8, 1.7, 1000.0, false);
         world.add_spring(b, c, TissueLayer::Skin, 0.8, 1.7, 1000.0, false);
         world.springs[0].broken = true;
-        world.springs[1].stress = 0.12;
+        world.spring_wear[1].stress = 0.12;
 
         world.propagate_skin_tears();
 
@@ -11012,8 +11068,8 @@ fn bone_contact_mass(bone: BoneSegment, scale: f64) -> f64 {
 /// [`World::flesh_points`]); a point the mask does not cover yet counts.
 /// Skin is open along this spring: it broke, a blade cut across it, or it
 /// is a lip of an opened cut.
-fn spring_opens_skin(spring: &Spring) -> bool {
-    spring.broken || spring.cut || spring.twin != MISSING_SPRING
+fn spring_opens_skin(spring: &Spring, wear: &SpringWear) -> bool {
+    spring.broken || wear.cut || wear.twin != MISSING_SPRING
 }
 
 fn is_flesh(flesh: &[bool], index: usize) -> bool {

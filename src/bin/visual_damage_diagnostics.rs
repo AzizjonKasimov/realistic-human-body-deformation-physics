@@ -856,9 +856,10 @@ fn skin_wound_lines(world: &rp::World) -> SkinWoundLines {
             .filter_map(|&edge| {
                 springs
                     .get(edge)
-                    .filter(|spring| spring.broken || spring.cut)
+                    .zip(world.spring_wear().get(edge))
+                    .filter(|(spring, wear)| spring.broken || wear.cut)
             })
-            .map(|spring| {
+            .map(|(spring, wear)| {
                 let (a, b) = (points[spring.a].position, points[spring.b].position);
                 if spring.broken {
                     (
@@ -866,7 +867,7 @@ fn skin_wound_lines(world: &rp::World) -> SkinWoundLines {
                         1.0 - smoothstep(1.3, 1.9, cut_gap(world, spring)),
                     )
                 } else {
-                    (add(a, scale(subtract(b, a), spring.cut_at)), 1.0)
+                    (add(a, scale(subtract(b, a), wear.cut_at)), 1.0)
                 }
             })
             .collect();

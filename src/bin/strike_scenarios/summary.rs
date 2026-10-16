@@ -34,16 +34,17 @@ pub(crate) fn skin_openings(world: &rp::World) -> String {
     let count = |layer: rp::TissueLayer| {
         let mut cut = Vec::new();
         let mut torn = 0;
-        for spring in world
+        for (spring, wear) in world
             .springs()
             .iter()
-            .filter(|spring| spring.layer == layer)
+            .zip(world.spring_wear())
+            .filter(|(spring, _)| spring.layer == layer)
         {
-            if spring.cut {
+            if wear.cut {
                 let (a, b) = (flesh_of(spring.a), flesh_of(spring.b));
                 cut.push((a.min(b), a.max(b)));
             }
-            torn += usize::from(spring.broken && !spring.cut);
+            torn += usize::from(spring.broken && !wear.cut);
         }
         cut.sort_unstable();
         cut.dedup();

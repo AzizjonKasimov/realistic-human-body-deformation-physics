@@ -218,10 +218,11 @@ mod inner {
                         .with_colors(colours)
                         .with_radii([1.6f32]),
                 );
-                let fibers: Vec<&rp::Spring> = world
+                let fibers: Vec<(&rp::Spring, &rp::SpringWear)> = world
                     .springs()
                     .iter()
-                    .filter(|spring| {
+                    .zip(world.spring_wear())
+                    .filter(|(spring, _)| {
                         !spring.broken
                             && points
                                 .get(spring.a)
@@ -230,15 +231,15 @@ mod inner {
                     .collect();
                 let strains: Vec<Color> = fibers
                     .iter()
-                    .map(|spring| {
+                    .map(|(spring, wear)| {
                         let (a, b) = (points[spring.a].position, points[spring.b].position);
                         let length = (b.x - a.x).hypot(b.y - a.y);
-                        strain_colour(length / spring.rest.max(1e-6) - 1.0 - spring.prestretch)
+                        strain_colour(length / spring.rest.max(1e-6) - 1.0 - wear.prestretch)
                     })
                     .collect();
                 log(
                     &format!("body/{name}/fibers"),
-                    &LineStrips2D::new(fibers.iter().map(|spring| {
+                    &LineStrips2D::new(fibers.iter().map(|(spring, _)| {
                         vec![xy(points[spring.a].position), xy(points[spring.b].position)]
                     }))
                     .with_colors(strains)

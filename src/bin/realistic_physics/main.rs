@@ -1140,7 +1140,7 @@ fn skin_rim(world: &rp::World) -> SkinRim {
         .filter_map(|(spring, &(count, inner_point))| {
             let spring_of = springs[spring];
             (count == 1
-                && spring_of.twin == rp::MISSING_SPRING
+                && world.spring_wear()[spring].twin == rp::MISSING_SPRING
                 && !points[spring_of.a].is_ghost()
                 && !points[spring_of.b].is_ghost())
             .then_some(OutlineEdge {
@@ -1459,9 +1459,10 @@ fn draw_skin_wounds(ctx: &RenderContext) {
         let mut cut = [(rp::Vec2 { x: 0.0, y: 0.0 }, 0.0f32); 3];
         let mut count = 0;
         for edge in [triangle.edge_ab, triangle.edge_bc, triangle.edge_ca] {
-            let Some(spring) = springs
+            let Some((spring, wear)) = springs
                 .get(edge)
-                .filter(|spring| spring.broken || spring.cut)
+                .zip(world.spring_wear().get(edge))
+                .filter(|(spring, wear)| spring.broken || wear.cut)
             else {
                 continue;
             };
@@ -1471,7 +1472,7 @@ fn draw_skin_wounds(ctx: &RenderContext) {
                 let clean = 1.0 - smoothstep(1.3, 1.9, cut_gap(world, spring) as f32);
                 (mid(a, b), clean)
             } else {
-                (add(a, scale(sub(b, a), spring.cut_at)), 1.0)
+                (add(a, scale(sub(b, a), wear.cut_at)), 1.0)
             };
             count += 1;
         }

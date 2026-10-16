@@ -250,7 +250,7 @@ impl World {
             return;
         }
         let guides = body::fiber_guides(frame);
-        for spring in &mut self.springs {
+        for (spring, wear) in self.springs.iter_mut().zip(&mut self.spring_wear) {
             if spring.kind != SpringKind::Skin {
                 continue;
             }
@@ -260,8 +260,8 @@ impl World {
             let cos = dot(direction, axis);
             let stretch = (along * cos * cos + across * (1.0 - cos * cos)).max(1.0);
             spring.rest /= stretch;
-            spring.rest_reference = spring.rest;
-            spring.prestretch = stretch;
+            wear.rest_reference = spring.rest;
+            wear.prestretch = stretch;
         }
         // Stretched both ways, each triangle of skin rests smaller too.
         for area in &mut self.areas {

@@ -859,14 +859,15 @@ impl World {
                 self.springs_reached(&candidates, &resting, &reached, &shape)
             {
                 let spring = self.springs[spring_index];
-                if spring.broken || spring.cut {
+                let wear = self.spring_wear[spring_index];
+                if spring.broken || wear.cut {
                     continue;
                 }
                 let force = (strike.mass * speed).max(push);
                 let pressure =
                     force * strike.profile.cut_pressure_scale * self.blade_layer_scale(spring);
-                let threshold = spring.tear_impulse * self.materials.sharp_tool_tear_pressure;
-                self.springs[spring_index].stress = self.springs[spring_index]
+                let threshold = wear.tear_impulse * self.materials.sharp_tool_tear_pressure;
+                self.spring_wear[spring_index].stress = self.spring_wear[spring_index]
                     .stress
                     .max(pressure / threshold.max(1.0));
                 if pressure <= threshold {
@@ -929,8 +930,9 @@ impl World {
         self.springs
             .iter()
             .enumerate()
-            .filter(|(_, spring)| {
-                if spring.broken || spring.cut || !self.spring_in_flesh(**spring) {
+            .filter(|(index, spring)| {
+                if spring.broken || self.spring_wear[*index].cut || !self.spring_in_flesh(**spring)
+                {
                     return false;
                 }
                 let a = self.points[spring.a].position;
@@ -1030,7 +1032,7 @@ impl World {
             .iter()
             .filter_map(|&index| {
                 let spring = self.springs[index];
-                if spring.broken || spring.cut {
+                if spring.broken || self.spring_wear[index].cut {
                     return None;
                 }
                 // The tip crosses a fiber where the fiber lies now or where
@@ -1157,7 +1159,7 @@ impl World {
             Some(Actor::Tool),
             Measure::Load,
             pressure,
-            spring.tear_impulse * self.materials.sharp_tool_tear_pressure,
+            self.spring_wear[spring_index].tear_impulse * self.materials.sharp_tool_tear_pressure,
         );
         self.cut_spring(spring_index, cut_at);
         let skin = spring.layer == TissueLayer::Skin;
@@ -1169,7 +1171,7 @@ impl World {
             self.fresh_skin_cuts.push(spring_index);
         } else {
             self.stats.broken_muscle += 1;
-            if spring.fiber {
+            if self.spring_wear[spring_index].fiber {
                 self.stats.muscle_fiber_tears += 1;
                 self.debug.muscle_fiber_tears += 1;
             }
@@ -1768,8 +1770,9 @@ impl World {
                 0.78 + a.exposure.max(b.exposure) * 0.42
             };
             let pressure = blow * profile.crush_tear_scale * contact * layer_scale;
-            let threshold = spring.tear_impulse * self.materials.sharp_tool_tear_pressure;
-            self.springs[spring_index].stress = self.springs[spring_index]
+            let threshold = self.spring_wear[spring_index].tear_impulse
+                * self.materials.sharp_tool_tear_pressure;
+            self.spring_wear[spring_index].stress = self.spring_wear[spring_index]
                 .stress
                 .max(pressure / threshold.max(1.0));
             if pressure <= threshold {
