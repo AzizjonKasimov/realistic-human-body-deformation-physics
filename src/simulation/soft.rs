@@ -147,7 +147,7 @@ impl World {
     /// is solved (`cuts.rs`), and a debug build checks it after each
     /// substep. So the soft constraints take each end's inverse mass from
     /// here, rather than dividing for it at every end on every pass.
-    fn weigh_points(&mut self) {
+    fn refresh_inverse_masses(&mut self) {
         self.inverse_masses.clear();
         self.inverse_masses
             .extend(self.points.iter().map(Point::inverse_mass));
@@ -195,7 +195,7 @@ impl World {
             self.timed("bone attachments", Self::judge_bone_attachments);
             self.timed("attachments", Self::judge_attachments);
             self.timed("bone joints", Self::judge_bone_joints);
-            self.weigh_points();
+            self.refresh_inverse_masses();
             if self.materials.warm_starting {
                 self.warm_start_soft(h);
             } else {

@@ -1879,7 +1879,7 @@ pub struct World {
     /// its arrays are reused.
     grid: grid::SpatialGrid,
     /// Each point's inverse mass, worked out as each substep begins
-    /// (`World::weigh_points`).
+    /// (`World::refresh_inverse_masses`).
     inverse_masses: Vec<f64>,
     /// The time a velocity spans in the solver's passes: a substep while the
     /// substeps run (`soft.rs`), a step otherwise; and how far through the
