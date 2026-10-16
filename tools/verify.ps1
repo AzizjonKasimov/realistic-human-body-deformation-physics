@@ -25,7 +25,7 @@ Also check that the root realistic_physics.exe's sound reaches the speakers
 
 .PARAMETER Deep
 Also play 2000 random blows and run the moved-body tests (strike_scenarios
---random and --moved; about 12 more minutes), which find what the tuned
+--random and --moved; about 4 more minutes), which find what the tuned
 scenarios do not try.
 #>
 param(

@@ -224,7 +224,7 @@ The Rust verifier runs formatting checks, simulation tests, deterministic strike
 - `-Capture` also saves real app screenshots of the body at rest at 1280x720, 800x600, and 390x844 (see [Screenshots](#screenshots)).
 - `-SoundCheck` also runs `.\tools\sound_check.ps1` on the root `realistic_physics.exe`, which checks that its sound reaches the speakers (see [Sound](#sound)).
 - `-SkipSweep` and `-SkipDiagnostics` leave out the sweep and the two diagnostics.
-- `-Deep` also plays 2000 random blows and runs the moved-body tests (about 12 more minutes; see [Look Into A Run](#look-into-a-run)), which find what the tuned scenarios do not try.
+- `-Deep` also plays 2000 random blows and runs the moved-body tests (about 4 more minutes; see [Look Into A Run](#look-into-a-run)), which find what the tuned scenarios do not try.
 
 The tests include the patched quad-snd's own mixer tests (`vendor\quad-snd`).
 
