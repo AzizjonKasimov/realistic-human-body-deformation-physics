@@ -139,10 +139,17 @@ struct PostureHold {
 }
 
 impl PostureHold {
-    fn of(point: &Point, binding: PostureBinding, bones: &[BoneSegment], h: f64) -> Option<Self> {
+    /// How a point of inverse mass `point_inverse_mass` bound to the skeleton
+    /// by `binding` is held this substep.
+    fn of(
+        point_inverse_mass: f64,
+        binding: PostureBinding,
+        bones: &[BoneSegment],
+        h: f64,
+    ) -> Option<Self> {
         let mut target = Vec2::default();
         let mut velocity = Vec2::default();
-        let mut inverse_mass = point.inverse_mass();
+        let mut inverse_mass = point_inverse_mass;
         let mut held = [(MISSING_BONE, 0.0, 0.0, 0.0, 0.0); 2];
         let mut total = 0.0;
         for slot in 0..2 {
@@ -319,7 +326,12 @@ impl World {
                 continue;
             }
             let point_hold = self.point_holds[index];
-            let Some(hold) = PostureHold::of(&point, point_hold.posture, &self.bones, h) else {
+            let Some(hold) = PostureHold::of(
+                self.inverse_masses[index],
+                point_hold.posture,
+                &self.bones,
+                h,
+            ) else {
                 continue;
             };
             let omega = 2.0 * PI * hertz;
@@ -345,7 +357,7 @@ impl World {
     /// Gives point `index` the impulse `impulse` toward its place, and its
     /// bones the same back, each by its weight.
     fn apply_posture(&mut self, index: usize, hold: &PostureHold, impulse: Vec2, h: f64) {
-        let w = self.points[index].inverse_mass();
+        let w = self.inverse_masses[index];
         let point = &mut self.points[index];
         point.position = add(point.position, scale(impulse, w * h));
         for &(bone, weight, tau, sigma, end) in &hold.bones {
@@ -370,7 +382,12 @@ impl World {
             if point.pinned || point_hold.posture_impulse == Vec2::default() {
                 continue;
             }
-            let Some(hold) = PostureHold::of(&point, point_hold.posture, &self.bones, h) else {
+            let Some(hold) = PostureHold::of(
+                self.inverse_masses[index],
+                point_hold.posture,
+                &self.bones,
+                h,
+            ) else {
                 continue;
             };
             self.apply_posture(index, &hold, point_hold.posture_impulse, h);

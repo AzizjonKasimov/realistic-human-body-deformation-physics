@@ -140,6 +140,20 @@ impl Point {
     }
 }
 
+impl World {
+    /// Works out each point's inverse mass for the substep about to be
+    /// solved. Nothing a substep does changes what a point weighs or whether
+    /// it is pinned: cuts and tears split points only once the step's motion
+    /// is solved (`cuts.rs`), and a debug build checks it after each
+    /// substep. So the soft constraints take each end's inverse mass from
+    /// here, rather than dividing for it at every end on every pass.
+    fn weigh_points(&mut self) {
+        self.inverse_masses.clear();
+        self.inverse_masses
+            .extend(self.points.iter().map(Point::inverse_mass));
+    }
+}
+
 impl BoneSegment {
     /// One over the mass at each end of the bone, which carries half of it;
     /// nothing moves a pinned bone.
@@ -181,6 +195,7 @@ impl World {
             self.timed("bone attachments", Self::judge_bone_attachments);
             self.timed("attachments", Self::judge_attachments);
             self.timed("bone joints", Self::judge_bone_joints);
+            self.weigh_points();
             if self.materials.warm_starting {
                 self.warm_start_soft(h);
             } else {
@@ -215,6 +230,13 @@ impl World {
                     world.constrain_to_world(width, floor_y)
                 });
             }
+            debug_assert!(
+                self.points
+                    .iter()
+                    .zip(&self.inverse_masses)
+                    .all(|(point, &weighed)| point.inverse_mass().to_bits() == weighed.to_bits()),
+                "a point's weight changed during a substep"
+            );
         }
         self.join_substeps(substeps);
         self.solver_dt = dt;
@@ -417,7 +439,7 @@ impl World {
                 continue;
             }
             let push = scale(along, spring.impulse / length);
-            let (wa, wb) = (a.inverse_mass(), b.inverse_mass());
+            let (wa, wb) = (self.inverse_masses[spring.a], self.inverse_masses[spring.b]);
             speed_up(&mut self.points[spring.a], scale(push, -wa), h);
             speed_up(&mut self.points[spring.b], scale(push, wb), h);
         }
@@ -431,7 +453,7 @@ impl World {
             }
             let gradients = area_gradients(&self.points, &area);
             for (corner, gradient) in [area.a, area.b, area.c].into_iter().zip(gradients) {
-                let w = self.points[corner].inverse_mass();
+                let w = self.inverse_masses[corner];
                 speed_up(
                     &mut self.points[corner],
                     scale(gradient, w * area.impulse),
@@ -457,14 +479,14 @@ impl World {
                 continue;
             }
             let push = scale(along, attachment.impulse / length);
-            speed_up(
-                &mut self.points[attachment.skin_point],
-                scale(push, -skin.inverse_mass()),
-                h,
+            let (ws, wm) = (
+                self.inverse_masses[attachment.skin_point],
+                self.inverse_masses[attachment.muscle_point],
             );
+            speed_up(&mut self.points[attachment.skin_point], scale(push, -ws), h);
             speed_up(
                 &mut self.points[attachment.muscle_point],
-                scale(push, muscle.inverse_mass()),
+                scale(push, wm),
                 h,
             );
         }
@@ -851,7 +873,7 @@ impl World {
                 continue;
             }
             let (a, b) = (self.points[spring.a], self.points[spring.b]);
-            let (wa, wb) = (a.inverse_mass(), b.inverse_mass());
+            let (wa, wb) = (self.inverse_masses[spring.a], self.inverse_masses[spring.b]);
             let w = wa + wb;
             if w <= EPSILON {
                 continue;
@@ -890,7 +912,10 @@ impl World {
                 self.points[attachment.skin_point],
                 self.points[attachment.muscle_point],
             );
-            let (ws, wm) = (skin.inverse_mass(), muscle.inverse_mass());
+            let (ws, wm) = (
+                self.inverse_masses[attachment.skin_point],
+                self.inverse_masses[attachment.muscle_point],
+            );
             let w = ws + wm;
             if w <= EPSILON {
                 continue;
@@ -937,7 +962,7 @@ impl World {
             }
             let point = self.points[attachment.point];
             let bone = self.bones[attachment.bone];
-            let tie = BoneTie::of(&attachment, &point, &bone);
+            let tie = BoneTie::of(&attachment, self.inverse_masses[attachment.point], &bone);
             if tie.inverse_mass <= EPSILON {
                 continue;
             }
@@ -975,9 +1000,8 @@ impl World {
     /// flesh one way and the bone the other.
     fn apply_bone_tie(&mut self, index: usize, impulse: Vec2, h: f64) {
         let attachment = self.bone_attachments[index];
-        let point = self.points[attachment.point];
         let bone = self.bones[attachment.bone];
-        let tie = BoneTie::of(&attachment, &point, &bone);
+        let tie = BoneTie::of(&attachment, self.inverse_masses[attachment.point], &bone);
         speed_up(
             &mut self.points[attachment.point],
             scale(impulse, tie.point_inverse_mass),
@@ -1015,7 +1039,7 @@ impl World {
             let mut speed = 0.0;
             for (corner, gradient) in corners.into_iter().zip(gradients) {
                 let point = &self.points[corner];
-                weight += point.inverse_mass() * dot(gradient, gradient);
+                weight += self.inverse_masses[corner] * dot(gradient, gradient);
                 speed += dot(gradient, velocity(point, h));
             }
             if weight <= EPSILON {
@@ -1035,7 +1059,7 @@ impl World {
             let impulse = softness.impulse(mass, speed, error, area.impulse);
             self.areas[index].impulse += impulse;
             for (corner, gradient) in corners.into_iter().zip(gradients) {
-                let w = self.points[corner].inverse_mass();
+                let w = self.inverse_masses[corner];
                 speed_up(&mut self.points[corner], scale(gradient, w * impulse), h);
             }
         }
@@ -1046,7 +1070,7 @@ impl World {
     pub fn bone_tie_slip(&self, attachment: &BoneAttachment) -> f64 {
         let point = &self.points[attachment.point];
         let bone = &self.bones[attachment.bone];
-        let tie = BoneTie::of(attachment, point, bone);
+        let tie = BoneTie::of(attachment, point.inverse_mass(), bone);
         distance(point.position, tie.target(bone.a, bone.b))
     }
 
@@ -1079,7 +1103,9 @@ struct BoneTie {
 }
 
 impl BoneTie {
-    fn of(attachment: &BoneAttachment, point: &Point, bone: &BoneSegment) -> Self {
+    /// The tie `attachment` from flesh of inverse mass `point_inverse_mass`
+    /// to `bone`.
+    fn of(attachment: &BoneAttachment, point_inverse_mass: f64, bone: &BoneSegment) -> Self {
         let length = bone.rest_length.max(EPSILON);
         // A chip is held at its nearest point, the flesh at its world offset;
         // a longer piece is held in its own frame, so it turns with the flesh
@@ -1097,7 +1123,7 @@ impl BoneTie {
         let point_inverse_mass = if attachment.holds_piece {
             0.0
         } else {
-            point.inverse_mass()
+            point_inverse_mass
         };
         let end_inverse_mass = bone.inverse_end_mass();
         let inverse_mass = point_inverse_mass

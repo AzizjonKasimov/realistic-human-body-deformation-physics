@@ -1878,6 +1878,9 @@ pub struct World {
     /// The spatial grid the contact passes rebuild for each search, kept so
     /// its arrays are reused.
     grid: grid::SpatialGrid,
+    /// Each point's inverse mass, worked out as each substep begins
+    /// (`World::weigh_points`).
+    inverse_masses: Vec<f64>,
     /// The time a velocity spans in the solver's passes: a substep while the
     /// substeps run (`soft.rs`), a step otherwise; and how far through the
     /// step the substeps have come.
@@ -1949,6 +1952,7 @@ impl World {
             trace_time: 0.0,
             journal: None,
             grid: grid::SpatialGrid::default(),
+            inverse_masses: Vec::new(),
             solver_dt: materials.fixed_dt,
             solver_progress: 1.0,
             outline_wrap_stale: false,
