@@ -791,14 +791,6 @@ pub struct Point {
     /// attached to them, and only the flesh of their pieces is drawn (see
     /// `cuts.rs`).
     pub ghost_of: usize,
-    /// Where the point keeps its place on the skeleton (`stance.rs`), and the
-    /// impulse that held it there last substep.
-    pub posture: PostureBinding,
-    pub posture_impulse: Vec2,
-    /// How hard the skin that runs on round the back, and the flesh inside,
-    /// hold this point of the outline against the stretch the skin rests at
-    /// (`outline.rs`).
-    pub wrap: Vec2,
 }
 
 impl Point {
@@ -826,11 +818,26 @@ impl Default for Point {
             surface_depth: 0.0,
             on_cut: false,
             ghost_of: MISSING_POINT,
-            posture: PostureBinding::default(),
-            posture_impulse: Vec2::default(),
-            wrap: Vec2::default(),
         }
     }
+}
+
+/// How a point of tissue is held in the body's shape besides by its fibers:
+/// its place on the skeleton and the impulse that held it there last
+/// substep, and the outline's hold on it. Each point's lies beside it at the
+/// same index of `World::point_holds`, apart from the [`Point`], which the
+/// solver's passes read many times a step: the posture is taken once a
+/// substep, the outline's hold on the outline alone.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PointHold {
+    /// Where the point keeps its place on the skeleton (`stance.rs`), and the
+    /// impulse that held it there last substep.
+    pub posture: PostureBinding,
+    pub posture_impulse: Vec2,
+    /// How hard the skin that runs on round the back, and the flesh inside,
+    /// hold this point of the outline against the stretch the skin rests at
+    /// (`outline.rs`).
+    pub wrap: Vec2,
 }
 
 /// A fiber of tissue as the solver reads it on every pass of every substep:
@@ -1796,6 +1803,9 @@ struct CavityMetrics {
 pub struct World {
     materials: Materials,
     points: Vec<Point>,
+    /// How each point is held besides by its fibers, index for index
+    /// (`PointHold`).
+    point_holds: Vec<PointHold>,
     springs: Vec<Spring>,
     /// Each spring's wear, index for index (`SpringWear`).
     spring_wear: Vec<SpringWear>,
@@ -1896,6 +1906,7 @@ impl World {
         Self {
             materials,
             points: Vec::new(),
+            point_holds: Vec::new(),
             springs: Vec::new(),
             spring_wear: Vec::new(),
             areas: Vec::new(),
@@ -2010,6 +2021,20 @@ impl World {
         &self.points
     }
 
+    /// How each point is held besides by its fibers, at the point's own
+    /// index.
+    pub fn point_holds(&self) -> &[PointHold] {
+        &self.point_holds
+    }
+
+    /// Adds `point` held as `hold`, and returns its index: the two lists only
+    /// ever grow, together.
+    fn push_point(&mut self, point: Point, hold: PointHold) -> usize {
+        self.points.push(point);
+        self.point_holds.push(hold);
+        self.points.len() - 1
+    }
+
     pub fn springs(&self) -> &[Spring] {
         &self.springs
     }
@@ -2098,21 +2123,22 @@ impl World {
     }
 
     pub fn add_point(&mut self, position: Vec2, layer: TissueLayer, pinned: bool) -> usize {
-        let index = self.points.len();
-        self.points.push(Point {
-            position,
-            previous: position,
-            home: position,
-            layer,
-            pinned,
-            mass: if layer == TissueLayer::Muscle {
-                1.25
-            } else {
-                1.0
+        self.push_point(
+            Point {
+                position,
+                previous: position,
+                home: position,
+                layer,
+                pinned,
+                mass: if layer == TissueLayer::Muscle {
+                    1.25
+                } else {
+                    1.0
+                },
+                ..Point::default()
             },
-            ..Point::default()
-        });
-        index
+            PointHold::default(),
+        )
     }
 
     /// Adds a spring between points `a` and `b` as they lie now, `stiffness`
@@ -7270,8 +7296,8 @@ impl World {
         // in the gap between forearm and upper arm as the elbow opened. The
         // larger pieces keep the nearest flesh: held by their own bone's
         // flesh, the pieces of a smashed arm were dragged out after it.
-        let on_own_bone = |point: &Point| {
-            let binding = point.posture;
+        let on_own_bone = |index: usize| {
+            let binding = self.point_holds[index].posture;
             let slot = usize::from(binding.weights[1] > binding.weights[0]);
             self.bones
                 .get(binding.bones[slot])
@@ -7287,7 +7313,7 @@ impl World {
                 let t = segment_t(point.position, bone.a, bone.b);
                 let gap = distance(point.position, bone_point(bone, t));
                 if gap <= reach {
-                    let elsewhere = if !bone.splinter || on_own_bone(point) {
+                    let elsewhere = if !bone.splinter || on_own_bone(index) {
                         0.0
                     } else {
                         self.materials.point_spacing

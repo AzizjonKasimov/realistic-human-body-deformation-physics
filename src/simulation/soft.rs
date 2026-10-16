@@ -518,8 +518,8 @@ impl World {
         for attachment in &mut self.bone_attachments {
             attachment.impulse = Vec2::default();
         }
-        for point in &mut self.points {
-            point.posture_impulse = Vec2::default();
+        for hold in &mut self.point_holds {
+            hold.posture_impulse = Vec2::default();
         }
         for hold in &mut self.hip_holds {
             hold.impulse = Vec2::default();
@@ -556,9 +556,9 @@ impl World {
                 attachment.impulse = Vec2::default();
             }
         }
-        for (index, point) in self.points.iter_mut().enumerate() {
+        for (index, hold) in self.point_holds.iter_mut().enumerate() {
             if touches(index) {
-                point.posture_impulse = Vec2::default();
+                hold.posture_impulse = Vec2::default();
             }
         }
     }

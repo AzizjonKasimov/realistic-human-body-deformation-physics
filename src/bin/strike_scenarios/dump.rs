@@ -174,8 +174,8 @@ fn report_flesh(world: &rp::World, bone: usize, at: &dyn Fn(rp::Vec2) -> String)
         "  flesh held to bone {bone} ({}):",
         rp::inspect::bone_name(world, bone)
     );
-    for (index, point) in world.points().iter().enumerate() {
-        let binding = point.posture;
+    for (index, (point, hold)) in world.points().iter().zip(world.point_holds()).enumerate() {
+        let binding = hold.posture;
         let bound = (0..2).any(|slot| binding.bones[slot] == bone && binding.weights[slot] >= 0.5);
         let ties: Vec<String> = world
             .bone_attachments()

@@ -65,10 +65,11 @@ fn print_outline_holds(world: &rp::World, frame: rp::BodyFrame) {
     let mut pulls: Vec<(f64, rp::Vec2)> = world
         .points()
         .iter()
-        .filter(|point| point.wrap != rp::Vec2::default())
-        .map(|point| {
+        .zip(world.point_holds())
+        .filter(|(_, hold)| hold.wrap != rp::Vec2::default())
+        .map(|(point, hold)| {
             (
-                point.wrap.x.hypot(point.wrap.y) / point.mass.max(1.0e-9),
+                hold.wrap.x.hypot(hold.wrap.y) / point.mass.max(1.0e-9),
                 point.home,
             )
         })

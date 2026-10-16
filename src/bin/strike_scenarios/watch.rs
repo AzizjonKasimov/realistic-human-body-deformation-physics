@@ -319,7 +319,11 @@ fn report_fastest(
 /// phases that barely touched it left out.
 fn report_trace(name: &str, frame: i32, world: &rp::World, traced: rp::Traced) {
     let place = match traced {
-        rp::Traced::Point(index) => world.points().get(index).map(|point| {
+        rp::Traced::Point(index) => world
+            .points()
+            .get(index)
+            .zip(world.point_holds().get(index))
+            .map(|(point, hold)| {
             format!(
                 "point {index} ({:?}{}, {:.0} g) at ({:.1}, {:.1}), outline hold ({:.0}, {:.0}), on bones {:?} by {:.2?}",
                 point.layer,
@@ -331,10 +335,10 @@ fn report_trace(name: &str, frame: i32, world: &rp::World, traced: rp::Traced) {
                 point.mass * 100.0,
                 point.position.x,
                 point.position.y,
-                point.wrap.x,
-                point.wrap.y,
-                point.posture.bones,
-                point.posture.weights,
+                hold.wrap.x,
+                hold.wrap.y,
+                hold.posture.bones,
+                hold.posture.weights,
             )
         }),
         rp::Traced::Bone(index) => world.bones().get(index).map(|bone| {
@@ -413,8 +417,8 @@ pub(crate) fn report_pieces_out(world: &rp::World) {
         // The tissue that keeps its place on a piece outside the skin, and
         // how far it lies from that place.
         if !bone.splinter && !inside_the_skin(world, middle) {
-            for (point_index, point) in points.iter().enumerate() {
-                let binding = point.posture;
+            for (point_index, (point, hold)) in points.iter().zip(world.point_holds()).enumerate() {
+                let binding = hold.posture;
                 let Some(slot) = (0..2).find(|&slot| binding.bones[slot] == index) else {
                     continue;
                 };

@@ -398,6 +398,7 @@ impl World {
                 continue;
             }
             let source = self.points[*node];
+            let source_hold = self.point_holds[*node];
             let total: f64 = groups.iter().map(|group| group.1).sum::<f64>().max(EPSILON);
             let mut kept = source.mass;
             for (group, &(holds_node, share)) in groups.iter().enumerate() {
@@ -406,14 +407,16 @@ impl World {
                 }
                 let mass = (source.mass * share / total).max(source.mass * GHOST_MASS_SHARE);
                 kept -= mass;
-                self.points.push(Point {
-                    mass,
-                    ghost_of: *node,
-                    on_cut: false,
-                    ..source
-                });
+                let ghost = self.push_point(
+                    Point {
+                        mass,
+                        ghost_of: *node,
+                        on_cut: false,
+                        ..source
+                    },
+                    source_hold,
+                );
                 origin.push(*node);
-                let ghost = self.points.len() - 1;
                 for (&triangle, &member) in fan.iter().zip(&group_of) {
                     if member == Some(group) {
                         moves.push((triangle, *node, ghost));
@@ -908,6 +911,7 @@ impl World {
             return None;
         }
         let source = self.points[point];
+        let source_hold = self.point_holds[point];
         let count = fan.len();
 
         let fan_corners: Vec<[usize; 3]> = fan
@@ -949,12 +953,14 @@ impl World {
                 self.points[point].mass = mass;
                 self.points[point].on_cut = true;
             } else {
-                self.points.push(Point {
-                    mass,
-                    on_cut: true,
-                    ..source
-                });
-                member[g] = self.points.len() - 1;
+                member[g] = self.push_point(
+                    Point {
+                        mass,
+                        on_cut: true,
+                        ..source
+                    },
+                    source_hold,
+                );
             }
         }
 

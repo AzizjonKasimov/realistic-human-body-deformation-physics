@@ -132,8 +132,8 @@ impl World {
         let homes: Vec<Vec2> = self.points.iter().map(|point| point.home).collect();
         let force = self.skin_pull(&homes);
         let joined = self.skin_joined_to_body();
-        for point in &mut self.points {
-            point.wrap = Vec2::default();
+        for hold in &mut self.point_holds {
+            hold.wrap = Vec2::default();
         }
         for outline in &self.outlines {
             for &point in &outline.points {
@@ -142,7 +142,7 @@ impl World {
                 // light scrap of torn skin held as if whole was thrown.
                 let skin = &self.points[point];
                 if skin.layer == TissueLayer::Skin && joined[point] && !skin.on_cut {
-                    self.points[point].wrap = scale(force[point], -1.0);
+                    self.point_holds[point].wrap = scale(force[point], -1.0);
                 }
             }
         }
@@ -265,10 +265,11 @@ impl World {
         let turns = self.bone_turns();
         for index in 0..self.points.len() {
             let point = self.points[index];
-            if point.wrap == Vec2::default() || point.pinned || !is_flesh(&self.flesh, index) {
+            let hold = self.point_holds[index];
+            if hold.wrap == Vec2::default() || point.pinned || !is_flesh(&self.flesh, index) {
                 continue;
             }
-            let binding = point.posture;
+            let binding = hold.posture;
             let mut wrap = Vec2::default();
             let mut held = 0.0;
             for slot in 0..2 {
@@ -276,12 +277,12 @@ impl World {
                     continue;
                 };
                 let weight = binding.weights[slot];
-                wrap.x += weight * (point.wrap.x * cos - point.wrap.y * sin);
-                wrap.y += weight * (point.wrap.x * sin + point.wrap.y * cos);
+                wrap.x += weight * (hold.wrap.x * cos - hold.wrap.y * sin);
+                wrap.y += weight * (hold.wrap.x * sin + hold.wrap.y * cos);
                 held += weight;
             }
             if held <= 0.0 {
-                wrap = point.wrap;
+                wrap = hold.wrap;
             }
             let shift = scale(wrap, h * h / point.mass.max(EPSILON));
             self.points[index].position = add(point.position, shift);

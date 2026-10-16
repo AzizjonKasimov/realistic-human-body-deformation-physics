@@ -139,8 +139,7 @@ struct PostureHold {
 }
 
 impl PostureHold {
-    fn of(point: &Point, bones: &[BoneSegment], h: f64) -> Option<Self> {
-        let binding = point.posture;
+    fn of(point: &Point, binding: PostureBinding, bones: &[BoneSegment], h: f64) -> Option<Self> {
         let mut target = Vec2::default();
         let mut velocity = Vec2::default();
         let mut inverse_mass = point.inverse_mass();
@@ -229,11 +228,11 @@ impl World {
     /// Where point `point` keeps its place on the skeleton now
     /// (`PostureBinding`), or `None` for one bound to no bone.
     pub fn posture_target(&self, point: usize) -> Option<Vec2> {
-        let point = self.points.get(point)?;
+        let hold = self.point_holds.get(point)?;
         let mut target = Vec2::default();
         let mut total = 0.0;
         for slot in 0..2 {
-            let binding = point.posture;
+            let binding = hold.posture;
             let Some(bone) = self.bones.get(binding.bones[slot]) else {
                 continue;
             };
@@ -295,7 +294,7 @@ impl World {
                     *weight /= total;
                 }
             }
-            self.points[index].posture = binding;
+            self.point_holds[index].posture = binding;
         }
     }
 
@@ -319,7 +318,8 @@ impl World {
             if hertz <= 0.0 {
                 continue;
             }
-            let Some(hold) = PostureHold::of(&point, &self.bones, h) else {
+            let point_hold = self.point_holds[index];
+            let Some(hold) = PostureHold::of(&point, point_hold.posture, &self.bones, h) else {
                 continue;
             };
             let omega = 2.0 * PI * hertz;
@@ -332,11 +332,12 @@ impl World {
                 scale(subtract(point.position, point.previous), 1.0 / h),
                 hold.velocity,
             );
+            let given = point_hold.posture_impulse;
             let impulse = Vec2 {
-                x: softness.impulse(mass, speed.x, error.x, point.posture_impulse.x),
-                y: softness.impulse(mass, speed.y, error.y, point.posture_impulse.y),
+                x: softness.impulse(mass, speed.x, error.x, given.x),
+                y: softness.impulse(mass, speed.y, error.y, given.y),
             };
-            self.points[index].posture_impulse = add(point.posture_impulse, impulse);
+            self.point_holds[index].posture_impulse = add(given, impulse);
             self.apply_posture(index, &hold, impulse, h);
         }
     }
@@ -365,13 +366,14 @@ impl World {
     pub(super) fn warm_start_posture(&mut self, h: f64) {
         for index in 0..self.points.len() {
             let point = self.points[index];
-            if point.pinned || point.posture_impulse == Vec2::default() {
+            let point_hold = self.point_holds[index];
+            if point.pinned || point_hold.posture_impulse == Vec2::default() {
                 continue;
             }
-            let Some(hold) = PostureHold::of(&point, &self.bones, h) else {
+            let Some(hold) = PostureHold::of(&point, point_hold.posture, &self.bones, h) else {
                 continue;
             };
-            self.apply_posture(index, &hold, point.posture_impulse, h);
+            self.apply_posture(index, &hold, point_hold.posture_impulse, h);
         }
     }
 
@@ -616,8 +618,8 @@ impl World {
     pub(super) fn split_stance_at_break(&mut self, bone: usize, second: usize, break_t: f64) {
         let first_share = break_t.max(0.05);
         let second_share = (1.0 - break_t).max(0.05);
-        for point in &mut self.points {
-            let binding = &mut point.posture;
+        for hold in &mut self.point_holds {
+            let binding = &mut hold.posture;
             for slot in 0..2 {
                 if binding.bones[slot] != bone {
                     continue;
