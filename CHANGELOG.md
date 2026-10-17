@@ -2,6 +2,12 @@
 
 What each version of Realistic Physics changed, newest first. The game shows its version on the start screen and in its bottom-left corner, and every Short made from the game shows the version it was made with. Only the newest version is online.
 
+## v0.10.2 (2026-10-17)
+
+- A blow hurts the body the same on every screen. A big window used to build a finer body with relatively smaller tools, and a small one a coarser body; now every screen plays the same body and only draws it larger or smaller.
+- On a big screen the tools are drawn as big next to the body as on any other screen.
+- Resizing the window fits the body to it again, even after the body has been hurt.
+
 ## v0.10.1 (2026-10-16)
 
 - A hard blow to the shoulder no longer leaves the forearm's bone poking out of its skin: the arm's muscles hold their bones as firmly as braced muscle does.
