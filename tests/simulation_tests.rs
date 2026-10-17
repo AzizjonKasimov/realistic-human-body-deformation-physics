@@ -245,38 +245,35 @@ fn generated_body_mirrors_across_its_midline() {
     }
 }
 
-/// The app draws the body larger on a big screen and smaller on a phone, and
-/// it must settle into its guard at any size. Given its weight all at once,
-/// a body drawn at the app's largest dropped its trunk onto the pelvis and
-/// tore the lower back as it settled, and its arms fell out of the guard.
+/// The body must settle into its guard. Given its weight all at once, a body
+/// built larger, as the app once built it for a big screen, dropped its trunk
+/// onto the pelvis and tore the lower back as it settled, and its arms fell
+/// out of the guard; every body is built at the scenarios' size now, in any
+/// window (`rp::world_frame`).
 #[test]
-fn a_body_of_any_size_settles_in_its_guard() {
-    for (width, height) in [(1600.0, 923.0), (1920.0, 1080.0), (390.0, 844.0)] {
-        let world = rp::create_layered_body(width, height, rp::Materials::default());
-        if let Some(index) = world
-            .bone_joints()
-            .iter()
-            .position(|joint| joint.broken || joint.post_fracture_limited || joint.subluxated)
-        {
-            panic!(
-                "FAIL: {} was hurt as the body settled in a {width}x{height} window",
-                rp::inspect::joint_name(&world, index)
-            );
-        }
-        let worst = world
-            .bones()
-            .iter()
-            .map(|bone| {
-                (bone.a.x - bone.home_a.x)
-                    .hypot(bone.a.y - bone.home_a.y)
-                    .max((bone.b.x - bone.home_b.x).hypot(bone.b.y - bone.home_b.y))
-            })
-            .fold(0.0, f64::max);
-        if worst > 6.0 {
-            panic!(
-                "FAIL: a bone rests {worst:.1} px from its drawing after the settle in a {width}x{height} window"
-            );
-        }
+fn the_body_settles_in_its_guard() {
+    let world = rp::create_layered_body_in(rp::world_frame(), rp::Materials::default());
+    if let Some(index) = world
+        .bone_joints()
+        .iter()
+        .position(|joint| joint.broken || joint.post_fracture_limited || joint.subluxated)
+    {
+        panic!(
+            "FAIL: {} was hurt as the body settled",
+            rp::inspect::joint_name(&world, index)
+        );
+    }
+    let worst = world
+        .bones()
+        .iter()
+        .map(|bone| {
+            (bone.a.x - bone.home_a.x)
+                .hypot(bone.a.y - bone.home_a.y)
+                .max((bone.b.x - bone.home_b.x).hypot(bone.b.y - bone.home_b.y))
+        })
+        .fold(0.0, f64::max);
+    if worst > 6.0 {
+        panic!("FAIL: a bone rests {worst:.1} px from its drawing after the settle");
     }
 }
 
@@ -331,41 +328,32 @@ fn flesh_is_tied_only_through_flesh() {
     }
 }
 
-/// The body is meshed for each window size, so check desktop, browser pane,
-/// and phone shapes: at rest no muscle may show past the skin anywhere.
+/// At rest no muscle may show past the skin anywhere. Every body is meshed
+/// at the scenarios' size, whatever the window (`rp::world_frame`); concave
+/// corners of the outline, the crotch and the armpits, are where the skin
+/// mesh can come up short.
 #[test]
-fn skin_covers_the_muscle_at_rest_in_any_window() {
-    let windows = [
-        (800.0, 600.0),
-        (1280.0, 720.0),
-        (1366.0, 768.0),
-        (1920.0, 1080.0),
-        (758.0, 914.0),
-        (390.0, 844.0),
-    ];
-    for (width, height) in windows {
-        let world = rp::create_layered_body(width, height, rp::Materials::default());
-        let points = world.points();
-        for triangle in world.triangles() {
-            if triangle.layer != rp::TissueLayer::Muscle {
-                continue;
-            }
-            let [a, b, c] = [triangle.a, triangle.b, triangle.c].map(|i| points[i].position);
-            let mid = |p: rp::Vec2, q: rp::Vec2| rp::Vec2 {
-                x: (p.x + q.x) * 0.5,
-                y: (p.y + q.y) * 0.5,
-            };
-            let centroid = rp::Vec2 {
-                x: (a.x + b.x + c.x) / 3.0,
-                y: (a.y + b.y + c.y) / 3.0,
-            };
-            for sample in [a, b, c, mid(a, b), mid(b, c), mid(c, a), centroid] {
-                if !rp::point_inside_layer(&world, sample, rp::TissueLayer::Skin) {
-                    let (u, v) = rp::body_frame(width, height).body_coords(sample);
-                    panic!(
-                        "FAIL: muscle shows past the skin at body ({u:.3}, {v:.3}) in a {width}x{height} window"
-                    );
-                }
+fn skin_covers_the_muscle_at_rest() {
+    let frame = rp::world_frame();
+    let world = rp::create_layered_body_in(frame, rp::Materials::default());
+    let points = world.points();
+    for triangle in world.triangles() {
+        if triangle.layer != rp::TissueLayer::Muscle {
+            continue;
+        }
+        let [a, b, c] = [triangle.a, triangle.b, triangle.c].map(|i| points[i].position);
+        let mid = |p: rp::Vec2, q: rp::Vec2| rp::Vec2 {
+            x: (p.x + q.x) * 0.5,
+            y: (p.y + q.y) * 0.5,
+        };
+        let centroid = rp::Vec2 {
+            x: (a.x + b.x + c.x) / 3.0,
+            y: (a.y + b.y + c.y) / 3.0,
+        };
+        for sample in [a, b, c, mid(a, b), mid(b, c), mid(c, a), centroid] {
+            if !rp::point_inside_layer(&world, sample, rp::TissueLayer::Skin) {
+                let (u, v) = frame.body_coords(sample);
+                panic!("FAIL: muscle shows past the skin at body ({u:.3}, {v:.3})");
             }
         }
     }

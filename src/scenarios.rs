@@ -2683,8 +2683,8 @@ pub fn scenarios() -> Vec<Scenario> {
             play: gesture(ToolMode::Heavy, FIRST_TOUCH_ON_CHEST),
             // A tool first taken up inside the body passes through it rather
             // than appearing in the flesh and blasting it apart, as the first
-            // touch on a phone, which also rebuilds the body for finger-sized
-            // buttons, used to.
+            // touch on a phone used to, when it also rebuilt the body for
+            // finger-sized buttons.
             expectations: ScenarioExpectations {
                 contacts: IntBand::range(0, 0),
                 bone_fractures: IntBand::range(0, 0),
