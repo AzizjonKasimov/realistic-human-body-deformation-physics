@@ -1,6 +1,7 @@
 # Drives a headless Edge or Chrome over the DevTools protocol, for the checks
-# that need a real browser page: parity.ps1 (the self-test) and
-# analytics_check.ps1 (visit counts). Dot-source it after common.ps1.
+# that need a real browser page: parity.ps1 (the self-test), touch_check.ps1
+# (a phone's touches), and analytics_check.ps1 (visit counts). Dot-source it
+# after common.ps1.
 
 function Find-Browser([string]$Path) {
     if ($Path) {
