@@ -274,6 +274,125 @@ impl World {
         self.carry_rest_tension();
     }
 
+    /// The flesh round each elbow rests as a living arm's does: a relaxed
+    /// elbow rests part way open (Wiegner and Watts 1986), not bent as far as
+    /// the guard bends it, and its skin and muscle bear being stretched as
+    /// far as the elbow's whole range takes them. A weightless copy of the
+    /// body opens each elbow from the guard to `Materials::elbow_rest_opening`
+    /// and on to straight; each spring and triangle near the elbow then rests
+    /// at the length and area it had at that relaxed angle, and tires, sets,
+    /// and tears only past the longest the range stretched it. Built at rest
+    /// in the guard, the fold held a limp forearm up in it, and the skin at
+    /// the crease's end, stretched half again with the arm straight, tore as
+    /// it tired. `arms` names each arm's upper arm and forearm, and `width`
+    /// the window the body stands in.
+    pub(super) fn rest_flesh_round_elbows(&mut self, arms: &[[usize; 2]], width: f64) {
+        let relaxed = self.materials.elbow_rest_opening;
+        if relaxed <= 0.0 {
+            return;
+        }
+        // Each elbow, the way it opens, and how far its range opens it.
+        let elbows: Vec<(usize, f64, f64)> = arms
+            .iter()
+            .filter_map(|&[upper_arm, forearm]| {
+                let index = self
+                    .bone_joints
+                    .iter()
+                    .position(|joint| joint.a == upper_arm && joint.b == forearm)?;
+                let joint = self.bone_joints[index];
+                Some(if joint.max_angle > -joint.min_angle {
+                    (index, 1.0, joint.max_angle)
+                } else {
+                    (index, -1.0, -joint.min_angle)
+                })
+            })
+            .collect();
+        let Some(full) = elbows.iter().map(|elbow| elbow.2).reduce(f64::min) else {
+            return;
+        };
+        let mut swept = self.clone();
+        swept.materials.gravity = 0.0;
+        let dt = swept.materials.fixed_dt;
+        let lengths = |world: &World| -> Vec<f64> {
+            world
+                .springs
+                .iter()
+                .map(|spring| {
+                    distance(
+                        world.points[spring.a].position,
+                        world.points[spring.b].position,
+                    )
+                })
+                .collect()
+        };
+        let built = lengths(self);
+        let mut longest = built.clone();
+        let mut opened = Vec::new();
+        let mut opened_areas = Vec::new();
+        // Muscles stiff enough to hold the elbow where they aim it against
+        // the flesh: opened to the relaxed angle and held there while the
+        // flesh settles, then on to straight.
+        for (from, to, ramp, hold) in [(0.0, relaxed, 24, 24), (relaxed, full, 36, 12)] {
+            for step in 0..ramp + hold {
+                let share = ((step + 1) as f64 / ramp as f64).min(1.0);
+                for &(index, opens, _) in &elbows {
+                    let drive = swept.bone_joints[index].drive;
+                    swept.bone_joints[index].drive = JointDrive {
+                        stiffness: 300.0,
+                        damping: 15.0,
+                        max_torque: 200.0,
+                        aim: opens * (from + (to - from) * share),
+                        ..drive
+                    };
+                }
+                swept.step(dt, &InputState::default(), width);
+                for (most, now) in longest.iter_mut().zip(lengths(&swept)) {
+                    *most = most.max(now);
+                }
+            }
+            if opened.is_empty() {
+                opened = lengths(&swept);
+                opened_areas = swept
+                    .areas
+                    .iter()
+                    .map(|area| {
+                        signed_area(
+                            swept.points[area.a].position,
+                            swept.points[area.b].position,
+                            swept.points[area.c].position,
+                        )
+                    })
+                    .collect();
+            }
+        }
+        for (index, (spring, wear)) in self
+            .springs
+            .iter_mut()
+            .zip(&mut self.spring_wear)
+            .enumerate()
+        {
+            let (was, now, most) = (built[index], opened[index], longest[index]);
+            if was <= EPSILON || ((now / was - 1.0).abs() < 0.01 && most / was - 1.0 < 0.01) {
+                continue;
+            }
+            spring.rest *= now / was;
+            wear.rest_reference = spring.rest;
+            wear.prestretch = most / spring.rest;
+        }
+        for (area, &now) in self.areas.iter_mut().zip(&opened_areas) {
+            let was = signed_area(
+                self.points[area.a].home,
+                self.points[area.b].home,
+                self.points[area.c].home,
+            );
+            if was.abs() <= EPSILON || (now / was - 1.0).abs() < 0.01 {
+                continue;
+            }
+            area.rest_area *= now / was;
+        }
+        self.carry_rest_tension();
+    }
+
     /// Lets the stretched skin settle where it pulls itself even, its outline
     /// held: on an uneven mesh its springs do not quite balance as built, and
     /// what is left would slide it over the muscle. Each point inside moves
@@ -378,6 +497,12 @@ impl World {
     /// length it pulls toward there: tissue is soft at first and stiffens
     /// sharply once its collagen straightens, as a J-shaped curve.
     pub(super) fn spring_stiffness_at(&self, spring: &Spring, length: f64) -> (f64, f64) {
+        if spring.kind == SpringKind::Skin && length < spring.rest {
+            return (
+                spring.stiffness * self.materials.skin_compression_share,
+                spring.rest,
+            );
+        }
         let (onset, ratio) = self.materials.stiffening(spring.kind);
         if ratio <= 1.0 || length <= spring.rest * onset {
             return (spring.stiffness, spring.rest);

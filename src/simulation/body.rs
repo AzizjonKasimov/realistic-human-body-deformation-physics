@@ -256,7 +256,12 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
         // elbow straightened, and held a broken forearm bent up in the guard.
         let past_elbow = (skeleton.upper_arms.contains(&nearest_bone) && nearest_t >= 1.0)
             || (skeleton.forearms.contains(&nearest_bone) && nearest_t <= 0.0);
-        if nearest_bone != usize::MAX && !past_elbow {
+        let untied = materials.elbow_untied_radius * spacing;
+        let by_elbow = skeleton
+            .forearms
+            .iter()
+            .any(|&forearm| distance(position, world.bones[forearm].a) < untied);
+        if nearest_bone != usize::MAX && !past_elbow && !by_elbow {
             world.add_bone_attachment(muscle_point, nearest_bone, nearest_t);
         }
     }
@@ -297,6 +302,19 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
     }
 
     world.give_tissue_physical_properties(frame);
+    // The skin round each elbow slides over it more freely.
+    let slide = materials.elbow_slide_radius * spacing;
+    let elbows: Vec<Vec2> = skeleton
+        .forearms
+        .iter()
+        .map(|&forearm| world.bones[forearm].home_a)
+        .collect();
+    for attachment in &mut world.attachments {
+        let skin = world.points[attachment.skin_point].home;
+        if elbows.iter().any(|&elbow| distance(skin, elbow) < slide) {
+            attachment.stiffness *= materials.elbow_slide_fat_share;
+        }
+    }
     // Tissue keeps its place on the bones of its own part of the body: the
     // flesh of an arm on the arm's bones, the chest's on the trunk's, and
     // only on bones it reaches through flesh, so the forearm's side of the
@@ -323,6 +341,10 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
             reached
         }
     });
+    world.rest_flesh_round_elbows(
+        &[0, 1].map(|side| [skeleton.upper_arms[side], skeleton.forearms[side]]),
+        frame.origin.x * 2.0 + frame.height,
+    );
     // The body stands on the floor at its soles, and its hips are held up.
     world.set_floor_y(frame.point(0.0, 1.0).y);
     world.hold_hip(skeleton.pelvis, false);

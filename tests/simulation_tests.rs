@@ -431,6 +431,129 @@ fn a_limp_arm_hangs_by_the_body() {
     }
 }
 
+/// How hard the left elbow's flesh resists the elbow opening from the guard,
+/// with no weight to carry: the elbow held by stiff muscles at each angle in
+/// turn, a second each, and the torque they hold it with read off, in
+/// newton metres, against how far it has opened, in degrees. Positive is the
+/// flesh pulling the elbow back toward the guard.
+fn elbow_resistance(materials: rp::Materials) -> Vec<(f64, f64)> {
+    let (width, height) = (1280.0, 720.0);
+    let mut world = rp::create_layered_body(
+        width,
+        height,
+        rp::Materials {
+            gravity: 0.0,
+            ..materials
+        },
+    );
+    let index = elbow(&world, true);
+    let joint = world.bone_joints()[index];
+    let opens = if joint.max_angle > -joint.min_angle {
+        1.0
+    } else {
+        -1.0
+    };
+    let held = rp::JointDrive {
+        stiffness: 300.0,
+        damping: 15.0,
+        max_torque: 200.0,
+        ..joint.drive
+    };
+    let dt = world.materials().fixed_dt;
+    let mut curve = Vec::new();
+    let mut from = 0.0_f64;
+    for to in [
+        0.0, 15.0, 30.0, 45.0, 60.0, 75.0, 90.0, 105.0, 120.0, 130.0_f64,
+    ] {
+        for frame in 0..60 {
+            let eased = from + (to - from) * (frame as f64 / 30.0).min(1.0);
+            world.drive_bone_joint(
+                index,
+                rp::JointDrive {
+                    aim: held.aim + opens * eased.to_radians(),
+                    ..held
+                },
+            );
+            world.step(dt, &rp::InputState::default(), width);
+        }
+        from = to;
+        let opened = world.joint_turn(index).expect("the elbow joins its bones") * opens;
+        curve.push((opened.to_degrees(), world.joint_torque(index) * opens));
+        if std::env::var("RP_ELBOW_STRAIN").is_ok() {
+            let frame = rp::body_frame(width, height);
+            let points = world.points();
+            let mut stretched: Vec<(f64, usize)> = world
+                .springs()
+                .iter()
+                .enumerate()
+                .filter(|(_, spring)| !spring.broken && spring.layer == rp::TissueLayer::Skin)
+                .map(|(index, spring)| {
+                    let length = (points[spring.a].position.x - points[spring.b].position.x)
+                        .hypot(points[spring.a].position.y - points[spring.b].position.y);
+                    (
+                        length / spring.rest / world.spring_wear()[index].prestretch,
+                        index,
+                    )
+                })
+                .collect();
+            stretched.sort_by(|a, b| b.0.total_cmp(&a.0));
+            let top: Vec<String> = stretched
+                .iter()
+                .take(4)
+                .map(|&(stretch, index)| {
+                    let spring = world.springs()[index];
+                    let (u, v) = frame.body_coords(points[spring.a].home);
+                    let (u2, v2) = frame.body_coords(points[spring.b].home);
+                    format!(
+                        "{:+.0}% ({u:.3},{v:.3})-({u2:.3},{v2:.3}) built {:.1} px",
+                        (stretch - 1.0) * 100.0,
+                        (points[spring.a].home.x - points[spring.b].home.x)
+                            .hypot(points[spring.a].home.y - points[spring.b].home.y)
+                    )
+                })
+                .collect();
+            println!(
+                "  opened {:.0}: most stretched skin {}",
+                opened.to_degrees(),
+                top.join(", ")
+            );
+        }
+    }
+    curve
+}
+
+/// Prints how hard the elbow's flesh resists opening, with each part of the
+/// flesh's hold on the bones switched off in turn: a tool for finding what
+/// holds a limp forearm up (`cargo test --release --test simulation_tests
+/// elbow_resistance -- --ignored --nocapture`).
+#[test]
+#[ignore]
+fn print_elbow_resistance() {
+    let defaults = rp::Materials::default();
+    let relaxed = |opening: f64| rp::Materials {
+        elbow_rest_opening: opening,
+        ..defaults
+    };
+    let variants = [
+        ("as built", defaults),
+        ("rests opened", relaxed(0.6)),
+        ("rests opened", relaxed(0.9)),
+        ("rests opened", relaxed(1.06)),
+    ];
+    for (name, materials) in variants {
+        let curve = elbow_resistance(materials);
+        let line: Vec<String> = curve
+            .iter()
+            .map(|(opened, torque)| format!("{opened:.0}:{torque:+.2}"))
+            .collect();
+        println!(
+            "elbow resistance, {name} {:.2}: {}",
+            materials.elbow_rest_opening,
+            line.join("  ")
+        );
+    }
+}
+
 /// A punch straightens the elbow from the guard, so the arm must open all the
 /// way without tearing its flesh or turning it inside out: the inside of the
 /// elbow is a crease, as in a real arm, where one block of flesh tore once
