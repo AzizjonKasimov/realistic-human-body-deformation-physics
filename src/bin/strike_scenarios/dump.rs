@@ -1,7 +1,7 @@
 //! The body laid out in numbers on one frame of a play (`--dump`): each bone
 //! where it lies and how far from where it was built, each joint how far it
-//! is turned and has slipped, each artery, and how far each bone's flesh has
-//! slid off it. The questions it answers are the ones a picture leaves open:
+//! is turned and has slipped, each tendon how long against its slack, each
+//! artery, and how far each bone's flesh has slid off it. The questions it answers are the ones a picture leaves open:
 //! is the body where it should be, and by how much is it not.
 
 use super::*;
@@ -11,6 +11,7 @@ use super::*;
 pub(crate) struct Dump {
     pub(crate) bones: bool,
     pub(crate) joints: bool,
+    pub(crate) tendons: bool,
     pub(crate) vessels: bool,
     pub(crate) ties: bool,
     /// The flesh held to this bone, point by point.
@@ -19,7 +20,7 @@ pub(crate) struct Dump {
 }
 
 impl Dump {
-    /// Reads `bones,joints,vessels,ties` or `all`, then `:FRAME`.
+    /// Reads `bones,joints,tendons,vessels,ties` or `all`, then `:FRAME`.
     pub(crate) fn parse(spec: &str) -> Result<Dump, String> {
         let (what, frame) = match spec.split_once(':') {
             Some((what, frame)) => (
@@ -38,6 +39,7 @@ impl Dump {
             match item.trim() {
                 "bones" => dump.bones = true,
                 "joints" => dump.joints = true,
+                "tendons" => dump.tendons = true,
                 "vessels" => dump.vessels = true,
                 "ties" => dump.ties = true,
                 flesh if flesh.starts_with("flesh=") => {
@@ -49,12 +51,13 @@ impl Dump {
                 "all" => {
                     dump.bones = true;
                     dump.joints = true;
+                    dump.tendons = true;
                     dump.vessels = true;
                     dump.ties = true;
                 }
                 other => {
                     return Err(format!(
-                        "--dump takes bones, joints, vessels, ties, flesh=N, or all, got `{other}`"
+                        "--dump takes bones, joints, tendons, vessels, ties, flesh=N, or all, got `{other}`"
                     ))
                 }
             }
@@ -111,6 +114,26 @@ impl Dump {
                     world.joint_turn(index).unwrap_or(0.0).to_degrees(),
                     world.joint_torque(index),
                     joint.rest,
+                );
+            }
+        }
+        if self.tendons {
+            // How long each tendon is against the length it starts to pull
+            // at, and how hard it pulled on the last substep.
+            for (index, tendon) in world.tendons().iter().enumerate() {
+                let length = world.tendon_length(index).unwrap_or(0.0);
+                let (from, to) = world.tendon_ends(index).unwrap_or_default();
+                println!(
+                    "  tendon {index:>2} the {:<20} {:?} bone {} {} -> bone {} {}  length {length:.1} px, slack {:.1} ({:+.1}){}",
+                    tendon.muscle.name(),
+                    tendon.limb,
+                    tendon.from.bone,
+                    at(from),
+                    tendon.to.bone,
+                    at(to),
+                    tendon.slack,
+                    length - tendon.slack,
+                    if tendon.impulse < 0.0 { ", pulling" } else { "" },
                 );
             }
         }
@@ -271,7 +294,8 @@ impl MeshShot {
     /// place into `output/mesh_NAME_FRAME.svg`: slivers (quality under 0.3,
     /// 1 for an equilateral triangle) blue, triangles turned over since the
     /// body was built red. The mesh's shape where it tears, gapes, or shows
-    /// muscle through the skin is what this shows.
+    /// muscle through the skin is what this shows; the elbow's crease was
+    /// meshed with it.
     pub(crate) fn draw(&self, name: &str, frame: i32, world: &rp::World) {
         if frame != self.frame {
             return;

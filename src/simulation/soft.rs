@@ -112,17 +112,17 @@ fn speed_up(point: &mut Point, change: Vec2, h: f64) {
     point.position = add(point.position, scale(change, h));
 }
 
-fn bone_place(bone: &BoneSegment) -> (Vec2, Vec2) {
+pub(super) fn bone_place(bone: &BoneSegment) -> (Vec2, Vec2) {
     (bone.previous_a, bone.previous_b)
 }
 
-fn speed_up_bone(bone: &mut BoneSegment, change_a: Vec2, change_b: Vec2, h: f64) {
+pub(super) fn speed_up_bone(bone: &mut BoneSegment, change_a: Vec2, change_b: Vec2, h: f64) {
     bone.a = add(bone.a, scale(change_a, h));
     bone.b = add(bone.b, scale(change_b, h));
 }
 
 /// A quarter turn counterclockwise.
-fn perpendicular(value: Vec2) -> Vec2 {
+pub(super) fn perpendicular(value: Vec2) -> Vec2 {
     Vec2 {
         x: -value.y,
         y: value.x,
@@ -220,6 +220,7 @@ impl World {
                 self.timed("hip hold", |world| world.solve_hip_hold(h));
                 self.timed("joint muscles", |world| world.solve_joint_drives(h));
                 self.timed("joints", |world| world.solve_soft_joints(h));
+                self.timed("tendons", |world| world.solve_tendons(h));
                 self.timed("tool contact", Self::solve_tool_contact);
                 self.timed("bones", Self::solve_bones);
                 self.timed("fragment-bone", Self::solve_bone_fragment_bone_contacts);
@@ -424,6 +425,7 @@ impl World {
             world.warm_start_joint_drives(h)
         });
         self.timed("warm start: joints", |world| world.warm_start_joints(h));
+        self.timed("warm start: tendons", |world| world.warm_start_tendons(h));
     }
 
     fn warm_start_fibers(&mut self, h: f64) {
@@ -551,6 +553,9 @@ impl World {
             joint.hold_impulse = Vec2::default();
             joint.angular_impulse = 0.0;
             joint.drive_impulse = 0.0;
+        }
+        for tendon in &mut self.tendons {
+            tendon.impulse = 0.0;
         }
     }
 

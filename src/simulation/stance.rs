@@ -592,7 +592,15 @@ impl World {
     /// A bone of `part` in `limb` broke: if that leaves the limb hanging,
     /// its muscles let go.
     pub(super) fn let_go_of_broken_limb(&mut self, limb: Limb, part: BonePart) {
-        let Some(index) = limb.index().filter(|_| limb.falls_when_broken(part)) else {
+        if limb.falls_when_broken(part) {
+            self.let_limb_go(limb);
+        }
+    }
+
+    /// The muscles of `limb` let go, as a broken bone makes them, and it
+    /// hangs, only damped: as a person's arm hangs once they are knocked out.
+    pub fn let_limb_go(&mut self, limb: Limb) {
+        let Some(index) = limb.index() else {
             return;
         };
         if !self.limp_limbs[index] {

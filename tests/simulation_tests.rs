@@ -281,8 +281,9 @@ fn a_body_of_any_size_settles_in_its_guard() {
 }
 
 /// Flesh is tied to flesh and bone only through flesh: no tie of skin to
-/// muscle or muscle to bone reaches across a gap in the figure, such as the
-/// armpit.
+/// muscle or muscle to bone, and no spring at the elbow, reaches across a
+/// gap in the figure. Joined across the inner elbow's crease, the fold held
+/// a broken arm's limp forearm up in the guard like a rubber wedge.
 #[test]
 fn flesh_is_tied_only_through_flesh() {
     let (width, height) = (1280.0, 720.0);
@@ -328,6 +329,196 @@ fn flesh_is_tied_only_through_flesh() {
             y: bone.home_a.y + ay * t,
         };
         check("tie of muscle to bone", at, on_bone);
+    }
+    // A spring between two points of the skin's outline is its surface, and
+    // may cut a corner where the outline turns inward, as round the crease's
+    // end or at the crotch; the others across the inner elbow are checked.
+    let on_outline = |at: rp::Vec2| {
+        let (u, v) = frame.body_coords(at);
+        rp::silhouette_distance(u, v) * frame.height > -1.0
+    };
+    for spring in world.springs() {
+        let (a, b) = (points[spring.a].home, points[spring.b].home);
+        let (u, v) = frame.body_coords(rp::Vec2 {
+            x: (a.x + b.x) * 0.5,
+            y: (a.y + b.y) * 0.5,
+        });
+        let at_elbow = (0.17..0.26).contains(&u.abs()) && (0.24..0.33).contains(&v);
+        if at_elbow && !(on_outline(a) && on_outline(b)) {
+            check("spring at the elbow", a, b);
+        }
+    }
+}
+
+/// The joint between an upper arm and a forearm on the `left` side or the
+/// right: its elbow.
+fn elbow(world: &rp::World, left: bool) -> usize {
+    let limb = if left {
+        rp::Limb::LeftArm
+    } else {
+        rp::Limb::RightArm
+    };
+    let bones = world.bones();
+    world
+        .bone_joints()
+        .iter()
+        .position(|joint| {
+            let (a, b) = (&bones[joint.a], &bones[joint.b]);
+            a.part == rp::BonePart::UpperArm && b.part == rp::BonePart::Forearm && a.limb == limb
+        })
+        .expect("an elbow")
+}
+
+/// The far end of the `left` or right hand's bone: its fist.
+fn fist(world: &rp::World, left: bool) -> rp::Vec2 {
+    let limb = if left {
+        rp::Limb::LeftArm
+    } else {
+        rp::Limb::RightArm
+    };
+    world
+        .bones()
+        .iter()
+        .find(|bone| bone.part == rp::BonePart::Hand && bone.limb == limb && !bone.splinter)
+        .expect("a hand")
+        .b
+}
+
+/// A limp arm hangs by the body, as a person's does once its muscles let go,
+/// knocked out or holding no weight on a broken bone (Pecci and Kreher 2008):
+/// nothing else may hold it up, and hanging tears nothing. Joined across the
+/// inner elbow by one block of flesh, the fold held the forearm up in the
+/// guard like a rubber wedge, its fist a fifth of the way down.
+#[test]
+fn a_limp_arm_hangs_by_the_body() {
+    let (width, height) = (1280.0, 720.0);
+    let mut world = rp::create_layered_body(width, height, rp::Materials::default());
+    let left = true;
+    let start = fist(&world, left);
+    // How far the fist would drop hanging straight down from the shoulder,
+    // the arm's bones and joint gaps end to end.
+    let joint = world.bone_joints()[elbow(&world, left)];
+    let shoulder = world.bones()[joint.a].a;
+    let arm_length: f64 = world
+        .bones()
+        .iter()
+        .filter(|bone| bone.limb == rp::Limb::LeftArm && bone.part != rp::BonePart::Collarbone)
+        .map(|bone| bone.rest_length)
+        .sum::<f64>()
+        + 2.0 * joint.rest;
+    let full_drop = shoulder.y + arm_length - start.y;
+    world.let_limb_go(rp::Limb::LeftArm);
+    let dt = world.materials().fixed_dt;
+    for _ in 0..180 {
+        world.step(dt, &rp::InputState::default(), width);
+    }
+    let drop = fist(&world, left).y - start.y;
+    let opened = world
+        .joint_turn(elbow(&world, left))
+        .expect("the elbow joins its bones")
+        .abs()
+        .to_degrees();
+    let stats = world.stats();
+    let torn = stats.broken_skin
+        + stats.broken_muscle
+        + stats.broken_attachments
+        + stats.broken_bone_attachments
+        + stats.broken_bone_joints;
+    if drop < 0.7 * full_drop || opened < 90.0 || torn != 0 {
+        panic!(
+            "FAIL: a limp arm's fist should hang most of the way down, its elbow open, nothing torn: it dropped {drop:.0} px of {full_drop:.0}, the elbow opened {opened:.0} degrees, {torn} torn"
+        );
+    }
+}
+
+/// A punch straightens the elbow from the guard, so the arm must open all the
+/// way without tearing its flesh or turning it inside out: the inside of the
+/// elbow is a crease, as in a real arm, where one block of flesh tore once
+/// the elbow opened far, and the flesh over the point of the elbow slides
+/// over it, where tied to the end of the upper arm it tore off.
+#[test]
+fn an_elbow_straightens_without_tearing() {
+    let (width, height) = (1280.0, 720.0);
+    let mut world = rp::create_layered_body(width, height, rp::Materials::default());
+    let dt = world.materials().fixed_dt;
+    // The guard bends each elbow 134 degrees; straight is that far the way
+    // its range opens. Its muscles aim there over a second, as a slow reach,
+    // and hold it a second and a half.
+    let elbows: Vec<(usize, rp::JointDrive, f64)> = [true, false]
+        .map(|left| {
+            let index = elbow(&world, left);
+            let joint = world.bone_joints()[index];
+            let opens = if joint.max_angle > -joint.min_angle {
+                1.0
+            } else {
+                -1.0
+            };
+            (index, joint.drive, opens * 134.0_f64.to_radians())
+        })
+        .to_vec();
+    let mut watchdogs = rp::inspect::Watchdogs::new(&world);
+    for frame in 0..150 {
+        let share = (frame as f64 / 60.0).min(1.0);
+        for &(index, drive, straight) in &elbows {
+            world.drive_bone_joint(
+                index,
+                rp::JointDrive {
+                    aim: drive.aim + straight * share,
+                    ..drive
+                },
+            );
+        }
+        world.step(dt, &rp::InputState::default(), width);
+        watchdogs.check(frame, &world);
+    }
+    let stats = world.stats();
+    let torn = stats.broken_skin
+        + stats.broken_muscle
+        + stats.broken_attachments
+        + stats.broken_bone_attachments
+        + stats.broken_bone_joints
+        + stats.bone_joint_subluxations
+        + stats.muscle_fiber_tears
+        + stats.tear_propagations;
+    let short_of_straight: Vec<f64> = elbows
+        .iter()
+        .map(|&(index, _, straight)| {
+            let turn = world.joint_turn(index).expect("the elbow joins its bones");
+            (straight - turn).abs().to_degrees()
+        })
+        .collect();
+    // The arms leave the guard on purpose, and are still moving as they
+    // come to rest held straight.
+    let trips: Vec<String> = watchdogs
+        .trips()
+        .iter()
+        .filter(|trip| {
+            !matches!(
+                trip.watchdog,
+                rp::inspect::Watchdog::GuardLost | rp::inspect::Watchdog::Restless
+            )
+        })
+        .map(|trip| {
+            format!(
+                "{:?} {:?} from frame {}",
+                trip.watchdog, trip.subject, trip.first_frame
+            )
+        })
+        .collect();
+    if torn != 0 || !trips.is_empty() {
+        panic!(
+            "FAIL: straightening the elbows should tear nothing and turn no flesh inside out: skin {}, muscle {}, fat {}, muscle off bone {}, joints {}; watchdogs {trips:?}",
+            stats.broken_skin,
+            stats.broken_muscle,
+            stats.broken_attachments,
+            stats.broken_bone_attachments,
+            stats.broken_bone_joints
+        );
+    }
+    if short_of_straight.iter().any(|&short| short > 15.0) {
+        panic!(
+            "FAIL: the elbows should open within 15 degrees of straight: {short_of_straight:.0?}"
+        );
     }
 }
 
@@ -484,7 +675,9 @@ fn generated_body_has_expected_layers_and_anatomy() {
     if lower_leg_gap_points >= left_leg_points.min(right_leg_points) {
         fail("separated legs should keep a readable center gap below the pelvis");
     }
-    let elbow_runs = skin_band_clusters(&world, 0.30, 0.33);
+    // Below the inner elbow's crease, whose rounded end reaches down to
+    // about 0.302 and splits an arm in two above it.
+    let elbow_runs = skin_band_clusters(&world, 0.305, 0.335);
     if elbow_runs != 3 {
         panic!("FAIL: the guard's elbows should stand out clear of the chest: runs={elbow_runs}");
     }

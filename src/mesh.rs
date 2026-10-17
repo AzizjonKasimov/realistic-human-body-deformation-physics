@@ -2,8 +2,17 @@
 
 pub(crate) type P2 = (f64, f64);
 
-/// Points spaced evenly (about `spacing` apart) along a closed polyline.
-pub(crate) fn resample_loop(outline: &[P2], spacing: f64) -> Vec<P2> {
+/// Points spaced evenly (about `spacing` apart) along a closed polyline,
+/// with each stretch between two of them cut into as many equal stretches
+/// along the outline as `pieces` asks for (at least one). The even points
+/// stay where they are, so a refinement changes the outline only where it
+/// asks to, and on a mirrored outline a mirrored `pieces` keeps the points
+/// mirrored.
+pub(crate) fn resample_loop_refined(
+    outline: &[P2],
+    spacing: f64,
+    pieces: impl Fn(P2, P2) -> usize,
+) -> Vec<P2> {
     let n = outline.len();
     let lengths: Vec<f64> = (0..n)
         .map(|i| distance(outline[i], outline[(i + 1) % n]))
@@ -14,25 +23,41 @@ pub(crate) fn resample_loop(outline: &[P2], spacing: f64) -> Vec<P2> {
     }
     let count = (perimeter / spacing).round().max(3.0) as usize;
     let step = perimeter / count as f64;
-    let mut result = Vec::with_capacity(count);
-    let mut segment = 0;
-    let mut segment_start = 0.0;
-    for k in 0..count {
-        let target = k as f64 * step;
-        while segment + 1 < n && segment_start + lengths[segment] < target {
-            segment_start += lengths[segment];
-            segment += 1;
+    // The points at `targets`, rising, in steps along the loop.
+    let along = |targets: &[f64]| {
+        let mut result = Vec::with_capacity(targets.len());
+        let mut segment = 0;
+        let mut segment_start = 0.0;
+        for &steps in targets {
+            let target = steps * step;
+            while segment + 1 < n && segment_start + lengths[segment] < target {
+                segment_start += lengths[segment];
+                segment += 1;
+            }
+            let t = if lengths[segment] > 1.0e-12 {
+                ((target - segment_start) / lengths[segment]).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let a = outline[segment];
+            let b = outline[(segment + 1) % n];
+            result.push((a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t));
         }
-        let t = if lengths[segment] > 1.0e-12 {
-            ((target - segment_start) / lengths[segment]).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let a = outline[segment];
-        let b = outline[(segment + 1) % n];
-        result.push((a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t));
+        result
+    };
+    let even = along(&(0..count).map(|k| k as f64).collect::<Vec<_>>());
+    let mut targets = Vec::with_capacity(count);
+    for k in 0..count {
+        let parts = pieces(even[k], even[(k + 1) % count]).max(1);
+        for part in 0..parts {
+            targets.push(k as f64 + part as f64 / parts as f64);
+        }
     }
-    result
+    if targets.len() == count {
+        even
+    } else {
+        along(&targets)
+    }
 }
 
 /// Hexagonal lattice covering the box, with vertical edges so muscle fibers
@@ -215,11 +240,41 @@ mod tests {
     #[test]
     fn resample_loop_spaces_points_evenly() {
         let square = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
-        let points = resample_loop(&square, 2.5);
+        let points = resample_loop_refined(&square, 2.5, |_, _| 1);
         assert_eq!(points.len(), 16);
         for i in 0..points.len() {
             let gap = distance(points[i], points[(i + 1) % points.len()]);
             assert!((gap - 2.5).abs() < 1.0e-9);
+        }
+    }
+
+    #[test]
+    fn refining_a_loop_keeps_its_even_points_and_splits_only_where_asked() {
+        let square = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)];
+        let even = resample_loop_refined(&square, 2.5, |_, _| 1);
+        // Split only the stretches along the square's top side, in three.
+        let refined =
+            resample_loop_refined(
+                &square,
+                2.5,
+                |a, b| {
+                    if a.1 == 10.0 && b.1 == 10.0 {
+                        3
+                    } else {
+                        1
+                    }
+                },
+            );
+        assert_eq!(
+            refined.len(),
+            even.len() + 4 * 2,
+            "four stretches along the top"
+        );
+        for point in &even {
+            assert!(refined.contains(point), "{point:?} kept");
+        }
+        for point in refined.iter().filter(|point| !even.contains(point)) {
+            assert!((point.1 - 10.0).abs() < 1.0e-9, "{point:?} on the top side");
         }
     }
 }

@@ -16,6 +16,7 @@ mod phases;
 mod properties;
 mod soft;
 mod stance;
+mod tendons;
 mod tissue;
 mod tools;
 mod tuning;
@@ -30,6 +31,7 @@ pub use journal::{Actor, Event, EventKind, Journal, Measure, StepNote, Subject};
 pub use motion::MotionSnapshot;
 pub use phases::{PhaseClock, PhaseTime, PhaseTimes, Traced, TracedStage};
 pub use stance::{HipHold, JointDrive, Limb, PostureBinding};
+pub use tendons::{Muscle, Tendon, TendonEnd};
 pub use tissue::SpringKind;
 pub use tools::{swing_power, tool_geometry, tool_pose, ToolGeometry, ToolPose, ToolReach};
 pub use tuning::{apply_settings, parse_settings, trying};
@@ -1817,6 +1819,8 @@ pub struct World {
     bone_covers: Vec<cover::BoneCover>,
     bone_attachments: Vec<BoneAttachment>,
     bone_joints: Vec<BoneJoint>,
+    /// The muscles and tendons across the joints (`tendons.rs`).
+    tendons: Vec<Tendon>,
     vessels: Vec<VesselSegment>,
     cavities: Vec<CavityRegion>,
     organs: Vec<OrganRegion>,
@@ -1919,6 +1923,7 @@ impl World {
             bone_covers: Vec::new(),
             bone_attachments: Vec::new(),
             bone_joints: Vec::new(),
+            tendons: Vec::new(),
             vessels: Vec::new(),
             cavities: Vec::new(),
             organs: Vec::new(),
@@ -7096,6 +7101,7 @@ impl World {
             }
         }
         self.split_stance_at_break(bone_index, second_index, break_t);
+        self.split_tendons_at_break(bone_index, second_index, break_t);
         self.let_go_of_broken_limb(old.limb, old.part);
         // The periosteum and the muscle round a break hold its pieces
         // together: they bend and shift at the break but do not come apart.
