@@ -1,11 +1,16 @@
-//! Moved-body tests. The same blows on the body mirrored left to right,
-//! moved across the window, or drawn larger should hurt it alike, judged
-//! over the sweep's runs: a rule that differs is reading where something is
-//! on the screen, or its size in pixels, rather than what is happening to
-//! the body. And a body falling or drifting free, nothing touching it,
-//! should come to no harm, its flesh staying put on its bones: anything
-//! else is a rule judging motion against the screen instead of against the
-//! flesh around it, as broken pieces were once damped against the world.
+//! Moved-body tests. The same blows on the body mirrored left to right or
+//! moved across the window should hurt it alike, judged over the sweep's
+//! runs: a rule that differs is reading where something is on the screen
+//! rather than what is happening to the body. And a body falling or
+//! drifting free, nothing touching it, should come to no harm, its flesh
+//! staying put on its bones: anything else is a rule judging motion against
+//! the screen instead of against the flesh around it, as broken pieces were
+//! once damped against the world.
+//!
+//! A body built larger, as the app once built it for a big screen, is no
+//! longer played: every body is simulated at the scenarios' size and only
+//! drawn larger or smaller (`rp::View`), and `tools\capture.ps1` checks that
+//! the app plays a blow alike in every window.
 
 use super::*;
 
@@ -16,28 +21,25 @@ enum Moved {
     Same,
     Mirrored,
     Across,
-    Larger,
 }
 
 impl Moved {
-    const ALL: [Moved; 4] = [Moved::Same, Moved::Mirrored, Moved::Across, Moved::Larger];
+    const ALL: [Moved; 3] = [Moved::Same, Moved::Mirrored, Moved::Across];
 
     fn describe(self) -> &'static str {
         match self {
             Moved::Same => "as tuned",
             Moved::Mirrored => "mirrored left to right",
             Moved::Across => "moved 208 px across the window",
-            Moved::Larger => "drawn 28% larger, as on a 1080p screen",
         }
     }
 
     /// The window it plays in: wider moves the body across without
-    /// changing its size; taller draws it larger, at the app's largest.
+    /// changing its size.
     fn window(self) -> (f64, f64) {
         match self {
             Moved::Same | Moved::Mirrored => (SCENARIO_WIDTH, SCENARIO_HEIGHT),
             Moved::Across => (SCENARIO_WIDTH + 400.0, SCENARIO_HEIGHT),
-            Moved::Larger => (1600.0, 923.0),
         }
     }
 
@@ -47,22 +49,13 @@ impl Moved {
             _ => *scenario,
         }
     }
-
-    /// How many of this window's pixels make one of the scenarios' window.
-    fn px_scale(self) -> f64 {
-        let (width, height) = self.window();
-        rp::body_frame(SCENARIO_WIDTH, SCENARIO_HEIGHT).height
-            / rp::body_frame(width, height).height
-    }
 }
 
-/// A number the comparison judges, how to read it from a run, whether it
-/// is in pixels (and so scales with the body drawn larger), and the least
+/// A number the comparison judges, how to read it from a run, and the least
 /// difference in its median that counts.
 struct Metric {
     name: &'static str,
     value: fn(&ScenarioResult) -> f64,
-    px: bool,
     floor: f64,
 }
 
@@ -71,55 +64,46 @@ fn metrics() -> [Metric; 9] {
         Metric {
             name: "bones broken",
             value: |r| r.bone_fractures as f64,
-            px: false,
             floor: 1.0,
         },
         Metric {
             name: "skin torn",
             value: |r| r.skin_tears as f64,
-            px: false,
             floor: 4.0,
         },
         Metric {
             name: "muscle torn",
             value: |r| r.muscle_tears as f64,
-            px: false,
             floor: 4.0,
         },
         Metric {
             name: "bruises",
             value: |r| r.contusion_events as f64,
-            px: false,
             floor: 15.0,
         },
         Metric {
             name: "arteries cut",
             value: |r| r.vessel_lacerations as f64,
-            px: false,
             floor: 1.0,
         },
         Metric {
             name: "blood lost (ml)",
             value: |r| r.blood_loss * rp::scenarios::BLOOD_VOLUME_ML,
-            px: false,
             floor: 2.0,
         },
         Metric {
             name: "fastest tissue (px/s)",
             value: |r| r.max_point_speed,
-            px: true,
             floor: 250.0,
         },
         Metric {
             name: "fist off its guard (px)",
             value: |r| r.final_fist_offset,
-            px: true,
             floor: 6.0,
         },
         Metric {
             name: "head turn (degrees)",
             value: |r| r.max_head_turn,
-            px: false,
             floor: 5.0,
         },
     ]
@@ -135,7 +119,6 @@ fn median(mut values: Vec<f64>) -> f64 {
 /// outcome happened, how often the runs stayed in band, and the medians.
 fn differences(
     scenario: &Scenario,
-    moved: Moved,
     base: &[(ScenarioResult, bool)],
     other: &[(ScenarioResult, bool)],
 ) -> Vec<String> {
@@ -166,30 +149,18 @@ fn differences(
             ));
         }
     }
-    let scale = moved.px_scale();
     for metric in &metrics() {
-        let before = median(
-            base.iter()
-                .map(|(result, _)| (metric.value)(result))
-                .collect(),
-        );
-        let after = median(
-            other
-                .iter()
-                .map(|(result, _)| (metric.value)(result) * if metric.px { scale } else { 1.0 })
-                .collect(),
-        );
+        let median_of = |runs: &[(ScenarioResult, bool)]| {
+            median(
+                runs.iter()
+                    .map(|(result, _)| (metric.value)(result))
+                    .collect(),
+            )
+        };
+        let (before, after) = (median_of(base), median_of(other));
         let limit = (0.3 * before.abs().max(after.abs())).max(metric.floor);
         if (after - before).abs() > limit {
-            found.push(format!(
-                "median {} {before:.1} -> {after:.1}{}",
-                metric.name,
-                if metric.px && scale != 1.0 {
-                    " (in the tuned window's pixels)"
-                } else {
-                    ""
-                }
-            ));
+            found.push(format!("median {} {before:.1} -> {after:.1}", metric.name));
         }
     }
     found
@@ -252,7 +223,7 @@ pub(crate) fn moved_body_tests(selected: &[Scenario], output_dir: &Path) {
     for (index, scenario) in selected.iter().enumerate() {
         let base = &played[index][0];
         for (way, &moved) in Moved::ALL.iter().enumerate().skip(1) {
-            let found = differences(scenario, moved, base, &played[index][way]);
+            let found = differences(scenario, base, &played[index][way]);
             if found.is_empty() {
                 continue;
             }

@@ -50,11 +50,10 @@
 //!                                     phase's share beyond what it does at
 //!                                     rest, and the frames that moved it most
 //!   --moved                           instead, the moved-body tests: replay each
-//!                                     scenario's sweep with the body mirrored,
-//!                                     moved across the window, and drawn larger,
-//!                                     report where the blows hurt it differently,
-//!                                     and let a body fall and drift free
-//!                                     (strike_moved_report.txt)
+//!                                     scenario's sweep with the body mirrored and
+//!                                     moved across the window, report where the
+//!                                     blows hurt it differently, and let a body
+//!                                     fall and drift free (strike_moved_report.txt)
 //!   --random N [--seed S] [--tools T,...]
 //!                                     instead, play N random blows: any tool
 //!                                     (bat, hammer, knife), through any point of

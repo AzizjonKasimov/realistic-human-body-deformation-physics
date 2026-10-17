@@ -1,8 +1,8 @@
 //! Screenshot mode, so the real rendering can be checked without a person at
 //! the keyboard. `realistic_physics --capture OUT.png [options]` opens the
 //! window, plays an optional scripted strike or gesture from
-//! `realistic_physics::scenarios`, saves the screen as a PNG, and exits.
-//! Native only.
+//! `realistic_physics::scenarios`, saves the screen as a PNG, prints a digest
+//! of the world it left (`world digest ...`), and exits. Native only.
 //!
 //! ```text
 //! --size WXH                 window size (default 1280x720)
@@ -22,11 +22,12 @@
 //! --label TEXT              write TEXT in the bottom right corner
 //! --no-label                 write no label or step number, for frames that
 //!                            become a video (`--every 1` saves every step)
-//! --body-frame X,Y,H         put the top of the head at X,Y and make the body
-//!                            H pixels tall instead of fitting it to the window.
-//!                            Injuries depend on the body's size in pixels, and
-//!                            the tuned scenarios use 561.6, its height in a
-//!                            1280x720 window, so a tall video keeps that size.
+//! --body-frame X,Y,H         draw the top of the head at X,Y and the body H
+//!                            pixels tall instead of fitting it to the window.
+//!                            It is only drawn so: every body is simulated at
+//!                            the scenarios' size and place (561.6 px tall,
+//!                            `rp::world_frame`), so a play hurts it alike in
+//!                            any window and at any size it is drawn.
 //! --events FILE              write what happens at each step as CSV: the tool,
 //!                            its speed and impact, whether it touches the body,
 //!                            and running counts of broken bones, torn skin and
@@ -189,11 +190,12 @@ pub async fn run(request: CaptureRequest) {
     let (width, height) = (screen_width() as f64, screen_height() as f64);
     let mut app = AppState::new(width, height);
     if let Some(frame) = request.body_frame {
-        app.place_body(frame, width as f32, height as f32);
+        app.view = rp::View::fitting(rp::world_frame(), frame);
     }
+    let world_frame = rp::world_frame();
     if let Some(play) = &request.play {
         // Bones as strong as the play asks, for a run of the sweep.
-        app.world = rp::create_layered_body_in(app.frame, play.materials());
+        app.world = rp::create_layered_body_in(world_frame, play.materials());
         app.world.capture_motion(&mut app.earlier);
     }
     app.hide_ui = request.hide_ui;
@@ -216,19 +218,21 @@ pub async fn run(request: CaptureRequest) {
         .as_ref()
         .map(|bank| (Foley::new(), Mixdown::new(bank, dt)));
     for frame in 0..frames {
+        // The play is in the world, as the scenarios play it; only its
+        // pointer ring is drawn through the view.
         let input = match &request.play {
-            Some(play) => play.input(frame, dt, app.frame),
+            Some(play) => play.input(frame, dt, world_frame),
             None => rp::InputState::default(),
         };
         if input.active {
             app.tool = input.tool;
-            app.pointer = rp::Vec2 {
+            app.pointer = app.view.to_screen(rp::Vec2 {
                 x: input.x,
                 y: input.y,
-            };
+            });
         }
         app.pointer_down = input.down;
-        step_world(&mut app, &input, width);
+        step_world(&mut app, &input);
         if let Some((foley, mix)) = sound.as_mut() {
             mix.step(&foley.hear(&app.world));
         }
@@ -245,6 +249,12 @@ pub async fn run(request: CaptureRequest) {
         }
     }
     save_views(&mut app, &request, request.every.map(|_| frames)).await;
+    // A fingerprint of the world the play left, which must not depend on the
+    // window: capture.ps1 compares it across the sizes it captures.
+    println!(
+        "world digest {:016x} after {frames} steps",
+        rp::inspect::digest(&app.world)
+    );
     if let Some(mut out) = events {
         out.flush().unwrap_or_else(|error| fail(&error.to_string()));
     }

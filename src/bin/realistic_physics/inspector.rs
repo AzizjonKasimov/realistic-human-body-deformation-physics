@@ -34,7 +34,7 @@ use rp::inspect::{
     actor_name, bone_name, joint_name, measure_text as measure_words, place_name, story,
     subject_name, subject_spec, BlameTarget, Trip, Watchdogs, Why,
 };
-use rp::scenarios::{scenario, Gesture, Play, Scenario, Strike, SCENARIO_HEIGHT, SCENARIO_WIDTH};
+use rp::scenarios::{scenario, Gesture, Play, Scenario, Strike};
 
 use super::*;
 
@@ -262,27 +262,25 @@ struct Viewer {
 /// Plays `frame` of `scenario` on the app, as the scenarios play it.
 fn play_frame(app: &mut AppState, scenario: &Scenario, frame: i32) {
     let dt = app.world.materials().fixed_dt;
-    let input = scenario.input(frame, dt, app.frame);
+    let input = scenario.input(frame, dt, rp::world_frame());
     if input.active {
         app.tool = input.tool;
-        app.pointer = rp::Vec2 {
+        app.pointer = app.view.to_screen(rp::Vec2 {
             x: input.x,
             y: input.y,
-        };
+        });
     }
     app.pointer_down = input.down;
-    step_world(app, &input, SCENARIO_WIDTH);
+    step_world(app, &input);
 }
 
 impl Viewer {
     /// Plays the whole of `scenario` once, keeping what stepping through it
     /// needs.
     fn record(scenario: Scenario) -> Self {
-        let mut app = AppState::new(SCENARIO_WIDTH, SCENARIO_HEIGHT);
+        let mut app = AppState::new(screen_width() as f64, screen_height() as f64);
         app.hide_ui = true;
-        let frame = rp::body_frame(SCENARIO_WIDTH, SCENARIO_HEIGHT);
-        app.place_body(frame, SCENARIO_WIDTH as f32, SCENARIO_HEIGHT as f32);
-        app.world = rp::create_layered_body_in(frame, scenario.materials());
+        app.world = rp::create_layered_body_in(rp::world_frame(), scenario.materials());
         app.world.keep_journal();
         app.skin_rim = skin_rim(&app.world);
         let mut watchdogs = Watchdogs::new(&app.world);
@@ -435,6 +433,8 @@ pub async fn run(request: InspectRequest) {
     }
     loop {
         handle_keys(&mut viewer);
+        // A resized window draws the run larger or smaller, as the app does.
+        viewer.app.fit_view(screen_width(), screen_height());
         if viewer.playing {
             viewer.play_clock += get_frame_time() as f64;
             while viewer.play_clock >= PLAY_FRAME_SECONDS && viewer.playing {
@@ -525,10 +525,11 @@ fn handle_keys(viewer: &mut Viewer) {
             let share = ((x - 12.0) / (screen_width() - 24.0)).clamp(0.0, 1.0);
             go = Some((share * (viewer.frames - 1) as f32).round() as i32);
         } else if x < screen_width() - PANEL_WIDTH {
-            viewer.select_at(rp::Vec2 {
+            let at = viewer.app.view.to_world(rp::Vec2 {
                 x: x as f64,
                 y: y as f64,
             });
+            viewer.select_at(at);
             viewer.panel_scroll = 0;
         }
     }
@@ -575,6 +576,8 @@ fn wrapped(line: &str, width: f32) -> Vec<String> {
 
 fn draw_viewer(viewer: &Viewer) {
     draw_app(&viewer.app);
+    // The overlays lie on the world, drawn as the app draws it.
+    set_camera(&WorldCamera::of(viewer.app.view));
     let overlays = viewer.overlays;
     if overlays.stretch != Stretch::Off {
         draw_stretch(&viewer.app.world, overlays.stretch);
@@ -595,6 +598,7 @@ fn draw_viewer(viewer: &Viewer) {
     if let Some(selection) = viewer.selection {
         draw_selected(&viewer.app.world, selection);
     }
+    set_default_camera();
     draw_top_bar(viewer);
     draw_side_panel(viewer);
     draw_timeline(viewer);

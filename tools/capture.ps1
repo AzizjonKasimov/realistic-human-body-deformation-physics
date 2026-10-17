@@ -10,6 +10,12 @@ steps, saves the screen, and closes. With -Every N it also saves the screen
 every N steps on the way, as a film strip of how things move. Output goes to
 output\captures by default.
 
+The app simulates the body at the scenarios' size in any window and only draws
+it larger or smaller, so a play must hurt it alike at every size: with more
+than one size, this also checks that each capture's step-by-step log
+(NAME-SIZE-events.csv) and the digest of the world it left are the same, and
+fails, naming the first step that differs, when they are not.
+
 .EXAMPLE
 .\tools\capture.ps1
 Rest pose, normal and anatomy views, 1280x720.
@@ -73,13 +79,16 @@ if (-not $Exe) {
 $sheetExe = Join-Path $repoRoot "target\release\contact_sheet.exe"
 
 $images = @()
+# Per size: the world digest the capture printed and its step-by-step log.
+$runs = @()
 foreach ($size in ($Sizes -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
     $stem = "$Name-$size"
     $path = Join-Path $Out "$stem.png"
     # A film strip's frames are STEM-NNNN.png; clear an earlier strip's first.
     $stripPattern = "^$([regex]::Escape($stem))-\d{4}(-normal|-anatomy)?\.png$"
     Get-ChildItem -LiteralPath $Out -File | Where-Object { $_.Name -match $stripPattern } | Remove-Item
-    $arguments = @("--capture", $path, "--view", $View, "--size", $size, "--label", "$Name $size")
+    $events = Join-Path $Out "$stem-events.csv"
+    $arguments = @("--capture", $path, "--view", $View, "--size", $size, "--label", "$Name $size", "--events", $events)
     if ($Scenario) { $arguments += @("--scenario", $Scenario) }
     if ($Strike) { $arguments += @("--strike", $Strike) }
     if ($Gesture) { $arguments += @("--gesture", $Gesture) }
@@ -89,7 +98,16 @@ foreach ($size in ($Sizes -split "," | ForEach-Object { $_.Trim() } | Where-Obje
     if ($NoUi) { $arguments += "--no-ui" }
     if ($NoTool) { $arguments += "--no-tool" }
     if ($NoLabel) { $arguments += "--no-label" }
-    Invoke-Checked -Label "Capture $Name at $size" -Command { & $Exe @arguments }
+    $script:printed = @()
+    Invoke-Checked -Label "Capture $Name at $size" -Command {
+        $script:printed = & $Exe @arguments 2>&1
+        $script:printed
+    }
+    $digest = $script:printed | ForEach-Object { "$_" } |
+        Where-Object { $_ -match "^world digest (\S+)" } |
+        ForEach-Object { $Matches[1] } |
+        Select-Object -Last 1
+    $runs += [pscustomobject]@{ Size = $size; Digest = $digest; Events = $events }
     if ($Every -gt 0) {
         $images += Get-ChildItem -LiteralPath $Out -File |
             Where-Object { $_.Name -match $stripPattern } |
@@ -110,4 +128,37 @@ if ($images.Count -gt 1 -and (Test-Path $sheetExe)) {
     $height = if ($Every -gt 0) { 300 } else { 480 }
     $sheet = Join-Path $Out "$Name-sheet.png"
     Invoke-Checked -Label "Contact sheet" -Command { & $sheetExe $sheet --height $height --columns $columns @images }
+}
+
+# The window only changes how the world is drawn, so every size must have
+# simulated the same play step for step. Builds from before v0.10.2 sized the
+# body to the window and print no digest, so theirs are not compared.
+if ($runs.Count -gt 1 -and ($runs | Where-Object { -not $_.Digest })) {
+    Write-Host ""
+    Write-Host "This build prints no world digest (older than v0.10.2), so the sizes' physics was not compared."
+} elseif ($runs.Count -gt 1) {
+    $first = $runs[0]
+    $firstLog = Get-Content -LiteralPath $first.Events
+    $differ = @()
+    foreach ($run in $runs | Select-Object -Skip 1) {
+        $log = Get-Content -LiteralPath $run.Events
+        $step = 0
+        while ($step -lt [Math]::Max($firstLog.Count, $log.Count) -and $firstLog[$step] -eq $log[$step]) {
+            $step++
+        }
+        if ($run.Digest -ne $first.Digest -or $step -lt [Math]::Max($firstLog.Count, $log.Count)) {
+            $differ += $run
+            Write-Host ("{0} differs from {1}: world digest {2} against {3}" -f $run.Size, $first.Size, $run.Digest, $first.Digest)
+            if ($step -lt [Math]::Max($firstLog.Count, $log.Count)) {
+                Write-Host "  first different line of the step log ($($firstLog[0])):"
+                Write-Host "  $($first.Size): $($firstLog[$step])"
+                Write-Host "  $($run.Size): $($log[$step])"
+            }
+        }
+    }
+    if ($differ.Count -gt 0) {
+        throw "The same play hurt the body differently in different window sizes; the app's physics must not depend on the window."
+    }
+    Write-Host ""
+    Write-Host "Same physics at every size ($(($runs | ForEach-Object { $_.Size }) -join ', ')): world digest $($first.Digest), step logs identical."
 }
