@@ -5,10 +5,12 @@ mod silhouette;
 pub mod simulation;
 pub mod sound;
 mod version;
+mod view;
 
 pub use silhouette::silhouette_distance;
 pub use simulation::*;
 pub use version::version_label;
+pub use view::{world_frame, View};
 
 #[cfg(test)]
 mod tests {

@@ -1,5 +1,6 @@
 use macroquad::prelude::*;
 use realistic_physics as rp;
+use rp::scenarios::SCENARIO_WIDTH;
 
 mod about;
 mod analytics;
@@ -49,11 +50,14 @@ const CHIP_HEIGHT: f32 = 25.0;
 const BODY_UI_GAP: f32 = 4.0;
 
 struct AppState {
+    /// The body, simulated where every body is (`rp::world_frame`) whatever
+    /// the window, so a blow hurts it alike on every screen.
     world: rp::World,
-    /// Where the body was placed in the window.
-    frame: rp::BodyFrame,
-    /// Window size and button size the body was fitted to.
-    built_for: (f32, f32, bool),
+    /// How the world is drawn in the window: larger or smaller, to fit the
+    /// body between the HUD and the control buttons.
+    view: rp::View,
+    /// Window size and button size the view was fitted to.
+    view_for: (f32, f32, bool),
     running: bool,
     /// The sound is switched off.
     muted: bool,
@@ -61,10 +65,11 @@ struct AppState {
     debug_overlay: bool,
     accumulator: f64,
     pointer_initialized: bool,
-    /// Where the hand is; the simulation pulls the tool toward it.
+    /// Where the pointer is on the screen. The hand is where it points in
+    /// the world, and the simulation pulls the tool toward it.
     pointer: rp::Vec2,
-    /// Where the hand was on the last simulation step.
-    stepped_pointer: rp::Vec2,
+    /// Where the hand was in the world on the last simulation step.
+    stepped_hand: rp::Vec2,
     /// Where everything was before the last simulation step, and where it
     /// really is while the frame draws it between the two.
     earlier: rp::MotionSnapshot,
@@ -127,8 +132,8 @@ impl AppState {
         };
         let mut app = Self {
             world: rp::World::new(rp::Materials::default()),
-            frame: rp::body_frame(width, height),
-            built_for: (0.0, 0.0, false),
+            view: rp::View::IDENTITY,
+            view_for: (0.0, 0.0, false),
             running: true,
             muted: false,
             pointer_down: false,
@@ -136,7 +141,7 @@ impl AppState {
             accumulator: 0.0,
             pointer_initialized: false,
             pointer: initial_pointer,
-            stepped_pointer: initial_pointer,
+            stepped_hand: initial_pointer,
             earlier: rp::MotionSnapshot::default(),
             actual: rp::MotionSnapshot::default(),
             tool: rp::ToolMode::Heavy,
@@ -152,33 +157,40 @@ impl AppState {
             about_requested: false,
             about_open: None,
         };
-        app.rebuild_body(width as f32, height as f32);
+        app.fit_view(width as f32, height as f32);
+        app.stepped_hand = app.view.to_world(app.pointer);
+        app.reset_body();
         app
     }
 
-    /// A fresh body fitted to the window and to the controls as drawn now.
-    fn rebuild_body(&mut self, width: f32, height: f32) {
-        let frame = body_frame_for(self, width, height);
-        self.place_body(frame, width, height);
-    }
-
-    /// A fresh body at `frame` in a window of this size.
-    fn place_body(&mut self, frame: rp::BodyFrame, width: f32, height: f32) {
-        self.frame = frame;
-        self.world = rp::create_layered_body_in(self.frame, rp::Materials::default());
+    /// A fresh body, where every body is simulated.
+    fn reset_body(&mut self) {
+        self.world = rp::create_layered_body_in(rp::world_frame(), rp::Materials::default());
         self.world.capture_motion(&mut self.earlier);
         self.skin_rim = skin_rim(&self.world);
-        self.built_for = (width, height, self.touch_ui);
         self.tool_blood = 0.0;
         self.seen_fluid = 0;
         self.accumulator = 0.0;
     }
+
+    /// Fits the view to a window of this size and to the control buttons as
+    /// drawn now, when either has changed. Only the drawing changes: the body,
+    /// hurt or not, goes on being simulated where it is.
+    fn fit_view(&mut self, width: f32, height: f32) {
+        let now = (width, height, self.touch_ui);
+        if now != self.view_for {
+            let screen = screen_frame_for(self, width, height);
+            self.view = rp::View::fitting(rp::world_frame(), screen);
+            self.view_for = now;
+        }
+    }
 }
 
-/// Where the body goes: the default placement when it clears the HUD at the
-/// top and the control buttons at the bottom, which wrap into more rows in
-/// narrow windows, or else as large as fits between them.
-fn body_frame_for(app: &AppState, width: f32, height: f32) -> rp::BodyFrame {
+/// Where the body is drawn: the default placement when it clears the HUD at
+/// the top and the control buttons at the bottom, which wrap into more rows
+/// in narrow windows, or else as large as fits between them. At 1280x720 the
+/// default placement is where it is simulated, so the world is drawn as it is.
+fn screen_frame_for(app: &AppState, width: f32, height: f32) -> rp::BodyFrame {
     let default = rp::body_frame(width as f64, height as f64);
     let top = (hud_bottom(width) + BODY_UI_GAP) as f64;
     let hints = control_hints(app, &render_palette());
@@ -188,24 +200,6 @@ fn body_frame_for(app: &AppState, width: f32, height: f32) -> rp::BodyFrame {
         default
     } else {
         rp::body_frame_between(width as f64, top.max(default.origin.y), bottom)
-    }
-}
-
-/// Refits the body when the window or the button size has changed, as long as
-/// nothing has hurt it yet; a hurt body stays put until reset.
-fn refit_body(app: &mut AppState) {
-    let now = (screen_width(), screen_height(), app.touch_ui);
-    if now == app.built_for {
-        return;
-    }
-    let stats = app.world.stats();
-    let untouched = stats.contusion_events == 0
-        && stats.broken_skin == 0
-        && stats.broken_muscle == 0
-        && stats.fractured_bones == 0
-        && stats.emitted_fluid_particles == 0;
-    if untouched {
-        app.rebuild_body(now.0, now.1);
     }
 }
 
@@ -258,10 +252,45 @@ struct RenderContext<'a> {
     palette: RenderPalette,
     width: f32,
     height: f32,
-    /// Where the floor the body stands on lies, which the ground is drawn
-    /// down from and blood pools on.
+    /// Where the floor the body stands on is drawn on the screen, which the
+    /// ground is drawn down from.
     floor_y: f32,
+    /// The same floor in the world, which blood pools on.
+    world_floor_y: f32,
     anatomy: bool,
+}
+
+/// Draws world positions where the app's view puts them on the screen: the
+/// screen's own projection, which macroquad's default camera uses, after the
+/// view's scale and offset.
+struct WorldCamera(Mat4);
+
+impl WorldCamera {
+    fn of(view: rp::View) -> Self {
+        let screen = Mat4::orthographic_rh_gl(0.0, screen_width(), screen_height(), 0.0, -1.0, 1.0);
+        let scale = view.scale as f32;
+        let placed = Mat4::from_translation(vec3(view.offset.x as f32, view.offset.y as f32, 0.0))
+            * Mat4::from_scale(vec3(scale, scale, 1.0));
+        Self(screen * placed)
+    }
+}
+
+impl Camera for WorldCamera {
+    fn matrix(&self) -> Mat4 {
+        self.0
+    }
+
+    fn depth_enabled(&self) -> bool {
+        false
+    }
+
+    fn render_pass(&self) -> Option<RenderPass> {
+        None
+    }
+
+    fn viewport(&self) -> Option<(i32, i32, i32, i32)> {
+        None
+    }
 }
 
 fn window_conf() -> Conf {
@@ -314,7 +343,7 @@ async fn run() {
         if handle_input(&mut app) {
             audio.click();
         }
-        refit_body(&mut app);
+        app.fit_view(screen_width(), screen_height());
         step_simulation(&mut app, dt, &mut audio);
         audio.play(dt as f32, app.muted, app.running);
         // Draw the body between the last two simulation steps, so it moves
@@ -410,7 +439,7 @@ fn apply_control(app: &mut AppState, action: ControlAction) {
         }
         ControlAction::ToggleDebug => app.debug_overlay = !app.debug_overlay,
         ControlAction::TogglePause => app.running = !app.running,
-        ControlAction::Reset => app.rebuild_body(screen_width(), screen_height()),
+        ControlAction::Reset => app.reset_body(),
         ControlAction::ToggleMute => app.muted = !app.muted,
         ControlAction::About => app.about_requested = true,
     }
@@ -428,7 +457,9 @@ fn step_simulation(app: &mut AppState, frame_dt: f64, audio: &mut audio::Audio) 
     let steps = (app.accumulator / fixed_dt).floor() as usize;
     // The pointer moved over the time these steps cover, so the hand moves
     // through them evenly instead of jumping on the first and resting after.
-    let (from, to) = (app.stepped_pointer, app.pointer);
+    // It is read through the view as fitted this frame, after a first touch
+    // has grown the buttons, so a finger lands where the body is drawn.
+    let (from, to) = (app.stepped_hand, app.view.to_world(app.pointer));
     for step in 0..steps {
         let t = (step + 1) as f64 / steps as f64;
         let input = rp::InputState {
@@ -442,20 +473,21 @@ fn step_simulation(app: &mut AppState, frame_dt: f64, audio: &mut audio::Audio) 
             tool: app.tool,
         };
         app.world.capture_motion(&mut app.earlier);
-        step_world(app, &input, screen_width() as f64);
+        step_world(app, &input);
         audio.hear(&app.world);
         analytics::step(&app.world);
         app.accumulator -= fixed_dt;
     }
     if steps > 0 {
-        app.stepped_pointer = to;
+        app.stepped_hand = to;
     }
 }
 
-/// One fixed simulation step with this input, plus the blood the tool picks up.
-fn step_world(app: &mut AppState, input: &rp::InputState, width: f64) {
+/// One fixed simulation step with this input, in the scenarios' world
+/// whatever the window, plus the blood the tool picks up.
+fn step_world(app: &mut AppState, input: &rp::InputState) {
     let fixed_dt = app.world.materials().fixed_dt;
-    app.world.step(fixed_dt, input, width);
+    app.world.step(fixed_dt, input, SCENARIO_WIDTH);
     // A cut that opened rejoined the mesh, so the outline is rebuilt.
     if app.skin_rim.version != app.world.topology_version() {
         app.skin_rim = skin_rim(&app.world);
@@ -470,22 +502,33 @@ fn step_world(app: &mut AppState, input: &rp::InputState, width: f64) {
 }
 
 fn draw_app(app: &AppState) {
+    let floor_y = ground_y(app);
+    let floor = app.view.to_world(rp::Vec2 {
+        x: 0.0,
+        y: floor_y as f64,
+    });
     let ctx = RenderContext {
         app,
         palette: render_palette(),
         width: screen_width(),
         height: screen_height(),
-        floor_y: ground_y(app),
+        floor_y,
+        world_floor_y: floor.y as f32,
         anatomy: app.view_mode == ViewMode::Anatomy,
     };
 
     draw_background(&ctx);
+    // The world, drawn larger or smaller to fit the window; the HUD and
+    // buttons keep their size.
+    set_camera(&WorldCamera::of(app.view));
     draw_body_layers(&ctx);
     draw_effects(&ctx);
-    draw_striker(&ctx);
+    draw_tool(&ctx);
+    set_default_camera();
     if app.hide_ui {
         return;
     }
+    draw_pointer(&ctx);
     draw_hud(&ctx);
     draw_controls_hint(&ctx);
     draw_version(&ctx);
@@ -541,12 +584,13 @@ fn screen_floor_y() -> f32 {
     screen_height() - FLOOR_HEIGHT
 }
 
-/// Where the ground begins: the floor the body stands on, at its soles, or
-/// the window's bottom strip before there is a body.
+/// Where the ground begins on the screen: the floor the body stands on, at
+/// its soles, or the window's bottom strip before there is a body.
 fn ground_y(app: &AppState) -> f32 {
     let floor = app.world.floor_y();
     if floor.is_finite() {
-        (floor as f32).min(screen_floor_y())
+        let drawn = app.view.to_screen(rp::Vec2 { x: 0.0, y: floor }).y;
+        (drawn as f32).min(screen_floor_y())
     } else {
         screen_floor_y()
     }
@@ -1576,7 +1620,10 @@ fn draw_blood_stains(ctx: &RenderContext) {
         let half = (stain.width * 0.5) as f32;
         // A low view squashes the round pool into a flat ellipse.
         let deep = half * 0.22;
-        let (x, y) = (stain.position.x as f32, ctx.floor_y + 1.5 + deep * 0.4);
+        let (x, y) = (
+            stain.position.x as f32,
+            ctx.world_floor_y + 1.5 + deep * 0.4,
+        );
         let dry = (stain.age / BLOOD_DRYING_SECONDS).clamp(0.0, 1.0) as f32;
         let body = mix(rgba(118, 6, 16, 255), ctx.palette.blood_stain, dry);
         draw_ellipse(
@@ -1684,7 +1731,7 @@ fn draw_fluids(ctx: &RenderContext) {
         );
     }
 }
-fn draw_striker(ctx: &RenderContext) {
+fn draw_tool(ctx: &RenderContext) {
     let app = ctx.app;
     // The same pose and geometry the simulation collides with.
     if let Some(pose) = app.world.current_tool_pose().filter(|_| !app.hide_tool) {
@@ -1695,10 +1742,11 @@ fn draw_striker(ctx: &RenderContext) {
             rp::ToolMode::Blunt => draw_bat(ctx, &pose, &geometry),
         }
     }
+}
 
-    if app.hide_ui {
-        return;
-    }
+/// A ring where the pointer is, the same size on any screen.
+fn draw_pointer(ctx: &RenderContext) {
+    let app = ctx.app;
     let pointer = app.pointer;
     let ring = if app.pointer_down { 6.0 } else { 5.0 };
     draw_circle_lines(
