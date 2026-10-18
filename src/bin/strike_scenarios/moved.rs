@@ -1,5 +1,7 @@
-//! Moved-body tests. The same blows on the body mirrored left to right, or
-//! standing where either of two fighters stands, should hurt it alike,
+//! Moved-body tests. The same blows on the body mirrored left to right,
+//! on its mirror image as a second fighter is built (`World::mirrored`), or
+//! on the body standing where either of two fighters stands, should hurt it
+//! alike,
 //! judged over the sweep's runs: a rule that differs is reading where
 //! something is in the world, or is not the same on the body's two sides,
 //! rather than what is happening to the body. And a body falling or
@@ -31,6 +33,10 @@ enum Moved {
     /// Aimed a millionth of a pixel off: what chance alone does.
     Nudged,
     Mirrored,
+    /// The mirror image of the play on the body's mirror image, as the
+    /// second fighter is built: solved in the same order, it differs only
+    /// as rounding does.
+    MirrorImage,
     /// Moved to where fighter N stands (`rp::fighter_frames`).
     AtFighter(usize),
 }
@@ -40,10 +46,11 @@ enum Moved {
 const NUDGE: f64 = 2.0e-9;
 
 impl Moved {
-    const ALL: [Moved; 5] = [
+    const ALL: [Moved; 6] = [
         Moved::Same,
         Moved::Nudged,
         Moved::Mirrored,
+        Moved::MirrorImage,
         Moved::AtFighter(0),
         Moved::AtFighter(1),
     ];
@@ -63,6 +70,9 @@ impl Moved {
             Moved::Same => "as tuned".to_string(),
             Moved::Nudged => "aimed a millionth of a pixel off (chance alone)".to_string(),
             Moved::Mirrored => "mirrored left to right".to_string(),
+            Moved::MirrorImage => {
+                "mirrored on the body's mirror image (a second fighter)".to_string()
+            }
             Moved::AtFighter(fighter) => format!(
                 "where the {} fighter stands, {:+.0} px across",
                 if fighter == 0 { "left" } else { "right" },
@@ -77,6 +87,7 @@ impl Moved {
     fn scenario(self, scenario: &Scenario, along: f64, across: f64) -> Scenario {
         match self {
             Moved::Mirrored => scenario.shifted(along, across).mirrored(),
+            Moved::MirrorImage => scenario.shifted(along, across).mirrored_for_mirror_image(),
             Moved::Nudged => scenario.shifted(along + NUDGE, across),
             _ => scenario.shifted(along, across),
         }
@@ -266,6 +277,9 @@ pub(crate) fn moved_body_tests(selected: &[Scenario], output_dir: &Path) {
                     .scenario(&selected[index], along, across)
                     .with_bone_strength(strength);
                 let mut body = settled_body(SCENARIO_WIDTH, SCENARIO_HEIGHT, scenario.materials());
+                if moved == Moved::MirrorImage {
+                    body = body.mirrored(tuned_frame.origin.x);
+                }
                 let dx = moved.across();
                 body.move_across(dx);
                 let frame = rp::BodyFrame {

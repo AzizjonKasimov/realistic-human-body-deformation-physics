@@ -36,6 +36,11 @@
 //! --set NAME=VALUE           play with a setting of `Materials` changed, as
 //!                            `strike_scenarios --set` does, to see what a
 //!                            change looks like before making it the default
+//! --fighters                 play on two fighters standing side by side, as
+//!                            the app shows them, rather than a lone body
+//!                            (gestures throw the second fighter's punches
+//!                            with `punch2=`)
+//! --spacing S                with --fighters, stand them S body heights apart
 //! --sound FILE               write the game's own sound for the steps played,
 //!                            as a WAV mixed step by step the way the app plays
 //!                            it (`sound::Mixdown`), each step's sounds starting
@@ -74,6 +79,9 @@ pub struct CaptureRequest {
     /// One run of the strike sweep: the play moved along and across its
     /// path, on bones this much stronger (`strike_scenarios --variant`).
     variant: Option<(f64, f64, f64)>,
+    /// Play on two fighters rather than a lone body.
+    fighters: bool,
+    spacing: Option<f64>,
 }
 
 /// The window size asked for with `--size`, when capturing.
@@ -113,6 +121,8 @@ pub fn request() -> Option<CaptureRequest> {
         events: None,
         sound: None,
         variant: None,
+        fighters: false,
+        spacing: None,
     };
     while let Some(arg) = args.next() {
         let mut value = |name: &str| {
@@ -151,6 +161,18 @@ pub fn request() -> Option<CaptureRequest> {
             "--every" => request.every = Some(steps(&value("--every")).max(1)),
             "--no-ui" => request.hide_ui = true,
             "--no-tool" => request.hide_tool = true,
+            "--fighters" => request.fighters = true,
+            "--spacing" => {
+                let text = value("--spacing");
+                request.spacing = Some(
+                    text.parse::<f64>()
+                        .ok()
+                        .filter(|spacing| (0.2..=1.5).contains(spacing))
+                        .unwrap_or_else(|| {
+                            fail(&format!("`{text}` is not a spacing in body heights"))
+                        }),
+                );
+            }
             "--label" => request.label = Some(value("--label")),
             "--no-label" => request.show_label = false,
             "--body-frame" => {
@@ -204,9 +226,20 @@ pub async fn run(request: CaptureRequest) {
         app.view = rp::View::fitting(rp::world_frame(), frame);
     }
     let world_frame = rp::world_frame();
-    if let Some(play) = &request.play {
+    if let Some(spacing) = request.spacing {
+        app.spacing = spacing;
+        app.view_for = (0.0, 0.0, false);
+        app.fit_view(width as f32, height as f32);
+    }
+    let materials = request
+        .play
+        .map_or_else(rp::Materials::default, |play| play.materials());
+    if request.fighters {
+        app.world = rp::create_fighters_at(materials, app.spacing);
+        app.world.capture_motion(&mut app.earlier);
+    } else if request.play.is_some() {
         // Bones as strong as the play asks, for a run of the sweep.
-        app.world = rp::create_layered_body_in(world_frame, play.materials());
+        app.world = rp::create_layered_body_in(world_frame, materials);
         app.world.capture_motion(&mut app.earlier);
     }
     app.hide_ui = request.hide_ui;

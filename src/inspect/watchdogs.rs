@@ -311,7 +311,14 @@ impl Watchdogs {
             .fastest_tool
             .max(debug.striker_speed)
             .max(debug.punch_speed);
-        if debug.tissue_contacts + debug.bone_contacts > 0 {
+        // A body throwing a punch moves on purpose: it is not left alone
+        // to come to rest until the punch is over.
+        let punching = (0..world.body_count()).any(|body| {
+            [Limb::LeftArm, Limb::RightArm]
+                .iter()
+                .any(|&arm| world.punch(body, arm).is_some())
+        });
+        if debug.tissue_contacts + debug.bone_contacts > 0 || punching {
             self.quiet = 0;
         } else {
             self.quiet += 1;
@@ -522,20 +529,27 @@ impl Watchdogs {
                 );
             }
         }
-        for arm in [Limb::LeftArm, Limb::RightArm] {
-            let hurt = world.limp(arm)
+        for (body, arm) in (0..world.body_count())
+            .flat_map(|body| [Limb::LeftArm, Limb::RightArm].map(|arm| (body, arm)))
+        {
+            let of_body = |bone: usize| {
+                world
+                    .bones()
+                    .get(bone)
+                    .is_some_and(|bone| bone.body as usize == body)
+            };
+            let hurt = world.limp(body, arm)
                 || world.bone_joints().iter().any(|joint| {
                     joint.drive.limb == arm
+                        && of_body(joint.a)
                         && (joint.broken || joint.post_fracture_limited || joint.subluxated)
                 });
             if hurt {
                 continue;
             }
-            let fist = world
-                .bones()
-                .iter()
-                .enumerate()
-                .find(|(_, bone)| bone.part == BonePart::Hand && bone.limb == arm);
+            let fist = world.bones().iter().enumerate().find(|(_, bone)| {
+                bone.part == BonePart::Hand && bone.limb == arm && bone.body as usize == body
+            });
             if let Some((index, bone)) = fist {
                 let off = span(bone.b, bone.home_b);
                 if off > GUARD_DROP_PX {

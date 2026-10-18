@@ -527,7 +527,7 @@ impl World {
                 let link = JointLink::of(&joint, &self.bones);
                 self.apply_joint_link(&joint, &link, joint.impulse, h);
             }
-            if joint.hold_impulse != Vec2::default() && !self.punch_drives(index) {
+            if joint.hold_impulse != Vec2::default() && !self.punch_pins(index) {
                 let pin = JointPin::of(&joint, &self.bones, hold.reach());
                 self.apply_joint_pin(&joint, &pin, joint.hold_impulse, h);
             }
@@ -655,7 +655,7 @@ impl World {
             if !hold.pulls_only {
                 self.bone_joints[index].impulse = 0.0;
                 // A punch holds its joints round the whole limb (`punch.rs`).
-                if self.punch_drives(index) {
+                if self.punch_pins(index) {
                     self.solve_joint_limit(index, &hold, cap, h);
                     continue;
                 }
@@ -1047,12 +1047,16 @@ impl World {
     /// Each triangle of tissue resists growing or shrinking, as tissue that
     /// keeps its volume bulges rather than squashes.
     fn solve_soft_areas(&mut self, h: f64) {
-        let turgor = self.blood_turgor_scale_internal();
+        let turgor_by_body = self.turgor_by_body();
         for index in 0..self.areas.len() {
             let area = self.areas[index];
             if area.stiffness <= 0.0 || !self.area_alive(&area) {
                 continue;
             }
+            let turgor = turgor_by_body
+                .get(self.points[area.a].body as usize)
+                .copied()
+                .unwrap_or(1.0);
             let corners = [area.a, area.b, area.c];
             let gradients = area_gradients(&self.points, &area);
             let mut weight = 0.0;

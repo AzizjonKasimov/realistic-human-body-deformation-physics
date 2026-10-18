@@ -13,35 +13,59 @@
 use super::soft::{perpendicular, JointPin, JointTurn, Softness};
 use super::*;
 
-/// One joint a punch drives, and what its muscles move. Throwing a punch,
-/// the arm's muscles are contracted, and a contracted limb moves as one
-/// piece: its muscles turn the whole limb beyond the joint, bone and flesh
-/// together, and push back on the rest of the body. Pulling on the light
-/// bones alone, they ran the bones ahead of the flesh round them, and
-/// stopping at full reach, the fist's flesh pulled the hand's bone off the
-/// wrist. Pushing back on the upper arm alone, the elbow's muscles lifted it
-/// faster than the shoulder's could hold it, and the fist swung up over the
-/// head: a practised arm braces against the turn of its own joints, so the
-/// push passes on to the trunk.
+/// One joint a punch drives, and the two pieces of the arm's chain it joins
+/// (`Link`). Throwing a punch, the arm's muscles are contracted, and a
+/// contracted limb moves as pieces: each joint's muscles turn the piece
+/// beyond it, bone and flesh together, and push back on the piece before
+/// it, and its hold keeps the two together, as Box2D's revolute joint joins
+/// two bodies. Pulling on the light bones alone, they ran the bones ahead
+/// of the flesh round them, and stopping at full reach, the fist's flesh
+/// pulled the hand's bone off the wrist. Pushing back on the whole rest of
+/// the body rather than the piece before, each joint out along the arm
+/// pushed the arm round the shoulder from outside it: straightening, the
+/// elbow held the arm down with nearly the shoulder's whole strength, and
+/// the fist never rose above the shoulder.
 #[derive(Clone, Debug, PartialEq)]
 struct Swing {
     joint: usize,
-    /// Which bones lie beyond the joint, by index as the punch began.
-    beyond: Vec<bool>,
-    /// How much of each point's place on the skeleton lies on those bones
-    /// (`PostureBinding`), by index as the punch began; the rest of each
-    /// point belongs to the rest of the body.
-    share: Vec<f64>,
+    /// The body whose arm swings.
+    body: usize,
+    /// The pieces on the body's side of the joint and beyond it, by their
+    /// place in [`Punch::links`].
+    inner: usize,
+    outer: usize,
+    /// Whether the punch holds the joint together round its pieces too, or
+    /// leaves that to the joint's own hold on its bones.
+    pinned: bool,
+    /// What the joint's own muscles and hold carried in the guard as the
+    /// punch began, which they take up again once it is over.
+    guard_impulses: (f64, Vec2),
+    /// Whether the punch still drives the joint: the arm's joints go back
+    /// to their own muscles once the arm is back in its guard, while the
+    /// lower back's stay with the punch until the body is upright again.
+    active: bool,
     /// How hard each side is to move this substep (`World::measure_punches`).
     sides: Option<Sides>,
 }
 
+/// One piece of a punching arm's chain: the rest of the body, the
+/// collarbone, the upper arm, the forearm, or the hand, each with the flesh
+/// bound to it.
+#[derive(Clone, Debug, PartialEq)]
+struct Link {
+    /// Which bones it holds, by index as the punch began.
+    bones: Vec<bool>,
+    /// How much of each point's place on the skeleton lies on those bones
+    /// (`PostureBinding`), by index as the punch began.
+    share: Vec<f64>,
+}
+
 /// The two sides of a joint a punch drives, where the substep began: the
-/// rest of the body and the limb beyond, each moved as one piece.
+/// piece before it and the piece beyond, each moved as one piece.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Sides {
-    rest: Piece,
-    beyond: Piece,
+    inner: Piece,
+    outer: Piece,
 }
 
 /// A side moved as one piece: its mass, its centre of mass, and how hard it
@@ -58,21 +82,32 @@ struct Piece {
 pub struct Punch {
     /// Seconds since it was thrown.
     pub age: f64,
-    /// The shoulder girdle, the shoulder, the elbow, and the wrist, which it
-    /// drives.
-    swings: [Swing; 4],
+    /// The lower back, the shoulder girdle, the shoulder, the elbow, the
+    /// wrist, the neck, and the other arm's shoulder, which it drives.
+    swings: [Swing; 7],
+    /// The pieces those joints join: the hips and legs, the trunk above
+    /// them, the arm's collarbone, upper arm, forearm, and hand, the head,
+    /// and the other arm beyond its shoulder.
+    links: Vec<Link>,
     /// The fist's way out, a straight line from where it stood in the guard
-    /// to where the punch aims, from the shoulder in the body as built.
+    /// to where the punch aims, from the shoulder in the trunk as built.
     path: ArmPath,
+    /// How far above level the fist's end lies from the shoulder in the
+    /// world, in radians (`Materials::punch_rise`).
+    rise: f64,
+    /// Which way the punch goes: 1 toward the right of the window, -1
+    /// toward the left.
+    toward: f64,
 }
 
 /// A two-link arm's fist moving on a straight line, and the shoulder's and
 /// elbow's turns that put it there.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct ArmPath {
-    /// Where the fist starts and ends, from the shoulder.
+    /// Where the fist starts, from the shoulder, and how far from the
+    /// shoulder it ends.
     from: Vec2,
-    to: Vec2,
+    reach: f64,
     /// From the shoulder to the elbow, and from the elbow to the fist.
     upper: f64,
     fore: f64,
@@ -104,9 +139,14 @@ impl ArmPath {
     }
 
     /// How far the shoulder and the elbow turn from the guard to put the
-    /// fist `reach` of the way along the path.
-    fn turns(&self, reach: f64) -> (f64, f64) {
-        let fist = lerp(self.from, self.to, reach);
+    /// fist `progress` of the way along the path to its end at the angle
+    /// `line` from the shoulder.
+    fn turns(&self, progress: f64, line: f64) -> (f64, f64) {
+        let to = Vec2 {
+            x: self.reach * libm::cos(line),
+            y: self.reach * libm::sin(line),
+        };
+        let fist = lerp(self.from, to, progress);
         let (upper, elbow) = self.solve(fist);
         (
             wrap_angle(upper - self.start.0),
@@ -115,34 +155,72 @@ impl ArmPath {
     }
 }
 
+/// How far from 0 to 1 the smoothest path, the one that keeps the change of
+/// acceleration least, has gone at `t` of its way (Flash and Hogan 1985).
+fn smooth(t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * t * (10.0 + t * (6.0 * t - 15.0))
+}
+
 impl Punch {
+    /// When the fist reaches the punch's pose, in seconds after it was
+    /// thrown: once the arm has gone out and the trunk has leaned in.
+    fn landing(materials: &Materials) -> f64 {
+        materials
+            .punch_out_seconds
+            .max(materials.punch_lean_seconds)
+    }
+
     /// How far along its way to the punch's pose the arm aims at `age`, from
     /// 0 in the guard to 1 at the pose, for a punch timed by `materials`:
-    /// out and back along the smoothest path, the one that keeps the change
-    /// of acceleration least, as people plan a quick reach (Flash and Hogan
-    /// 1985). Its muscles follow the path, so they take up the arm's weight
-    /// gradually rather than all at once.
+    /// out and back along the smoothest path, as people plan a quick reach.
+    /// Its muscles follow the path, so they take up the arm's weight
+    /// gradually rather than all at once. The arm sets off late enough to
+    /// get there as the trunk finishes leaning in, as a punch's trunk moves
+    /// before its arm.
     fn reach_at(age: f64, materials: &Materials) -> f64 {
-        let smooth = |t: f64| {
-            let t = t.clamp(0.0, 1.0);
-            t * t * t * (10.0 + t * (6.0 * t - 15.0))
-        };
+        let landing = Self::landing(materials);
         let out = materials.punch_out_seconds;
-        if age < out {
-            smooth(age / out.max(EPSILON))
+        if age < landing {
+            smooth((age - (landing - out)) / out.max(EPSILON))
         } else {
-            1.0 - smooth((age - out) / materials.punch_back_seconds.max(EPSILON))
+            1.0 - smooth((age - landing) / materials.punch_back_seconds.max(EPSILON))
+        }
+    }
+
+    /// How far the body has gone into the punch at `age`, from 0 in the
+    /// guard to 1 leaned `Materials::punch_lean` and shifted
+    /// `Materials::punch_hip_shift`: in as the arm goes out, and back over
+    /// `Materials::punch_recover_seconds`. Brought back as fast as the arm,
+    /// the hips swung the trunk past upright, and it rocked for over a
+    /// second.
+    fn lean_at(age: f64, materials: &Materials) -> f64 {
+        let landing = Self::landing(materials);
+        let lean = materials.punch_lean_seconds.max(EPSILON);
+        if age < landing {
+            smooth((age - (landing - lean)) / lean)
+        } else {
+            1.0 - smooth((age - landing) / materials.punch_recover_seconds.max(EPSILON))
         }
     }
 
     /// The arm is still on its way out, not yet coming back.
     pub fn going_out(&self, materials: &Materials) -> bool {
-        self.age < materials.punch_out_seconds
+        self.age < Self::landing(materials)
     }
 
-    /// The punch is over: the arm is back in its guard.
+    /// The arm is back in its guard.
+    fn arm_home(&self, materials: &Materials) -> bool {
+        self.age >= Self::landing(materials) + materials.punch_back_seconds
+    }
+
+    /// The punch is over: the arm is back in its guard and the body upright.
     fn done(&self, materials: &Materials) -> bool {
-        self.age >= materials.punch_out_seconds + materials.punch_back_seconds
+        self.age
+            >= Self::landing(materials)
+                + materials
+                    .punch_back_seconds
+                    .max(materials.punch_recover_seconds)
     }
 }
 
@@ -157,47 +235,73 @@ fn arm_slot(limb: Limb) -> Option<usize> {
 }
 
 impl World {
-    /// The punch `limb`'s arm is throwing, if any.
-    pub fn punch(&self, limb: Limb) -> Option<&Punch> {
-        arm_slot(limb).and_then(|arm| self.punches[arm].as_ref())
+    /// The punch body `body`'s `limb` is throwing, if any.
+    pub fn punch(&self, body: usize, limb: Limb) -> Option<&Punch> {
+        let arm = arm_slot(limb)?;
+        self.bodies.get(body)?.punches[arm].as_ref()
     }
 
-    /// `limb`'s arm throws a punch out to its side, unless it hangs limp,
-    /// has no shoulder or elbow left to throw with, or is still going out
-    /// with the last one.
-    pub fn throw_punch(&mut self, limb: Limb) {
+    /// Every punch being thrown, by body and arm, the viewer's left arm
+    /// first.
+    fn punch_slots(&self) -> Vec<(usize, usize)> {
+        (0..self.bodies.len())
+            .flat_map(|body| (0..2).map(move |arm| (body, arm)))
+            .filter(|&(body, arm)| self.bodies[body].punches[arm].is_some())
+            .collect()
+    }
+
+    /// Body `body`'s `limb` throws a punch out to its side, unless it hangs
+    /// limp, has no shoulder or elbow left to throw with, or is still going
+    /// out with the last one.
+    pub fn throw_punch(&mut self, body: usize, limb: Limb) {
         let Some(arm) = arm_slot(limb) else {
             return;
         };
+        if body >= self.bodies.len() {
+            return;
+        }
         let materials = self.materials;
-        if self.limp(limb)
-            || self.punches[arm]
+        if self.limp(body, limb)
+            || self.bodies[body].punches[arm]
                 .as_ref()
                 .is_some_and(|punch| punch.going_out(&materials))
         {
             return;
         }
-        if let Some((swings, path)) = self.punch_pose(limb) {
-            self.punches[arm] = Some(Punch {
-                age: 0.0,
-                swings,
-                path,
-            });
+        if let Some(mut punch) = self.punch_pose(body, limb) {
+            // A joint another punch of the body still drives, the lower back
+            // still bringing the body back from the last punch, passes to
+            // this one, with what its own muscles carried in the guard
+            // before either.
+            for swing in &mut punch.swings {
+                for earlier in self.bodies[body].punches.iter_mut().flatten() {
+                    for old in &mut earlier.swings {
+                        if old.active && old.joint == swing.joint {
+                            old.active = false;
+                            swing.guard_impulses = old.guard_impulses;
+                        }
+                    }
+                }
+            }
+            self.bodies[body].punches[arm] = Some(punch);
         }
     }
 
-    /// The shoulder, elbow, and wrist joints of `limb`'s arm, and the path
-    /// its fist takes: a straight line from where it stands in the guard to
-    /// the punch's pose, where the elbow is straight but for
-    /// `Materials::punch_elbow_bend` and the fist lies on a line rising
-    /// `Materials::punch_rise` from the shoulder, out to the arm's own side. People plan a quick reach as a straight line for the
-    /// hand (Flash and Hogan 1985); turned joint by joint toward the pose,
-    /// the fist swung up over the head and came down onto it.
-    fn punch_pose(&self, limb: Limb) -> Option<([Swing; 4], ArmPath)> {
-        let joint_between = |from: BonePart, to: BonePart| {
+    /// A punch by body `body`'s `limb`: the joints it drives, from the lower
+    /// back out to the wrist, the pieces they join, and the path its fist
+    /// takes, a straight line from where it stands in the guard to the
+    /// punch's pose. There the trunk leans `Materials::punch_lean` toward the
+    /// arm's side, the elbow is straight but for `Materials::punch_elbow_bend`,
+    /// and the fist lies on a line rising `Materials::punch_rise` from the
+    /// shoulder. People plan a quick reach as a straight line for the hand
+    /// (Flash and Hogan 1985); turned joint by joint toward the pose, the
+    /// fist swung up over the head and came down onto it.
+    fn punch_pose(&self, body: usize, limb: Limb) -> Option<Punch> {
+        let joint_between = |from: BonePart, to: BonePart, limb: Limb| {
             self.bone_joints.iter().position(|joint| {
                 !joint.broken
                     && joint.drive.limb == limb
+                    && self.joint_body(joint) == body
                     && self
                         .bones
                         .get(joint.a)
@@ -205,14 +309,25 @@ impl World {
                     && self.bones.get(joint.b).is_some_and(|bone| bone.part == to)
             })
         };
-        let girdle = joint_between(BonePart::Spine, BonePart::Collarbone)?;
-        let shoulder = joint_between(BonePart::Collarbone, BonePart::UpperArm)?;
-        let elbow = joint_between(BonePart::UpperArm, BonePart::Forearm)?;
-        let wrist = joint_between(BonePart::Forearm, BonePart::Hand)?;
-        let hand = self
-            .bones
-            .iter()
-            .find(|bone| bone.part == BonePart::Hand && bone.limb == limb && !bone.splinter)?;
+        let back = joint_between(BonePart::Spine, BonePart::Pelvis, Limb::None)?;
+        let neck = joint_between(BonePart::Skull, BonePart::Spine, Limb::None)?;
+        let other = if limb == Limb::RightArm {
+            Limb::LeftArm
+        } else {
+            Limb::RightArm
+        };
+        let guard = joint_between(BonePart::Collarbone, BonePart::UpperArm, other)
+            .filter(|_| !self.limp(body, other));
+        let girdle = joint_between(BonePart::Spine, BonePart::Collarbone, limb)?;
+        let shoulder = joint_between(BonePart::Collarbone, BonePart::UpperArm, limb)?;
+        let elbow = joint_between(BonePart::UpperArm, BonePart::Forearm, limb)?;
+        let wrist = joint_between(BonePart::Forearm, BonePart::Hand, limb)?;
+        let hand = self.bones.iter().find(|bone| {
+            bone.part == BonePart::Hand
+                && bone.limb == limb
+                && bone.body as usize == body
+                && !bone.splinter
+        })?;
         let upper = self.bones[self.bone_joints[elbow].a];
         let forearm = self.bones[self.bone_joints[elbow].b];
         let lengths = (
@@ -220,47 +335,114 @@ impl World {
             distance(forearm.home_a, hand.home_b),
         );
         let rest = self.bone_joints[elbow].rest_angle;
-        // The viewer's right arm reaches right, its elbow bent the way angles
-        // shrink down the window; the left arm mirrors it.
-        let rightward = upper.home_b.x >= upper.home_a.x;
         let mut path = ArmPath {
             from: subtract(hand.home_b, upper.home_a),
-            to: Vec2::default(),
+            reach: (lengths.0 * lengths.0
+                + lengths.1 * lengths.1
+                + 2.0 * lengths.0 * lengths.1 * libm::cos(self.materials.punch_elbow_bend))
+            .sqrt(),
             upper: lengths.0,
             fore: lengths.1,
             bend: -rest.signum(),
             start: (0.0, 0.0),
         };
         path.start = path.solve(path.from);
-        let reach = (lengths.0 * lengths.0
-            + lengths.1 * lengths.1
-            + 2.0 * lengths.0 * lengths.1 * libm::cos(self.materials.punch_elbow_bend))
-        .sqrt();
-        let rise = self.materials.punch_rise;
-        let line = if rightward { -rise } else { PI + rise };
-        path.to = Vec2 {
-            x: reach * libm::cos(line),
-            y: reach * libm::sin(line),
+        // The viewer's right arm reaches right, its elbow bent the way angles
+        // shrink down the window; the left arm mirrors it.
+        let toward = if upper.home_b.x >= upper.home_a.x {
+            1.0
+        } else {
+            -1.0
         };
-        use BonePart::{Collarbone, Forearm, Hand, UpperArm};
-        Some((
-            [
-                self.swing_of(girdle, limb, &[Collarbone, UpperArm, Forearm, Hand]),
-                self.swing_of(shoulder, limb, &[UpperArm, Forearm, Hand]),
-                self.swing_of(elbow, limb, &[Forearm, Hand]),
-                self.swing_of(wrist, limb, &[Hand]),
+        use BonePart::{Collarbone, Forearm, Hand, Pelvis, Skull, UpperArm};
+        let arm = [Collarbone, UpperArm, Forearm, Hand];
+        let in_arm = |bone: &BoneSegment| bone.limb == limb && arm.contains(&bone.part);
+        let below_back = |bone: &BoneSegment| {
+            bone.part == Pelvis || matches!(bone.limb, Limb::LeftLeg | Limb::RightLeg)
+        };
+        let guard_arm = |bone: &BoneSegment| {
+            guard.is_some() && bone.limb == other && arm[1..].contains(&bone.part)
+        };
+        let mut links = vec![
+            self.link_of(body, below_back),
+            self.link_of(body, |bone| {
+                !below_back(bone) && !in_arm(bone) && bone.part != Skull && !guard_arm(bone)
+            }),
+        ];
+        links.extend(
+            arm.iter()
+                .map(|&part| self.link_of(body, |bone| in_arm(bone) && bone.part == part)),
+        );
+        links.push(self.link_of(body, |bone| bone.part == Skull));
+        links.push(self.link_of(body, guard_arm));
+        let swing = |joint: usize, inner: usize, outer: usize| Swing {
+            joint,
+            body,
+            inner,
+            outer,
+            pinned: true,
+            guard_impulses: (
+                self.bone_joints[joint].drive_impulse,
+                self.bone_joints[joint].hold_impulse,
+            ),
+            active: true,
+            sides: None,
+        };
+        Some(Punch {
+            age: 0.0,
+            swings: [
+                // The lower back's muscles turn the whole trunk, flesh and
+                // all, against the hips: on its bones alone they were as
+                // soft as the spine is light, and the trunk lagged its lean
+                // and rocked after it. The joint's own hold keeps its bones
+                // together, as it carries the trunk's weight in the guard;
+                // held round the pieces, the trunk's flesh was held up twice
+                // and flew up as the punch began.
+                Swing {
+                    pinned: false,
+                    ..swing(back, 1, 0)
+                },
+                swing(girdle, 1, 2),
+                swing(shoulder, 2, 3),
+                swing(elbow, 3, 4),
+                swing(wrist, 4, 5),
+                // The neck's muscles hold the head to the trunk, as a puncher
+                // keeps the head still: on its bones alone they let the head
+                // lag 30 degrees as the hips carried the body in.
+                Swing {
+                    pinned: false,
+                    ..swing(neck, 6, 1)
+                },
+                // And the other arm keeps its guard by the head: on its bones
+                // alone it swung up and out as the body went in.
+                match guard {
+                    Some(joint) => Swing {
+                        pinned: false,
+                        ..swing(joint, 1, 7)
+                    },
+                    None => Swing {
+                        joint: usize::MAX,
+                        pinned: false,
+                        active: false,
+                        guard_impulses: (0.0, Vec2::default()),
+                        ..swing(shoulder, 1, 7)
+                    },
+                },
             ],
+            links,
             path,
-        ))
+            rise: self.materials.punch_rise,
+            toward,
+        })
     }
 
-    /// Joint `joint` of `limb`'s arm, moving the bones of the `beyond` parts
-    /// and their flesh.
-    fn swing_of(&self, joint: usize, limb: Limb, beyond: &[BonePart]) -> Swing {
-        let beyond: Vec<bool> = self
+    /// The piece of body `body` made of the bones `holds` picks, and the
+    /// flesh bound to them.
+    fn link_of(&self, body: usize, holds: impl Fn(&BoneSegment) -> bool) -> Link {
+        let bones: Vec<bool> = self
             .bones
             .iter()
-            .map(|bone| bone.limb == limb && beyond.contains(&bone.part))
+            .map(|bone| bone.body as usize == body && holds(bone))
             .collect();
         let share = self
             .point_holds
@@ -268,65 +450,119 @@ impl World {
             .map(|hold| {
                 let binding = hold.posture;
                 (0..2)
-                    .filter(|&slot| beyond.get(binding.bones[slot]) == Some(&true))
+                    .filter(|&slot| bones.get(binding.bones[slot]) == Some(&true))
                     .map(|slot| binding.weights[slot])
                     .sum()
             })
             .collect();
-        Swing {
-            joint,
-            beyond,
-            share,
-            sides: None,
-        }
+        Link { bones, share }
     }
 
     /// Aims each punching arm's muscles along its punch's path, out to the
     /// pose and back to the guard, and ends punches that are done or whose
     /// arm has gone limp.
     pub(super) fn drive_punches(&mut self, dt: f64) {
-        for (arm, limb) in [Limb::LeftArm, Limb::RightArm].into_iter().enumerate() {
-            let Some(mut punch) = self.punches[arm].take() else {
+        for state in &mut self.bodies {
+            state.hip_shift = Vec2::default();
+        }
+        let px_per_metre = 1000.0 / self.mm_per_px();
+        for (body, arm) in self.punch_slots() {
+            let limb = [Limb::LeftArm, Limb::RightArm][arm];
+            let Some(mut punch) = self.bodies[body].punches[arm].take() else {
                 continue;
             };
             punch.age += dt;
-            let over = punch.done(&self.materials) || self.limp(limb);
-            let (shoulder, elbow) = if over {
-                (0.0, 0.0)
+            let over = punch.done(&self.materials) || self.limp(body, limb);
+            let (lean, shoulder, elbow) = if over {
+                (0.0, 0.0, 0.0)
             } else {
+                let leaning = Punch::lean_at(punch.age, &self.materials);
+                // The lower back joins the spine, above, to the pelvis:
+                // leaning the spine's top toward the punch turns the joint
+                // the other way.
+                let lean = -punch.toward * self.materials.punch_lean * leaning;
+                if punch.swings[0].active {
+                    self.bodies[body].hip_shift.x +=
+                        punch.toward * self.materials.punch_hip_shift * px_per_metre * leaning;
+                }
+                // The arm is planned in the trunk, which leans about the
+                // lower back and carries the shoulder and the arm round with
+                // it: to end `rise` above level in the world, the arm rises
+                // against the trunk by as much again as the trunk has leaned
+                // in.
+                let leaned = punch.toward * self.trunk_turn(&punch);
+                let rise = punch.rise + leaned;
+                let line = if punch.toward > 0.0 { -rise } else { PI + rise };
                 let (shoulder, elbow) = punch
                     .path
-                    .turns(Punch::reach_at(punch.age, &self.materials));
-                // The arm aims its fist in space, as people plan a reach for
-                // the hand: the shoulder takes off however far the arm's
-                // load has lifted the shoulder girdle, which carried the
-                // whole arm up and the fist over its path.
-                (shoulder - self.girdle_lift(&punch), elbow)
+                    .turns(Punch::reach_at(punch.age, &self.materials), line);
+                // The shoulder takes off however far the arm's load has
+                // lifted the shoulder girdle, which carried the whole arm up
+                // and the fist over its path.
+                (lean, shoulder - self.girdle_lift(&punch), elbow)
             };
-            for (swing, turn) in punch.swings.iter().zip([0.0, shoulder, elbow, 0.0]) {
+            for (swing, turn) in punch
+                .swings
+                .iter()
+                .zip([lean, 0.0, shoulder, elbow, 0.0, 0.0, 0.0])
+            {
+                if !swing.active {
+                    continue;
+                }
                 if let Some(joint) = self.bone_joints.get_mut(swing.joint) {
                     joint.drive.swing = turn;
                 }
             }
-            self.punches[arm] = (!over).then_some(punch);
+            // Each joint's own muscles and hold take it back once the punch
+            // is done with it, from what they carried in the guard: what the
+            // punch's carried turned and held whole pieces, and given to the
+            // bones alone it flicked the arm's flesh. Held by the punch until
+            // the body was upright again, the arm was held off its guard and
+            // swung back into it.
+            let arm_home = punch.arm_home(&self.materials);
+            for (index, swing) in punch.swings.iter_mut().enumerate() {
+                let release = over || ((1..=4).contains(&index) && arm_home);
+                if !(swing.active && release) {
+                    continue;
+                }
+                swing.active = false;
+                if let Some(joint) = self.bone_joints.get_mut(swing.joint) {
+                    joint.drive.swing = 0.0;
+                    joint.drive_impulse = swing.guard_impulses.0;
+                    if swing.pinned {
+                        joint.hold_impulse = swing.guard_impulses.1;
+                    }
+                }
+            }
+            self.bodies[body].punches[arm] = (!over).then_some(punch);
         }
     }
 
-    /// Where the fist of each arm throwing a punch is, the viewer's left arm
-    /// first: the end of its hand's bone.
-    pub(super) fn punching_fists(&self) -> [Option<Vec2>; 2] {
-        [Limb::LeftArm, Limb::RightArm].map(|limb| {
-            self.punch(limb)?;
-            self.bones
-                .iter()
-                .find(|bone| bone.part == BonePart::Hand && bone.limb == limb && !bone.splinter)
-                .map(|hand| hand.b)
-        })
+    /// Where the fist of each arm throwing a punch is, by body and arm, the
+    /// viewer's left arm first: the end of its hand's bone.
+    pub(super) fn punching_fists(&self) -> Vec<Option<Vec2>> {
+        let mut fists = Vec::with_capacity(self.bodies.len() * 2);
+        for body in 0..self.bodies.len() {
+            for limb in [Limb::LeftArm, Limb::RightArm] {
+                fists.push(self.punch(body, limb).and_then(|_| {
+                    self.bones
+                        .iter()
+                        .find(|bone| {
+                            bone.part == BonePart::Hand
+                                && bone.limb == limb
+                                && bone.body as usize == body
+                                && !bone.splinter
+                        })
+                        .map(|hand| hand.b)
+                }));
+            }
+        }
+        fists
     }
 
     /// How fast the fists that stood at `before` a step `dt` long ago have
-    /// moved since, the faster of them, in pixels per second.
-    pub(super) fn punch_speed(&self, before: [Option<Vec2>; 2], dt: f64) -> f64 {
+    /// moved since, the fastest of them, in pixels per second.
+    pub(super) fn punch_speed(&self, before: &[Option<Vec2>], dt: f64) -> f64 {
         let now = self.punching_fists();
         before
             .iter()
@@ -335,10 +571,25 @@ impl World {
             .fold(0.0, f64::max)
     }
 
+    /// How far the trunk throwing `punch` has turned in the world from where
+    /// it was built, in radians: its spine's turn, the way angles grow down
+    /// the window.
+    fn trunk_turn(&self, punch: &Punch) -> f64 {
+        let Some(spine) = self
+            .bone_joints
+            .get(punch.swings[0].joint)
+            .and_then(|joint| self.bones.get(joint.a))
+        else {
+            return 0.0;
+        };
+        let angle = |a: Vec2, b: Vec2| libm::atan2(b.y - a.y, b.x - a.x);
+        wrap_angle(angle(spine.a, spine.b) - angle(spine.home_a, spine.home_b))
+    }
+
     /// How far `punch`'s shoulder girdle has turned from where it was built,
     /// in radians: its collarbone against the spine.
     fn girdle_lift(&self, punch: &Punch) -> f64 {
-        let Some(joint) = self.bone_joints.get(punch.swings[0].joint) else {
+        let Some(joint) = self.bone_joints.get(punch.swings[1].joint) else {
             return 0.0;
         };
         let (Some(spine), Some(collarbone)) = (self.bones.get(joint.a), self.bones.get(joint.b))
@@ -357,63 +608,83 @@ impl World {
     /// move the limb as one piece (`solve_punch_drives`) rather than only its
     /// bones.
     pub(super) fn punch_drives(&self, index: usize) -> bool {
-        self.punches
+        self.bodies
             .iter()
-            .flatten()
-            .any(|punch| punch.swings.iter().any(|swing| swing.joint == index))
+            .flat_map(|state| state.punches.iter().flatten())
+            .any(|punch| {
+                punch
+                    .swings
+                    .iter()
+                    .any(|swing| swing.active && swing.joint == index)
+            })
+    }
+
+    /// Whether a punch holds joint `index` together round the pieces it
+    /// joins this step (`solve_punch_pins`), rather than the joint's own
+    /// hold on its bones.
+    pub(super) fn punch_pins(&self, index: usize) -> bool {
+        self.bodies
+            .iter()
+            .flat_map(|state| state.punches.iter().flatten())
+            .any(|punch| {
+                punch
+                    .swings
+                    .iter()
+                    .any(|swing| swing.active && swing.pinned && swing.joint == index)
+            })
     }
 
     /// How hard each side of each joint a punch drives is to move, from
     /// where everything was when this substep began, which stays put through
     /// its passes.
     pub(super) fn measure_punches(&mut self) {
-        for arm in 0..self.punches.len() {
-            let Some(mut punch) = self.punches[arm].take() else {
+        for (body, arm) in self.punch_slots() {
+            let Some(mut punch) = self.bodies[body].punches[arm].take() else {
                 continue;
             };
-            for swing in &mut punch.swings {
-                swing.sides = self.sides(swing);
+            for swing in punch.swings.iter_mut().filter(|swing| swing.active) {
+                swing.sides = self.sides(swing, &punch.links);
             }
-            self.punches[arm] = Some(punch);
+            self.bodies[body].punches[arm] = Some(punch);
         }
     }
 
     /// The muscles across each joint a punch drives: a soft spring toward
     /// the punch's path, as `solve_joint_drives` holds a joint, pulling with
-    /// all their strength until the arm is nearly there, turning the whole
-    /// limb beyond the joint and pushing back on the rest of the body.
+    /// all their strength until the arm is nearly there, turning the piece
+    /// beyond the joint and pushing back on the piece before it.
     pub(super) fn solve_punch_drives(&mut self, h: f64) {
-        for arm in 0..self.punches.len() {
-            let Some(punch) = self.punches[arm].take() else {
+        for (body, arm) in self.punch_slots() {
+            let Some(punch) = self.bodies[body].punches[arm].take() else {
                 continue;
             };
-            for swing in &punch.swings {
-                self.solve_swing(swing, h);
+            for swing in punch.swings.iter().filter(|swing| swing.active) {
+                self.solve_swing(swing, &punch.links, h);
             }
-            self.punches[arm] = Some(punch);
+            self.bodies[body].punches[arm] = Some(punch);
         }
     }
 
     /// Gives each joint a punch drives the impulse it carried last substep.
     pub(super) fn warm_start_punch_drives(&mut self, h: f64) {
-        for arm in 0..self.punches.len() {
-            let Some(punch) = self.punches[arm].take() else {
+        for (body, arm) in self.punch_slots() {
+            let Some(punch) = self.bodies[body].punches[arm].take() else {
                 continue;
             };
-            for swing in &punch.swings {
+            for swing in punch.swings.iter().filter(|swing| swing.active) {
                 let joint = self.bone_joints[swing.joint];
                 let limit = self.drive_limit(&joint) * h;
                 let given = joint.drive_impulse.clamp(-limit, limit);
                 self.bone_joints[swing.joint].drive_impulse = given;
                 if let (true, Some(sides)) = (given != 0.0, swing.sides) {
-                    self.turn_limb(swing, &sides, given, h);
+                    self.turn_pieces(swing, &punch.links, &sides, given, h);
                 }
             }
-            self.punches[arm] = Some(punch);
+            self.bodies[body].punches[arm] = Some(punch);
         }
     }
 
-    fn solve_swing(&mut self, swing: &Swing, h: f64) {
+    fn solve_swing(&mut self, swing: &Swing, links: &[Link], h: f64) {
         let joint = self.bone_joints[swing.joint];
         let limit = self.drive_limit(&joint) * h;
         if limit <= 0.0 {
@@ -423,7 +694,7 @@ impl World {
         let Some(sides) = swing.sides else {
             return;
         };
-        let mass = 1.0 / (1.0 / sides.rest.inertia + 1.0 / sides.beyond.inertia);
+        let mass = 1.0 / (1.0 / sides.inner.inertia + 1.0 / sides.outer.inertia);
         let newton_metres = self.newton_metres();
         // The muscles of a punch are fully active, not braced as the
         // guard's: they pull with all their strength until the arm is within
@@ -441,42 +712,44 @@ impl World {
         let given = joint.drive_impulse.clamp(-limit, limit);
         let total = (given + softness.impulse(mass, speed, angle, given)).clamp(-limit, limit);
         self.bone_joints[swing.joint].drive_impulse = total;
-        self.turn_limb(swing, &sides, total - given, h);
+        self.turn_pieces(swing, links, &sides, total - given, h);
     }
 
     /// The two sides of `swing`'s joint as pieces, where the substep began:
-    /// each bone as two halves at its ends, and each point of flesh split
-    /// between the sides by its share.
-    fn sides(&self, swing: &Swing) -> Option<Sides> {
+    /// each bone as two halves at its ends, and each point of flesh by its
+    /// share in each.
+    fn sides(&self, swing: &Swing, links: &[Link]) -> Option<Sides> {
+        let (inner, outer) = (links.get(swing.inner)?, links.get(swing.outer)?);
         // Each side's mass, its first moment, and its second moment about
         // the window's corner, from which its centre and its turning inertia
         // about the centre follow.
         let mut sums = [(0.0, Vec2::default(), 0.0); 2];
-        let mut add_to = |beyond: f64, weight: f64, at: Vec2| {
-            for (side, share) in [(0, 1.0 - beyond), (1, beyond)] {
-                let mass = weight * share;
-                sums[side].0 += mass;
-                sums[side].1 = add(sums[side].1, scale(at, mass));
-                sums[side].2 += mass * dot(at, at);
-            }
+        let mut add_to = |side: usize, mass: f64, at: Vec2| {
+            sums[side].0 += mass;
+            sums[side].1 = add(sums[side].1, scale(at, mass));
+            sums[side].2 += mass * dot(at, at);
         };
         for (index, bone) in self.bones.iter().enumerate() {
             if bone.pinned {
                 continue;
             }
-            let beyond = if swing.beyond.get(index) == Some(&true) {
-                1.0
-            } else {
-                0.0
-            };
-            add_to(beyond, bone.mass * 0.5, bone.previous_a);
-            add_to(beyond, bone.mass * 0.5, bone.previous_b);
+            for (side, link) in [inner, outer].into_iter().enumerate() {
+                if link.bones.get(index) == Some(&true) {
+                    add_to(side, bone.mass * 0.5, bone.previous_a);
+                    add_to(side, bone.mass * 0.5, bone.previous_b);
+                }
+            }
         }
-        for (point, &share) in self.points.iter().zip(&swing.share) {
-            if point.pinned || point.is_ghost() {
+        for (index, point) in self.points.iter().enumerate() {
+            if point.pinned || point.is_ghost() || point.body as usize != swing.body {
                 continue;
             }
-            add_to(share, point.mass, point.previous);
+            for (side, link) in [inner, outer].into_iter().enumerate() {
+                let share = link.share.get(index).copied().unwrap_or(0.0);
+                if share > 0.0 {
+                    add_to(side, point.mass * share, point.previous);
+                }
+            }
         }
         let piece = |(mass, moment, second): (f64, Vec2, f64)| {
             if mass <= EPSILON {
@@ -491,74 +764,105 @@ impl World {
             })
         };
         Some(Sides {
-            rest: piece(sums[0])?,
-            beyond: piece(sums[1])?,
+            inner: piece(sums[0])?,
+            outer: piece(sums[1])?,
         })
     }
 
-    /// Turns the limb beyond `swing`'s joint by the angular impulse
-    /// `impulse` over a substep `h` long, and the rest of the body the other
-    /// way, each about its own centre of mass by its own inertia, as a joint
-    /// motor turns two bodies (Box2D's revolute joint); the joint's hold on
-    /// its bones keeps them together.
-    fn turn_limb(&mut self, swing: &Swing, sides: &Sides, impulse: f64, h: f64) {
-        let (rest, beyond) = (sides.rest, sides.beyond);
-        let turn = |piece: &Piece, at: Vec2, angle: f64| {
-            scale(perpendicular(subtract(at, piece.centre)), angle)
+    /// Moves each piece of `swing`'s sides as one, from where the substep
+    /// began: `motion` gives a piece's shift and its turn about its centre,
+    /// for the piece before the joint and then the piece beyond.
+    fn move_pieces(
+        &mut self,
+        swing: &Swing,
+        links: &[Link],
+        sides: &Sides,
+        motion: [(Vec2, f64); 2],
+    ) {
+        let (Some(inner), Some(outer)) = (links.get(swing.inner), links.get(swing.outer)) else {
+            return;
         };
-        let (rest_angle, beyond_angle) =
-            (-impulse * h / rest.inertia, impulse * h / beyond.inertia);
+        let pieces = [
+            (inner, sides.inner, motion[0]),
+            (outer, sides.outer, motion[1]),
+        ];
+        let moved = |piece: &Piece, (shift, turn): (Vec2, f64), at: Vec2| {
+            add(
+                shift,
+                scale(perpendicular(subtract(at, piece.centre)), turn),
+            )
+        };
         for (index, bone) in self.bones.iter_mut().enumerate() {
             if bone.pinned {
                 continue;
             }
-            let (piece, angle) = if swing.beyond.get(index) == Some(&true) {
-                (&beyond, beyond_angle)
-            } else {
-                (&rest, rest_angle)
-            };
-            bone.a = add(bone.a, turn(piece, bone.previous_a, angle));
-            bone.b = add(bone.b, turn(piece, bone.previous_b, angle));
+            for (link, piece, motion) in &pieces {
+                if link.bones.get(index) == Some(&true) {
+                    bone.a = add(bone.a, moved(piece, *motion, bone.previous_a));
+                    bone.b = add(bone.b, moved(piece, *motion, bone.previous_b));
+                }
+            }
         }
-        for (point, &share) in self.points.iter_mut().zip(&swing.share) {
-            if point.pinned || point.is_ghost() {
+        for (index, point) in self.points.iter_mut().enumerate() {
+            if point.pinned || point.is_ghost() || point.body as usize != swing.body {
                 continue;
             }
             let at = point.previous;
-            let moved = add(
-                scale(turn(&beyond, at, beyond_angle), share),
-                scale(turn(&rest, at, rest_angle), 1.0 - share),
-            );
-            point.position = add(point.position, moved);
+            for (link, piece, motion) in &pieces {
+                let share = link.share.get(index).copied().unwrap_or(0.0);
+                if share > 0.0 {
+                    point.position = add(point.position, scale(moved(piece, *motion, at), share));
+                }
+            }
         }
+    }
+
+    /// Turns the piece beyond `swing`'s joint by the angular impulse
+    /// `impulse` over a substep `h` long, and the piece before it the other
+    /// way, each about its own centre of mass by its own inertia, as a joint
+    /// motor turns two bodies (Box2D's revolute joint); the joint's hold on
+    /// its bones keeps them together.
+    fn turn_pieces(&mut self, swing: &Swing, links: &[Link], sides: &Sides, impulse: f64, h: f64) {
+        let motion = [
+            (Vec2::default(), -impulse * h / sides.inner.inertia),
+            (Vec2::default(), impulse * h / sides.outer.inertia),
+        ];
+        self.move_pieces(swing, links, sides, motion);
     }
 
     /// Each joint a punch drives holds its second bone's anchor where it was
     /// built on its first, as `solve_soft_joints` holds a whole joint, but
-    /// pulls the whole limb beyond it and the rest of the body, flesh and
-    /// bone.
+    /// pulls the two pieces it joins, flesh and bone.
     /// Swung fast, a fist swings round on a circle, and holding it there took
     /// more than the light bones' own joints could give: the wrist was pulled
     /// apart as the fist's flesh flew outward.
     pub(super) fn solve_punch_pins(&mut self, h: f64) {
-        for arm in 0..self.punches.len() {
-            let Some(punch) = self.punches[arm].take() else {
+        for (body, arm) in self.punch_slots() {
+            let Some(punch) = self.bodies[body].punches[arm].take() else {
                 continue;
             };
-            for swing in &punch.swings {
-                self.solve_swing_pin(swing, h);
+            for swing in punch
+                .swings
+                .iter()
+                .filter(|swing| swing.active && swing.pinned)
+            {
+                self.solve_swing_pin(swing, &punch.links, h);
             }
-            self.punches[arm] = Some(punch);
+            self.bodies[body].punches[arm] = Some(punch);
         }
     }
 
     /// Gives each joint a punch drives the hold it carried last substep.
     pub(super) fn warm_start_punch_pins(&mut self, h: f64) {
-        for arm in 0..self.punches.len() {
-            let Some(punch) = self.punches[arm].take() else {
+        for (body, arm) in self.punch_slots() {
+            let Some(punch) = self.bodies[body].punches[arm].take() else {
                 continue;
             };
-            for swing in &punch.swings {
+            for swing in punch
+                .swings
+                .iter()
+                .filter(|swing| swing.active && swing.pinned)
+            {
                 let joint = self.bone_joints[swing.joint];
                 let given = joint.hold_impulse;
                 let (Some(sides), Some(hold)) = (swing.sides, self.joint_hold(&joint)) else {
@@ -568,18 +872,18 @@ impl World {
                     continue;
                 }
                 let pin = JointPin::of(&joint, &self.bones, hold.reach());
-                let (rest_at, beyond_at) = pin.places(&self.bones);
+                let (inner_at, outer_at) = pin.places(&self.bones);
                 let levers = (
-                    subtract(rest_at, sides.rest.centre),
-                    subtract(beyond_at, sides.beyond.centre),
+                    subtract(inner_at, sides.inner.centre),
+                    subtract(outer_at, sides.outer.centre),
                 );
-                self.push_limb(swing, &sides, given, levers, h);
+                self.push_pieces(swing, &punch.links, &sides, given, levers, h);
             }
-            self.punches[arm] = Some(punch);
+            self.bodies[body].punches[arm] = Some(punch);
         }
     }
 
-    fn solve_swing_pin(&mut self, swing: &Swing, h: f64) {
+    fn solve_swing_pin(&mut self, swing: &Swing, links: &[Link], h: f64) {
         let joint = self.bone_joints[swing.joint];
         let Some(hold) = self.joint_hold(&joint) else {
             return;
@@ -591,22 +895,22 @@ impl World {
             return;
         };
         let pin = JointPin::of(&joint, &self.bones, hold.reach());
-        let (rest_at, beyond_at) = pin.places(&self.bones);
-        let (rest, beyond) = (sides.rest, sides.beyond);
-        let (r_rest, r_beyond) = (
-            subtract(rest_at, rest.centre),
-            subtract(beyond_at, beyond.centre),
+        let (inner_at, outer_at) = pin.places(&self.bones);
+        let (inner, outer) = (sides.inner, sides.outer);
+        let (r_inner, r_outer) = (
+            subtract(inner_at, inner.centre),
+            subtract(outer_at, outer.centre),
         );
         // The point constraint of Box2D's revolute joint (Erin Catto, MIT,
         // `revolute_joint.c`): how hard the two anchors are to move apart,
         // through each piece's mass and its turn about its centre.
-        let (m_rest, m_beyond) = (1.0 / rest.mass, 1.0 / beyond.mass);
-        let (i_rest, i_beyond) = (1.0 / rest.inertia, 1.0 / beyond.inertia);
+        let (m_inner, m_outer) = (1.0 / inner.mass, 1.0 / outer.mass);
+        let (i_inner, i_outer) = (1.0 / inner.inertia, 1.0 / outer.inertia);
         let k11 =
-            m_rest + m_beyond + r_rest.y * r_rest.y * i_rest + r_beyond.y * r_beyond.y * i_beyond;
-        let k12 = -r_rest.y * r_rest.x * i_rest - r_beyond.y * r_beyond.x * i_beyond;
+            m_inner + m_outer + r_inner.y * r_inner.y * i_inner + r_outer.y * r_outer.y * i_outer;
+        let k12 = -r_inner.y * r_inner.x * i_inner - r_outer.y * r_outer.x * i_outer;
         let k22 =
-            m_rest + m_beyond + r_rest.x * r_rest.x * i_rest + r_beyond.x * r_beyond.x * i_beyond;
+            m_inner + m_outer + r_inner.x * r_inner.x * i_inner + r_outer.x * r_outer.x * i_outer;
         let determinant = k11 * k22 - k12 * k12;
         if determinant.abs() <= EPSILON * EPSILON {
             return;
@@ -628,16 +932,17 @@ impl World {
                 + softness.impulse(0.0, 0.0, 0.0, given.y),
         };
         self.bone_joints[swing.joint].hold_impulse = add(given, impulse);
-        self.push_limb(swing, &sides, impulse, (r_rest, r_beyond), h);
+        self.push_pieces(swing, links, &sides, impulse, (r_inner, r_outer), h);
     }
 
-    /// Pushes the limb beyond `swing`'s joint by the impulse `impulse` at its
-    /// anchor, `levers.1` from its centre of mass, over a substep `h` long,
-    /// and the rest of the body the other way at its anchor, `levers.0` from
-    /// its centre: each piece moves and turns as one.
-    fn push_limb(
+    /// Pushes the piece beyond `swing`'s joint by the impulse `impulse` at
+    /// its anchor, `levers.1` from its centre of mass, over a substep `h`
+    /// long, and the piece before it the other way at its anchor, `levers.0`
+    /// from its centre: each piece moves and turns as one.
+    fn push_pieces(
         &mut self,
         swing: &Swing,
+        links: &[Link],
         sides: &Sides,
         impulse: Vec2,
         levers: (Vec2, Vec2),
@@ -649,37 +954,11 @@ impl World {
                 cross(lever, push) * h / piece.inertia,
             )
         };
-        let rest = motion(&sides.rest, levers.0, scale(impulse, -1.0));
-        let beyond = motion(&sides.beyond, levers.1, impulse);
-        let moved = |piece: &Piece, (shift, turn): (Vec2, f64), at: Vec2| {
-            add(
-                shift,
-                scale(perpendicular(subtract(at, piece.centre)), turn),
-            )
-        };
-        for (index, bone) in self.bones.iter_mut().enumerate() {
-            if bone.pinned {
-                continue;
-            }
-            let (piece, push) = if swing.beyond.get(index) == Some(&true) {
-                (&sides.beyond, beyond)
-            } else {
-                (&sides.rest, rest)
-            };
-            bone.a = add(bone.a, moved(piece, push, bone.previous_a));
-            bone.b = add(bone.b, moved(piece, push, bone.previous_b));
-        }
-        for (point, &share) in self.points.iter_mut().zip(&swing.share) {
-            if point.pinned || point.is_ghost() {
-                continue;
-            }
-            let at = point.previous;
-            let shift = add(
-                scale(moved(&sides.beyond, beyond, at), share),
-                scale(moved(&sides.rest, rest, at), 1.0 - share),
-            );
-            point.position = add(point.position, shift);
-        }
+        let motion = [
+            motion(&sides.inner, levers.0, scale(impulse, -1.0)),
+            motion(&sides.outer, levers.1, impulse),
+        ];
+        self.move_pieces(swing, links, sides, motion);
     }
 }
 
@@ -697,17 +976,18 @@ mod tests {
             .unwrap()
     }
 
-    /// Throws a punch with `limb` on a fresh body and plays a second after:
-    /// the farthest the fist got from where it stood, its fastest, and how
-    /// far from there it ended.
+    /// Throws a punch with `limb` on a fresh body and plays two seconds
+    /// after, long enough for the body to come back upright: the farthest
+    /// the fist got from where it stood, its fastest, and how far from there
+    /// it ended.
     fn throw(limb: Limb) -> (World, f64, f64, f64) {
         let mut world = create_layered_body(1280.0, 720.0, Materials::default());
         let dt = world.materials.fixed_dt;
         let start = fist(&world, limb);
         let (mut farthest, mut fastest, mut last) = (0.0_f64, 0.0_f64, start);
-        for step in 0..60 {
+        for step in 0..120 {
             let input = InputState {
-                punch: (step == 0).then_some(limb),
+                punch: (step == 0).then_some((0, limb)),
                 ..InputState::default()
             };
             world.step(dt, &input, 1280.0);
@@ -772,10 +1052,10 @@ mod tests {
     #[test]
     fn a_limp_arm_throws_no_punch() {
         let mut world = create_layered_body(1280.0, 720.0, Materials::default());
-        world.let_limb_go(Limb::RightArm);
-        world.throw_punch(Limb::RightArm);
-        assert!(world.punch(Limb::RightArm).is_none());
-        world.throw_punch(Limb::LeftArm);
-        assert!(world.punch(Limb::LeftArm).is_some());
+        world.let_limb_go(0, Limb::RightArm);
+        world.throw_punch(0, Limb::RightArm);
+        assert!(world.punch(0, Limb::RightArm).is_none());
+        world.throw_punch(0, Limb::LeftArm);
+        assert!(world.punch(0, Limb::LeftArm).is_some());
     }
 }

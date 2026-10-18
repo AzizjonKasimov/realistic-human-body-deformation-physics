@@ -330,13 +330,21 @@ impl World {
     /// hangs on the skeleton; less as the body loses blood.
     pub(super) fn solve_posture(&mut self, h: f64) {
         let zeta = self.materials.posture_damping_ratio;
-        let turgor = self.blood_turgor_scale_internal().max(0.0).sqrt();
+        let turgor_by_body: Vec<f64> = self
+            .turgor_by_body()
+            .into_iter()
+            .map(|turgor| turgor.max(0.0).sqrt())
+            .collect();
         for index in 0..self.points.len() {
             let point = self.points[index];
             // A ghost is not flesh of its own and has no place to keep.
             if point.pinned || point.is_ghost() {
                 continue;
             }
+            let turgor = turgor_by_body
+                .get(point.body as usize)
+                .copied()
+                .unwrap_or(1.0);
             let hertz = match point.layer {
                 TissueLayer::Skin => self.materials.skin_posture_hertz,
                 TissueLayer::Muscle => self.materials.muscle_posture_hertz,
@@ -434,7 +442,9 @@ impl World {
                 (bone.a, bone.previous_a)
             };
             let softness = Softness::of_stiffness(stiffness, damping, mass, h);
-            let error = subtract(previous, add(hold.home, hold.aim));
+            // A punch carries the hips toward what it hits (`punch.rs`).
+            let shift = self.bodies[self.bone_body(hold.bone)].hip_shift;
+            let error = subtract(previous, add(add(hold.home, hold.aim), shift));
             let speed = scale(subtract(place, previous), 1.0 / h);
             let impulse = Vec2 {
                 x: softness.impulse(mass, speed.x, error.x, hold.impulse.x),
@@ -580,7 +590,7 @@ impl World {
             let mass = 1.0 / turn.inverse_mass;
             // A limb hanging from a break holds no pose, but its relaxed
             // muscles still damp how it swings.
-            let (stiffness, damping) = if self.limp(joint.drive.limb) {
+            let (stiffness, damping) = if self.limp(self.joint_body(&joint), joint.drive.limb) {
                 (0.0, joint.drive.damping * LIMP_DAMPING_SHARE)
             } else {
                 (joint.drive.stiffness, joint.drive.damping)
@@ -608,26 +618,35 @@ impl World {
         joint.drive.max_torque * (1.0 - joint.subluxation).max(0.0) * self.newton_metres()
     }
 
-    /// Whether `limb` hangs from a broken bone, its muscles letting go.
-    pub fn limp(&self, limb: Limb) -> bool {
-        limb.index().is_some_and(|index| self.limp_limbs[index])
+    /// Whether body `body`'s `limb` hangs from a broken bone, its muscles
+    /// letting go.
+    pub fn limp(&self, body: usize, limb: Limb) -> bool {
+        limb.index().is_some_and(|index| {
+            self.bodies
+                .get(body)
+                .is_some_and(|state| state.limp_limbs[index])
+        })
     }
 
-    /// A bone of `part` in `limb` broke: if that leaves the limb hanging,
-    /// its muscles let go.
-    pub(super) fn let_go_of_broken_limb(&mut self, limb: Limb, part: BonePart) {
+    /// A bone of `part` in body `body`'s `limb` broke: if that leaves the
+    /// limb hanging, its muscles let go.
+    pub(super) fn let_go_of_broken_limb(&mut self, body: usize, limb: Limb, part: BonePart) {
         if limb.falls_when_broken(part) {
-            self.let_limb_go(limb);
+            self.let_limb_go(body, limb);
         }
     }
 
-    /// The muscles of `limb` let go, as a broken bone makes them, and it
-    /// hangs, only damped: as a person's arm hangs once they are knocked out.
-    pub fn let_limb_go(&mut self, limb: Limb) {
+    /// The muscles of body `body`'s `limb` let go, as a broken bone makes
+    /// them, and it hangs, only damped: as a person's arm hangs once they are
+    /// knocked out.
+    pub fn let_limb_go(&mut self, body: usize, limb: Limb) {
         let Some(index) = limb.index() else {
             return;
         };
-        if !self.limp_limbs[index] {
+        if body >= self.bodies.len() {
+            return;
+        }
+        if !self.bodies[body].limp_limbs[index] {
             self.note(
                 EventKind::LimbWentLimp,
                 Subject::Limb(limb),
@@ -638,11 +657,12 @@ impl World {
                 0.0,
             );
         }
-        self.limp_limbs[index] = true;
+        self.bodies[body].limp_limbs[index] = true;
         // The pull the muscles carried goes with them.
-        for joint in &mut self.bone_joints {
-            if joint.drive.limb == limb {
-                joint.drive_impulse = 0.0;
+        for index in 0..self.bone_joints.len() {
+            let joint = self.bone_joints[index];
+            if joint.drive.limb == limb && self.joint_body(&joint) == body {
+                self.bone_joints[index].drive_impulse = 0.0;
             }
         }
     }

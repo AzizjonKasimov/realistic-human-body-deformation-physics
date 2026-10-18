@@ -213,9 +213,10 @@ pub enum GestureStep {
     Press(bool),
     /// The hand stays still for this many steps.
     Wait(i32),
-    /// The figure throws a punch with this arm on the next step, as its key
-    /// or button does in the app.
-    Punch(Limb),
+    /// Body `0` (the only one, or the left fighter) or `1` (the right
+    /// fighter) throws a punch with this arm on the next step, as its key or
+    /// button does in the app.
+    Punch(usize, Limb),
 }
 
 /// A tool used the way a person plays the app: the tool is in hand from the
@@ -236,7 +237,7 @@ impl Gesture {
             .iter()
             .map(|step| match *step {
                 GestureStep::Move { frames, .. } | GestureStep::Wait(frames) => frames.max(0),
-                GestureStep::Press(_) | GestureStep::Punch(_) => 0,
+                GestureStep::Press(_) | GestureStep::Punch(..) => 0,
             })
             .sum()
     }
@@ -253,7 +254,7 @@ impl Gesture {
         for step in self.steps {
             match *step {
                 GestureStep::Press(state) => down = state,
-                GestureStep::Punch(_) => {}
+                GestureStep::Punch(..) => {}
                 GestureStep::Wait(frames) => {
                     if frame < elapsed + frames {
                         return (position, down);
@@ -279,11 +280,11 @@ impl Gesture {
 
     /// The arm that throws a punch on `frame`: a punch step fires on the
     /// first frame after the steps before it.
-    pub fn punch(&self, frame: i32) -> Option<Limb> {
+    pub fn punch(&self, frame: i32) -> Option<(usize, Limb)> {
         let mut elapsed = 0;
         for step in self.steps {
             match *step {
-                GestureStep::Punch(limb) if elapsed == frame => return Some(limb),
+                GestureStep::Punch(body, limb) if elapsed == frame => return Some((body, limb)),
                 GestureStep::Move { frames, .. } | GestureStep::Wait(frames) => {
                     elapsed += frames.max(0);
                 }
@@ -336,8 +337,21 @@ impl Gesture {
     }
 
     /// The same gesture mirrored left to right across the body's middle,
-    /// its steps leaked as [`Gesture::shifted`]'s are.
+    /// its steps leaked as [`Gesture::shifted`]'s are: a punch is thrown by
+    /// the arm on the other side.
     pub fn mirrored(&self) -> Gesture {
+        self.mirrored_with(true)
+    }
+
+    /// The same gesture mirrored left to right for a body built as the
+    /// mirror image of this one (`World::mirrored`), whose arms keep their
+    /// names on the other side: a punch is thrown by the arm of the same
+    /// name.
+    pub fn mirrored_for_mirror_image(&self) -> Gesture {
+        self.mirrored_with(false)
+    }
+
+    fn mirrored_with(&self, swap_arms: bool) -> Gesture {
         let steps: Vec<GestureStep> = self
             .steps
             .iter()
@@ -346,11 +360,14 @@ impl Gesture {
                     to: (-to.0, to.1),
                     frames,
                 },
-                GestureStep::Punch(limb) => GestureStep::Punch(match limb {
-                    Limb::LeftArm => Limb::RightArm,
-                    Limb::RightArm => Limb::LeftArm,
-                    other => other,
-                }),
+                GestureStep::Punch(body, limb) if swap_arms => GestureStep::Punch(
+                    body,
+                    match limb {
+                        Limb::LeftArm => Limb::RightArm,
+                        Limb::RightArm => Limb::LeftArm,
+                        other => other,
+                    },
+                ),
                 other => other,
             })
             .collect();
@@ -383,8 +400,10 @@ impl Gesture {
             match part {
                 "down" => steps.push(GestureStep::Press(true)),
                 "up" => steps.push(GestureStep::Press(false)),
-                "punch=left" => steps.push(GestureStep::Punch(Limb::LeftArm)),
-                "punch=right" => steps.push(GestureStep::Punch(Limb::RightArm)),
+                "punch=left" => steps.push(GestureStep::Punch(0, Limb::LeftArm)),
+                "punch=right" => steps.push(GestureStep::Punch(0, Limb::RightArm)),
+                "punch2=left" => steps.push(GestureStep::Punch(1, Limb::LeftArm)),
+                "punch2=right" => steps.push(GestureStep::Punch(1, Limb::RightArm)),
                 _ => {
                     if let Some(frames) = part.strip_prefix("wait=") {
                         steps.push(GestureStep::Wait(number(frames)? as i32));
@@ -430,8 +449,20 @@ impl fmt::Display for Gesture {
                 GestureStep::Press(true) => write!(f, ":down")?,
                 GestureStep::Press(false) => write!(f, ":up")?,
                 GestureStep::Wait(frames) => write!(f, ":wait={frames}")?,
-                GestureStep::Punch(Limb::LeftArm) => write!(f, ":punch=left")?,
-                GestureStep::Punch(_) => write!(f, ":punch=right")?,
+                GestureStep::Punch(body, limb) => write!(
+                    f,
+                    ":punch{}={}",
+                    if body == 0 {
+                        "".to_string()
+                    } else {
+                        (body + 1).to_string()
+                    },
+                    if limb == Limb::LeftArm {
+                        "left"
+                    } else {
+                        "right"
+                    }
+                )?,
             }
         }
         write!(f, ":power={}", self.power)
@@ -512,6 +543,16 @@ impl Play {
                 followup.map(|followup| followup.mirrored()),
             ),
             Play::Gesture(gesture) => Play::Gesture(gesture.mirrored()),
+        }
+    }
+
+    /// The play mirrored left to right for a body built as the mirror
+    /// image of this one, whose arms keep their names
+    /// ([`Gesture::mirrored_for_mirror_image`]).
+    pub fn mirrored_for_mirror_image(&self) -> Play {
+        match self {
+            Play::Gesture(gesture) => Play::Gesture(gesture.mirrored_for_mirror_image()),
+            swing => swing.mirrored(),
         }
     }
 }
@@ -887,6 +928,15 @@ impl Scenario {
     pub fn mirrored(&self) -> Scenario {
         Scenario {
             play: self.play.mirrored(),
+            ..*self
+        }
+    }
+
+    /// The scenario mirrored left to right for a body built as the mirror
+    /// image of this one (`World::mirrored`), whose arms keep their names.
+    pub fn mirrored_for_mirror_image(&self) -> Scenario {
+        Scenario {
+            play: self.play.mirrored_for_mirror_image(),
             ..*self
         }
     }
@@ -2458,8 +2508,10 @@ const fn throw_punch(arm: Limb) -> [GestureStep; 4] {
             frames: 0,
         },
         GestureStep::Wait(10),
-        GestureStep::Punch(arm),
-        GestureStep::Wait(110),
+        GestureStep::Punch(0, arm),
+        // The body takes a second and a third to come back upright, then
+        // must stand still in its guard (`QUIET_FRAMES`).
+        GestureStep::Wait(200),
     ]
 }
 
@@ -3194,13 +3246,16 @@ mod tests {
             Gesture::parse("fist:-0.4,0.3:wait=5:punch=right:wait=3:punch=left:wait=9").unwrap();
         assert_eq!(gesture.tool, ToolMode::Fist);
         let thrown: Vec<(i32, Limb)> = (0..gesture.frames())
-            .filter_map(|frame| gesture.punch(frame).map(|limb| (frame, limb)))
+            .filter_map(|frame| gesture.punch(frame).map(|(_, limb)| (frame, limb)))
             .collect();
         assert_eq!(thrown, vec![(5, Limb::RightArm), (8, Limb::LeftArm)]);
         assert_eq!(Gesture::parse(&gesture.to_string()).unwrap(), gesture);
         let mirrored = gesture.mirrored();
-        assert_eq!(mirrored.punch(5), Some(Limb::LeftArm));
-        assert_eq!(mirrored.punch(8), Some(Limb::RightArm));
+        assert_eq!(mirrored.punch(5), Some((0, Limb::LeftArm)));
+        assert_eq!(mirrored.punch(8), Some((0, Limb::RightArm)));
+        let second = Gesture::parse("fist:-0.4,0.3:wait=2:punch2=right:wait=4").unwrap();
+        assert_eq!(second.punch(2), Some((1, Limb::RightArm)));
+        assert_eq!(Gesture::parse(&second.to_string()).unwrap(), second);
     }
 
     #[test]

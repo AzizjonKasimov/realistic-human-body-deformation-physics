@@ -35,6 +35,10 @@ A gesture played the way the app is, saved every 5 steps as a film strip.
 .EXAMPLE
 .\tools\capture.ps1 -Gesture "hammer:-0.6,0.9:wait=5:punch=right:wait=40" -Every 2 -Set punch_elbow_bend=0.4
 A punch filmed with a setting changed, to see a change before making it the default.
+
+.EXAMPLE
+.\tools\capture.ps1 -Fighters -Spacing 0.5 -Gesture "hammer:-1.3,0.95:wait=10:punch=right:wait=20" -Every 2 -NoTool
+The left fighter punching the right, the two standing half a body height apart.
 #>
 param(
     [string]$Scenario = "",
@@ -56,6 +60,11 @@ param(
     [switch]$NoTool,
     # Leave out the name and step label, for images to publish.
     [switch]$NoLabel,
+    # Play on two fighters side by side, as the app shows them, rather than a
+    # lone body; gestures throw the second fighter's punches with punch2=.
+    [switch]$Fighters,
+    # With -Fighters, how far apart they stand, in body heights.
+    [double]$Spacing = 0,
     [string]$Out = "",
     # File name stem; defaults to the scenario name, "strike", "gesture", or "rest".
     [string]$Name = "",
@@ -104,6 +113,8 @@ foreach ($size in ($Sizes -split "," | ForEach-Object { $_.Trim() } | Where-Obje
     if ($NoUi) { $arguments += "--no-ui" }
     if ($NoTool) { $arguments += "--no-tool" }
     if ($NoLabel) { $arguments += "--no-label" }
+    if ($Fighters) { $arguments += "--fighters" }
+    if ($Spacing -gt 0) { $arguments += @("--spacing", "$Spacing") }
     foreach ($item in $Set) { $arguments += @("--set", $item) }
     $script:printed = @()
     Invoke-Checked -Label "Capture $Name at $size" -Command {

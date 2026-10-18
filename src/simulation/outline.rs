@@ -59,6 +59,24 @@ impl OutlineLoop {
     pub(super) fn points(&self) -> &[usize] {
         &self.points
     }
+
+    /// The loop moved to follow `points` points and `springs` springs
+    /// already in a world it joins (`World::add_body`).
+    pub(super) fn move_indices(&mut self, points: usize, springs: usize) {
+        for point in &mut self.points {
+            *point += points;
+        }
+        for spring in self.edge_springs.iter_mut().flatten() {
+            *spring += springs;
+        }
+    }
+
+    /// The loop of the body mirrored left to right: the same points in the
+    /// same order run round the other way, so its outward side turns
+    /// (`World::mirrored`).
+    pub(super) fn mirror(&mut self) {
+        self.outward = -self.outward;
+    }
 }
 
 impl World {
@@ -376,6 +394,49 @@ impl World {
                     }
                 }
             }
+            // Another body's skin presses on this one's, as two fighters'
+            // arms meet: any of its outline points in front of a stretch of
+            // this outline that faced it where the bodies stood. Only skin
+            // meets skin; the muscle sheet's outline lies under it.
+            let first =
+                |outline: &OutlineLoop| outline.points.first().map(|&point| self.points[point]);
+            let Some(this) = first(outline).filter(|point| point.layer == TissueLayer::Skin) else {
+                continue;
+            };
+            for other in &self.outlines {
+                if !first(other).is_some_and(|point| {
+                    point.layer == TissueLayer::Skin && point.body != this.body
+                }) {
+                    continue;
+                }
+                for &point in &other.points {
+                    if !is_flesh(&self.flesh, point) {
+                        continue;
+                    }
+                    let p = self.points[point].position;
+                    for &edge in grid.at(p) {
+                        let edge = edge as usize;
+                        let next = (edge + 1) % count;
+                        let (home_a, home_b) = (
+                            self.points[outline.points[edge]].home,
+                            self.points[outline.points[next]].home,
+                        );
+                        let faces =
+                            outward_normal(home_a, home_b, outline.outward).is_some_and(|normal| {
+                                dot(subtract(self.points[point].home, home_a), normal) > 0.0
+                            });
+                        let a = self.points[outline.points[edge]].position;
+                        let b = self.points[outline.points[next]].position;
+                        if faces && distance_to_segment(p, a, b) <= reach {
+                            self.outline_pairs.push(OutlinePair {
+                                outline: outline_index,
+                                point,
+                                edge,
+                            });
+                        }
+                    }
+                }
+            }
         }
         self.grid = grid;
     }
@@ -539,55 +600,80 @@ impl World {
         // are speeds the step keeps, so a cut flap of skin that fell deep
         // into other skin was thrown out at 2,400 px/s in one substep.
         let max_push = OUTLINE_PUSH_SPEED * 1000.0 / self.mm_per_px() * self.solver_dt;
-        for pair_index in 0..self.outline_pairs.len() {
-            let pair = self.outline_pairs[pair_index];
-            let outline = &self.outlines[pair.outline];
-            let count = outline.points.len();
-            let ia = outline.points[pair.edge];
-            let ib = outline.points[(pair.edge + 1) % count];
-            let outward = outline.outward;
-            let (p, a, b) = (self.points[pair.point], self.points[ia], self.points[ib]);
-            let Some(normal) = outward_normal(a.position, b.position, outward) else {
-                continue;
-            };
-            let along = subtract(b.position, a.position);
-            // A stretch of outline turned over in a crease, as the skin of
-            // the armpit folds under an arm pressed to the chest, faces into
-            // the body: it is no surface to press against, and a point in
-            // front of it would read as deep behind it.
-            if dot(along, subtract(b.home, a.home)) <= 0.0 {
-                continue;
-            }
-            let t = dot(subtract(p.position, a.position), along) / dot(along, along);
-            if !(0.0..=1.0).contains(&t) {
-                continue;
-            }
-            let separation = dot(subtract(p.position, a.position), normal);
-            if separation >= 0.0 || separation < -max_depth {
-                continue;
-            }
-            let inverse = |point: &Point| {
-                if point.pinned {
-                    0.0
-                } else {
-                    1.0 / point.mass.max(EPSILON)
+        // Each body's own outline first, one pair after another; then
+        // between bodies, every push found from where both stood once their
+        // own were done, and only then applied, so neither body is solved
+        // first: one after the other, two fighters touching at rest drifted
+        // off each other's mirror image.
+        let mut between = Vec::new();
+        for crossing in [false, true] {
+            for pair_index in 0..self.outline_pairs.len() {
+                let pair = self.outline_pairs[pair_index];
+                let outline = &self.outlines[pair.outline];
+                let count = outline.points.len();
+                let ia = outline.points[pair.edge];
+                let ib = outline.points[(pair.edge + 1) % count];
+                if (self.points[pair.point].body != self.points[ia].body) != crossing {
+                    continue;
                 }
-            };
-            let (wp, wa, wb) = (inverse(&p), inverse(&a), inverse(&b));
-            let weight = wp + wa * (1.0 - t) * (1.0 - t) + wb * t * t;
-            if weight <= EPSILON {
-                continue;
+                let outward = outline.outward;
+                let (p, a, b) = (self.points[pair.point], self.points[ia], self.points[ib]);
+                let Some(normal) = outward_normal(a.position, b.position, outward) else {
+                    continue;
+                };
+                let along = subtract(b.position, a.position);
+                // A stretch of outline turned over in a crease, as the skin
+                // of the armpit folds under an arm pressed to the chest, faces
+                // into the body: it is no surface to press against, and a
+                // point in front of it would read as deep behind it.
+                if dot(along, subtract(b.home, a.home)) <= 0.0 {
+                    continue;
+                }
+                let t = dot(subtract(p.position, a.position), along) / dot(along, along);
+                if !(0.0..=1.0).contains(&t) {
+                    continue;
+                }
+                let separation = dot(subtract(p.position, a.position), normal);
+                if separation >= 0.0 || separation < -max_depth {
+                    continue;
+                }
+                let inverse = |point: &Point| {
+                    if point.pinned {
+                        0.0
+                    } else {
+                        1.0 / point.mass.max(EPSILON)
+                    }
+                };
+                let (wp, wa, wb) = (inverse(&p), inverse(&a), inverse(&b));
+                let weight = wp + wa * (1.0 - t) * (1.0 - t) + wb * t * t;
+                if weight <= EPSILON {
+                    continue;
+                }
+                let push = (-separation * OUTLINE_CONTACT_STIFFNESS).min(max_push) / weight;
+                let moves = [
+                    (pair.point, scale(normal, push * wp)),
+                    (ia, scale(normal, -push * wa * (1.0 - t))),
+                    (ib, scale(normal, -push * wb * t)),
+                ];
+                self.debug.outline_contacts += 1;
+                if crossing {
+                    between.extend(moves);
+                    self.debug.max_overlap_between_bodies =
+                        self.debug.max_overlap_between_bodies.max(-separation);
+                } else {
+                    for (point, shift) in moves {
+                        self.points[point].position = add(self.points[point].position, shift);
+                    }
+                    if self.body_part_of(pair.point) != self.body_part_of(ia) {
+                        self.debug.max_overlap_between_parts =
+                            self.debug.max_overlap_between_parts.max(-separation);
+                    }
+                }
+                self.debug.max_outline_overlap = self.debug.max_outline_overlap.max(-separation);
             }
-            let push = (-separation * OUTLINE_CONTACT_STIFFNESS).min(max_push) / weight;
-            self.points[pair.point].position = add(p.position, scale(normal, push * wp));
-            self.points[ia].position = subtract(a.position, scale(normal, push * wa * (1.0 - t)));
-            self.points[ib].position = subtract(b.position, scale(normal, push * wb * t));
-            self.debug.outline_contacts += 1;
-            if self.body_part_of(pair.point) != self.body_part_of(ia) {
-                self.debug.max_overlap_between_parts =
-                    self.debug.max_overlap_between_parts.max(-separation);
-            }
-            self.debug.max_outline_overlap = self.debug.max_outline_overlap.max(-separation);
+        }
+        for (point, shift) in between {
+            self.points[point].position = add(self.points[point].position, shift);
         }
     }
 }

@@ -68,6 +68,22 @@ pub(super) struct BoneCover {
     real: [[f64; COVER_DIRECTIONS]; COVER_STATIONS],
 }
 
+impl BoneCover {
+    /// The cover of the same bone mirrored left to right: what lay a turn
+    /// counterclockwise from the bone lies as far clockwise
+    /// (`World::mirrored`).
+    pub(super) fn mirror(&mut self) {
+        for table in [&mut self.figure, &mut self.real] {
+            for row in table.iter_mut() {
+                let turned = *row;
+                for (turn, value) in row.iter_mut().enumerate() {
+                    *value = turned[(COVER_DIRECTIONS - turn) % COVER_DIRECTIONS];
+                }
+            }
+        }
+    }
+}
+
 /// What covers a bone at one place on one side.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Cover {

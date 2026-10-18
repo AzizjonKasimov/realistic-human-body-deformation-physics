@@ -57,9 +57,12 @@
 //!                                     moved across the window, report where the
 //!                                     blows hurt it differently, and let a body
 //!                                     fall and drift free (strike_moved_report.txt)
-//!   --twin mirrored|across[=PX]       instead, play each selected scenario
+//!   --twin mirrored|mirrored-body|across[=PX]
+//!                                     instead, play each selected scenario
 //!                                     beside a twin of the body mirrored left
-//!                                     to right or moved PX px across (208 by
+//!                                     to right (the same body, or built as
+//!                                     its mirror image as a second fighter
+//!                                     is), or moved PX px across (208 by
 //!                                     default), compare them frame by frame,
 //!                                     and print, phase by phase, where they
 //!                                     first moved things differently: the

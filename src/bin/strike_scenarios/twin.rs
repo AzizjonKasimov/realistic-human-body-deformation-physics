@@ -24,16 +24,22 @@ pub(crate) const MOVED_ACROSS_PX: f64 = 400.0 * 0.52;
 /// The way the twin is changed from the body as tuned.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum TwinWay {
+    /// The same body, the play mirrored.
     Mirrored,
+    /// The body's mirror image (`World::mirrored`), as a second fighter is
+    /// built, the play mirrored: the two are solved in the same order, so
+    /// they should part only by rounding.
+    MirroredBody,
     /// Moved this many pixels across the world.
     Across(f64),
 }
 
 impl TwinWay {
-    /// Reads `mirrored`, `across`, or `across=PX`.
+    /// Reads `mirrored`, `mirrored-body`, `across`, or `across=PX`.
     pub(crate) fn parse(text: &str) -> Result<TwinWay, String> {
         match text.split_once('=') {
             None if text == "mirrored" => Ok(TwinWay::Mirrored),
+            None if text == "mirrored-body" => Ok(TwinWay::MirroredBody),
             None if text == "across" => Ok(TwinWay::Across(MOVED_ACROSS_PX)),
             Some(("across", px)) => px
                 .trim()
@@ -41,7 +47,7 @@ impl TwinWay {
                 .map(TwinWay::Across)
                 .map_err(|_| format!("--twin across=PX takes a number of pixels, got `{px}`")),
             _ => Err(format!(
-                "--twin takes mirrored, across, or across=PX, got `{text}`"
+                "--twin takes mirrored, mirrored-body, across, or across=PX, got `{text}`"
             )),
         }
     }
@@ -49,6 +55,7 @@ impl TwinWay {
     fn describe(self) -> String {
         match self {
             TwinWay::Mirrored => "mirrored left to right".to_string(),
+            TwinWay::MirroredBody => "built as its mirror image, the play mirrored".to_string(),
             TwinWay::Across(px) => format!("moved {px:.0} px across"),
         }
     }
@@ -66,7 +73,7 @@ impl Turn {
     /// The twin's place `at`, where the tuned body has it.
     fn place(self, at: Vec2) -> Vec2 {
         match self.way {
-            TwinWay::Mirrored => Vec2 {
+            TwinWay::Mirrored | TwinWay::MirroredBody => Vec2 {
                 x: 2.0 * self.middle - at.x,
                 y: at.y,
             },
@@ -80,7 +87,7 @@ impl Turn {
     /// The twin's motion or direction `by`, as the tuned body has it.
     fn motion(self, by: Vec2) -> Vec2 {
         match self.way {
-            TwinWay::Mirrored => Vec2 { x: -by.x, y: by.y },
+            TwinWay::Mirrored | TwinWay::MirroredBody => Vec2 { x: -by.x, y: by.y },
             TwinWay::Across(_) => by,
         }
     }
@@ -249,6 +256,11 @@ fn twin_run(scenario: &Scenario, way: TwinWay, explain: Option<i32>) {
     let tuned_frame = rp::body_frame(SCENARIO_WIDTH, SCENARIO_HEIGHT);
     let (twin_frame, twin_width, twin_scenario) = match way {
         TwinWay::Mirrored => (tuned_frame, SCENARIO_WIDTH, scenario.mirrored()),
+        TwinWay::MirroredBody => (
+            tuned_frame,
+            SCENARIO_WIDTH,
+            scenario.mirrored_for_mirror_image(),
+        ),
         TwinWay::Across(px) => (
             BodyFrame {
                 origin: Vec2 {
@@ -268,7 +280,10 @@ fn twin_run(scenario: &Scenario, way: TwinWay, explain: Option<i32>) {
     // A body standing elsewhere is the body built in the scenarios' place
     // and moved there (`World::move_across`), as a second fighter is.
     let mut tuned = settled_body(SCENARIO_WIDTH, SCENARIO_HEIGHT, materials);
-    let mut twin = tuned.clone();
+    let mut twin = match way {
+        TwinWay::MirroredBody => tuned.mirrored(tuned_frame.origin.x),
+        _ => tuned.clone(),
+    };
     if let TwinWay::Across(px) = way {
         twin.move_across(px);
     }
@@ -482,7 +497,7 @@ fn built_differently(tuned: &World, twin: &World, found: &Matches, turn: Turn) -
             let missing: Vec<usize> = ours
                 .iter()
                 .enumerate()
-                .filter(|(_, mapped)| mapped.map_or(true, |key| !theirs.contains(&key)))
+                .filter(|(_, mapped)| mapped.is_none_or(|key| !theirs.contains(&key)))
                 .map(|(index, _)| index)
                 .collect();
             if ours.len() != theirs.len() || !missing.is_empty() {

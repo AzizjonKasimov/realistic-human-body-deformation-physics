@@ -3,6 +3,7 @@ use std::f64::consts::PI;
 
 mod bending;
 mod blood;
+mod bodies;
 mod body;
 mod bruises;
 mod cover;
@@ -23,6 +24,7 @@ mod tools;
 mod tuning;
 
 pub use blood::{BloodTrail, SkinSpot};
+pub use bodies::{create_fighters, create_fighters_at, BodyState};
 pub use body::{
     body_frame, body_frame_between, create_layered_body, create_layered_body_in, BodyFrame,
 };
@@ -237,9 +239,10 @@ pub struct InputState {
     pub vy: f64,
     pub power: f64,
     pub tool: ToolMode,
-    /// An arm throws a punch on this step (`punch.rs`): the player pressed
-    /// its key or button.
-    pub punch: Option<Limb>,
+    /// A body throws a punch with an arm on this step (`punch.rs`): the
+    /// player pressed its key or button. The body is its index in the world,
+    /// 0 for the only one.
+    pub punch: Option<(usize, Limb)>,
 }
 
 impl Default for InputState {
@@ -367,6 +370,18 @@ pub struct Materials {
     /// (`punch.rs`).
     pub punch_elbow_bend: f64,
     pub punch_rise: f64,
+    /// How far the trunk leans into a punch at the lower back, in radians,
+    /// and how long it takes to lean that far (`punch.rs`): seen from the
+    /// front, the body's turn into a straight punch, which carries the
+    /// shoulder toward what it hits, shows as a lean toward it.
+    pub punch_lean: f64,
+    pub punch_lean_seconds: f64,
+    /// How far a punch shifts the body's weight toward what it hits, in
+    /// metres (`punch.rs`): the hips go with it as the legs push.
+    pub punch_hip_shift: f64,
+    /// How long the body takes to come back upright and over its feet
+    /// after a punch, in seconds (`punch.rs`).
+    pub punch_recover_seconds: f64,
     pub muscle_fiber_rupture_damage_floor: f64,
     pub muscle_tear_stretch: f64,
     pub muscle_tear_impulse: f64,
@@ -638,6 +653,16 @@ impl Default for Materials {
             // fighter as tall standing beside.
             punch_elbow_bend: 0.17,
             punch_rise: 0.38,
+            // A straight punch carries the shoulder well toward what it
+            // hits, by the body's weight going forward and its turn; seen
+            // from the front, the hips shift and the trunk leans. Set so the
+            // fist reaches the head of a fighter standing `FIGHTER_SPACING`
+            // away, at the trunk's own strength (`Joint::Back`), which takes
+            // a third of a second to lean it in.
+            punch_lean: 0.21,
+            punch_lean_seconds: 0.3,
+            punch_hip_shift: 0.15,
+            punch_recover_seconds: 1.0,
             muscle_fiber_rupture_damage_floor: 0.0,
             muscle_tear_stretch: 1.92,
             muscle_tear_impulse: 1180.0,
@@ -837,6 +862,8 @@ pub struct Point {
     /// attached to them, and only the flesh of their pieces is drawn (see
     /// `cuts.rs`).
     pub ghost_of: usize,
+    /// Which body in the world it belongs to (`bodies.rs`).
+    pub body: u8,
 }
 
 impl Point {
@@ -864,6 +891,7 @@ impl Default for Point {
             surface_depth: 0.0,
             on_cut: false,
             ghost_of: MISSING_POINT,
+            body: 0,
         }
     }
 }
@@ -1147,6 +1175,9 @@ pub struct BoneSegment {
     pub mass: f64,
     /// The limb the bone is part of, if any; its pieces keep it.
     pub limb: Limb,
+    /// Which body in the world it belongs to (`bodies.rs`); its pieces keep
+    /// it.
+    pub body: u8,
 }
 
 impl Default for BoneSegment {
@@ -1185,6 +1216,7 @@ impl Default for BoneSegment {
             cover_to: 1.0,
             mass: 2.0,
             limb: Limb::None,
+            body: 0,
         }
     }
 }
@@ -1600,11 +1632,13 @@ pub struct ContactDebug {
     pub solver_iterations: i32,
     /// Times this step an outline point was pushed out from behind another
     /// part of the outline, as an arm pressed against the chest is, and the
-    /// deepest such overlap in pixels, and the deepest between two parts of
-    /// the body, a limb and the trunk or two limbs.
+    /// deepest such overlap in pixels, the deepest between two parts of the
+    /// body, a limb and the trunk or two limbs, and the deepest between two
+    /// bodies' skins.
     pub outline_contacts: i32,
     pub max_outline_overlap: f64,
     pub max_overlap_between_parts: f64,
+    pub max_overlap_between_bodies: f64,
     pub fragment_sleep_events: i32,
     pub fragment_wake_events: i32,
     pub fragment_budget_skips: i32,
@@ -1708,6 +1742,7 @@ impl Default for ContactDebug {
             outline_contacts: 0,
             max_outline_overlap: 0.0,
             max_overlap_between_parts: 0.0,
+            max_overlap_between_bodies: 0.0,
             fragment_sleep_events: 0,
             fragment_wake_events: 0,
             fragment_budget_skips: 0,
@@ -1886,7 +1921,9 @@ pub struct World {
     wounds: Vec<WoundSource>,
     stats: Stats,
     debug: ContactDebug,
-    blood_volume: f64,
+    /// What each body in the world has of its own besides its flesh and
+    /// bones: its blood, limbs, punches, and broken bones (`bodies.rs`).
+    bodies: Vec<bodies::BodyState>,
     fluid_write_cursor: usize,
     /// Broken skin springs, where blood can leave the body.
     open_skin: Vec<usize>,
@@ -1952,12 +1989,6 @@ pub struct World {
     floor_y: f64,
     /// The ends of the pelvis, held up where the body stands (`stance.rs`).
     hip_holds: Vec<HipHold>,
-    /// Which limbs hang from a broken bone, their muscles let go, in the
-    /// order of [`Limb::index`].
-    limp_limbs: [bool; 4],
-    /// The punch each arm is throwing, the viewer's left arm first
-    /// (`punch.rs`).
-    punches: [Option<Punch>; 2],
 }
 
 impl Default for World {
@@ -1992,7 +2023,7 @@ impl World {
             wounds: Vec::new(),
             stats: Stats::default(),
             debug: ContactDebug::default(),
-            blood_volume: materials.blood_volume_capacity.max(0.0),
+            bodies: vec![bodies::BodyState::new(&materials)],
             fluid_write_cursor: 0,
             open_skin: Vec::new(),
             fresh_blood_used: 0,
@@ -2022,8 +2053,6 @@ impl World {
             outline_wrap_stale: false,
             floor_y: f64::INFINITY,
             hip_holds: Vec::new(),
-            limp_limbs: [false; 4],
-            punches: [None, None],
         }
     }
 
@@ -2235,12 +2264,14 @@ impl World {
         &self.debug
     }
 
+    /// The share of its blood the first body has left.
     pub fn blood_volume_fraction(&self) -> f64 {
-        self.blood_volume_fraction_internal()
+        self.blood_volume_fraction_of(0)
     }
 
+    /// How firm the first body's flesh is for the blood it has left.
     pub fn blood_turgor_scale(&self) -> f64 {
-        self.blood_turgor_scale_internal()
+        self.blood_turgor_scale_of(0)
     }
 
     pub fn add_point(&mut self, position: Vec2, layer: TissueLayer, pinned: bool) -> usize {
@@ -2594,8 +2625,8 @@ impl World {
             impact: striker_speed * striker_mass,
             solver_iterations: (self.materials.substeps * self.materials.contact_passes) as i32,
             blood_loss: self.stats.blood_loss,
-            blood_volume_fraction: self.blood_volume_fraction_internal(),
-            blood_turgor_scale: self.blood_turgor_scale_internal(),
+            blood_volume_fraction: self.blood_volume_fraction_of(0),
+            blood_turgor_scale: self.blood_turgor_scale_of(0),
             ..ContactDebug::default()
         };
         self.begin_journal_step();
@@ -2619,12 +2650,12 @@ impl World {
         });
         self.timed("wounds", Self::disturb_wounds_from_loaded_tissue);
         self.timed("outline pairs", Self::gather_outline_pairs);
-        if let Some(limb) = input.punch {
-            self.throw_punch(limb);
+        if let Some((body, limb)) = input.punch {
+            self.throw_punch(body, limb);
         }
         self.timed("punches", |world| world.drive_punches(dt));
         self.solve_motion(dt, width, floor_y);
-        self.debug.punch_speed = self.punch_speed(fists, dt);
+        self.debug.punch_speed = self.punch_speed(&fists, dt);
         // Tissue tears from how far it is stretched once the step's push has
         // spread through it, not from the instant a tool's push lands on a
         // few points.
@@ -3211,7 +3242,8 @@ impl World {
         }
 
         let dir = normalized(direction, Vec2 { x: 0.0, y: -1.0 });
-        let clamped_pressure = (pressure * self.blood_pressure_scale()).clamp(0.12, 4.8);
+        let body = self.body_near(center);
+        let clamped_pressure = (pressure * self.blood_pressure_scale(body)).clamp(0.12, 4.8);
         let clamped_depth = depth.clamp(0.12, 1.35);
         let clamped_radius = radius.clamp(1.3, 5.2);
 
@@ -3763,46 +3795,81 @@ impl World {
         }
     }
 
-    fn blood_volume_fraction_internal(&self) -> f64 {
+    /// The share of its blood body `body` has left.
+    pub fn blood_volume_fraction_of(&self, body: usize) -> f64 {
         let capacity = self.materials.blood_volume_capacity.max(EPSILON);
-        (self.blood_volume / capacity).clamp(0.0, 1.0)
+        let blood = self
+            .bodies
+            .get(body)
+            .map_or(0.0, |state| state.blood_volume);
+        (blood / capacity).clamp(0.0, 1.0)
     }
 
-    fn blood_pressure_scale(&self) -> f64 {
+    fn blood_pressure_scale(&self, body: usize) -> f64 {
         let min_scale = self.materials.blood_pressure_min_scale.clamp(0.05, 1.0);
-        min_scale + (1.0 - min_scale) * self.blood_volume_fraction_internal()
+        min_scale + (1.0 - min_scale) * self.blood_volume_fraction_of(body)
     }
 
-    fn blood_turgor_scale_internal(&self) -> f64 {
+    /// How firm body `body`'s flesh is for the blood it has left.
+    pub fn blood_turgor_scale_of(&self, body: usize) -> f64 {
         let min_scale = self.materials.blood_turgor_min_scale.clamp(0.10, 1.0);
-        min_scale + (1.0 - min_scale) * self.blood_volume_fraction_internal()
+        min_scale + (1.0 - min_scale) * self.blood_volume_fraction_of(body)
     }
 
-    /// Takes `ml` of blood out of the body.
-    fn drain_blood_ml(&mut self, ml: f64) {
+    /// How firm each body's flesh is for the blood it has left, in order.
+    pub(super) fn turgor_by_body(&self) -> Vec<f64> {
+        (0..self.bodies.len())
+            .map(|body| self.blood_turgor_scale_of(body))
+            .collect()
+    }
+
+    /// Takes `ml` of blood out of body `body`.
+    fn drain_blood_ml(&mut self, body: usize, ml: f64) {
         if ml <= 0.0 || self.materials.blood_volume_capacity <= 0.0 {
             return;
         }
+        let Some(state) = self.bodies.get_mut(body) else {
+            return;
+        };
         let loss = ml / BODY_BLOOD_ML * self.materials.blood_volume_capacity;
-        let drained = loss.min(self.blood_volume.max(0.0));
-        self.blood_volume = (self.blood_volume - drained).max(0.0);
+        let drained = loss.min(state.blood_volume.max(0.0));
+        state.blood_volume = (state.blood_volume - drained).max(0.0);
         self.stats.blood_loss += drained;
         self.debug.blood_loss = self.stats.blood_loss;
-        self.debug.blood_volume_fraction = self.blood_volume_fraction_internal();
-        self.debug.blood_turgor_scale = self.blood_turgor_scale_internal();
+        self.debug.blood_volume_fraction = self.blood_volume_fraction_of(0);
+        self.debug.blood_turgor_scale = self.blood_turgor_scale_of(0);
+    }
+
+    /// The body a wound bleeds from: the one its flesh or bone belongs to.
+    fn wound_body(&self, wound: &WoundSource) -> usize {
+        if wound.anchor_point < self.points.len() {
+            self.point_body(wound.anchor_point)
+        } else if wound.anchor_bone < self.bones.len() {
+            self.bone_body(wound.anchor_bone)
+        } else {
+            0
+        }
     }
 
     fn update_wounds(&mut self, dt: f64) {
         let mut emissions = Vec::new();
-        let mut drained_ml = 0.0;
-        let systemic_pressure = self.blood_pressure_scale();
+        let mut drained_ml = vec![0.0; self.bodies.len()];
+        let wound_bodies: Vec<usize> = self
+            .wounds
+            .iter()
+            .map(|wound| self.wound_body(wound))
+            .collect();
+        let pressures: Vec<f64> = (0..self.bodies.len())
+            .map(|body| self.blood_pressure_scale(body))
+            .collect();
         self.debug.blood_loss = self.stats.blood_loss;
-        self.debug.blood_volume_fraction = self.blood_volume_fraction_internal();
-        self.debug.blood_turgor_scale = self.blood_turgor_scale_internal();
-        for wound in &mut self.wounds {
+        self.debug.blood_volume_fraction = self.blood_volume_fraction_of(0);
+        self.debug.blood_turgor_scale = self.blood_turgor_scale_of(0);
+        for (wound, &body) in self.wounds.iter_mut().zip(&wound_bodies) {
             if !wound.active {
                 continue;
             }
+            let systemic_pressure = pressures.get(body).copied().unwrap_or(1.0);
             wound.age += dt;
             let layer_scale: f64 = if wound.layer == TissueLayer::Muscle {
                 1.35
@@ -3820,7 +3887,9 @@ impl World {
                 * open_factor
                 * layer_scale.min(1.0);
             let shed_ml = flow_ml_per_min * dt / 60.0;
-            drained_ml += shed_ml;
+            if let Some(drained) = drained_ml.get_mut(body) {
+                *drained += shed_ml;
+            }
             // Each drop shown stands for blood the wound has lost.
             wound.accumulator += shed_ml / BLOOD_DROP_ML;
             let effective_pressure = wound.pressure * systemic_pressure;
@@ -3876,7 +3945,9 @@ impl World {
 
         // The blood is lost whatever is shown; at most a few drops a step show
         // it.
-        self.drain_blood_ml(drained_ml);
+        for (body, ml) in drained_ml.into_iter().enumerate() {
+            self.drain_blood_ml(body, ml);
+        }
         let mut leak_left = self.materials.max_wound_leak_per_step;
         for (position, direction, count, speed, radius, intensity, spray, kind) in emissions {
             let count = count.min(leak_left);
@@ -6919,9 +6990,22 @@ impl World {
             return;
         }
         let dir = scale(delta, 1.0 / len);
+        // Across the bone, on its left as the body was built and tuned, and
+        // on its right in a body built as its mirror image, so a fighter's
+        // mirror image breaks as its mirror image would: taken always on the
+        // bone's left, it broke unlike the fighter it mirrored.
+        let side = if self
+            .bodies
+            .get(old.body as usize)
+            .is_some_and(|state| state.mirrored)
+        {
+            -1.0
+        } else {
+            1.0
+        };
         let base_normal = Vec2 {
-            x: -dir.y,
-            y: dir.x,
+            x: -dir.y * side,
+            y: dir.x * side,
         };
         let contact_normal = normalized(impulse_normal, base_normal);
         let normal = normalized(
@@ -7063,6 +7147,7 @@ impl World {
             open_break: first.open_break,
             pinned: old.pinned,
             limb: old.limb,
+            body: old.body,
             cover: old.cover,
             cover_from: cover_break,
             cover_to: old.cover_to,
@@ -7222,7 +7307,7 @@ impl World {
         }
         self.split_stance_at_break(bone_index, second_index, break_t);
         self.split_tendons_at_break(bone_index, second_index, break_t);
-        self.let_go_of_broken_limb(old.limb, old.part);
+        self.let_go_of_broken_limb(old.body as usize, old.limb, old.part);
         // The periosteum and the muscle round a break hold its pieces
         // together: they bend and shift at the break but do not come apart.
         // Once the body stood free of the pins that held each piece near
@@ -7266,7 +7351,7 @@ impl World {
         };
         if !open {
             self.bruise_tissue_around_fracture(crack, old.radius, load);
-            self.count_fracture(old.part, old.kind, load);
+            self.count_fracture(old.body as usize, old.part, old.kind, load);
             if butterfly {
                 self.chip_butterfly(&old, crack, previous_crack, home_crack, dir, normal);
             }
@@ -7302,7 +7387,7 @@ impl World {
         // Scaled to the bone, so an open break in a thin shin or forearm tears
         // out around the bone instead of through the whole limb.
         self.damage_tissue_around_fracture(crack, old.radius * 1.6 + overload * 3.0, load);
-        self.count_fracture(old.part, old.kind, load);
+        self.count_fracture(old.body as usize, old.part, old.kind, load);
         self.chip_splinter(
             &old,
             crack,
@@ -7338,6 +7423,7 @@ impl World {
             kind: old.kind,
             part: old.part,
             limb: old.limb,
+            body: old.body,
             a: Vec2 {
                 x: crack.x - dir.x * chip_length * 0.45 + normal.x * snap * 0.35,
                 y: crack.y - dir.y * chip_length * 0.45 + normal.y * snap * 0.35,
@@ -7504,7 +7590,10 @@ impl World {
         }
     }
 
-    fn count_fracture(&mut self, part: BonePart, kind: BoneKind, load: f64) {
+    fn count_fracture(&mut self, body: usize, part: BonePart, kind: BoneKind, load: f64) {
+        if let Some(state) = self.bodies.get_mut(body) {
+            state.fractures[part.index()] += 1;
+        }
         self.stats.fractured_bones += 1;
         self.debug.fractures += 1;
         self.debug.part_fractures[part.index()] += 1;
@@ -8418,7 +8507,7 @@ mod tests {
         );
 
         let mut depleted = World::new(materials);
-        depleted.blood_volume = 0.10;
+        depleted.bodies[0].blood_volume = 0.10;
         depleted.open_wound(
             Vec2 { x: 10.0, y: 10.0 },
             Vec2 { x: 0.0, y: 1.0 },
@@ -8455,7 +8544,7 @@ mod tests {
         // off it.
         let pulled_off = |blood_volume: f64| {
             let mut world = World::new(materials);
-            world.blood_volume = blood_volume;
+            world.bodies[0].blood_volume = blood_volume;
             let point = world.add_point(Vec2 { x: 100.0, y: 100.0 }, TissueLayer::Skin, false);
             world.add_bone_segment(
                 Vec2 { x: 80.0, y: 60.0 },
@@ -8499,7 +8588,7 @@ mod tests {
 
         fn build_area_world(materials: Materials, blood_volume: f64) -> World {
             let mut world = World::new(materials);
-            world.blood_volume = blood_volume;
+            world.bodies[0].blood_volume = blood_volume;
             let a = world.add_point(Vec2 { x: 100.0, y: 100.0 }, TissueLayer::Skin, false);
             let b = world.add_point(Vec2 { x: 200.0, y: 100.0 }, TissueLayer::Skin, false);
             let c = world.add_point(Vec2 { x: 100.0, y: 200.0 }, TissueLayer::Skin, false);

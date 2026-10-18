@@ -23,9 +23,15 @@ pub const FIGHTER_SPACING: f64 = 0.52;
 /// at the same size, the viewer's left one first: side by side about the
 /// world's middle, [`FIGHTER_SPACING`] apart.
 pub fn fighter_frames() -> [BodyFrame; 2] {
+    fighter_frames_at(FIGHTER_SPACING)
+}
+
+/// Where two fighters stand `spacing` body heights apart, as
+/// [`fighter_frames`] places them.
+pub fn fighter_frames_at(spacing: f64) -> [BodyFrame; 2] {
     let frame = world_frame();
     let middle = SCENARIO_WIDTH * 0.5;
-    let half = FIGHTER_SPACING * frame.height * 0.5;
+    let half = spacing * frame.height * 0.5;
     [middle - half, middle + half].map(|x| BodyFrame {
         origin: Vec2 {
             x,

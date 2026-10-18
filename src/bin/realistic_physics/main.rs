@@ -24,8 +24,9 @@ enum ViewMode {
 #[derive(Clone, Copy)]
 enum ControlAction {
     Tool(rp::ToolMode),
-    /// The figure throws a punch with this arm (`rp::World::throw_punch`).
-    Punch(rp::Limb),
+    /// Fighter 0 (the left) or 1 (the right) throws a punch at the other with
+    /// its arm toward it (`rp::World::throw_punch`).
+    Punch(usize),
     ToggleDebug,
     TogglePause,
     Reset,
@@ -35,8 +36,8 @@ enum ControlAction {
 }
 
 const KEY_CONTROLS: [(KeyCode, ControlAction); 11] = [
-    (KeyCode::Left, ControlAction::Punch(rp::Limb::LeftArm)),
-    (KeyCode::Right, ControlAction::Punch(rp::Limb::RightArm)),
+    (KeyCode::Left, ControlAction::Punch(0)),
+    (KeyCode::Right, ControlAction::Punch(1)),
     (KeyCode::H, ControlAction::Tool(rp::ToolMode::Heavy)),
     (KeyCode::B, ControlAction::Tool(rp::ToolMode::Blunt)),
     (KeyCode::S, ControlAction::Tool(rp::ToolMode::Sharp)),
@@ -105,8 +106,10 @@ struct AppState {
     /// ran before it opened, so it runs again once the card closes.
     about_open: Option<bool>,
     /// A punch key or button pressed since the last simulation step, which
-    /// throws on the next one.
-    pending_punch: Option<rp::Limb>,
+    /// throws on the next one: which fighter throws it.
+    pending_punch: Option<usize>,
+    /// How far apart the two fighters stand, in body heights.
+    spacing: f64,
 }
 
 /// A skin spring on the body's outline, with the third corner of its triangle
@@ -165,6 +168,7 @@ impl AppState {
             about_requested: false,
             about_open: None,
             pending_punch: None,
+            spacing: rp::FIGHTER_SPACING,
         };
         app.fit_view(width as f32, height as f32);
         app.stepped_hand = app.view.to_world(app.pointer);
@@ -172,9 +176,9 @@ impl AppState {
         app
     }
 
-    /// A fresh body, where every body is simulated.
+    /// Two fresh fighters, where they stand.
     fn reset_body(&mut self) {
-        self.world = rp::create_layered_body_in(rp::world_frame(), rp::Materials::default());
+        self.world = rp::create_fighters_at(rp::Materials::default(), self.spacing);
         self.world.capture_motion(&mut self.earlier);
         self.skin_rim = skin_rim(&self.world);
         self.tool_blood = 0.0;
@@ -195,22 +199,41 @@ impl AppState {
     }
 }
 
-/// Where the body is drawn: the default placement when it clears the HUD at
-/// the top and the control buttons at the bottom, which wrap into more rows
-/// in narrow windows, or else as large as fits between them. At 1280x720 the
-/// default placement is where it is simulated, so the world is drawn as it is.
+/// Where the scenarios' body frame (`rp::world_frame`) is drawn, so that both
+/// fighters show: the default placement when it clears the HUD at the top
+/// and the control buttons at the bottom, which wrap into more rows in
+/// narrow windows, or else as large as fits between them; and across, the
+/// two fighters centred in the window, smaller still if they would not fit.
+/// At 1280x720 that is where the world is simulated, so it is drawn as it is.
 fn screen_frame_for(app: &AppState, width: f32, height: f32) -> rp::BodyFrame {
     let default = rp::body_frame(width as f64, height as f64);
     let top = (hud_bottom(width) + BODY_UI_GAP) as f64;
     let hints = control_hints(app, &render_palette());
     let panel = layout_control_hints(&hints, width, height - FLOOR_HEIGHT, app.touch_ui).panel;
     let bottom = (panel.y - BODY_UI_GAP) as f64;
-    if default.origin.y >= top && default.origin.y + default.height <= bottom {
+    let mut frame = if default.origin.y >= top && default.origin.y + default.height <= bottom {
         default
     } else {
         rp::body_frame_between(width as f64, top.max(default.origin.y), bottom)
-    }
+    };
+    // Across, the world from the left fighter's outer side to the right's,
+    // in the scenarios' frame, drawn in the window less a margin each side.
+    let world = rp::world_frame();
+    let [left, right] = rp::fighter_frames_at(app.spacing);
+    let reach = FIGHTERS_HALF_WIDTH * world.height;
+    let (from, to) = (left.origin.x - reach, right.origin.x + reach);
+    let room = (width as f64 - 2.0 * BODY_SIDE_MARGIN).max(1.0);
+    let scale = (frame.height / world.height).min(room / (to - from));
+    frame.height = world.height * scale;
+    frame.origin.x = width as f64 * 0.5 + (world.origin.x - (from + to) * 0.5) * scale;
+    frame
 }
+
+/// How far out from its midline a fighter reaches in the guard, in body
+/// heights, with room for a punch's fist.
+const FIGHTERS_HALF_WIDTH: f64 = 0.31;
+/// The least room left beside the fighters at each side of the window.
+const BODY_SIDE_MARGIN: f64 = 12.0;
 
 #[derive(Clone, Copy)]
 struct RenderPalette {
@@ -446,7 +469,7 @@ fn apply_control(app: &mut AppState, action: ControlAction) {
                 app.tool_blood = 0.0;
             }
         }
-        ControlAction::Punch(limb) => app.pending_punch = Some(limb),
+        ControlAction::Punch(fighter) => app.pending_punch = Some(fighter),
         ControlAction::ToggleDebug => app.debug_overlay = !app.debug_overlay,
         ControlAction::TogglePause => app.running = !app.running,
         ControlAction::Reset => app.reset_body(),
@@ -481,7 +504,10 @@ fn step_simulation(app: &mut AppState, frame_dt: f64, audio: &mut audio::Audio) 
             vy: 0.0,
             power: rp::swing_power(app.tool),
             tool: app.tool,
-            punch: app.pending_punch.take(),
+            punch: app
+                .pending_punch
+                .take()
+                .map(|fighter| (fighter, app.world.inner_arm(fighter))),
         };
         app.world.capture_motion(&mut app.earlier);
         step_world(app, &input);
@@ -2285,21 +2311,21 @@ fn control_hints(app: &AppState, palette: &RenderPalette) -> [ControlHint; 12] {
             active: app.tool == rp::ToolMode::Fist,
             action: Some(ControlAction::Tool(rp::ToolMode::Fist)),
         },
-        // The figure throws a punch with the arm on that side of the
-        // screen, out to that side.
+        // The fighter on that side of the screen punches the other, with
+        // its arm toward it.
         ControlHint {
             key: "LEFT",
             label: HintLabel::Text("punch"),
             accent: palette.tool_accent,
-            active: app.world.punch(rp::Limb::LeftArm).is_some(),
-            action: Some(ControlAction::Punch(rp::Limb::LeftArm)),
+            active: app.world.punch(0, app.world.inner_arm(0)).is_some(),
+            action: Some(ControlAction::Punch(0)),
         },
         ControlHint {
             key: "RIGHT",
             label: HintLabel::Text("punch"),
             accent: palette.tool_accent,
-            active: app.world.punch(rp::Limb::RightArm).is_some(),
-            action: Some(ControlAction::Punch(rp::Limb::RightArm)),
+            active: app.world.punch(1, app.world.inner_arm(1)).is_some(),
+            action: Some(ControlAction::Punch(1)),
         },
         ControlHint {
             key: "D",

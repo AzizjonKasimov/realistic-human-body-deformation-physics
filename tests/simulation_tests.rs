@@ -404,7 +404,7 @@ fn a_limp_arm_hangs_by_the_body() {
         .sum::<f64>()
         + 2.0 * joint.rest;
     let full_drop = shoulder.y + arm_length - start.y;
-    world.let_limb_go(rp::Limb::LeftArm);
+    world.let_limb_go(0, rp::Limb::LeftArm);
     let dt = world.materials().fixed_dt;
     for _ in 0..180 {
         world.step(dt, &rp::InputState::default(), width);

@@ -215,6 +215,7 @@ impl World {
             kind: old.kind,
             part: old.part,
             limb: old.limb,
+            body: old.body,
             a: subtract(center, along),
             b: add(center, along),
             previous_a: subtract(previous_center, along),
