@@ -27,6 +27,12 @@ const OUTLINE_CONTACT_STIFFNESS: f64 = 0.8;
 /// `contactSpeed` (3 m/s), which keeps a deep overlap from throwing what it
 /// pushes out.
 const OUTLINE_PUSH_SPEED: f64 = 3.0;
+/// How far inside the skin, in pixels, a closed break's piece that reached
+/// it is held: a sliver of the skin's own thickness.
+const SKIN_HOLDS_PIECE_MARGIN: f64 = 0.5;
+/// How far outside the skin, in point spacings, a closed break's piece is
+/// still drawn back in: past that it is out, through skin that let it go.
+const SKIN_HOLDS_PIECE_REACH: f64 = 1.5;
 
 /// One closed outline of a tissue sheet, in order along the loop.
 #[derive(Clone, Debug)]
@@ -374,6 +380,157 @@ impl World {
         self.grid = grid;
     }
 
+    /// The skin holds a closed break's pieces in: a piece's end or middle
+    /// found outside the skin's outline, beside a stretch of whole skin, is
+    /// pushed back in and the skin out over it, split by mass, as skin tents
+    /// over a broken bone it is not pierced by. Only an open break's pieces
+    /// cut their way out (`cuts_skin`); where the skin is torn or cut, or the
+    /// flesh at it torn away, nothing holds them. Without it a closed break's
+    /// piece slid out past the skin below the elbow, or was left in the gap
+    /// of the elbow's crease as the elbow opened round it.
+    pub(super) fn hold_closed_pieces_in_the_skin(&mut self) {
+        let max_push = OUTLINE_PUSH_SPEED * 1000.0 / self.mm_per_px() * self.solver_dt;
+        let reach = SKIN_HOLDS_PIECE_REACH * self.materials.point_spacing;
+        for index in 0..self.bones.len() {
+            let bone = self.bones[index];
+            if !(bone.fractured || bone.splinter) || bone.open_break || bone.pinned {
+                continue;
+            }
+            // Each end and the middle, and how much of what moves it each end
+            // takes.
+            for (share_a, share_b) in [(1.0, 0.0), (0.0, 1.0), (0.5, 0.5)] {
+                let bone = self.bones[index];
+                let at = add(scale(bone.a, share_a), scale(bone.b, share_b));
+                let Some((pa, pb, t, normal, depth)) = self.skin_left_behind(at, reach, &bone)
+                else {
+                    continue;
+                };
+                let depth = depth + SKIN_HOLDS_PIECE_MARGIN;
+                // The sample moves its two ends by their shares; the skin's
+                // edge moves its two points by theirs.
+                let w_end = bone.inverse_end_mass();
+                let w_bone = w_end * (share_a * share_a + share_b * share_b);
+                let (wa, wb) = (self.inverse_masses[pa], self.inverse_masses[pb]);
+                let w_skin = (1.0 - t) * (1.0 - t) * wa + t * t * wb;
+                let total = w_bone + w_skin;
+                if total <= EPSILON {
+                    continue;
+                }
+                let lambda = depth.min(max_push) / total;
+                let bone_move = scale(normal, -lambda * w_end);
+                let bone = &mut self.bones[index];
+                bone.a = add(bone.a, scale(bone_move, share_a));
+                bone.b = add(bone.b, scale(bone_move, share_b));
+                self.points[pa].position = add(
+                    self.points[pa].position,
+                    scale(normal, lambda * (1.0 - t) * wa),
+                );
+                self.points[pb].position =
+                    add(self.points[pb].position, scale(normal, lambda * t * wb));
+                self.debug.skin_held_pieces += 1;
+            }
+        }
+    }
+
+    /// Whether `at`, on broken bone `piece`, lies outside the skin's outline
+    /// with a stretch of the skin round `piece` whole within `reach`, the
+    /// nearest such stretch: its two points, where along it `at` lies, its
+    /// outward normal, and how far outside it `at` is. Skin round another
+    /// part of the body does not hold it: held by the nearest skin, a smashed
+    /// arm's pieces were held against the head, and the arm with them.
+    fn skin_left_behind(
+        &self,
+        at: Vec2,
+        reach: f64,
+        piece: &BoneSegment,
+    ) -> Option<(usize, usize, f64, Vec2, f64)> {
+        for outline in &self.outlines {
+            let count = outline.points.len();
+            if count < 3 || self.points[outline.points[0]].layer != TissueLayer::Skin {
+                continue;
+            }
+            // Inside the loop, by how many of its edges a line from `at`
+            // running right crosses; and the nearest stretch of whole skin
+            // round the piece.
+            let mut inside = false;
+            let mut nearest: Option<(f64, usize)> = None;
+            for edge in 0..count {
+                let (pa, pb) = (outline.points[edge], outline.points[(edge + 1) % count]);
+                let (qa, qb) = (self.points[pa].position, self.points[pb].position);
+                if (qa.y > at.y) != (qb.y > at.y)
+                    && at.x < qa.x + (at.y - qa.y) / (qb.y - qa.y) * (qb.x - qa.x)
+                {
+                    inside = !inside;
+                }
+                let gap = distance(at, lerp(qa, qb, segment_t(at, qa, qb)));
+                if gap >= reach || nearest.is_some_and(|(closest, _)| gap >= closest) {
+                    continue;
+                }
+                let whole = outline.edge_springs[edge]
+                    .is_some_and(|spring| !self.springs[spring].broken)
+                    && is_flesh(&self.flesh, pa)
+                    && is_flesh(&self.flesh, pb);
+                if whole && self.skin_round(pa, piece) && self.skin_round(pb, piece) {
+                    nearest = Some((gap, edge));
+                }
+            }
+            if inside {
+                return None;
+            }
+            let (_, edge) = nearest?;
+            let (pa, pb) = (outline.points[edge], outline.points[(edge + 1) % count]);
+            let (qa, qb) = (self.points[pa].position, self.points[pb].position);
+            let side = subtract(qb, qa);
+            let normal = normalized(
+                scale(
+                    Vec2 {
+                        x: -side.y,
+                        y: side.x,
+                    },
+                    outline.outward,
+                ),
+                Vec2::default(),
+            );
+            let t = segment_t(at, qa, qb);
+            let depth = dot(subtract(at, lerp(qa, qb, t)), normal);
+            return (depth > 0.0).then_some((pa, pb, t, normal, depth));
+        }
+        None
+    }
+
+    /// The limb whose bones mostly keep point `point` in its place, or the
+    /// head and trunk's (`Limb::None`).
+    fn body_part_of(&self, point: usize) -> Limb {
+        let binding = self.point_holds[point].posture;
+        let main = if binding.weights[1] > binding.weights[0] {
+            binding.bones[1]
+        } else {
+            binding.bones[0]
+        };
+        self.bones.get(main).map_or(Limb::None, |bone| bone.limb)
+    }
+
+    /// Whether point `point` is flesh round broken bone `piece`: kept in its
+    /// place by a bone of the same limb, or for the head and trunk, of the
+    /// same part.
+    fn skin_round(&self, point: usize, piece: &BoneSegment) -> bool {
+        let Some(hold) = self.point_holds.get(point) else {
+            return false;
+        };
+        let binding = hold.posture;
+        binding
+            .bones
+            .iter()
+            .zip(binding.weights)
+            .any(|(&index, weight)| {
+                weight > 0.0
+                    && self.bones.get(index).is_some_and(|bone| {
+                        bone.limb == piece.limb
+                            && (piece.limb != Limb::None || bone.part == piece.part)
+                    })
+            })
+    }
+
     /// Pushes outline points out from behind the stretches of outline they
     /// pressed into, and those stretches back, split by mass.
     pub(super) fn solve_outline_contacts(&mut self) {
@@ -426,6 +583,10 @@ impl World {
             self.points[ia].position = subtract(a.position, scale(normal, push * wa * (1.0 - t)));
             self.points[ib].position = subtract(b.position, scale(normal, push * wb * t));
             self.debug.outline_contacts += 1;
+            if self.body_part_of(pair.point) != self.body_part_of(ia) {
+                self.debug.max_overlap_between_parts =
+                    self.debug.max_overlap_between_parts.max(-separation);
+            }
             self.debug.max_outline_overlap = self.debug.max_outline_overlap.max(-separation);
         }
     }

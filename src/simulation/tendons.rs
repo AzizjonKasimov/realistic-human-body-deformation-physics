@@ -6,18 +6,29 @@
 //! bones together, as a real arm's muscles keep a smashed forearm hanging
 //! from the elbow. Without them, once the inner elbow was a crease rather than
 //! one block of flesh, broken bone left the body in about three times as many
-//! sweep runs.
+//! sweep runs. Each pulls no harder than its muscle's full strength and tears
+//! once stretched as far past its slack as tears a relaxed muscle: a cord that
+//! held whatever it took hauled a smashed arm's top piece down out of its torn
+//! shoulder and tipped the trunk over.
 //!
 //! Each is MuJoCo's spatial tendon with a length limit (Google DeepMind,
 //! Apache-2.0: the limit is a one-sided constraint on the tendon's length),
 //! here a straight cord solved as Box2D v3's distance joint solves its upper
 //! limit (Erin Catto, MIT, `distance_joint.c`): speculative while slack, so
-//! it never overshoots, and a soft spring as stiff as the joints once taut.
+//! it never overshoots, a soft spring as stiff as the joints once taut, and
+//! no harder than a greatest force, as Box2D's motor joint holds its.
+//! A relaxed muscle gives more than that: its fibres take centimetres of
+//! stretch to pull hard (Thelen 2003). Pulling as softly, a smashed arm's
+//! pieces drifted out of the body, 11 sweep runs against 6 before the
+//! muscles were added, the flesh alone not holding them: the firm cord
+//! stands in for the fascia and the rest of what holds a mangled limb
+//! together.
 //! Where each attaches comes from the arm of Holzbaur, Murray, and Delp 2005
 //! (OpenSim's arm26 model, its data under CC BY 3.0); the figures and sources
 //! are in `docs/INJURY_REFERENCE.md` (The muscles across the elbow).
 
 use super::soft::{bone_place, perpendicular, speed_up_bone, Softness};
+use super::stance::bone_frame;
 use super::*;
 
 /// A muscle crossing the elbow.
@@ -72,45 +83,74 @@ pub struct Tendon {
     /// How long it is when it starts to pull, in pixels: the longest it gets
     /// over the elbow's whole range, and `TENDON_SLACK_MM` more.
     pub slack: f64,
+    /// How long it is when it tears, in pixels: stretched past its slack by
+    /// `TEAR_STRAIN` of its fibres' length.
+    pub tears_at: f64,
+    /// The hardest it pulls, in newtons: its muscle's full strength.
+    pub strength: f64,
+    /// How long its muscle's fibres are at rest, in pixels.
+    pub fibres: f64,
+    /// Torn: it pulls no more.
+    pub torn: bool,
     /// The impulse it pulled with last substep, which warm starts the next;
     /// never more than nothing, as it only pulls.
     pub impulse: f64,
 }
 
-/// The muscles across each elbow, and where each attaches, in centimetres
-/// from the middle of the elbow: on the upper arm how far above it and how
-/// far in front, then on the forearm how far below it and how far in front
-/// (in front is the side the elbow bends toward, the guard's inner elbow;
-/// negative is behind, the point of the elbow). The forearm's flexors and
-/// extensors, which run on from the epicondyles to the hand, are left out:
-/// pulled by them, the hand's bone came out of the fist's flesh when a
-/// smashed forearm hung on them.
-const ARM_TENDONS: [(Muscle, (f64, f64), (f64, f64)); 4] = [
+/// The muscles across each elbow, where each attaches, in centimetres from
+/// the middle of the elbow: on the upper arm how far above it and how far in
+/// front, then on the forearm how far below it and how far in front (in
+/// front is the side the elbow bends toward, the guard's inner elbow;
+/// negative is behind, the point of the elbow); how strong each is, its
+/// fibres' full isometric force in newtons; and how long its fibres are at
+/// rest, in centimetres. The forearm's flexors and extensors, which run on
+/// from the epicondyles to the hand, are left out: pulled by them, the hand's
+/// bone came out of the fist's flesh when a smashed forearm hung on them.
+const ARM_TENDONS: [(Muscle, (f64, f64), (f64, f64), f64, f64); 4] = [
     // Holzbaur et al. 2005: the brachialis from 11.7 cm above the elbow to the
     // ulna 2.4 below it, lying on the front of the bones (1 cm in front, an
     // estimate); the biceps's last point on the humerus 11.5 above and 1.7 in
-    // front, to the radius 4.8 below and 0.8 in front.
-    (Muscle::Brachialis, (11.7, 1.0), (2.4, 0.6)),
-    (Muscle::Biceps, (11.5, 1.7), (4.8, 0.8)),
+    // front, to the radius 4.8 below and 0.8 in front. Their strengths and
+    // fibres are OpenSim's arm26 model's: the brachialis 987.26 N with 8.58
+    // cm fibres; the biceps's long and short heads 624.3 and 435.56 N with
+    // 11.57 and 13.21 cm fibres, here one cord with their strengths summed
+    // and their fibres averaged by strength.
+    (Muscle::Brachialis, (11.7, 1.0), (2.4, 0.6), 987.26, 8.58),
+    (Muscle::Biceps, (11.5, 1.7), (4.8, 0.8), 1059.86, 12.24),
     // The brachioradialis from the ridge above the elbow, 4 to 10 cm up, to
     // the base of the radius's styloid at the wrist (Holzbaur et al. give no
-    // distances for it; StatPearls).
-    (Muscle::Brachioradialis, (7.0, 1.0), (22.0, 0.6)),
+    // distances for it; StatPearls), 101.58 N strong with 27.03 cm fibres
+    // (Garner and Pandy 2001).
+    (
+        Muscle::Brachioradialis,
+        (7.0, 1.0),
+        (22.0, 0.6),
+        101.58,
+        27.03,
+    ),
     // The triceps's medial and lateral heads from 15.3 and 16.4 cm above,
     // behind the humerus, round the back of the elbow to the olecranon, 1.0
-    // cm above the elbow's middle and 2.2 behind it.
-    (Muscle::Triceps, (15.8, -1.5), (-1.0, -2.2)),
+    // cm above the elbow's middle and 2.2 behind it; 624.3 N each with 11.38
+    // cm fibres (arm26).
+    (Muscle::Triceps, (15.8, -1.5), (-1.0, -2.2), 1248.6, 11.38),
 ];
 
-/// How much longer than its longest over the elbow's range a tendon is when
-/// it starts to pull, in millimetres. A relaxed muscle takes centimetres of
-/// stretch before it pulls hard (a relaxed biceps about 7 cm to carry its
-/// full strength, Thelen 2003), and the joints give a few pixels under load,
-/// so a cord as tight as the range would hold a limb at the ends of it.
-const TENDON_SLACK_MM: f64 = 10.0;
+/// How far past its slack a muscle across the elbow tears, as a share of its
+/// fibres' resting length: 60%, the stretch at which a relaxed muscle's
+/// fibres would bear its full strength in Thelen's model (2003, *J Biomech
+/// Eng* 125:70; OpenSim's `FmaxMuscleStrain`). For the brachialis that is
+/// 37% past the length of its fibres and tendon together, about where a
+/// relaxed muscle and its tendon pulled apart tore, 38% past their resting
+/// length at their greatest pull (the rabbit's calf, Hang et al. 1996).
+const TEAR_STRAIN: f64 = 0.6;
 
 /// How finely the elbow's range is swept for the longest a tendon gets.
 const RANGE_SAMPLES: usize = 48;
+
+/// How much longer than the longest the elbow's range takes it a muscle is
+/// when it starts to pull, in millimetres: a relaxed muscle gives that much
+/// more before it pulls hard, set by judgement.
+const TENDON_SLACK_MM: f64 = 10.0;
 
 /// How a tendon lies when the substep began: how long it is, along which
 /// line from its first end to its second, and how hard its ends are to move
@@ -232,16 +272,21 @@ impl World {
                 sigma,
             }
         };
-        for (muscle, origin, insertion) in ARM_TENDONS {
+        for (muscle, origin, insertion, strength, fibres) in ARM_TENDONS {
             let mut tendon = Tendon {
                 muscle,
                 limb,
                 from: end_on(&upper, upper_arm, above, origin),
                 to: end_on(&fore, forearm, below, insertion),
                 slack: 0.0,
+                tears_at: 0.0,
+                strength,
+                fibres: px(fibres),
+                torn: false,
                 impulse: 0.0,
             };
             tendon.slack = self.longest_over_range(&tendon, &elbow) + TENDON_SLACK_MM / mm_per_px;
+            tendon.tears_at = tendon.slack + TEAR_STRAIN * tendon.fibres;
             self.tendons.push(tendon);
         }
     }
@@ -276,30 +321,42 @@ impl World {
     /// Each tendon pulls its ends together once stretched past its slack:
     /// as stiff as a joint once taut, and while slack, only as hard as keeps
     /// it from stretching past its slack within the substep, as Box2D's
-    /// distance joint holds its upper limit.
+    /// distance joint holds its upper limit. It pulls no harder than its
+    /// muscle's strength, giving way past that, and once stretched to where
+    /// its muscle tears, it tears and lets go of what it carried in.
     pub(super) fn solve_tendons(&mut self, h: f64) {
         let hertz = self.materials.bone_joint_hertz.min(0.25 / h);
         let softness = Softness::new(2.0 * PI * hertz, self.materials.bone_joint_damping_ratio, h);
+        let newtons = self.newtons();
         for index in 0..self.tendons.len() {
             let tendon = self.tendons[index];
+            if tendon.torn {
+                continue;
+            }
             let Some(line) = TendonLine::of(&tendon, &self.bones) else {
                 self.tendons[index].impulse = 0.0;
                 continue;
             };
+            let given = tendon.impulse;
+            if line.length >= tendon.tears_at {
+                self.tendons[index].torn = true;
+                self.tendons[index].impulse = 0.0;
+                self.apply_tendon(&tendon, &line, -given, h);
+                continue;
+            }
             if line.inverse_mass <= EPSILON {
                 continue;
             }
             let mass = 1.0 / line.inverse_mass;
             let error = line.length - tendon.slack;
             let speed = line.speed(&tendon, &self.bones, h);
-            let given = tendon.impulse;
             let impulse = if error < 0.0 {
                 -mass * (speed + error / h)
             } else {
                 softness.impulse(mass, speed, error, given)
             };
-            // A tendon only pulls.
-            let total = (given + impulse).min(0.0);
+            // A tendon only pulls, and no harder than its muscle can.
+            let total = (given + impulse).clamp(-tendon.strength * newtons * h, 0.0);
             self.tendons[index].impulse = total;
             self.apply_tendon(&tendon, &line, total - given, h);
         }
@@ -358,21 +415,9 @@ impl World {
     }
 }
 
-/// Where `p` sits on a bone running from `a` to `b`: how far along it, as a
-/// share of its length, and how far across it, a quarter turn
-/// counterclockwise, as a share of its length.
-fn bone_frame(a: Vec2, b: Vec2, p: Vec2) -> (f64, f64) {
-    let along = subtract(b, a);
-    let length_sq = dot(along, along).max(EPSILON);
-    let offset = subtract(p, a);
-    (
-        dot(offset, along) / length_sq,
-        cross(along, offset) / length_sq,
-    )
-}
-
 #[cfg(test)]
 mod tests {
+    use super::super::soft::KG_PER_MASS;
     use super::*;
 
     fn body() -> World {
@@ -381,7 +426,8 @@ mod tests {
 
     /// Every arm has its muscles across the elbow, and once the body has
     /// settled in the guard none of them pulls: slack through the elbow's
-    /// range, they leave the arm's motion alone.
+    /// range, they leave the arm's motion alone, and each tears only past
+    /// its slack.
     #[test]
     fn the_arms_tendons_are_slack_in_the_guard() {
         let world = body();
@@ -396,6 +442,13 @@ mod tests {
                 tendon.slack
             );
             assert_eq!(tendon.impulse, 0.0, "the {} pulls", tendon.muscle.name());
+            assert!(
+                !tendon.torn && tendon.tears_at > tendon.slack + 1.0,
+                "the {} is slack to {:.1} px and tears at {:.1}",
+                tendon.muscle.name(),
+                tendon.slack,
+                tendon.tears_at
+            );
         }
     }
 
@@ -464,6 +517,10 @@ mod tests {
                 from: TendonEnd { bone: first, tau: tau_a, sigma: sigma_a },
                 to: TendonEnd { bone: second, tau: tau_b, sigma: sigma_b },
                 slack: 0.0,
+                tears_at: f64::INFINITY,
+                strength: 1000.0,
+                fibres: 30.0,
+                torn: false,
                 impulse: 0.0,
             };
             let line = TendonLine::of(&tendon, &world.bones);
@@ -480,17 +537,18 @@ mod tests {
         }
     }
 
-    /// Two bones, the first held still, the second thrown off it at 600 px/s
-    /// (about 2 m/s): a tendon between them, slack while they lie as they
-    /// were, pulls nothing then, and once they part stops them at its slack,
-    /// stretching less than a pixel past it; without it they fly apart.
-    #[test]
-    fn a_tendon_holds_its_bones_at_its_slack() {
-        let mut world = World::new(Materials {
-            gravity: 0.0,
-            linear_drag: 0.0,
-            ..Materials::default()
-        });
+    /// Two bones end to end, the first held still and the second free, on a
+    /// body 565 px tall (about 3 mm a pixel), weightless and without drag
+    /// unless `falls`, and a tendon between them slack by 10 px whose muscle
+    /// is `strength` newtons strong with 11.38 cm fibres, as the triceps's
+    /// heads are; the bones, the second's index, and the tendon's slack.
+    fn two_bones_on_a_tendon(strength: f64, falls: bool) -> (World, usize, usize, f64) {
+        let mut world = World::new(Materials::default());
+        world.body_height = 565.0;
+        if !falls {
+            world.materials.gravity = 0.0;
+            world.materials.linear_drag = 0.0;
+        }
         let first = world.add_bone_segment(
             Vec2 { x: 100.0, y: 100.0 },
             Vec2 { x: 200.0, y: 100.0 },
@@ -505,6 +563,7 @@ mod tests {
             1.0e9,
             false,
         );
+        let fibres = 113.8 / world.mm_per_px();
         world.tendons.push(Tendon {
             muscle: Muscle::Triceps,
             limb: Limb::LeftArm,
@@ -519,22 +578,44 @@ mod tests {
                 sigma: 0.05,
             },
             slack: 0.0,
+            tears_at: 0.0,
+            strength,
+            fibres,
+            torn: false,
             impulse: 0.0,
         });
         let slack = world.tendon_length(0).unwrap() + 10.0;
         world.tendons[0].slack = slack;
-        let dt = world.materials.fixed_dt;
-        for _ in 0..10 {
-            world.step(dt, &InputState::default(), 1000.0);
+        world.tendons[0].tears_at = slack + TEAR_STRAIN * fibres;
+        if !falls {
+            let dt = world.materials.fixed_dt;
+            for _ in 0..10 {
+                world.step(dt, &InputState::default(), 1000.0);
+            }
+            assert_eq!(world.tendons[0].impulse, 0.0, "a slack tendon pulls");
         }
-        assert_eq!(world.tendons[0].impulse, 0.0, "a slack tendon pulls");
+        (world, first, second, slack)
+    }
+
+    /// Throws `second` off its bone at `speed` px/s.
+    fn throw(world: &mut World, second: usize, speed: f64) {
+        let throw = speed * world.materials.fixed_dt;
+        world.bones[second].previous_a.x -= throw;
+        world.bones[second].previous_b.x -= throw;
+    }
+
+    /// Two bones, the first held still, the second thrown off it at 600 px/s
+    /// (about 2 m/s): a tendon between them, slack while they lie as they
+    /// were, pulls nothing then, and once they part stops them at its slack,
+    /// stretching less than a pixel past it; without it they fly apart.
+    #[test]
+    fn a_tendon_holds_its_bones_at_its_slack() {
+        let (mut world, first, second, slack) = two_bones_on_a_tendon(1248.6, false);
         let mut thrown = world.clone();
         thrown.tendons.clear();
-        let throw = 600.0 * dt;
-        for world in [&mut world, &mut thrown] {
-            world.bones[second].previous_a.x -= throw;
-            world.bones[second].previous_b.x -= throw;
-        }
+        throw(&mut world, second, 600.0);
+        throw(&mut thrown, second, 600.0);
+        let dt = world.materials.fixed_dt;
         let mut longest: f64 = 0.0;
         for _ in 0..60 {
             world.step(dt, &InputState::default(), 1000.0);
@@ -543,7 +624,7 @@ mod tests {
         }
         let apart = |world: &World| distance(world.bones[first].b, world.bones[second].a);
         assert!(
-            longest < slack + 1.0 && longest > slack - 1.0,
+            !world.tendons[0].torn && longest < slack + 1.0 && longest > slack - 1.0,
             "the tendon, slack to {slack:.1} px, got to {longest:.1}"
         );
         assert!(
@@ -551,6 +632,54 @@ mod tests {
             "thrown apart, the bones' ends lie {:.1} px apart on a tendon and {:.1} without",
             apart(&world),
             apart(&thrown)
+        );
+    }
+
+    /// A bone hanging from another by a tendon comes to rest at the tendon's
+    /// slack, the tendon carrying its weight.
+    #[test]
+    fn a_tendon_carries_a_hanging_bone() {
+        let (mut world, _, second, slack) = two_bones_on_a_tendon(1248.6, true);
+        let dt = world.materials.fixed_dt;
+        for _ in 0..600 {
+            world.step(dt, &InputState::default(), 1000.0);
+        }
+        let weight = world.bones[second].mass * KG_PER_MASS * world.materials.gravity;
+        let stretch = world.tendon_length(0).unwrap() - slack;
+        let held =
+            -world.tendons[0].impulse / (world.newtons() * dt / world.materials.substeps as f64);
+        assert!(
+            stretch.abs() < 1.0 && (held - weight).abs() < 0.05 * weight,
+            "the bone weighs {weight:.2} N; the tendon, {stretch:+.2} px past its slack, held {held:.2} N"
+        );
+    }
+
+    /// A tendon too weak to stop the thrown bone pulls only as hard as its
+    /// muscle can, gives way, and once stretched to where it tears, tears
+    /// and pulls no more: the bone flies on past it.
+    #[test]
+    fn a_tendon_gives_way_past_its_strength_and_tears() {
+        let strength = 1.0;
+        let (mut world, _, second, _) = two_bones_on_a_tendon(strength, false);
+        throw(&mut world, second, 600.0);
+        let dt = world.materials.fixed_dt;
+        let h = dt / world.materials.substeps as f64;
+        let most = strength * world.newtons() * h;
+        let mut hardest: f64 = 0.0;
+        for _ in 0..60 {
+            world.step(dt, &InputState::default(), 1000.0);
+            hardest = hardest.max(-world.tendons[0].impulse);
+        }
+        assert!(
+            hardest <= most * (1.0 + 1.0e-9),
+            "it pulled with {hardest:.3e} on a substep, its muscle at most {most:.3e}"
+        );
+        assert!(world.tendons[0].torn, "the weak tendon never tore");
+        assert_eq!(world.tendons[0].impulse, 0.0, "a torn tendon pulls");
+        let (length, tears_at) = (world.tendon_length(0).unwrap(), world.tendons[0].tears_at);
+        assert!(
+            length > tears_at + 30.0,
+            "torn, the tendon's ends lie {length:.1} px apart, tearing at {tears_at:.1}"
         );
     }
 }

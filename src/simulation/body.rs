@@ -256,12 +256,7 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
         // elbow straightened, and held a broken forearm bent up in the guard.
         let past_elbow = (skeleton.upper_arms.contains(&nearest_bone) && nearest_t >= 1.0)
             || (skeleton.forearms.contains(&nearest_bone) && nearest_t <= 0.0);
-        let untied = materials.elbow_untied_radius * spacing;
-        let by_elbow = skeleton
-            .forearms
-            .iter()
-            .any(|&forearm| distance(position, world.bones[forearm].a) < untied);
-        if nearest_bone != usize::MAX && !past_elbow && !by_elbow {
+        if nearest_bone != usize::MAX && !past_elbow {
             world.add_bone_attachment(muscle_point, nearest_bone, nearest_t);
         }
     }
@@ -302,19 +297,6 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
     }
 
     world.give_tissue_physical_properties(frame);
-    // The skin round each elbow slides over it more freely.
-    let slide = materials.elbow_slide_radius * spacing;
-    let elbows: Vec<Vec2> = skeleton
-        .forearms
-        .iter()
-        .map(|&forearm| world.bones[forearm].home_a)
-        .collect();
-    for attachment in &mut world.attachments {
-        let skin = world.points[attachment.skin_point].home;
-        if elbows.iter().any(|&elbow| distance(skin, elbow) < slide) {
-            attachment.stiffness *= materials.elbow_slide_fat_share;
-        }
-    }
     // Tissue keeps its place on the bones of its own part of the body: the
     // flesh of an arm on the arm's bones, the chest's on the trunk's, and
     // only on bones it reaches through flesh, so the forearm's side of the
@@ -341,14 +323,29 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
             reached
         }
     });
-    world.rest_flesh_round_elbows(
-        &[0, 1].map(|side| [skeleton.upper_arms[side], skeleton.forearms[side]]),
-        frame.origin.x * 2.0 + frame.height,
-    );
     // The body stands on the floor at its soles, and its hips are held up.
     world.set_floor_y(frame.point(0.0, 1.0).y);
     world.hold_hip(skeleton.pelvis, false);
     world.hold_hip(skeleton.pelvis, true);
+    // The elbows, the way each opens, toward the larger end of its range,
+    // how far it opens to relax, and how far its range takes it.
+    let mut relaxing = Vec::new();
+    for side in 0..2 {
+        let elbow = world.bone_joints.iter().position(|joint| {
+            joint.a == skeleton.upper_arms[side] && joint.b == skeleton.forearms[side]
+        });
+        if let Some(index) = elbow.filter(|_| materials.elbow_rest_opening > 0.0) {
+            let joint = world.bone_joints[index];
+            let (way, full) = if joint.max_angle > -joint.min_angle {
+                (1.0, joint.max_angle)
+            } else {
+                (-1.0, -joint.min_angle)
+            };
+            relaxing.push((index, way, materials.elbow_rest_opening, full));
+        }
+    }
+    let rested_round_joints =
+        world.rest_flesh_round_joints(&relaxing, frame.origin.x * 2.0 + frame.height);
     // It is built in the guard as drawn, without its weight. It settles
     // under that weight before anything happens to it, and its muscles
     // learn the weight on the way, so it comes to rest in the guard as
@@ -367,6 +364,7 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
         world.learn_the_guards_weight();
     }
     world.materials.gravity = gravity;
+    world.hold_flesh_where_it_lies(&rested_round_joints);
     world
 }
 

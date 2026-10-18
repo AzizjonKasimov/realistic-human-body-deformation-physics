@@ -97,10 +97,33 @@ impl Dump {
         }
         if self.joints {
             for (index, joint) in world.bone_joints().iter().enumerate() {
+                // How far apart a torn or loosened joint's bones have pulled.
+                let gap = || {
+                    let bones = world.bones();
+                    let anchor = |bone: &rp::BoneSegment, t: f64| rp::Vec2 {
+                        x: bone.a.x + (bone.b.x - bone.a.x) * t,
+                        y: bone.a.y + (bone.b.y - bone.a.y) * t,
+                    };
+                    let (from, to) = (
+                        anchor(&bones[joint.a], joint.t_a),
+                        anchor(&bones[joint.b], joint.t_b),
+                    );
+                    (to.x - from.x).hypot(to.y - from.y)
+                };
                 let state = if joint.broken {
-                    "torn".to_string()
+                    format!(
+                        "torn, bones {} and {} {:.1} px apart",
+                        joint.a,
+                        joint.b,
+                        gap()
+                    )
                 } else if joint.post_fracture_limited {
-                    "loose".to_string()
+                    format!(
+                        "loose, bones {} and {} {:.1} px apart",
+                        joint.a,
+                        joint.b,
+                        gap()
+                    )
                 } else if joint.subluxated {
                     "out of place".to_string()
                 } else {
@@ -119,12 +142,13 @@ impl Dump {
         }
         if self.tendons {
             // How long each tendon is against the length it starts to pull
-            // at, and how hard it pulled on the last substep.
+            // at and the length it tears at, and whether it pulled on the
+            // last substep or has torn.
             for (index, tendon) in world.tendons().iter().enumerate() {
                 let length = world.tendon_length(index).unwrap_or(0.0);
                 let (from, to) = world.tendon_ends(index).unwrap_or_default();
                 println!(
-                    "  tendon {index:>2} the {:<20} {:?} bone {} {} -> bone {} {}  length {length:.1} px, slack {:.1} ({:+.1}){}",
+                    "  tendon {index:>2} the {:<20} {:?} bone {} {} -> bone {} {}  length {length:.1} px, slack {:.1} ({:+.1}), tears at {:.1}{}",
                     tendon.muscle.name(),
                     tendon.limb,
                     tendon.from.bone,
@@ -133,7 +157,14 @@ impl Dump {
                     at(to),
                     tendon.slack,
                     length - tendon.slack,
-                    if tendon.impulse < 0.0 { ", pulling" } else { "" },
+                    tendon.tears_at,
+                    if tendon.torn {
+                        ", torn"
+                    } else if tendon.impulse < 0.0 {
+                        ", pulling"
+                    } else {
+                        ""
+                    },
                 );
             }
         }

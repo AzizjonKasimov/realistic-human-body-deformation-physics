@@ -180,6 +180,7 @@ fn phase_note(phase: &str) -> &'static str {
     match phase {
         "integrate" => " (gravity, drag)",
         "outline hold" => " (the skin outline's hold, which balances its pull at rest)",
+        "skin holds pieces" => " (whole skin holding a closed break's pieces in)",
         "ghosts" => " (a cut's ghost points)",
         "predict" => " (its own momentum)",
         "fibers" => " (the tissue's springs)",

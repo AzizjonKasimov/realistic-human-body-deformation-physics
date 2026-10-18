@@ -227,6 +227,7 @@ impl World {
                 self.timed("fragment-tissue", Self::solve_bone_fragment_tissue_contacts);
                 self.timed("fragment pairs", Self::solve_bone_fragment_repulsion);
                 self.timed("outline contact", Self::solve_outline_contacts);
+                self.timed("skin holds pieces", Self::hold_closed_pieces_in_the_skin);
                 self.timed("world bounds", |world| {
                     world.constrain_to_world(width, floor_y)
                 });

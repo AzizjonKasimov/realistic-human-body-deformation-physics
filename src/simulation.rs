@@ -306,9 +306,6 @@ pub struct Materials {
     pub skin_thickness: f64,
     pub skin_stiffening_stretch: f64,
     pub skin_stiffening_ratio: f64,
-    /// How much of its stiffness skin keeps squeezed shorter than it rests:
-    /// a membrane wrinkles rather than bearing the squeeze.
-    pub skin_compression_share: f64,
     /// How far living skin is stretched past the length it would shrink to
     /// cut free, along the body and limbs and around them.
     pub skin_prestretch_along: f64,
@@ -344,18 +341,10 @@ pub struct Materials {
     pub bone_tie_hertz: f64,
     pub foot_tie_hertz: f64,
     pub bone_tie_damping_ratio: f64,
-    /// How far round the elbow's turning point, in point spacings, muscle is
-    /// left untied to either bone, and how far the skin slides on looser fat
-    /// (`elbow_slide_fat_share`).
-    pub elbow_untied_radius: f64,
-    pub elbow_slide_radius: f64,
-    /// How far past the guard the flesh round the elbow rests, in radians:
-    /// a relaxed elbow rests part way open (`rest_elbow_flesh_opened`).
+    /// How far past the guard the flesh round the elbow rests, in radians: a
+    /// relaxed elbow rests part way open (`rest_flesh_round_joints`); none
+    /// rests it in the guard, as the body is built.
     pub elbow_rest_opening: f64,
-    /// How much of the fat's hold skin within `elbow_slide_radius` of the
-    /// elbow's turning point keeps: over the point of the elbow the skin
-    /// slides on a bursa, and in front of it on thin, loose fascia.
-    pub elbow_slide_fat_share: f64,
     pub muscle_fiber_rupture_damage_floor: f64,
     pub muscle_tear_stretch: f64,
     pub muscle_tear_impulse: f64,
@@ -576,7 +565,6 @@ impl Default for Materials {
             skin_thickness: 0.002,
             skin_stiffening_stretch: 1.25,
             skin_stiffening_ratio: 70.0,
-            skin_compression_share: 1.0,
             // Living skin is stretched about a fifth along the lines it is
             // tensed in, which run round the trunk and limbs, and a twelfth
             // across them (Deroy et al. 2017, dog skin; no human
@@ -610,10 +598,9 @@ impl Default for Materials {
             bone_tie_hertz: 30.0,
             foot_tie_hertz: 55.0,
             bone_tie_damping_ratio: 0.4,
-            elbow_untied_radius: 0.0,
-            elbow_slide_radius: 0.0,
-            elbow_rest_opening: 0.0,
-            elbow_slide_fat_share: 1.0,
+            // A relaxed elbow rests at 107 degrees, 10 either way (Wiegner and
+            // Watts 1986), 61 degrees more open than the guard's 46.
+            elbow_rest_opening: 1.06,
             muscle_fiber_rupture_damage_floor: 0.0,
             muscle_tear_stretch: 1.92,
             muscle_tear_impulse: 1180.0,
@@ -1504,6 +1491,8 @@ pub struct Stats {
 
 #[derive(Clone, Copy, Debug)]
 pub struct ContactDebug {
+    /// Times the skin held a closed break's piece from passing out through it.
+    pub skin_held_pieces: i32,
     pub active: bool,
     pub down: bool,
     pub striker_position: Vec2,
@@ -1571,9 +1560,11 @@ pub struct ContactDebug {
     pub solver_iterations: i32,
     /// Times this step an outline point was pushed out from behind another
     /// part of the outline, as an arm pressed against the chest is, and the
-    /// deepest such overlap in pixels.
+    /// deepest such overlap in pixels, and the deepest between two parts of
+    /// the body, a limb and the trunk or two limbs.
     pub outline_contacts: i32,
     pub max_outline_overlap: f64,
+    pub max_overlap_between_parts: f64,
     pub fragment_sleep_events: i32,
     pub fragment_wake_events: i32,
     pub fragment_budget_skips: i32,
@@ -1611,6 +1602,7 @@ pub struct ContactDebug {
 impl Default for ContactDebug {
     fn default() -> Self {
         Self {
+            skin_held_pieces: 0,
             active: false,
             down: false,
             striker_position: Vec2::default(),
@@ -1674,6 +1666,7 @@ impl Default for ContactDebug {
             solver_iterations: 0,
             outline_contacts: 0,
             max_outline_overlap: 0.0,
+            max_overlap_between_parts: 0.0,
             fragment_sleep_events: 0,
             fragment_wake_events: 0,
             fragment_budget_skips: 0,

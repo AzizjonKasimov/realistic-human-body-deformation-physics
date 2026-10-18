@@ -527,15 +527,15 @@ fn elbow_resistance(materials: rp::Materials) -> Vec<(f64, f64)> {
 #[ignore]
 fn print_elbow_resistance() {
     let defaults = rp::Materials::default();
-    let relaxed = |opening: f64| rp::Materials {
-        elbow_rest_opening: opening,
-        ..defaults
-    };
     let variants = [
-        ("as built", defaults),
-        ("rests opened", relaxed(0.6)),
-        ("rests opened", relaxed(0.9)),
-        ("rests opened", relaxed(1.06)),
+        (
+            "rests in the guard",
+            rp::Materials {
+                elbow_rest_opening: 0.0,
+                ..defaults
+            },
+        ),
+        ("rests relaxed", defaults),
     ];
     for (name, materials) in variants {
         let curve = elbow_resistance(materials);
@@ -1258,8 +1258,9 @@ fn resting_body_carries_no_hidden_motion() {
 }
 
 /// Plays `gesture` on a body whose bones are `strength` times as strong as
-/// tuned, and returns how many times its outline met itself and how far it
-/// got in at most, in pixels.
+/// tuned, and returns how many times its outline met itself and how far one
+/// part of the body got into another at most, in pixels: a limb into the
+/// trunk or into another limb, not a crushed limb's skin into its own.
 fn outline_contact_under(gesture: &str, strength: f64) -> (i32, f64, f64) {
     let (width, height) = (1280.0, 720.0);
     let mut materials = rp::Materials::default();
@@ -1272,7 +1273,7 @@ fn outline_contact_under(gesture: &str, strength: f64) -> (i32, f64, f64) {
     for frame in 0..gesture.frames() {
         world.step(dt, &gesture.input(frame, body), width);
         contacts += world.debug().outline_contacts;
-        deepest = deepest.max(world.debug().max_outline_overlap);
+        deepest = deepest.max(world.debug().max_overlap_between_parts);
     }
     (contacts, deepest, world.materials().point_spacing)
 }
