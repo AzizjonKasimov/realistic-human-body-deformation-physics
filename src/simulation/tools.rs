@@ -167,6 +167,21 @@ fn tool_handling(tool: ToolMode) -> ToolHandling {
             max_reach: 150.0,
             swing_radius: 170.0,
         },
+        // A fist moves as quickly as the arm throws it, and turns as fast as
+        // the forearm behind it can swing round.
+        ToolMode::Fist => ToolHandling {
+            drive: 800.0,
+            damping: 48.0,
+            press_drive: 118.0,
+            press_damping: 15.0,
+            press_share: PRESS_SHARE,
+            // About 10 m/s: an untrained man's hardest straight punch
+            // averages 8.0 m/s and reaches 11.1 (Adamec et al. 2021).
+            max_speed: 3200.0,
+            regrip_speed: 3200.0,
+            max_reach: 150.0,
+            swing_radius: 90.0,
+        },
     }
 }
 
@@ -176,7 +191,7 @@ pub fn swing_power(tool: ToolMode) -> f64 {
     match tool {
         ToolMode::Sharp => 3.0,
         ToolMode::Blunt => 2.1,
-        ToolMode::Heavy => 2.6,
+        ToolMode::Heavy | ToolMode::Fist => 2.6,
     }
 }
 
@@ -186,14 +201,37 @@ pub fn swing_power(tool: ToolMode) -> f64 {
 /// of a 0.8 kg bat (Guo et al. 2026's weighed 0.79 kg) struck 15 cm past its
 /// centre of mass, where I is about 0.045 kg m^2. A sledgehammer's 4.5 kg
 /// (10 lb) head strikes with all of its mass. A knife's blade does not break
-/// bone by its blow.
+/// bone by its blow. A punch strikes with about 2.9 kg, the fist with the
+/// arm and body behind it: Olympic boxers' gloved punches (Walilko, Viano,
+/// and Bir 2005) and untrained men's bare ones (Adamec et al. 2021, 2.93 +/-
+/// 0.81 kg) alike.
 fn tool_mass_kg(tool: ToolMode) -> f64 {
     match tool {
         ToolMode::Sharp => 0.2,
         ToolMode::Blunt => 0.6,
         ToolMode::Heavy => 4.5,
+        ToolMode::Fist => 2.9,
     }
 }
+
+/// How stiff the striking part itself is, in newtons a metre, a spring in
+/// series with the flesh and bone it meets (`cover.rs`). Steel and wood
+/// barely give against flesh and bone; a fist does, through the flesh over
+/// its knuckles and the small bones and joints of the hand and wrist behind
+/// them, and how well a fist is clenched changes how stiff it is (Morgan and
+/// Carrier 2013; Horns, Jung, and Carrier 2015). No study has measured it,
+/// so it is set so punches break bones as often as the injury research says
+/// (`docs/INJURY_REFERENCE.md`, Punches).
+pub(super) fn tool_stiffness(tool: ToolMode) -> f64 {
+    match tool {
+        ToolMode::Fist => FIST_STIFFNESS,
+        ToolMode::Sharp | ToolMode::Blunt | ToolMode::Heavy => f64::INFINITY,
+    }
+}
+
+/// See `tool_stiffness`: with it a hard punch never breaks the skull or a
+/// forearm raised in the guard and rarely a rib, as the research says.
+const FIST_STIFFNESS: f64 = 40_000.0;
 
 /// Dimensions of a tool in world pixels, measured from the point the hand drives.
 #[derive(Clone, Copy, Debug)]
@@ -241,6 +279,22 @@ pub fn tool_geometry(tool: ToolMode) -> ToolGeometry {
             handle_length: 150.0,
             handle_half_width: 5.0,
         },
+        // A fist about 10 cm across, striking with the row of its knuckles,
+        // a face lying across the way it moves, as the bat's barrel does:
+        // struck with the round end of a capsule, the skin wrapped round it
+        // and split. The face is flat but for its last 2 cm each side; rounder
+        // (3 cm), it pushed the skin it struck aside off its ends and split
+        // the skin over the side of the head or the ribs in a third of
+        // punches. Its forearm behind it is drawn as far as it shows.
+        ToolMode::Fist => ToolGeometry {
+            contact_back: 9.0,
+            contact_front: 9.0,
+            contact_radius: 7.0,
+            contact_padding: 4.0,
+            body_half_width: 16.0,
+            handle_length: 80.0,
+            handle_half_width: 10.0,
+        },
     }
 }
 
@@ -268,7 +322,7 @@ pub fn tool_pose(tool: ToolMode, center: Vec2, heading: Vec2, side: Vec2) -> Too
             subtract(center, scale(heading, geometry.contact_back)),
             add(center, scale(heading, geometry.contact_front)),
         ),
-        ToolMode::Blunt => (
+        ToolMode::Blunt | ToolMode::Fist => (
             add(center, scale(side, geometry.contact_back)),
             subtract(center, scale(side, geometry.contact_front)),
         ),
@@ -557,7 +611,7 @@ impl World {
     /// Turns the tool for this step's motion; `down` is whether the button is
     /// held.
     fn turn_tool(&mut self, down: bool, dt: f64) {
-        if self.tool.mode == ToolMode::Sharp {
+        if matches!(self.tool.mode, ToolMode::Sharp | ToolMode::Fist) {
             self.turn_blade(dt);
         } else {
             self.turn_held_tool(down, dt);
@@ -568,14 +622,20 @@ impl World {
     /// swing the blade round, so it does not snap round when the hand turns
     /// back. Tissue steers an embedded knife to follow its stroke, like a
     /// scalpel, except that a knife pulled backward keeps its line and
-    /// withdraws rather than flipping around inside the wound.
+    /// withdraws rather than flipping around inside the wound. A fist turns
+    /// the same way to lead with its knuckles, the forearm swinging round
+    /// behind it.
     fn turn_blade(&mut self, dt: f64) {
         let velocity = self.tool.velocity;
         let speed = hypot(velocity.x, velocity.y);
         if speed > TOOL_TURN_SPEED {
             let target = scale(velocity, 1.0 / speed);
-            if !self.tool.embedded {
-                let radius = tool_handling(ToolMode::Sharp).swing_radius.max(1.0);
+            // A fist pulled back stays facing where it struck, the forearm
+            // drawing it back, rather than turning round to lead with it.
+            let pulled_back =
+                self.tool.mode == ToolMode::Fist && dot(target, self.tool.heading) <= -0.2;
+            if !self.tool.embedded && !pulled_back {
+                let radius = tool_handling(self.tool.mode).swing_radius.max(1.0);
                 self.tool.heading = rotate_toward(self.tool.heading, target, speed / radius * dt);
             } else if dot(target, self.tool.heading) > -0.2 {
                 self.tool.heading =
@@ -1563,6 +1623,7 @@ impl World {
             let blow = self.blow_on_bone(
                 bone.part,
                 strike.mass_kg,
+                tool_stiffness(strike.tool),
                 dot(velocity, normal).max(0.0),
                 cover.real,
             );

@@ -14,8 +14,15 @@ each side's frames and NAME-before-after.png.
 
 A scenario plays on both sides only if the commit has it. -RefScenario plays
 another one on the commit's side, as when a scenario was restaged or is new;
--Strike and -Gesture play the same swing on both. With none of them, the sheet
-shows both bodies at rest.
+-Strike and -Gesture play the same swing on both, and -RefGesture another
+gesture on the commit's side, as when the working tree's uses what the commit
+lacks (a punch, a new tool). With none of them, the sheet shows both bodies at
+rest.
+
+-Steps picks the moments the sheet shows, such as the few steps around a blow
+from a strip saved every step; a side that saved no frame at a step shows its
+last one before it. A strip with an empty frame, as the app saves while the
+display sleeps, stops the sheet.
 
 .EXAMPLE
 .\tools\before_after.ps1 -Scenario bat_hard_forearm -Every 12 -Frames 72 -Crop 400,30,480,590
@@ -28,18 +35,30 @@ One custom swing on both sides.
 .EXAMPLE
 .\tools\before_after.ps1 -Scenario bat_tap_on_the_guard -RefScenario bat_moderate_forearm -Every 15
 A new scenario against the nearest one the commit has.
+
+.EXAMPLE
+.\tools\before_after.ps1 -Scenario punch_to_the_head -RefGesture "bat:-0.44,0.06:wait=10:down:0,0.06/6:-0.44,0.06/10:up:wait=80" -Every 6
+A new scenario with a new tool against the bat swung the same way.
+
+.EXAMPLE
+.\tools\before_after.ps1 -Scenario punch_to_the_head -RefGesture "bat:-0.44,0.06:wait=10:down:0,0.06/6:-0.44,0.06/10:up:wait=80" -Every 1 -Frames 106 -Steps 14,16,18,21,40,106
+The same, showing only the steps around the blow.
 #>
 param(
     [string]$Ref = "main",
     [string]$Scenario = "",
     # The scenario to play on the commit's side instead of -Scenario.
     [string]$RefScenario = "",
+    # The gesture to play on the commit's side instead of -Scenario or -Gesture.
+    [string]$RefGesture = "",
     [string]$Strike = "",
     [string]$Gesture = "",
     # Steps to play; 0 plays the whole strike, or lets the body settle.
     [int]$Frames = 0,
     # Save the screen every this many steps; 0 saves only the last.
     [int]$Every = 0,
+    # The steps the sheet shows, such as 14,16,18; every frame saved if left out.
+    [int[]]$Steps = @(),
     [ValidateSet("normal", "anatomy")]
     [string]$View = "normal",
     [string]$Size = "1280x720",
@@ -73,12 +92,16 @@ if (-not $NoBuild) {
 }
 
 # Films one side and returns its frames in order of their steps.
-function Invoke-Side([string]$Side, [string]$Exe, [string]$Play) {
+function Invoke-Side([string]$Side, [string]$Exe, [string]$Play, [string]$Moves) {
     $stem = "$Name-$Side"
     $capture = @{ Name = $stem; Out = $Out; Sizes = $Size; View = $View; Exe = $Exe }
-    if ($Play) { $capture.Scenario = $Play }
-    if ($Strike) { $capture.Strike = $Strike }
-    if ($Gesture) { $capture.Gesture = $Gesture }
+    if ($Moves) {
+        $capture.Gesture = $Moves
+    } else {
+        if ($Play) { $capture.Scenario = $Play }
+        if ($Strike) { $capture.Strike = $Strike }
+        if ($Gesture) { $capture.Gesture = $Gesture }
+    }
     if ($Frames -gt 0) { $capture.Frames = $Frames }
     if ($Every -gt 0) { $capture.Every = $Every }
     if ($NoUi) { $capture.NoUi = $true }
@@ -94,12 +117,36 @@ function Invoke-Side([string]$Side, [string]$Exe, [string]$Play) {
     if ($frames.Count -eq 0) {
         throw "capture.ps1 saved no frames for $Side"
     }
+    # A screen saved while the display sleeps is an empty image of a few bytes.
+    $empty = @($frames | Where-Object { (Get-Item -LiteralPath $_).Length -lt 1000 })
+    if ($empty.Count -gt 0) {
+        throw "$($empty.Count) of the $Side frames came out empty (was the display asleep?); film again"
+    }
     return $frames
 }
 
+# The frames of the steps asked for, each the last saved at or before its step.
+function Select-Steps([string[]]$Strip, [string]$Side) {
+    if ($Steps.Count -eq 0) {
+        return $Strip
+    }
+    $saved = @($Strip | ForEach-Object {
+            if ($_ -match '-(\d{4})\.png$') { [pscustomobject]@{ Step = [int]$Matches[1]; Path = $_ } }
+        })
+    foreach ($step in $Steps) {
+        $frame = $saved | Where-Object { $_.Step -le $step } | Select-Object -Last 1
+        if (-not $frame) {
+            throw "the $Side strip saved no frame at or before step $step"
+        }
+        $frame.Path
+    }
+}
+
 # A function hands back a one-frame list as the bare path; @() keeps it a list.
-$before = @(Invoke-Side "before" $refExe $(if ($RefScenario) { $RefScenario } else { $Scenario }))
-$after = @(Invoke-Side "after" (Join-Path $repoRoot "target\release\realistic_physics.exe") $Scenario)
+$before = @(Invoke-Side "before" $refExe $(if ($RefScenario) { $RefScenario } else { $Scenario }) $RefGesture)
+$after = @(Invoke-Side "after" (Join-Path $repoRoot "target\release\realistic_physics.exe") $Scenario "")
+$before = @(Select-Steps $before "before")
+$after = @(Select-Steps $after "after")
 
 # The shorter strip holds its last frame, so each column stays one moment.
 $columns = [Math]::Max($before.Count, $after.Count)

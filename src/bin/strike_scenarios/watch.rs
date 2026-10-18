@@ -119,8 +119,14 @@ fn report_stance(name: &str, frame: i32, world: &rp::World, last_positions: &[rp
         } else {
             String::new()
         };
+        // A joint a punch drives shows where its muscles aim it.
+        let aim = if joint.drive.swing != 0.0 {
+            format!(" aims {:+.1}deg", joint.drive.swing.to_degrees())
+        } else {
+            String::new()
+        };
         joints.push(format!(
-            "{side}{}-{} {turn:+.1}deg {:+.1}Nm{state}",
+            "{side}{}-{} {turn:+.1}deg{aim} {:+.1}Nm{state}",
             a.part.name(),
             b.part.name(),
             world.joint_torque(index)

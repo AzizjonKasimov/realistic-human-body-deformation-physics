@@ -551,6 +551,7 @@ fn joint_drive(joint: Joint) -> JointDrive {
         max_torque,
         limb: Limb::None,
         aim: 0.0,
+        swing: 0.0,
     }
 }
 

@@ -326,11 +326,14 @@ impl World {
 
     /// The blow a tool of `tool_mass` kilograms puts on a bone of `part`
     /// under `cover_mm` of flesh, driving into it at `speed` pixels a second
-    /// (see the module notes).
+    /// (see the module notes). The tool itself gives as a spring of
+    /// `tool_stiffness` newtons a metre in series, infinitely stiff for steel
+    /// and wood.
     pub(super) fn blow_on_bone(
         &self,
         part: BonePart,
         tool_mass: f64,
+        tool_stiffness: f64,
         speed: f64,
         cover_mm: f64,
     ) -> Blow {
@@ -339,7 +342,12 @@ impl World {
         let softening = (1.0 / (1.0 + cover_mm.max(0.0) / COVER_SOFTENING_MM))
             .sqrt()
             .max(MIN_COVER_SHARE);
-        let stiffness = BARE_BONE_STIFFNESS * softening * softening;
+        let flesh = BARE_BONE_STIFFNESS * softening * softening;
+        let stiffness = if tool_stiffness.is_finite() {
+            flesh * tool_stiffness / (flesh + tool_stiffness).max(EPSILON)
+        } else {
+            flesh
+        };
         let metres_per_second = speed.max(0.0) * self.mm_per_px() * 0.001;
         Blow {
             force: metres_per_second * (stiffness * mass).sqrt() * LOAD_PER_NEWTON,
@@ -420,14 +428,14 @@ mod tests {
     fn a_blow_grows_with_speed_and_softens_under_flesh() {
         let world = body();
         let slow = world
-            .blow_on_bone(BonePart::Forearm, 0.8, 1000.0, 10.0)
+            .blow_on_bone(BonePart::Forearm, 0.8, f64::INFINITY, 1000.0, 10.0)
             .force;
         let fast = world
-            .blow_on_bone(BonePart::Forearm, 0.8, 2000.0, 10.0)
+            .blow_on_bone(BonePart::Forearm, 0.8, f64::INFINITY, 2000.0, 10.0)
             .force;
         assert!((fast / slow - 2.0).abs() < 1.0e-9, "{}", fast / slow);
         let covered = world
-            .blow_on_bone(BonePart::Forearm, 0.8, 1000.0, 25.0)
+            .blow_on_bone(BonePart::Forearm, 0.8, f64::INFINITY, 1000.0, 25.0)
             .force;
         let share = covered / slow;
         let expected: f64 =
@@ -437,23 +445,52 @@ mod tests {
             "{share} against {expected}"
         );
         let thick = world
-            .blow_on_bone(BonePart::Forearm, 0.8, 1000.0, 500.0)
+            .blow_on_bone(BonePart::Forearm, 0.8, f64::INFINITY, 1000.0, 500.0)
             .force;
         let bare = world
-            .blow_on_bone(BonePart::Forearm, 0.8, 1000.0, 0.0)
+            .blow_on_bone(BonePart::Forearm, 0.8, f64::INFINITY, 1000.0, 0.0)
             .force;
         assert!((thick / bare - MIN_COVER_SHARE).abs() < 1.0e-9);
+    }
+
+    /// A striker that gives itself, as a fist does, is a spring in series
+    /// with the flesh and bone it meets: its blow is softer than a rigid
+    /// tool's of the same mass and speed, by the stiffnesses in series.
+    #[test]
+    fn a_striker_that_gives_strikes_bone_more_softly() {
+        let world = body();
+        let rigid = world
+            .blow_on_bone(BonePart::Forearm, 2.9, f64::INFINITY, 2500.0, 8.0)
+            .force;
+        let fist = world
+            .blow_on_bone(BonePart::Forearm, 2.9, 40_000.0, 2500.0, 8.0)
+            .force;
+        let flesh = BARE_BONE_STIFFNESS / (1.0 + 8.0 / COVER_SOFTENING_MM);
+        let expected = (40_000.0 / (flesh + 40_000.0)).sqrt();
+        assert!(
+            (fist / rigid - expected).abs() < 1.0e-9,
+            "{} against {expected}",
+            fist / rigid
+        );
     }
 
     #[test]
     fn a_heavy_tool_spends_more_of_its_blow_moving_a_light_limb() {
         let world = body();
         let speed = 1000.0;
-        let hammer_on_hand = world.blow_on_bone(BonePart::Hand, 4.5, speed, 5.0).force;
-        let hammer_on_thigh = world.blow_on_bone(BonePart::Thigh, 4.5, speed, 5.0).force;
+        let hammer_on_hand = world
+            .blow_on_bone(BonePart::Hand, 4.5, f64::INFINITY, speed, 5.0)
+            .force;
+        let hammer_on_thigh = world
+            .blow_on_bone(BonePart::Thigh, 4.5, f64::INFINITY, speed, 5.0)
+            .force;
         assert!(hammer_on_hand < hammer_on_thigh * 0.5);
-        let bat_on_hand = world.blow_on_bone(BonePart::Hand, 0.8, speed, 5.0).force;
-        let bat_on_thigh = world.blow_on_bone(BonePart::Thigh, 0.8, speed, 5.0).force;
+        let bat_on_hand = world
+            .blow_on_bone(BonePart::Hand, 0.8, f64::INFINITY, speed, 5.0)
+            .force;
+        let bat_on_thigh = world
+            .blow_on_bone(BonePart::Thigh, 0.8, f64::INFINITY, speed, 5.0)
+            .force;
         assert!(bat_on_hand > bat_on_thigh * 0.6);
     }
 

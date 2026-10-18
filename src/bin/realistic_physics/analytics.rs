@@ -19,6 +19,7 @@ pub fn step(world: &rp::World) {
         rp::ToolMode::Heavy => (1, "sledgehammer"),
         rp::ToolMode::Blunt => (2, "bat"),
         rp::ToolMode::Sharp => (4, "knife"),
+        rp::ToolMode::Fist => (8, "fist"),
     };
     if REPORTED.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
         platform::tool_used(name);

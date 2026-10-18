@@ -33,6 +33,9 @@
 //!                            and running counts of broken bones, torn skin and
 //!                            muscle, bruises, and blood drops (a video's sound
 //!                            is made from them)
+//! --set NAME=VALUE           play with a setting of `Materials` changed, as
+//!                            `strike_scenarios --set` does, to see what a
+//!                            change looks like before making it the default
 //! --sound FILE               write the game's own sound for the steps played,
 //!                            as a WAV mixed step by step the way the app plays
 //!                            it (`sound::Mixdown`), each step's sounds starting
@@ -95,6 +98,7 @@ pub fn request() -> Option<CaptureRequest> {
         return None;
     }
     let mut args = env::args().skip(1);
+    let mut settings = Vec::new();
     let mut request = CaptureRequest {
         path: PathBuf::new(),
         views: vec![ViewMode::Normal],
@@ -155,6 +159,7 @@ pub fn request() -> Option<CaptureRequest> {
             }
             "--events" => request.events = Some(PathBuf::from(value("--events"))),
             "--sound" => request.sound = Some(PathBuf::from(value("--sound"))),
+            "--set" => settings.push(value("--set")),
             "--variant" => {
                 let spec = value("--variant");
                 let numbers: Vec<f64> = spec
@@ -171,6 +176,12 @@ pub fn request() -> Option<CaptureRequest> {
             }
             other => fail(&format!("unknown option `{other}`")),
         }
+    }
+    if !settings.is_empty() {
+        let parsed = rp::parse_settings(&settings).unwrap_or_else(|error| fail(&error));
+        rp::apply_settings(&mut rp::Materials::default(), &parsed)
+            .unwrap_or_else(|error| fail(&error));
+        rp::scenarios::use_settings(parsed);
     }
     if let (Some((along, across, strength)), Some(play)) = (request.variant, request.play) {
         request.play = Some(play.shifted(along, across).with_bone_strength(strength));

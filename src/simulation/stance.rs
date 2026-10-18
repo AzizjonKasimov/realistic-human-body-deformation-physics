@@ -57,6 +57,9 @@ pub struct JointDrive {
     /// learned as the body settles, so that the weight they carry leaves the
     /// joint at that angle (`learn_the_guards_weight`).
     pub aim: f64,
+    /// How much further the muscles aim the joint for now, in radians: out
+    /// toward a punch's pose while the arm throws one (`punch.rs`), else 0.
+    pub swing: f64,
 }
 
 /// How much of its braced damping a joint keeps in a limb hanging limp: a
@@ -555,6 +558,10 @@ impl World {
                 self.bone_joints[index].drive_impulse = 0.0;
                 continue;
             }
+            // A punch's muscles move the whole limb (`punch.rs`).
+            if self.punch_drives(index) {
+                continue;
+            }
             let turn = JointTurn::of(&joint, &self.bones);
             if turn.inverse_mass <= 0.0 {
                 continue;
@@ -570,7 +577,8 @@ impl World {
             let stiffness = (stiffness * newton_metres).min(mass * cap * cap);
             let damping = damping * newton_metres;
             let softness = Softness::of_stiffness(stiffness, damping, mass, h);
-            let angle = wrap_angle(turn.angle - joint.rest_angle - joint.drive.aim);
+            let angle =
+                wrap_angle(turn.angle - joint.rest_angle - joint.drive.aim - joint.drive.swing);
             let speed = turn.speed(&self.bones, h);
             let given = joint.drive_impulse.clamp(-limit, limit);
             let total = (given + softness.impulse(mass, speed, angle, given)).clamp(-limit, limit);
@@ -582,7 +590,7 @@ impl World {
     /// The most torque the muscles across `joint` give, in the engine's
     /// units: none across a broken joint or bone, less the further the joint
     /// has come out of place. A limb hanging from a break only damps.
-    fn drive_limit(&self, joint: &BoneJoint) -> f64 {
+    pub(super) fn drive_limit(&self, joint: &BoneJoint) -> f64 {
         if !self.joint_holds(joint) || joint.drive.stiffness <= 0.0 {
             return 0.0;
         }
@@ -630,6 +638,9 @@ impl World {
 
     pub(super) fn warm_start_joint_drives(&mut self, h: f64) {
         for index in 0..self.bone_joints.len() {
+            if self.punch_drives(index) {
+                continue;
+            }
             let joint = self.bone_joints[index];
             let limit = self.drive_limit(&joint) * h;
             let given = joint.drive_impulse.clamp(-limit, limit);

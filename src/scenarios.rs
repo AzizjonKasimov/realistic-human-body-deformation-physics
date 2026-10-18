@@ -109,6 +109,7 @@ impl Strike {
             },
             power: self.power,
             tool: self.tool,
+            punch: None,
         }
     }
 
@@ -212,6 +213,9 @@ pub enum GestureStep {
     Press(bool),
     /// The hand stays still for this many steps.
     Wait(i32),
+    /// The figure throws a punch with this arm on the next step, as its key
+    /// or button does in the app.
+    Punch(Limb),
 }
 
 /// A tool used the way a person plays the app: the tool is in hand from the
@@ -232,7 +236,7 @@ impl Gesture {
             .iter()
             .map(|step| match *step {
                 GestureStep::Move { frames, .. } | GestureStep::Wait(frames) => frames.max(0),
-                GestureStep::Press(_) => 0,
+                GestureStep::Press(_) | GestureStep::Punch(_) => 0,
             })
             .sum()
     }
@@ -249,6 +253,7 @@ impl Gesture {
         for step in self.steps {
             match *step {
                 GestureStep::Press(state) => down = state,
+                GestureStep::Punch(_) => {}
                 GestureStep::Wait(frames) => {
                     if frame < elapsed + frames {
                         return (position, down);
@@ -272,6 +277,25 @@ impl Gesture {
         (position, down)
     }
 
+    /// The arm that throws a punch on `frame`: a punch step fires on the
+    /// first frame after the steps before it.
+    pub fn punch(&self, frame: i32) -> Option<Limb> {
+        let mut elapsed = 0;
+        for step in self.steps {
+            match *step {
+                GestureStep::Punch(limb) if elapsed == frame => return Some(limb),
+                GestureStep::Move { frames, .. } | GestureStep::Wait(frames) => {
+                    elapsed += frames.max(0);
+                }
+                _ => {}
+            }
+            if elapsed > frame {
+                break;
+            }
+        }
+        None
+    }
+
     /// Pointer input on `frame` against a body placed at `body`. The tool is
     /// in play on every frame, as it is in the app.
     pub fn input(&self, frame: i32, body: BodyFrame) -> InputState {
@@ -286,6 +310,7 @@ impl Gesture {
             vy: 0.0,
             power: self.power,
             tool: self.tool,
+            punch: self.punch(frame),
         }
     }
 
@@ -321,6 +346,11 @@ impl Gesture {
                     to: (-to.0, to.1),
                     frames,
                 },
+                GestureStep::Punch(limb) => GestureStep::Punch(match limb {
+                    Limb::LeftArm => Limb::RightArm,
+                    Limb::RightArm => Limb::LeftArm,
+                    other => other,
+                }),
                 other => other,
             })
             .collect();
@@ -332,10 +362,12 @@ impl Gesture {
 
     /// Parses `tool:` followed by steps separated by `:`: `u,v` puts the hand
     /// there at once, `u,v/N` moves it there over N steps, `down` and `up`
-    /// press and release the button, and `wait=N` holds still for N steps.
-    /// `power=P` tries a strength other than the tool's swing power. For
-    /// example `bat:-0.3,0.4:wait=10:down:0.05,0.4/12:wait=40:up:wait=30`
-    /// hovers, presses, swings into the chest, leans there, and lets go.
+    /// press and release the button, `wait=N` holds still for N steps, and
+    /// `punch=left` or `punch=right` throws a punch with the arm on that
+    /// side of the window. `power=P` tries a strength other than the tool's
+    /// swing power. For example
+    /// `bat:-0.3,0.4:wait=10:down:0.05,0.4/12:wait=40:up:wait=30` hovers,
+    /// presses, swings into the chest, leans there, and lets go.
     pub fn parse(spec: &str) -> Result<Gesture, String> {
         let mut parts = spec.split(':');
         let tool = parse_tool(parts.next().unwrap_or(""))?;
@@ -351,6 +383,8 @@ impl Gesture {
             match part {
                 "down" => steps.push(GestureStep::Press(true)),
                 "up" => steps.push(GestureStep::Press(false)),
+                "punch=left" => steps.push(GestureStep::Punch(Limb::LeftArm)),
+                "punch=right" => steps.push(GestureStep::Punch(Limb::RightArm)),
                 _ => {
                     if let Some(frames) = part.strip_prefix("wait=") {
                         steps.push(GestureStep::Wait(number(frames)? as i32));
@@ -396,6 +430,8 @@ impl fmt::Display for Gesture {
                 GestureStep::Press(true) => write!(f, ":down")?,
                 GestureStep::Press(false) => write!(f, ":up")?,
                 GestureStep::Wait(frames) => write!(f, ":wait={frames}")?,
+                GestureStep::Punch(Limb::LeftArm) => write!(f, ":punch=left")?,
+                GestureStep::Punch(_) => write!(f, ":punch=right")?,
             }
         }
         write!(f, ":power={}", self.power)
@@ -495,7 +531,10 @@ fn parse_tool(name: &str) -> Result<ToolMode, String> {
         "bat" | "blunt" => Ok(ToolMode::Blunt),
         "knife" | "sharp" => Ok(ToolMode::Sharp),
         "hammer" | "heavy" | "sledgehammer" => Ok(ToolMode::Heavy),
-        other => Err(format!("unknown tool `{other}`; use bat, knife, or hammer")),
+        "fist" => Ok(ToolMode::Fist),
+        other => Err(format!(
+            "unknown tool `{other}`; use bat, knife, hammer, or fist"
+        )),
     }
 }
 
@@ -504,6 +543,7 @@ fn tool_spec_name(tool: ToolMode) -> &'static str {
         ToolMode::Blunt => "bat",
         ToolMode::Sharp => "knife",
         ToolMode::Heavy => "hammer",
+        ToolMode::Fist => "fist",
     }
 }
 
@@ -641,6 +681,8 @@ pub struct ScenarioExpectations {
     pub fist_offset: DoubleBand,
     /// How far below its place in the guard the lower fist ends, in pixels.
     pub fist_drop: DoubleBand,
+    /// The fastest a fist moved, in pixels per second: a punch's speed.
+    pub fist_speed: DoubleBand,
 }
 
 /// A tool whose axis turns more than this in one step has snapped round
@@ -1006,13 +1048,14 @@ impl Scenario {
                 r.bone_pieces_out
             ));
         }
-        // Struck flesh moves at most twice as fast as the tool that hit it,
-        // the limit of a perfectly elastic collision; faster flesh is the
-        // simulation flinging it.
-        let flesh_limit = (2.0 * r.max_tool_speed).max(1000.0);
+        // Struck flesh moves at most twice as fast as the tool or the fist
+        // that hit it, the limit of a perfectly elastic collision; faster
+        // flesh is the simulation flinging it. A punching arm's own flesh
+        // moves with its fist.
+        let flesh_limit = (2.0 * r.max_tool_speed.max(r.max_punch_speed)).max(1000.0);
         if r.max_point_speed > flesh_limit {
             problems.push(format!(
-                "flesh_speed={:.0} px/s, above {flesh_limit:.0}: twice the tool's speed",
+                "flesh_speed={:.0} px/s, above {flesh_limit:.0}: twice the striker's speed",
                 r.max_point_speed
             ));
         }
@@ -1243,6 +1286,7 @@ impl Scenario {
             real("max_fist_shift", r.max_fist_shift, e.fist_shift),
             real("final_fist_offset", r.final_fist_offset, e.fist_offset),
             real("final_fist_drop", r.final_fist_drop, e.fist_drop),
+            real("max_fist_speed", r.max_fist_speed, e.fist_speed),
         ];
         let mut problems: Vec<String> = checks.into_iter().flatten().collect();
         problems.extend(self.real_world_problems(r));
@@ -1415,6 +1459,8 @@ pub struct ScenarioResult {
     pub part_peak_load: [f64; BONE_PARTS],
     /// Fastest the tool moved, in pixels per second.
     pub max_tool_speed: f64,
+    /// Fastest a punching arm's fist moved, in pixels per second.
+    pub max_punch_speed: f64,
     /// The most the head turned on the neck off the guard, in degrees.
     pub max_head_turn: f64,
     /// The farthest a fist was knocked from where it stood when the play
@@ -1423,6 +1469,9 @@ pub struct ScenarioResult {
     pub max_fist_shift: f64,
     pub final_fist_offset: f64,
     pub final_fist_drop: f64,
+    /// Fastest a fist (the end of its hand's bone) moved from one step to
+    /// the next, in pixels per second.
+    pub max_fist_speed: f64,
     /// Steps since the body first lost blood.
     pub bleed_frames: i32,
     last_positions: Vec<Vec2>,
@@ -1436,6 +1485,8 @@ pub struct ScenarioResult {
     /// How far each arm's fist stood from where it was built when the play
     /// began, which the fist measures leave out.
     fists_at_start: Option<[Vec2; 2]>,
+    /// Where each arm's fist was on the last step.
+    last_fists: Option<[Vec2; 2]>,
 }
 
 impl ScenarioResult {
@@ -1470,10 +1521,20 @@ impl ScenarioResult {
             *count += fresh;
         }
         self.max_tool_speed = self.max_tool_speed.max(debug.striker_speed);
+        self.max_punch_speed = self.max_punch_speed.max(debug.punch_speed);
         self.max_head_turn = self.max_head_turn.max(head_turn_degrees(world));
         for (shift, _) in fist_offsets(world, self.fists_at_start.unwrap_or_default()) {
             self.max_fist_shift = self.max_fist_shift.max(shift);
         }
+        let fists = fist_places(world);
+        if let Some(last) = self.last_fists {
+            let dt = world.materials().fixed_dt.max(1.0e-9);
+            for (now, then) in fists.iter().zip(last) {
+                let speed = libm::hypot(now.x - then.x, now.y - then.y) / dt;
+                self.max_fist_speed = self.max_fist_speed.max(speed);
+            }
+        }
+        self.last_fists = Some(fists);
         for bone in world.bones() {
             let share = bone.break_load / bone.fracture_impulse.max(1.0);
             let peak = &mut self.part_peak_load[bone.part.index()];
@@ -1799,11 +1860,11 @@ pub fn run_on(
 }
 
 /// The direction the handle points from the bat's barrel or the hammer's
-/// head, or the knife's blade points, while a tool is in play.
+/// head, or the knife's blade or the fist points, while a tool is in play.
 pub fn tool_axis(world: &World) -> Option<Vec2> {
     let pose = world.current_tool_pose()?;
     Some(match pose.tool {
-        ToolMode::Sharp => pose.heading,
+        ToolMode::Sharp | ToolMode::Fist => pose.heading,
         ToolMode::Blunt | ToolMode::Heavy => pose.side,
     })
 }
@@ -1847,6 +1908,7 @@ pub fn tool_name(tool: ToolMode) -> &'static str {
         ToolMode::Blunt => "blunt",
         ToolMode::Sharp => "sharp",
         ToolMode::Heavy => "heavy",
+        ToolMode::Fist => "fist",
     }
 }
 
@@ -2006,6 +2068,21 @@ pub fn fists_off_their_place(world: &World) -> [Vec2; 2] {
         }
     }
     off
+}
+
+/// Where each arm's fist is, the end of its hand's bone, the viewer's left
+/// arm first.
+pub fn fist_places(world: &World) -> [Vec2; 2] {
+    let mut places = [Vec2::default(); 2];
+    for bone in world.bones() {
+        if bone.part != BonePart::Hand || bone.splinter {
+            continue;
+        }
+        if let Some(arm) = arm_index(bone.limb) {
+            places[arm] = bone.b;
+        }
+    }
+    places
 }
 
 /// Which arm a limb is, the viewer's left first.
@@ -2252,6 +2329,18 @@ const ARM_DROPS: &str =
 const ARM_HELD: &str = "Bennett et al. 1992: an arm held against a push springs back";
 const BLUNT_SPLIT: &str =
     "Sharkey et al. 2012: blunt blows split skin over bone; Barnes et al. 2022: 47 J left a thigh unsplit";
+const PUNCH_SKULL: &str =
+    "Raymond et al. 2009: the temple breaks at 5.6 kN, Walilko et al. 2005: a boxer's punch peaks at 3.4 kN; one-punch deaths come from the fall (Pilgrim et al. 2014)";
+const PUNCH_CUT: &str =
+    "Muzzi et al. 2022: 28% of bare-knuckle fighters had a facial cut over a whole bout of punches";
+const PUNCH_BODY_CUT: &str =
+    "Muzzi et al. 2022 list the cuts of 141 bare-knuckle bouts only on the face and the puncher's hand; Shepherd et al. 1990: two thirds of assault victims' cuts were on the face";
+const PUNCH_GUARD: &str =
+    "Muzzi et al. 2022 list no broken arm in 141 bare-knuckle bouts; Begeman and Pratima 1999: 1.37 kN breaks a forearm held at both ends";
+const PUNCH_RIBS: &str =
+    "Muzzi et al. 2022 list no broken rib in 141 bare-knuckle bouts; Viano et al. 1989: ribs broke under 240-1030 J side impacts";
+const PUNCH_SPEED: &str =
+    "Adamec et al. 2021: untrained men's hardest punch 8.0 +/- 1.2 m/s (5.7-11.1)";
 
 /// A [`RealCheck`] built as a constant, so a scenario's list of them lasts as
 /// long as the program.
@@ -2317,6 +2406,54 @@ const THRUST_INTO_THE_THIGH_FAST: &[GestureStep] = &[
     GestureStep::Wait(40),
 ];
 
+/// A fist thrown hard at the body from the side at `v` (body heights down
+/// from the crown), from `from` to `to` across it in six steps, about 8 m/s
+/// where it lands, and straight back out, as a punch is.
+const fn punch_at(v: f64, from: f64, to: f64) -> [GestureStep; 7] {
+    [
+        GestureStep::Move {
+            to: (from, v),
+            frames: 0,
+        },
+        GestureStep::Wait(10),
+        GestureStep::Press(true),
+        GestureStep::Move {
+            to: (to, v),
+            frames: 6,
+        },
+        GestureStep::Move {
+            to: (from, v),
+            frames: 10,
+        },
+        GestureStep::Press(false),
+        GestureStep::Wait(80),
+    ]
+}
+
+/// Into the side of the head, above the guard's fist.
+const PUNCH_TO_THE_HEAD: &[GestureStep] = &punch_at(0.06, -0.44, 0.0);
+/// Into the forearm raised in the guard.
+const PUNCH_ON_THE_GUARD: &[GestureStep] = &punch_at(0.24, -0.48, -0.04);
+/// Under the guard's elbow, into the side of the chest over the lowest ribs.
+const PUNCH_TO_THE_RIBS: &[GestureStep] = &punch_at(0.37, -0.46, -0.02);
+
+/// The figure throws a punch with one arm, the hammer carried well clear of
+/// it with the button up, and the arm comes back into its guard.
+const fn throw_punch(arm: Limb) -> [GestureStep; 4] {
+    [
+        GestureStep::Move {
+            to: (-0.6, 0.9),
+            frames: 0,
+        },
+        GestureStep::Wait(10),
+        GestureStep::Punch(arm),
+        GestureStep::Wait(110),
+    ]
+}
+
+const PUNCH_RIGHT: &[GestureStep] = &throw_punch(Limb::RightArm);
+const PUNCH_LEFT: &[GestureStep] = &throw_punch(Limb::LeftArm);
+
 /// The tuned scenarios, played in a 1280x720 window: scripted strikes and
 /// gestures played the way the app is. Each one checks what the play does in
 /// real life (`real`, from injury research), and that the engine and the tool
@@ -2345,6 +2482,12 @@ pub fn scenarios() -> Vec<Scenario> {
         tool_turn: DoubleBand::range(0.0, 16.0),
         tool_turning: DoubleBand::range(0.0, 45.0),
         ..e
+    };
+    // A punch lands, and the fist that threw it turns no faster than its
+    // forearm can swing round behind it.
+    let punched = ScenarioExpectations {
+        contacts: IntBand::at_least(1),
+        ..steady
     };
     let gesture = |tool, steps| {
         Play::Gesture(Gesture {
@@ -2904,6 +3047,104 @@ pub fn scenarios() -> Vec<Scenario> {
             ],
             bone_strength: 1.0,
         },
+        Scenario {
+            name: "punch_to_the_head",
+            region: "head",
+            intent: "punch",
+            play: gesture(ToolMode::Fist, PUNCH_TO_THE_HEAD),
+            // A hard bare-knuckle punch, about 8 m/s with 2.9 kg behind it
+            // (about 90 J), into the side of the head above the guard's fist,
+            // and straight back out. The head is knocked aside on the neck and
+            // the skull holds.
+            expectations: ScenarioExpectations {
+                head_turn: DoubleBand::range(6.0, 45.0),
+                ..punched
+            },
+            real: &[
+                check!(Bruises, Usually, BRUISE),
+                check!(OpensSkin, Rarely, PUNCH_CUT),
+                check!(Breaks(BonePart::Skull), Never, PUNCH_SKULL),
+            ],
+            bone_strength: 1.0,
+        },
+        Scenario {
+            name: "punch_on_the_guard",
+            region: "arm",
+            intent: "punch",
+            play: gesture(ToolMode::Fist, PUNCH_ON_THE_GUARD),
+            // The same punch into the forearm raised in the guard: it bruises
+            // the arm and knocks it aside, and the arm's muscles bring it back.
+            expectations: punched,
+            real: &[
+                check!(Bruises, Usually, BRUISE),
+                check!(OpensSkin, Rarely, PUNCH_BODY_CUT),
+                check!(Breaks(BonePart::Forearm), Never, PUNCH_GUARD),
+                check!(
+                    DropsGuard,
+                    Never,
+                    ARM_HELD,
+                    gap: "a blow this hard on the raised forearm tears the elbow, as the moderate bat's does: the bone's load and the soft joint's give pass the rule for a joint torn by a blow, and the forearm then swings loose"
+                ),
+            ],
+            bone_strength: 1.0,
+        },
+        Scenario {
+            name: "punch_to_the_ribs",
+            region: "torso",
+            intent: "punch",
+            play: gesture(ToolMode::Fist, PUNCH_TO_THE_RIBS),
+            // The same punch under the guard's elbow, into the side of the
+            // chest over the lowest ribs.
+            expectations: punched,
+            real: &[
+                check!(Bruises, Usually, BRUISE),
+                check!(OpensSkin, Rarely, PUNCH_BODY_CUT),
+                check!(Breaks(BonePart::Rib), Rarely, PUNCH_RIBS),
+            ],
+            bone_strength: 1.0,
+        },
+        Scenario {
+            name: "throws_a_punch_right",
+            region: "arm",
+            intent: "punch",
+            play: gesture(ToolMode::Heavy, PUNCH_RIGHT),
+            // The figure throws a straight punch with its right arm, out to
+            // its side at the height of a head beside it, into the air, and
+            // brings the arm back into its guard. Its own muscles throw it,
+            // as fast as an untrained man's hardest punch, and it hurts
+            // nothing.
+            expectations: ScenarioExpectations {
+                contacts: IntBand::range(0, 0),
+                fist_speed: DoubleBand::range(1829.0, 3562.0),
+                fist_offset: DoubleBand::range(0.0, 16.0),
+                ..steady
+            },
+            real: &[
+                check!(BreaksAnyBone, Never, PUNCH_SPEED),
+                check!(OpensSkin, Never, PUNCH_SPEED),
+                check!(DropsGuard, Never, ARM_HELD),
+            ],
+            bone_strength: 1.0,
+        },
+        Scenario {
+            name: "throws_a_punch_left",
+            region: "arm",
+            intent: "punch",
+            play: gesture(ToolMode::Heavy, PUNCH_LEFT),
+            // The same punch with the left arm, out to the left.
+            expectations: ScenarioExpectations {
+                contacts: IntBand::range(0, 0),
+                fist_speed: DoubleBand::range(1829.0, 3562.0),
+                fist_offset: DoubleBand::range(0.0, 16.0),
+                ..steady
+            },
+            real: &[
+                check!(BreaksAnyBone, Never, PUNCH_SPEED),
+                check!(OpensSkin, Never, PUNCH_SPEED),
+                check!(DropsGuard, Never, ARM_HELD),
+            ],
+            bone_strength: 1.0,
+        },
     ]
 }
 
@@ -2930,6 +3171,24 @@ mod tests {
             );
             assert!((drop - (off.y - 10.0)).abs() < 1e-9);
         }
+    }
+
+    /// A gesture can throw punches: `punch=left` and `punch=right` fire on
+    /// the step after the steps before them, read back as written, and swap
+    /// arms when the gesture is mirrored.
+    #[test]
+    fn gestures_throw_punches() {
+        let gesture =
+            Gesture::parse("fist:-0.4,0.3:wait=5:punch=right:wait=3:punch=left:wait=9").unwrap();
+        assert_eq!(gesture.tool, ToolMode::Fist);
+        let thrown: Vec<(i32, Limb)> = (0..gesture.frames())
+            .filter_map(|frame| gesture.punch(frame).map(|limb| (frame, limb)))
+            .collect();
+        assert_eq!(thrown, vec![(5, Limb::RightArm), (8, Limb::LeftArm)]);
+        assert_eq!(Gesture::parse(&gesture.to_string()).unwrap(), gesture);
+        let mirrored = gesture.mirrored();
+        assert_eq!(mirrored.punch(5), Some(Limb::LeftArm));
+        assert_eq!(mirrored.punch(8), Some(Limb::RightArm));
     }
 
     #[test]

@@ -2,6 +2,11 @@
 
 What each version of Realistic Physics changed, newest first. The game shows its version on the start screen and in its bottom-left corner, and every Short made from the game shows the version it was made with. Only the newest version is online.
 
+## v0.12 (2026-10-18)
+
+- The figure throws punches: the left and right arrow keys, or the LEFT and RIGHT punch buttons, make it punch with that arm, out to its side as fast as a hard real punch, and bring the arm back into its guard.
+- A fourth tool, the bare fist (F), hits like a real punch: it bruises and knocks the head aside, rarely splits the skin, and breaks no skull or forearm.
+
 ## v0.11 (2026-10-18)
 
 - A broken arm drops out of the guard and hangs at the side instead of staying raised: the elbow's flesh rests as a relaxed elbow does, and the inside of the elbow is a crease, so the arm can also straighten all the way without tearing.

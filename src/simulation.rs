@@ -14,6 +14,7 @@ mod outline;
 mod phases;
 #[cfg(test)]
 mod properties;
+mod punch;
 mod soft;
 mod stance;
 mod tendons;
@@ -30,6 +31,7 @@ pub use cuts::{OpenedCut, Piece, TriangleCut};
 pub use journal::{Actor, Event, EventKind, Journal, Measure, StepNote, Subject};
 pub use motion::MotionSnapshot;
 pub use phases::{PhaseClock, PhaseTime, PhaseTimes, Traced, TracedStage};
+pub use punch::Punch;
 pub use stance::{HipHold, JointDrive, Limb, PostureBinding};
 pub use tendons::{Muscle, Tendon, TendonEnd};
 pub use tissue::SpringKind;
@@ -101,6 +103,9 @@ pub enum ToolMode {
     Blunt,
     Sharp,
     Heavy,
+    /// A bare fist, as another fighter's punch lands: its knuckles lead, the
+    /// arm behind it (`tools.rs`).
+    Fist,
 }
 
 impl Default for ToolMode {
@@ -232,6 +237,9 @@ pub struct InputState {
     pub vy: f64,
     pub power: f64,
     pub tool: ToolMode,
+    /// An arm throws a punch on this step (`punch.rs`): the player pressed
+    /// its key or button.
+    pub punch: Option<Limb>,
 }
 
 impl Default for InputState {
@@ -245,6 +253,7 @@ impl Default for InputState {
             vy: 0.0,
             power: 2.0,
             tool: ToolMode::Blunt,
+            punch: None,
         }
     }
 }
@@ -345,6 +354,19 @@ pub struct Materials {
     /// relaxed elbow rests part way open (`rest_flesh_round_joints`); none
     /// rests it in the guard, as the body is built.
     pub elbow_rest_opening: f64,
+    /// How near a punch's pose, in radians, an arm throwing it goes on
+    /// pulling with all its strength (`punch.rs`): the muscles of a punch
+    /// are fully active, not braced as the guard's.
+    pub punch_full_pull: f64,
+    /// How long a punch takes to reach its pose, and to come back to the
+    /// guard, in seconds (`punch.rs`).
+    pub punch_out_seconds: f64,
+    pub punch_back_seconds: f64,
+    /// How far short of straight a punch leaves the elbow, and how far above
+    /// level the line from the shoulder to the fist rises, in radians
+    /// (`punch.rs`).
+    pub punch_elbow_bend: f64,
+    pub punch_rise: f64,
     pub muscle_fiber_rupture_damage_floor: f64,
     pub muscle_tear_stretch: f64,
     pub muscle_tear_impulse: f64,
@@ -601,6 +623,21 @@ impl Default for Materials {
             // A relaxed elbow rests at 107 degrees, 10 either way (Wiegner and
             // Watts 1986), 61 degrees more open than the guard's 46.
             elbow_rest_opening: 1.06,
+            // Set so the fist reaches an untrained man's hardest straight
+            // punch, 8.0 +/- 1.2 m/s (Adamec et al. 2021).
+            punch_full_pull: 0.25,
+            // A straight punch lands about a tenth of a second after it
+            // starts (Atha et al. 1985: a fist travelled 0.49 m in 0.1 s);
+            // the guard leaves the fist about 0.33 m from where it lands, so
+            // it gets there sooner, at about the 8 m/s of an untrained man's
+            // hardest punch (Adamec et al. 2021). A whole punch takes 0.4 s
+            // or less (VencesBrito et al. 2011).
+            punch_out_seconds: 0.08,
+            punch_back_seconds: 0.2,
+            // A punch lands before the elbow locks, and at the head of a
+            // fighter as tall standing beside.
+            punch_elbow_bend: 0.17,
+            punch_rise: 0.38,
             muscle_fiber_rupture_damage_floor: 0.0,
             muscle_tear_stretch: 1.92,
             muscle_tear_impulse: 1180.0,
@@ -1503,6 +1540,9 @@ pub struct ContactDebug {
     pub striker_radius: f64,
     pub tool: ToolMode,
     pub impact: f64,
+    /// How fast the fist of an arm throwing a punch moved this step, in
+    /// pixels per second (`punch.rs`).
+    pub punch_speed: f64,
     pub max_depth: f64,
     pub max_bone_load: f64,
     pub max_point_load: f64,
@@ -1610,6 +1650,7 @@ impl Default for ContactDebug {
             strongest_contact: Vec2::default(),
             striker_speed: 0.0,
             striker_mass: 0.0,
+            punch_speed: 0.0,
             striker_radius: 0.0,
             tool: ToolMode::Blunt,
             impact: 0.0,
@@ -1913,6 +1954,9 @@ pub struct World {
     /// Which limbs hang from a broken bone, their muscles let go, in the
     /// order of [`Limb::index`].
     limp_limbs: [bool; 4],
+    /// The punch each arm is throwing, the viewer's left arm first
+    /// (`punch.rs`).
+    punches: [Option<Punch>; 2],
 }
 
 impl Default for World {
@@ -1977,6 +2021,7 @@ impl World {
             floor_y: f64::INFINITY,
             hip_holds: Vec::new(),
             limp_limbs: [false; 4],
+            punches: [None, None],
         }
     }
 
@@ -2463,6 +2508,9 @@ impl World {
 
     /// One step, phase by phase; [`World::time_phases`] can time each.
     fn run_step(&mut self, dt: f64, input: &InputState, width: f64) {
+        // Where the punching fists stood as the step began, to tell how fast
+        // they moved over it.
+        let fists = self.punching_fists();
         self.timed("flesh mask", |world| {
             world.refresh_open_skin();
             world.refresh_flesh();
@@ -2517,7 +2565,12 @@ impl World {
         });
         self.timed("wounds", Self::disturb_wounds_from_loaded_tissue);
         self.timed("outline pairs", Self::gather_outline_pairs);
+        if let Some(limb) = input.punch {
+            self.throw_punch(limb);
+        }
+        self.timed("punches", |world| world.drive_punches(dt));
         self.solve_motion(dt, width, floor_y);
+        self.debug.punch_speed = self.punch_speed(fists, dt);
         // Tissue tears from how far it is stretched once the step's push has
         // spread through it, not from the instant a tool's push lands on a
         // few points.
@@ -4417,14 +4470,14 @@ impl World {
             let tool_scale = match input.tool {
                 ToolMode::Sharp => 1.48,
                 ToolMode::Heavy => 0.54,
-                ToolMode::Blunt => 0.18,
+                ToolMode::Blunt | ToolMode::Fist => 0.18,
             };
             let threshold = match input.tool {
                 ToolMode::Sharp => vessel.laceration_impulse,
                 ToolMode::Heavy => {
                     vessel.laceration_impulse * self.materials.major_vessel_blunt_impulse_scale
                 }
-                ToolMode::Blunt => {
+                ToolMode::Blunt | ToolMode::Fist => {
                     vessel.laceration_impulse
                         * self.materials.major_vessel_blunt_impulse_scale
                         * 1.35
@@ -8656,6 +8709,7 @@ mod tests {
                 vy: 0.0,
                 power: 2.0,
                 tool: ToolMode::Sharp,
+                punch: None,
             },
         );
 
@@ -8697,6 +8751,7 @@ mod tests {
                 vy: 0.0,
                 power: 4.0,
                 tool: ToolMode::Blunt,
+                punch: None,
             },
         );
 
@@ -9571,6 +9626,7 @@ mod tests {
                 vy: 0.0,
                 power: 2.0,
                 tool: ToolMode::Blunt,
+                punch: None,
             },
         );
 
@@ -9662,6 +9718,7 @@ mod tests {
                 vy: 0.0,
                 power: swing_power(tool),
                 tool,
+                punch: None,
             };
             world.step(dt, &input, 640.0);
             contacts += world.debug.tissue_contacts;
@@ -9726,6 +9783,7 @@ mod tests {
                 vy: 0.0,
                 power: 2.0,
                 tool: ToolMode::Blunt,
+                punch: None,
             },
         );
 
@@ -9989,6 +10047,7 @@ mod tests {
                 vy: 0.0,
                 power: 3.0,
                 tool: ToolMode::Sharp,
+                punch: None,
             },
         );
 
@@ -10031,6 +10090,7 @@ mod tests {
                 vy: 0.0,
                 power: 1.0,
                 tool: ToolMode::Blunt,
+                punch: None,
             },
         );
 
@@ -10695,6 +10755,23 @@ fn tool_profile(tool: ToolMode) -> ToolProfile {
         // 70% of iron-bar victims (Nolan et al. 2000; Eames et al. 1997).
         ToolMode::Blunt => ToolProfile {
             tissue_load_scale: 0.05,
+            open_fracture_scale: 1.5,
+            ..ToolProfile::default()
+        },
+        // A fist's knuckles are padded, so it gives against the flesh it
+        // strikes as wood and steel do not, and pushes it aside more softly;
+        // it bruises far more than it tears and, rounded as a bat's barrel,
+        // rarely drives a broken bone out through the skin. Pushing as hard
+        // as the bat, a fist driven into the side of the head split its skin
+        // in every run, where bare-knuckle fights show a cut over a whole
+        // bout in about a quarter of fighters (Muzzi et al. 2022). How much
+        // it gives against bone, which softens its blows there, is
+        // `tool_stiffness`; how hard it strikes bone, its 2.9 kg
+        // (`tool_mass_kg`).
+        ToolMode::Fist => ToolProfile {
+            mass_scale: 0.5,
+            tissue_push_scale: 0.7,
+            tissue_load_scale: 0.025,
             open_fracture_scale: 1.5,
             ..ToolProfile::default()
         },

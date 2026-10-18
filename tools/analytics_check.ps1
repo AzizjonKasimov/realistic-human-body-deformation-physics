@@ -452,7 +452,7 @@ try {
         Invoke-Click "#start"
         if (Wait-Counted "loaded" 60) {
             Invoke-Blow "sledgehammer"
-            foreach ($tool in @(@{ Key = "b"; Name = "bat" }, @{ Key = "s"; Name = "knife" })) {
+            foreach ($tool in @(@{ Key = "b"; Name = "bat" }, @{ Key = "s"; Name = "knife" }, @{ Key = "f"; Name = "fist" })) {
                 Send-Key $tool.Key
                 Wait-Page 0.5
                 Invoke-Blow $tool.Name
@@ -486,7 +486,7 @@ try {
             }
         }
         Test-Run "Playing: Start, each tool, a link, the about card, a minute" @(
-            "visit", "start", "loaded", "hit", "tool-sledgehammer", "tool-bat", "tool-knife",
+            "visit", "start", "loaded", "hit", "tool-sledgehammer", "tool-bat", "tool-knife", "tool-fist",
             "link-source-code", "fps-*-mouse", "played-1min"
         )
 

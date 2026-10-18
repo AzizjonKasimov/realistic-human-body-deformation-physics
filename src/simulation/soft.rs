@@ -196,6 +196,7 @@ impl World {
             self.timed("attachments", Self::judge_attachments);
             self.timed("bone joints", Self::judge_bone_joints);
             self.refresh_inverse_masses();
+            self.timed("punch sides", Self::measure_punches);
             if self.materials.warm_starting {
                 self.warm_start_soft(h);
             } else {
@@ -219,7 +220,9 @@ impl World {
                 }
                 self.timed("hip hold", |world| world.solve_hip_hold(h));
                 self.timed("joint muscles", |world| world.solve_joint_drives(h));
+                self.timed("punch muscles", |world| world.solve_punch_drives(h));
                 self.timed("joints", |world| world.solve_soft_joints(h));
+                self.timed("punch joints", |world| world.solve_punch_pins(h));
                 self.timed("tendons", |world| world.solve_tendons(h));
                 self.timed("tool contact", Self::solve_tool_contact);
                 self.timed("bones", Self::solve_bones);
@@ -425,7 +428,13 @@ impl World {
         self.timed("warm start: joint muscles", |world| {
             world.warm_start_joint_drives(h)
         });
+        self.timed("warm start: punch muscles", |world| {
+            world.warm_start_punch_drives(h)
+        });
         self.timed("warm start: joints", |world| world.warm_start_joints(h));
+        self.timed("warm start: punch joints", |world| {
+            world.warm_start_punch_pins(h)
+        });
         self.timed("warm start: tendons", |world| world.warm_start_tendons(h));
     }
 
@@ -518,7 +527,7 @@ impl World {
                 let link = JointLink::of(&joint, &self.bones);
                 self.apply_joint_link(&joint, &link, joint.impulse, h);
             }
-            if joint.hold_impulse != Vec2::default() {
+            if joint.hold_impulse != Vec2::default() && !self.punch_drives(index) {
                 let pin = JointPin::of(&joint, &self.bones, hold.reach());
                 self.apply_joint_pin(&joint, &pin, joint.hold_impulse, h);
             }
@@ -645,6 +654,11 @@ impl World {
             };
             if !hold.pulls_only {
                 self.bone_joints[index].impulse = 0.0;
+                // A punch holds its joints round the whole limb (`punch.rs`).
+                if self.punch_drives(index) {
+                    self.solve_joint_limit(index, &hold, cap, h);
+                    continue;
+                }
                 let pin = JointPin::of(&joint, &self.bones, hold.reach());
                 if pin.inverse_mass > EPSILON {
                     let hertz = (self.materials.bone_joint_hertz * hold.loosened).min(cap);
@@ -739,7 +753,7 @@ impl World {
 
     /// How joint `joint` holds its bones now, or `None` if it holds nothing:
     /// whole, or loose, as a break or an injury left it.
-    fn joint_hold(&self, joint: &BoneJoint) -> Option<JointHold> {
+    pub(super) fn joint_hold(&self, joint: &BoneJoint) -> Option<JointHold> {
         let (a, b) = (self.bones.get(joint.a)?, self.bones.get(joint.b)?);
         let m = &self.materials;
         if !joint.broken && !joint.post_fracture_limited {
@@ -1166,7 +1180,7 @@ const LOOSE_JOINT_SPIN_LOSS: f64 = 0.08;
 /// How a joint holds its bones this substep (`World::joint_hold`): how far
 /// apart it keeps their anchors, from the length it rests at and the most it
 /// lets them part, and the angle it lets them turn through.
-struct JointHold {
+pub(super) struct JointHold {
     rest: f64,
     length: f64,
     rest_angle: f64,
@@ -1174,9 +1188,9 @@ struct JointHold {
     max_angle: f64,
     /// How much of its stiffness it keeps, as a joint slipped out of place
     /// holds more loosely.
-    loosened: f64,
+    pub(super) loosened: f64,
     /// It only pulls its bones together, never pushes them apart.
-    pulls_only: bool,
+    pub(super) pulls_only: bool,
     /// A break or an injury has loosened it.
     loose: bool,
 }
@@ -1184,7 +1198,7 @@ struct JointHold {
 impl JointHold {
     /// How far it holds its bones apart against how far they rest apart: a
     /// joint slipping out of place holds them further.
-    fn reach(&self) -> f64 {
+    pub(super) fn reach(&self) -> f64 {
         self.length / self.rest.max(EPSILON)
     }
 }
@@ -1194,8 +1208,8 @@ impl JointHold {
 /// the two are to move together. The place is `(1 - tau) a + tau b + sigma
 /// perp(b - a)` on the first bone, with ends `a` and `b`, so it turns and
 /// slides with that bone as a muscle tie's anchor does (`BoneTie`).
-struct JointPin {
-    error: Vec2,
+pub(super) struct JointPin {
+    pub(super) error: Vec2,
     a: usize,
     b: usize,
     tau: f64,
@@ -1207,7 +1221,7 @@ struct JointPin {
 impl JointPin {
     /// The hold reaching `reach` times as far from the first bone's anchor
     /// as it was built (`JointHold::reach`).
-    fn of(joint: &BoneJoint, bones: &[BoneSegment], reach: f64) -> Self {
+    pub(super) fn of(joint: &BoneJoint, bones: &[BoneSegment], reach: f64) -> Self {
         let (a, b) = (&bones[joint.a], &bones[joint.b]);
         let length = a.rest_length.max(EPSILON);
         let tau = joint.t_a + joint.hold.x * reach / length;
@@ -1231,8 +1245,20 @@ impl JointPin {
         }
     }
 
+    /// Where the place the second bone is held lies on the first bone, and
+    /// where the second bone's anchor is, when the substep began.
+    pub(super) fn places(&self, bones: &[BoneSegment]) -> (Vec2, Vec2) {
+        let (a0, a1) = bone_place(&bones[self.a]);
+        let (b0, b1) = bone_place(&bones[self.b]);
+        let held = add(
+            lerp(a0, a1, self.tau),
+            scale(perpendicular(subtract(a1, a0)), self.sigma),
+        );
+        (held, lerp(b0, b1, self.t_b))
+    }
+
     /// How fast the second bone's anchor moves off the place it is held.
-    fn speed(&self, bones: &[BoneSegment], h: f64) -> Vec2 {
+    pub(super) fn speed(&self, bones: &[BoneSegment], h: f64) -> Vec2 {
         let (a, b) = (&bones[self.a], &bones[self.b]);
         let (a0, a1) = (subtract(a.a, a.previous_a), subtract(a.b, a.previous_b));
         let held = add(

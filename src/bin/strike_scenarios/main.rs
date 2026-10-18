@@ -56,8 +56,9 @@
 //!                                     fall and drift free (strike_moved_report.txt)
 //!   --random N [--seed S] [--tools T,...]
 //!                                     instead, play N random blows: any tool
-//!                                     (bat, hammer, knife), through any point of
-//!                                     skin from any side at any speed, or
+//!                                     (bat, hammer, and knife, or those --tools
+//!                                     names, fist among them), through any point
+//!                                     of skin from any side at any speed, or
 //!                                     pressed, held, and dragged; report the
 //!                                     rules every play follows that they broke
 //!                                     and what the watchdogs flagged, each with
@@ -458,14 +459,19 @@ fn parse_options() -> Result<Options, String> {
                     .map_err(|_| format!("--seed takes a whole number, got `{seed}`"))?;
             }
             "--tools" => {
-                let names = args.next().ok_or("--tools needs bat, hammer, or knife")?;
+                let names = args
+                    .next()
+                    .ok_or("--tools needs bat, hammer, knife, or fist")?;
                 options.tools = names
                     .split(',')
                     .map(|name| match name.trim() {
                         "bat" | "blunt" => Ok(rp::ToolMode::Blunt),
                         "hammer" | "heavy" | "sledgehammer" => Ok(rp::ToolMode::Heavy),
                         "knife" | "sharp" => Ok(rp::ToolMode::Sharp),
-                        other => Err(format!("unknown tool `{other}`; use bat, hammer, or knife")),
+                        "fist" => Ok(rp::ToolMode::Fist),
+                        other => Err(format!(
+                            "unknown tool `{other}`; use bat, hammer, knife, or fist"
+                        )),
                     })
                     .collect::<Result<_, _>>()?;
             }

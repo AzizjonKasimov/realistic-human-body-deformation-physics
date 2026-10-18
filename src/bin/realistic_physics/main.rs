@@ -24,6 +24,8 @@ enum ViewMode {
 #[derive(Clone, Copy)]
 enum ControlAction {
     Tool(rp::ToolMode),
+    /// The figure throws a punch with this arm (`rp::World::throw_punch`).
+    Punch(rp::Limb),
     ToggleDebug,
     TogglePause,
     Reset,
@@ -32,10 +34,13 @@ enum ControlAction {
     About,
 }
 
-const KEY_CONTROLS: [(KeyCode, ControlAction); 8] = [
+const KEY_CONTROLS: [(KeyCode, ControlAction); 11] = [
+    (KeyCode::Left, ControlAction::Punch(rp::Limb::LeftArm)),
+    (KeyCode::Right, ControlAction::Punch(rp::Limb::RightArm)),
     (KeyCode::H, ControlAction::Tool(rp::ToolMode::Heavy)),
     (KeyCode::B, ControlAction::Tool(rp::ToolMode::Blunt)),
     (KeyCode::S, ControlAction::Tool(rp::ToolMode::Sharp)),
+    (KeyCode::F, ControlAction::Tool(rp::ToolMode::Fist)),
     (KeyCode::D, ControlAction::ToggleDebug),
     (KeyCode::Space, ControlAction::TogglePause),
     (KeyCode::R, ControlAction::Reset),
@@ -99,6 +104,9 @@ struct AppState {
     /// While the browser's about card covers the app: whether the simulation
     /// ran before it opened, so it runs again once the card closes.
     about_open: Option<bool>,
+    /// A punch key or button pressed since the last simulation step, which
+    /// throws on the next one.
+    pending_punch: Option<rp::Limb>,
 }
 
 /// A skin spring on the body's outline, with the third corner of its triangle
@@ -156,6 +164,7 @@ impl AppState {
             hide_tool: false,
             about_requested: false,
             about_open: None,
+            pending_punch: None,
         };
         app.fit_view(width as f32, height as f32);
         app.stepped_hand = app.view.to_world(app.pointer);
@@ -437,6 +446,7 @@ fn apply_control(app: &mut AppState, action: ControlAction) {
                 app.tool_blood = 0.0;
             }
         }
+        ControlAction::Punch(limb) => app.pending_punch = Some(limb),
         ControlAction::ToggleDebug => app.debug_overlay = !app.debug_overlay,
         ControlAction::TogglePause => app.running = !app.running,
         ControlAction::Reset => app.reset_body(),
@@ -471,6 +481,7 @@ fn step_simulation(app: &mut AppState, frame_dt: f64, audio: &mut audio::Audio) 
             vy: 0.0,
             power: rp::swing_power(app.tool),
             tool: app.tool,
+            punch: app.pending_punch.take(),
         };
         app.world.capture_motion(&mut app.earlier);
         step_world(app, &input);
@@ -1740,6 +1751,7 @@ fn draw_tool(ctx: &RenderContext) {
             rp::ToolMode::Sharp => draw_knife(ctx, &pose, &geometry),
             rp::ToolMode::Heavy => draw_sledgehammer(ctx, &pose, &geometry),
             rp::ToolMode::Blunt => draw_bat(ctx, &pose, &geometry),
+            rp::ToolMode::Fist => draw_fist(ctx, &pose, &geometry),
         }
     }
 }
@@ -1777,6 +1789,66 @@ fn draw_polygon(points: &[rp::Vec2], color: Color) {
             to_mq(points[i]),
             to_mq(points[i + 1]),
             color,
+        );
+    }
+}
+
+/// A fist in the figure's own colours, the row of its knuckles leading, and
+/// the forearm behind it, as another fighter's would reach in. Its knuckles
+/// lie along the front of the same shape the simulation strikes with.
+fn draw_fist(ctx: &RenderContext, pose: &rp::ToolPose, geometry: &rp::ToolGeometry) {
+    let heading = pose.heading;
+    let across = perpendicular(heading);
+    let palette = &ctx.palette;
+    let half = geometry.body_half_width;
+    let radius = pose.contact_radius;
+    // The knuckles' face, the back of the fist where the wrist joins it, and
+    // the forearm behind, narrowing a little toward the hand.
+    let face = add(pose.center, scale(heading, radius));
+    let wrist = sub(pose.center, scale(heading, radius + 8.0));
+    let elbow = sub(wrist, scale(heading, geometry.handle_length));
+    let forearm = [
+        add(wrist, scale(across, geometry.handle_half_width)),
+        add(elbow, scale(across, geometry.handle_half_width * 1.25)),
+        sub(elbow, scale(across, geometry.handle_half_width * 1.25)),
+        sub(wrist, scale(across, geometry.handle_half_width)),
+    ];
+    draw_polygon(&forearm, palette.skin_base);
+    draw_polyline_closed(&forearm, 1.2, palette.skin_outline);
+    let rounding = radius * 0.6;
+    let front = sub(face, scale(heading, rounding));
+    let fist = [
+        add(wrist, scale(across, half * 0.85)),
+        add(front, scale(across, half)),
+        add(face, scale(across, half - rounding)),
+        sub(face, scale(across, half - rounding)),
+        sub(front, scale(across, half)),
+        sub(wrist, scale(across, half * 0.85)),
+    ];
+    draw_polygon(&fist, palette.skin_mid);
+    draw_polyline_closed(&fist, 1.2, palette.skin_outline);
+    // The four knuckles along the face, and the line where the fingers fold
+    // under.
+    for share in [-0.6, -0.2, 0.2, 0.6] {
+        let knuckle = add(sub(face, scale(heading, 2.5)), scale(across, half * share));
+        draw_circle(knuckle.x as f32, knuckle.y as f32, 2.4, palette.skin_light);
+    }
+    let fold = sub(face, scale(heading, radius * 0.9));
+    draw_line_vec(
+        add(fold, scale(across, half * 0.8)),
+        sub(fold, scale(across, half * 0.8)),
+        1.2,
+        palette.skin_outline,
+    );
+    if ctx.app.tool_blood > 0.02 {
+        draw_polygon(
+            &[
+                add(face, scale(across, half - rounding)),
+                sub(face, scale(across, half - rounding)),
+                sub(front, scale(across, half)),
+                add(front, scale(across, half)),
+            ],
+            with_alpha(palette.blood_mid, ctx.app.tool_blood * 0.6),
         );
     }
 }
@@ -2176,7 +2248,7 @@ impl ControlLayout {
     }
 }
 
-fn control_hints(app: &AppState, palette: &RenderPalette) -> [ControlHint; 9] {
+fn control_hints(app: &AppState, palette: &RenderPalette) -> [ControlHint; 12] {
     [
         ControlHint {
             key: "DRAG",
@@ -2205,6 +2277,29 @@ fn control_hints(app: &AppState, palette: &RenderPalette) -> [ControlHint; 9] {
             accent: tool_color(rp::ToolMode::Sharp),
             active: app.tool == rp::ToolMode::Sharp,
             action: Some(ControlAction::Tool(rp::ToolMode::Sharp)),
+        },
+        ControlHint {
+            key: "F",
+            label: HintLabel::Text("fist"),
+            accent: tool_color(rp::ToolMode::Fist),
+            active: app.tool == rp::ToolMode::Fist,
+            action: Some(ControlAction::Tool(rp::ToolMode::Fist)),
+        },
+        // The figure throws a punch with the arm on that side of the
+        // screen, out to that side.
+        ControlHint {
+            key: "LEFT",
+            label: HintLabel::Text("punch"),
+            accent: palette.tool_accent,
+            active: app.world.punch(rp::Limb::LeftArm).is_some(),
+            action: Some(ControlAction::Punch(rp::Limb::LeftArm)),
+        },
+        ControlHint {
+            key: "RIGHT",
+            label: HintLabel::Text("punch"),
+            accent: palette.tool_accent,
+            active: app.world.punch(rp::Limb::RightArm).is_some(),
+            action: Some(ControlAction::Punch(rp::Limb::RightArm)),
         },
         ControlHint {
             key: "D",
@@ -2714,6 +2809,7 @@ fn tool_name(tool: rp::ToolMode) -> &'static str {
         rp::ToolMode::Blunt => "bat",
         rp::ToolMode::Sharp => "knife",
         rp::ToolMode::Heavy => "hammer",
+        rp::ToolMode::Fist => "fist",
     }
 }
 
@@ -2722,6 +2818,7 @@ fn tool_color(tool: rp::ToolMode) -> Color {
         rp::ToolMode::Blunt => rgba(211, 167, 91, 235),
         rp::ToolMode::Sharp => rgba(192, 220, 224, 235),
         rp::ToolMode::Heavy => rgba(132, 141, 147, 235),
+        rp::ToolMode::Fist => rgba(201, 146, 119, 235),
     }
 }
 

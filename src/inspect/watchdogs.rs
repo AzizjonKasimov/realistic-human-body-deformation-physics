@@ -307,7 +307,10 @@ impl Watchdogs {
     /// Checks `world` as frame `frame` left it.
     pub fn check(&mut self, frame: i32, world: &World) {
         let debug = world.debug();
-        self.fastest_tool = self.fastest_tool.max(debug.striker_speed);
+        self.fastest_tool = self
+            .fastest_tool
+            .max(debug.striker_speed)
+            .max(debug.punch_speed);
         if debug.tissue_contacts + debug.bone_contacts > 0 {
             self.quiet = 0;
         } else {

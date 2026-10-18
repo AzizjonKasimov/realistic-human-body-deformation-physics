@@ -275,6 +275,7 @@ pub fn tool_name(tool: ToolMode) -> &'static str {
         ToolMode::Blunt => "the bat",
         ToolMode::Heavy => "the sledgehammer",
         ToolMode::Sharp => "the knife",
+        ToolMode::Fist => "the fist",
     }
 }
 

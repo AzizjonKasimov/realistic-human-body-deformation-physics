@@ -122,6 +122,8 @@ struct Followed {
     steps: Vec<(i32, Vec<TracedStage>)>,
     at_start: Vec<Vec2>,
     turn_start: Option<f64>,
+    /// A joint's gap between its anchors when it was first followed.
+    gap_start: Option<f64>,
     world: World,
 }
 
@@ -135,17 +137,20 @@ fn follow(scenario: &Scenario, why: Why, idle: bool) -> Option<Followed> {
     let body = body_frame(SCENARIO_WIDTH, SCENARIO_HEIGHT);
     let last = why.to.min(scenario.frames() - 1);
     let mut steps = Vec::new();
-    let mut started: Option<(i32, Vec<Vec2>, Option<f64>)> = None;
+    let mut started: Option<(i32, Vec<Vec2>, Option<f64>, Option<f64>)> = None;
     for frame in 0..=last {
         if started.is_none() && frame >= why.from {
             let traced = why.target.traced(&world);
             if let (false, Some(at)) = (traced.is_empty(), places(&world, why.target)) {
                 world.trace(&traced);
-                let turn = match why.target {
-                    BlameTarget::Joint(index) => world.joint_turn(index),
-                    _ => None,
+                let (turn, gap) = match why.target {
+                    BlameTarget::Joint(index) => (
+                        world.joint_turn(index),
+                        joint_anchors(&world, index).map(|(from, to)| len(sub(to, from))),
+                    ),
+                    _ => (None, None),
                 };
-                started = Some((frame, at, turn));
+                started = Some((frame, at, turn, gap));
             }
         }
         let input = if idle {
@@ -158,14 +163,56 @@ fn follow(scenario: &Scenario, why: Why, idle: bool) -> Option<Followed> {
             steps.push((frame, world.traced_stages().to_vec()));
         }
     }
-    let (from, at_start, turn_start) = started?;
+    let (from, at_start, turn_start, gap_start) = started?;
     Some(Followed {
         from,
         steps,
         at_start,
         turn_start,
+        gap_start,
         world,
     })
+}
+
+/// Where joint `index` holds each of its two bones: the anchor on its first
+/// bone and on its second.
+fn joint_anchors(world: &World, index: usize) -> Option<(Vec2, Vec2)> {
+    let joint = world.bone_joints().get(index)?;
+    let anchor = |bone: usize, t: f64| {
+        world.bones().get(bone).map(|bone| Vec2 {
+            x: bone.a.x + (bone.b.x - bone.a.x) * t,
+            y: bone.a.y + (bone.b.y - bone.a.y) * t,
+        })
+    };
+    Some((anchor(joint.a, joint.t_a)?, anchor(joint.b, joint.t_b)?))
+}
+
+/// What moved the place `lever` from a bone's middle, given what moved the
+/// bone (`blame`): each share's push, and its turn swinging the lever round.
+fn swung(blame: &Blame, lever: Vec2) -> Blame {
+    let round = |turn: f64| Vec2 {
+        x: -lever.y * turn,
+        y: lever.x * turn,
+    };
+    let moved = |push: Vec2, turn: f64| {
+        let swing = round(turn);
+        Vec2 {
+            x: push.x + swing.x,
+            y: push.y + swing.y,
+        }
+    };
+    Blame {
+        carried: moved(blame.carried, blame.carried_turn),
+        carried_turn: blame.carried_turn,
+        phases: blame
+            .phases
+            .iter()
+            .map(|phase| PhasePush {
+                push: moved(phase.push, phase.turn),
+                ..*phase
+            })
+            .collect(),
+    }
 }
 
 /// "12.0 left, 30.1 up": a motion on screen in words.
@@ -295,6 +342,31 @@ pub fn explain(scenario: &Scenario, why: Why) -> Vec<String> {
                     "    {phase:<22} {:+7.1} degrees",
                     turn.to_degrees()
                 ));
+            }
+            // How its two anchors moved apart: each bone's share at the
+            // anchor, its push and its turn swinging the anchor round its
+            // middle.
+            if let (Some((from, to)), Some(joint)) =
+                (joint_anchors(world, index), world.bone_joints().get(index))
+            {
+                let lever = |bone: usize, anchor: Vec2| {
+                    let bone = &world.bones()[bone];
+                    sub(
+                        anchor,
+                        Vec2 {
+                            x: (bone.a.x + bone.b.x) * 0.5,
+                            y: (bone.a.y + bone.b.y) * 0.5,
+                        },
+                    )
+                };
+                let apart = swung(&blame_of(0), lever(joint.a, from))
+                    .against(&swung(&blame_of(1), lever(joint.b, to)));
+                lines.push(format!(
+                    "  its bones' anchors went from {:.1} to {:.1} px apart; shares of the gap:",
+                    run.gap_start.unwrap_or(0.0),
+                    len(sub(to, from))
+                ));
+                lines.extend(shares_along(&apart, unit(sub(to, from))));
             }
         }
         BlameTarget::Triangle(_) => {

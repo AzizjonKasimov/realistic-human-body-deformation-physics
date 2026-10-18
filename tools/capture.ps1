@@ -31,6 +31,10 @@ A custom swing in body coordinates at three window sizes.
 .EXAMPLE
 .\tools\capture.ps1 -Gesture "bat:-0.3,0.3:wait=10:down:-0.08,0.3/15:-0.08,0.6/60:up:wait=20" -Every 5 -View normal
 A gesture played the way the app is, saved every 5 steps as a film strip.
+
+.EXAMPLE
+.\tools\capture.ps1 -Gesture "hammer:-0.6,0.9:wait=5:punch=right:wait=40" -Every 2 -Set punch_elbow_bend=0.4
+A punch filmed with a setting changed, to see a change before making it the default.
 #>
 param(
     [string]$Scenario = "",
@@ -55,6 +59,8 @@ param(
     [string]$Out = "",
     # File name stem; defaults to the scenario name, "strike", "gesture", or "rest".
     [string]$Name = "",
+    # Settings of Materials to change, NAME=VALUE each, as strike_scenarios --set takes them.
+    [string[]]$Set = @(),
     # App to run instead of building and using target\release\realistic_physics.exe.
     [string]$Exe = "",
     [switch]$NoBuild
@@ -98,6 +104,7 @@ foreach ($size in ($Sizes -split "," | ForEach-Object { $_.Trim() } | Where-Obje
     if ($NoUi) { $arguments += "--no-ui" }
     if ($NoTool) { $arguments += "--no-tool" }
     if ($NoLabel) { $arguments += "--no-label" }
+    foreach ($item in $Set) { $arguments += @("--set", $item) }
     $script:printed = @()
     Invoke-Checked -Label "Capture $Name at $size" -Command {
         $script:printed = & $Exe @arguments 2>&1

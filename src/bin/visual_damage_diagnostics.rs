@@ -1304,6 +1304,7 @@ fn tool_name(tool: rp::ToolMode) -> &'static str {
         rp::ToolMode::Blunt => "blunt",
         rp::ToolMode::Sharp => "sharp",
         rp::ToolMode::Heavy => "heavy",
+        rp::ToolMode::Fist => "fist",
     }
 }
 

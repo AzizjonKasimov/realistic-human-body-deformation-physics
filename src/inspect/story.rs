@@ -80,7 +80,25 @@ fn group_line(world: &World, group: &Group) -> String {
     } else {
         format!(", by {}", group.actor)
     };
-    format!("{what}{by}{measure} [{}]", group.phase)
+    format!(
+        "{what}{by}{measure} [{}]{}",
+        group.phase,
+        why_name(worst.subject)
+    )
+}
+
+/// What `strike_scenarios --why` takes to follow `subject`, as ` (spring:12)`,
+/// or nothing for what it cannot follow.
+fn why_name(subject: Subject) -> String {
+    let named = match subject {
+        Subject::Point(index) => format!("point:{index}"),
+        Subject::Spring(index) => format!("spring:{index}"),
+        Subject::Bone(index) => format!("bone:{index}"),
+        Subject::Joint(index) => format!("joint:{index}"),
+        Subject::Triangle(index) => format!("triangle:{index}"),
+        _ => return String::new(),
+    };
+    format!(" ({named})")
 }
 
 /// Groups `events` by kind, place (or subject, for what is told alone),
