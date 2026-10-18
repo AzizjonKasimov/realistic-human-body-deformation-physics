@@ -245,7 +245,11 @@ fn parting(
 /// phase by phase what parted them on frame `explain` or, without one, on
 /// the first frame they part beyond rounding.
 pub(crate) fn twin_runs(selected: &[Scenario], way: TwinWay, explain: Option<i32>) {
-    for scenario in selected {
+    // A body alone has a twin: two fighters are each other's already.
+    for scenario in selected
+        .iter()
+        .filter(|scenario| scenario.fight().is_none())
+    {
         twin_run(scenario, way, explain);
     }
 }

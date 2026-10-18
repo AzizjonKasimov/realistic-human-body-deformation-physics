@@ -24,7 +24,7 @@ mod tools;
 mod tuning;
 
 pub use blood::{BloodTrail, SkinSpot};
-pub use bodies::{create_fighters, create_fighters_at, BodyState};
+pub use bodies::{create_fighters, create_fighters_at, fighters_from, BodyState};
 pub use body::{
     body_frame, body_frame_between, create_layered_body, create_layered_body_in, BodyFrame,
 };
@@ -1939,9 +1939,17 @@ pub struct World {
     /// may touch this step.
     outlines: Vec<outline::OutlineLoop>,
     outline_pairs: Vec<outline::OutlinePair>,
+    /// Each skin point a pair between two bodies touches this step, with a
+    /// muscle point the fat ties it to, and how many such skin points each
+    /// of those muscle points is tied to (`outline.rs`).
+    flesh_under_skin: Vec<(usize, usize)>,
+    flesh_ties: Vec<(usize, usize)>,
     /// How hard a bat or hammer knocked each point this step, before the
     /// broad face spreads it; a blow that lands on a scab knocks it open.
     blunt_knock: Vec<f64>,
+    /// The fists figures threw pressing on another body this step
+    /// (`punch.rs`, `tools.rs`).
+    fist_contacts: Vec<tools::FistContact>,
     /// Which points belonged to flesh at the start of this step (see
     /// [`World::flesh_points`]); flesh torn away is not there to touch.
     flesh: Vec<bool>,
@@ -2033,7 +2041,10 @@ impl World {
             fresh_skin_cuts: Vec::new(),
             outlines: Vec::new(),
             outline_pairs: Vec::new(),
+            flesh_under_skin: Vec::new(),
+            flesh_ties: Vec::new(),
             blunt_knock: Vec::new(),
+            fist_contacts: Vec::new(),
             flesh: Vec::new(),
             body_height: blood::STANDARD_BODY_HEIGHT,
             pending_cuts: Vec::new(),
@@ -2654,6 +2665,9 @@ impl World {
             self.throw_punch(body, limb);
         }
         self.timed("punches", |world| world.drive_punches(dt));
+        self.acting(Actor::Tool);
+        self.timed("punches land", |world| world.land_punches(dt));
+        self.acting(Actor::Tissue);
         self.solve_motion(dt, width, floor_y);
         self.debug.punch_speed = self.punch_speed(&fists, dt);
         // Tissue tears from how far it is stretched once the step's push has
@@ -2661,6 +2675,7 @@ impl World {
         // few points.
         self.timed("springs", Self::judge_springs);
         self.finish_tool_step(dt);
+        self.finish_fist_contacts(dt);
         self.timed("tears open", Self::open_tears);
 
         self.timed("anchors", |world| {

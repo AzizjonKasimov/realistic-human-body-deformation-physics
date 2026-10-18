@@ -439,6 +439,70 @@ impl World {
             }
         }
         self.grid = grid;
+        self.find_flesh_under_skin();
+    }
+
+    /// The muscle the fat ties under each skin point a pair between two
+    /// bodies touches, which that pair presses with it, and how many of
+    /// those skin points each such muscle point is tied to.
+    fn find_flesh_under_skin(&mut self) {
+        self.flesh_under_skin.clear();
+        self.flesh_ties.clear();
+        let mut touched = Vec::new();
+        for pair in &self.outline_pairs {
+            let outline = &self.outlines[pair.outline];
+            let count = outline.points.len();
+            let (a, b) = (
+                outline.points[pair.edge],
+                outline.points[(pair.edge + 1) % count],
+            );
+            if self.points[pair.point].body != self.points[a].body {
+                touched.extend([pair.point, a, b]);
+            }
+        }
+        if touched.is_empty() {
+            return;
+        }
+        touched.sort_unstable();
+        touched.dedup();
+        for attachment in &self.attachments {
+            if !attachment.broken && touched.binary_search(&attachment.skin_point).is_ok() {
+                self.flesh_under_skin
+                    .push((attachment.skin_point, attachment.muscle_point));
+            }
+        }
+        self.flesh_under_skin.sort_unstable();
+        let mut muscles: Vec<usize> = self
+            .flesh_under_skin
+            .iter()
+            .map(|&(_, muscle)| muscle)
+            .collect();
+        muscles.sort_unstable();
+        for muscle in muscles {
+            match self.flesh_ties.last_mut() {
+                Some((last, count)) if *last == muscle => *count += 1,
+                _ => self.flesh_ties.push((muscle, 1)),
+            }
+        }
+    }
+
+    /// The muscle points the fat ties under skin point `skin`, which a pair
+    /// between two bodies presses with it, each with how many such skin
+    /// points it is tied to.
+    fn flesh_under(&self, skin: usize) -> impl Iterator<Item = (usize, usize)> + '_ {
+        let from = self
+            .flesh_under_skin
+            .partition_point(|&(point, _)| point < skin);
+        self.flesh_under_skin[from..]
+            .iter()
+            .take_while(move |&&(point, _)| point == skin)
+            .map(|&(_, muscle)| {
+                let ties = self
+                    .flesh_ties
+                    .binary_search_by_key(&muscle, |&(muscle, _)| muscle)
+                    .map_or(1, |index| self.flesh_ties[index].1);
+                (muscle, ties)
+            })
     }
 
     /// The skin holds a closed break's pieces in: a piece's end or middle
@@ -637,14 +701,24 @@ impl World {
                 if separation >= 0.0 || separation < -max_depth {
                     continue;
                 }
-                let inverse = |point: &Point| {
+                // Between two bodies a skin point presses with the muscle the
+                // fat ties under it, as one column of flesh: pressing the skin
+                // alone, two fighters' arms driven into each other dragged the
+                // skin off the muscle until it tore.
+                let inverse = |index: usize, point: &Point| {
                     if point.pinned {
-                        0.0
-                    } else {
-                        1.0 / point.mass.max(EPSILON)
+                        return 0.0;
                     }
+                    let column = if crossing {
+                        self.flesh_under(index)
+                            .map(|(muscle, ties)| self.points[muscle].mass / ties as f64)
+                            .sum::<f64>()
+                    } else {
+                        0.0
+                    };
+                    1.0 / (point.mass + column).max(EPSILON)
                 };
-                let (wp, wa, wb) = (inverse(&p), inverse(&a), inverse(&b));
+                let (wp, wa, wb) = (inverse(pair.point, &p), inverse(ia, &a), inverse(ib, &b));
                 let weight = wp + wa * (1.0 - t) * (1.0 - t) + wb * t * t;
                 if weight <= EPSILON {
                     continue;
@@ -672,8 +746,27 @@ impl World {
                 self.debug.max_outline_overlap = self.debug.max_outline_overlap.max(-separation);
             }
         }
+        // Each skin point moves as far as all its pushes take it, and each
+        // muscle point under them as far as the skin points tied to it moved
+        // on average.
+        between.sort_unstable_by_key(|&(point, _)| point);
+        let mut skin_moves: Vec<(usize, Vec2)> = Vec::new();
         for (point, shift) in between {
-            self.points[point].position = add(self.points[point].position, shift);
+            match skin_moves.last_mut() {
+                Some((last, total)) if *last == point => *total = add(*total, shift),
+                _ => skin_moves.push((point, shift)),
+            }
+        }
+        let mut muscle_moves: Vec<(usize, Vec2)> = Vec::new();
+        for &(skin, shift) in &skin_moves {
+            for (muscle, ties) in self.flesh_under(skin) {
+                muscle_moves.push((muscle, scale(shift, 1.0 / ties as f64)));
+            }
+        }
+        for (point, shift) in skin_moves.into_iter().chain(muscle_moves) {
+            if !self.points[point].pinned {
+                self.points[point].position = add(self.points[point].position, shift);
+            }
         }
     }
 }

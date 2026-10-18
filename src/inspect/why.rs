@@ -132,7 +132,11 @@ struct Followed {
 /// a piece a break makes; `idle`, with the tool kept out of play, as the
 /// body would be at rest.
 fn follow(scenario: &Scenario, why: Why, idle: bool) -> Option<Followed> {
-    let mut world = create_layered_body(SCENARIO_WIDTH, SCENARIO_HEIGHT, scenario.materials());
+    let mut world = scenario.ready(create_layered_body(
+        SCENARIO_WIDTH,
+        SCENARIO_HEIGHT,
+        scenario.materials(),
+    ));
     let dt = world.materials().fixed_dt;
     let body = body_frame(SCENARIO_WIDTH, SCENARIO_HEIGHT);
     let last = why.to.min(scenario.frames() - 1);

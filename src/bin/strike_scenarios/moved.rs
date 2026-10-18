@@ -248,6 +248,13 @@ fn differences(
 /// all cores, and reports where a move changed what the blows did beyond
 /// chance; then lets a body fall and drift free.
 pub(crate) fn moved_body_tests(selected: &[Scenario], output_dir: &Path) {
+    // A body alone is moved: two fighters stand where they stand.
+    let selected: Vec<Scenario> = selected
+        .iter()
+        .filter(|scenario| scenario.fight().is_none())
+        .copied()
+        .collect();
+    let selected = &selected[..];
     let started = Instant::now();
     let mut jobs = Vec::new();
     for (index, _) in selected.iter().enumerate() {

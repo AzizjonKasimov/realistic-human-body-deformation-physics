@@ -225,6 +225,7 @@ impl World {
                 self.timed("punch joints", |world| world.solve_punch_pins(h));
                 self.timed("tendons", |world| world.solve_tendons(h));
                 self.timed("tool contact", Self::solve_tool_contact);
+                self.timed("fist contact", Self::solve_fist_contacts);
                 self.timed("bones", Self::solve_bones);
                 self.timed("fragment-bone", Self::solve_bone_fragment_bone_contacts);
                 self.timed("fragment-tissue", Self::solve_bone_fragment_tissue_contacts);

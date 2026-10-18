@@ -226,6 +226,7 @@ impl Draw {
         steps.push(GestureStep::Press(false));
         steps.push(GestureStep::Wait(30 + self.rest));
         Play::Gesture(Gesture {
+            fight: None,
             tool: self.tool,
             power: rp::swing_power(self.tool),
             steps: Vec::leak(steps),

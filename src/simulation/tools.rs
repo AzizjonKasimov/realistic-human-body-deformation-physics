@@ -21,6 +21,7 @@
 //! air and meets only its edges and the bone left in it.
 
 use super::bending::pressed_stretch;
+use super::soft::perpendicular;
 use super::*;
 
 /// Below this speed a tool keeps its orientation instead of turning to follow
@@ -412,8 +413,8 @@ pub(super) struct ToolSolverContact {
     /// The striking part where the step began and where it ends; the solver
     /// moves it from one to the other through the substeps (`soft.rs`).
     start: ToolContactShape,
-    shape: ToolContactShape,
-    inertia: f64,
+    pub(super) shape: ToolContactShape,
+    pub(super) inertia: f64,
     /// Tissue points close enough to touch the tool this step.
     candidates: Vec<usize>,
 }
@@ -444,6 +445,35 @@ struct ToolStrike {
     /// The mass that carries momentum into the body: the tool and the arm
     /// swinging it.
     inertia: f64,
+    /// A body the strike leaves alone: the puncher's own, for a fist a
+    /// figure throws (`land_fist`).
+    spares: Option<u8>,
+}
+
+/// What a fist a figure threw did as it landed this step (`land_fist`).
+#[derive(Clone, Debug, Default)]
+pub(super) struct FistLanding {
+    /// The momentum it gave the body it struck, which its arm loses.
+    pub given: Vec2,
+    /// The hardest it struck a bone, in the units of a bone's strength, and
+    /// the way it pressed it.
+    pub blow: f64,
+    pub blow_normal: Vec2,
+    /// How it goes on pressing on the flesh it met through the solver's
+    /// substeps, as the tool does (`solve_tool_contact`).
+    pub contact: Option<ToolSolverContact>,
+}
+
+/// A fist a figure threw pressing on another body through the solver's
+/// substeps this step, as the tool does, and how far that body has pushed it
+/// back (`World::solve_fist_contacts`).
+#[derive(Clone, Debug)]
+pub(super) struct FistContact {
+    pub contact: ToolSolverContact,
+    pub shift: Vec2,
+    /// The body that threw it, and the slot of its punch (`Punch`).
+    pub body: usize,
+    pub arm: usize,
 }
 
 fn contact_shape(pose: &ToolPose) -> ToolContactShape {
@@ -781,6 +811,7 @@ impl World {
             mass,
             mass_kg: tool_mass_kg(input.tool) * input.power / swing_power(input.tool),
             inertia: mass * self.materials.tool_inertia_scale.max(EPSILON),
+            spares: None,
         };
         // A hand carries and swings any tool closely, but presses one into the
         // body no harder than an arm can push, whatever the tool weighs.
@@ -1436,7 +1467,7 @@ impl World {
             let blow = impact * speed / FIRM_SWING_SPEED;
             let tissue = self.shove_tissue(&shape, velocity, blow, strike, dt, sub_dt, &mut hits);
             let fractures_before = self.stats.fractured_bones;
-            let bone = self.shove_bones(&shape, velocity, impact, strike, dt, sub_dt);
+            let (bone, _) = self.shove_bones(&shape, velocity, impact, strike, dt, sub_dt);
             let given = add(tissue, bone);
             if hypot(given.x, given.y) > EPSILON {
                 peak_blow = peak_blow.max(blow);
@@ -1456,6 +1487,41 @@ impl World {
         self.tool.velocity = velocity;
         self.tool.held = false;
 
+        let touched = self.take_blunt_hits(hits, strike);
+        self.tool.embedded = touched > 0;
+        if peak_blow > 0.0 {
+            self.bruise_around_blow(&shape, peak_blow, strike);
+        }
+        if strike.profile.crush_tear_scale > 0.0 && peak_blow > 0.0 {
+            self.crush_tear_under_tool(strike.profile, &shape, peak_blow, None);
+        }
+
+        let reach = shape.influence + self.materials.point_spacing;
+        let candidates: Vec<usize> = self
+            .points
+            .iter()
+            .enumerate()
+            .filter(|&(index, point)| {
+                !point.pinned
+                    && is_flesh(&self.flesh, index)
+                    && (sample_point_contact(point.position, &shape).distance <= reach
+                        || sample_point_contact(point.previous, &start).distance <= reach)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if !candidates.is_empty() {
+            self.tool.contact = Some(ToolSolverContact {
+                start,
+                shape,
+                inertia: strike.inertia,
+                candidates,
+            });
+        }
+    }
+
+    /// Loads and bruises each point a blunt strike knocked, by what gathered
+    /// in `hits` through its motion; returns how many it touched.
+    fn take_blunt_hits(&mut self, hits: Vec<Option<PointHit>>, strike: ToolStrike) -> usize {
         let mut touched = 0;
         for (index, hit) in hits.into_iter().enumerate() {
             let Some(hit) = hit else {
@@ -1491,14 +1557,82 @@ impl World {
             self.debug.tissue_contacts += 1;
             self.debug.max_point_load = self.debug.max_point_load.max(point.load);
         }
-        self.tool.embedded = touched > 0;
+        touched
+    }
+
+    /// A fist a figure threw lands on whatever of another body lies in its
+    /// way this step, as the bare fist does (`move_blunt`): the centre of
+    /// its knuckles' face goes from `from` to `to`, the face across
+    /// `heading`, with the bare fist's weight, face, and give, and bruises,
+    /// shoves, and breaks what it meets by the same rules. It leaves the body
+    /// of `puncher` alone, whose own fist it is.
+    pub(super) fn land_fist(
+        &mut self,
+        puncher: u8,
+        from: Vec2,
+        to: Vec2,
+        heading: Vec2,
+        dt: f64,
+    ) -> FistLanding {
+        let tool = ToolMode::Fist;
+        let profile = tool_profile(tool);
+        let power = swing_power(tool);
+        let mass = self.materials.striker_mass * power * profile.mass_scale;
+        let strike = ToolStrike {
+            tool,
+            profile,
+            power,
+            mass,
+            mass_kg: tool_mass_kg(tool),
+            inertia: mass * self.materials.tool_inertia_scale.max(EPSILON),
+            spares: Some(puncher),
+        };
+        let side = perpendicular(heading);
+        let travel = distance(from, to);
+        let spacing = (self.materials.point_spacing * 0.25).max(1.0);
+        let steps = ((travel / spacing).ceil() as usize).clamp(1, MAX_TOOL_SUBSTEPS);
+        let sub_dt = dt / steps as f64;
+        let initial_velocity = scale(subtract(to, from), 1.0 / dt.max(EPSILON));
+        let mut velocity = initial_velocity;
+        let mut center = from;
+        let mut hits: Vec<Option<PointHit>> = vec![None; self.points.len()];
+        let mut landing = FistLanding::default();
+        let mut peak_blow: f64 = 0.0;
+        let mut shape = contact_shape(&tool_pose(tool, center, heading, side));
+        for _ in 0..steps {
+            center = add(center, scale(velocity, sub_dt));
+            shape = contact_shape(&tool_pose(tool, center, heading, side));
+            let speed = hypot(velocity.x, velocity.y);
+            let impact = strike.mass * speed;
+            let blow = impact * speed / FIRM_SWING_SPEED;
+            let tissue = self.shove_tissue(&shape, velocity, blow, strike, dt, sub_dt, &mut hits);
+            let fractures_before = self.stats.fractured_bones;
+            let (bone, bone_blow) = self.shove_bones(&shape, velocity, impact, strike, dt, sub_dt);
+            let given = add(tissue, bone);
+            if hypot(given.x, given.y) > EPSILON {
+                peak_blow = peak_blow.max(blow);
+            }
+            if bone_blow > landing.blow {
+                landing.blow = bone_blow;
+                landing.blow_normal = normalized(velocity, heading);
+            }
+            landing.given = add(landing.given, given);
+            velocity = subtract(velocity, scale(given, 1.0 / strike.inertia));
+            if self.stats.fractured_bones > fractures_before {
+                velocity = scale(velocity, 1.0 - FRACTURE_SPEED_LOSS);
+            }
+            if dot(velocity, initial_velocity) <= 0.0 {
+                break;
+            }
+        }
+        self.take_blunt_hits(hits, strike);
         if peak_blow > 0.0 {
             self.bruise_around_blow(&shape, peak_blow, strike);
+            if strike.profile.crush_tear_scale > 0.0 {
+                self.crush_tear_under_tool(strike.profile, &shape, peak_blow, Some(puncher));
+            }
         }
-        if strike.profile.crush_tear_scale > 0.0 && peak_blow > 0.0 {
-            self.crush_tear_under_tool(strike.profile, &shape, peak_blow);
-        }
-
+        let start = contact_shape(&tool_pose(tool, from, heading, side));
         let reach = shape.influence + self.materials.point_spacing;
         let candidates: Vec<usize> = self
             .points
@@ -1506,6 +1640,7 @@ impl World {
             .enumerate()
             .filter(|&(index, point)| {
                 !point.pinned
+                    && point.body != puncher
                     && is_flesh(&self.flesh, index)
                     && (sample_point_contact(point.position, &shape).distance <= reach
                         || sample_point_contact(point.previous, &start).distance <= reach)
@@ -1513,13 +1648,14 @@ impl World {
             .map(|(index, _)| index)
             .collect();
         if !candidates.is_empty() {
-            self.tool.contact = Some(ToolSolverContact {
+            landing.contact = Some(ToolSolverContact {
                 start,
                 shape,
                 inertia: strike.inertia,
                 candidates,
             });
         }
+        landing
     }
 
     /// Bruises the flesh around where a blow of strength `blow` landed, fading
@@ -1528,7 +1664,7 @@ impl World {
         let reach = shape.influence * BRUISE_HALO;
         let load = blow * 0.58 * strike.profile.tissue_push_scale * BRUISE_HALO_SHARE;
         for (index, point) in self.points.iter_mut().enumerate() {
-            if point.pinned || !is_flesh(&self.flesh, index) {
+            if point.pinned || !is_flesh(&self.flesh, index) || strike.spares == Some(point.body) {
                 continue;
             }
             // The face itself bruised what it touched; this is the ring
@@ -1582,7 +1718,7 @@ impl World {
         let bruising_share = hypot(velocity.x, velocity.y) / FIRM_SWING_SPEED;
         let base_strength = 0.58 * strike.profile.tissue_push_scale * (0.85 + strike.power * 0.15);
         for (index, point) in self.points.iter_mut().enumerate() {
-            if point.pinned || !is_flesh(&self.flesh, index) {
+            if point.pinned || !is_flesh(&self.flesh, index) || strike.spares == Some(point.body) {
                 continue;
             }
             let point_contact = sample_point_contact(point.position, shape);
@@ -1619,7 +1755,7 @@ impl World {
     /// Pushes and loads bone the tool meets at one point of its motion, and
     /// breaks it if the load is too much. `impact` is the tool's momentum, so
     /// a tool merely resting on a bone does not load it. Returns the momentum
-    /// the bones took.
+    /// the bones took, and the hardest blow it struck one.
     fn shove_bones(
         &mut self,
         shape: &ToolContactShape,
@@ -1628,15 +1764,16 @@ impl World {
         strike: ToolStrike,
         dt: f64,
         sub_dt: f64,
-    ) -> Vec2 {
+    ) -> (Vec2, f64) {
         let speed = hypot(velocity.x, velocity.y);
         let mut given = Vec2::default();
+        let mut hardest: f64 = 0.0;
         let initial_bone_count = self.bones.len();
         for i in 0..initial_bone_count {
             let mut bone = self.bones[i];
             // The spine lies behind the trunk, out of reach of a blow to the
             // front of the body, and is never drawn.
-            if bone.kind == BoneKind::Spine {
+            if bone.kind == BoneKind::Spine || strike.spares == Some(bone.body) {
                 continue;
             }
             let pair = closest_segment_points(shape.axis_start, shape.axis_end, bone.a, bone.b);
@@ -1681,6 +1818,7 @@ impl World {
                 cover.real,
             );
             let force = meets * blow.force;
+            hardest = hardest.max(force);
             bone.load = bone.load.max(force);
             // The blow bends the bone by its lever on the bone's joints, and
             // the bone breaks where it is bent hardest (see `bending.rs`).
@@ -1785,7 +1923,7 @@ impl World {
                 self.fracture_bone(i, bone.break_t, normal, blow);
             }
         }
-        given
+        (given, hardest)
     }
 
     /// Tissue a blunt tool presses into pushes back on it, split by mass, so a
@@ -1793,10 +1931,28 @@ impl World {
     /// Through the substeps the tool moves from where the step began to where
     /// it ends, as the tissue does.
     pub(super) fn solve_tool_contact(&mut self) {
-        let Some(contact) = &self.tool.contact else {
+        let Some(contact) = self.tool.contact.take() else {
             return;
         };
-        let shift = self.tool.solver_shift;
+        self.tool.solver_shift = self.press_out_of(&contact, self.tool.solver_shift);
+        self.tool.contact = Some(contact);
+    }
+
+    /// Each fist a figure threw presses on the body it struck through the
+    /// substeps as the tool does, and is pushed back as hard.
+    pub(super) fn solve_fist_contacts(&mut self) {
+        for index in 0..self.fist_contacts.len() {
+            let contact = self.fist_contacts[index].contact.clone();
+            let shift = self.fist_contacts[index].shift;
+            self.fist_contacts[index].shift = self.press_out_of(&contact, shift);
+        }
+    }
+
+    /// Pushes the tissue `contact` touches out of its striking part, where
+    /// the solver has moved it to this pass, split by mass with it; `shift` is
+    /// how far the tissue has pushed it back so far this step, and the
+    /// return how far now.
+    fn press_out_of(&mut self, contact: &ToolSolverContact, shift: Vec2) -> Vec2 {
         let progress = self.solver_progress;
         let began = (progress - 1.0 / self.materials.substeps.max(1) as f64).max(0.0);
         let at = |progress: f64| ToolContactShape {
@@ -1843,7 +1999,7 @@ impl World {
                 scale(point_contact.normal, correction * (1.0 - point_share)),
             );
         }
-        self.tool.solver_shift = add(shift, pushed_back);
+        add(shift, pushed_back)
     }
 
     /// Applies the solver's push-back to the tool, partly as a rebound.
@@ -1861,12 +2017,21 @@ impl World {
 
     /// A heavy head can split tissue it crushes against bone and itself;
     /// `blow` is how hard it hit.
-    fn crush_tear_under_tool(&mut self, profile: ToolProfile, shape: &ToolContactShape, blow: f64) {
+    fn crush_tear_under_tool(
+        &mut self,
+        profile: ToolProfile,
+        shape: &ToolContactShape,
+        blow: f64,
+        spares: Option<u8>,
+    ) {
         let influence = shape.influence;
         let mut events = Vec::new();
         for spring_index in 0..self.springs.len() {
             let spring = self.springs[spring_index];
-            if spring.broken || !self.spring_in_flesh(spring) {
+            if spring.broken
+                || !self.spring_in_flesh(spring)
+                || spares == Some(self.points[spring.a].body)
+            {
                 continue;
             }
             let a = self.points[spring.a];

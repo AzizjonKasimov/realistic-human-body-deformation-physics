@@ -11,6 +11,7 @@
 //! across in front of the body. Each arm punches to its own side.
 
 use super::soft::{perpendicular, JointPin, JointTurn, Softness};
+use super::tools::{FistContact, ToolSolverContact};
 use super::*;
 
 /// One joint a punch drives, and the two pieces of the arm's chain it joins
@@ -98,6 +99,17 @@ pub struct Punch {
     /// Which way the punch goes: 1 toward the right of the window, -1
     /// toward the left.
     toward: f64,
+    /// Where it turned back, if its fist met something on the way out.
+    turned: Option<TurnBack>,
+}
+
+/// Where a punch whose fist met something turned back: when, and how far
+/// out the arm and the body had got (`Punch::reach_at`, `Punch::lean_at`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TurnBack {
+    age: f64,
+    reach: f64,
+    lean: f64,
 }
 
 /// A two-link arm's fist moving on a straight line, and the shoulder's and
@@ -204,25 +216,80 @@ impl Punch {
         }
     }
 
+    /// How far along its way the arm aims now ([`Punch::reach_at`]); once
+    /// its fist has met something, coming back from as far as it got.
+    fn reach(&self, materials: &Materials) -> f64 {
+        match self.turned {
+            Some(turn) => {
+                let back = materials.punch_back_seconds.max(EPSILON);
+                turn.reach * (1.0 - smooth((self.age - turn.age) / back))
+            }
+            None => Self::reach_at(self.age, materials),
+        }
+    }
+
+    /// How far the body has gone into the punch now ([`Punch::lean_at`]);
+    /// once its fist has met something, coming back from as far as it got.
+    fn lean(&self, materials: &Materials) -> f64 {
+        match self.turned {
+            Some(turn) => {
+                let recover = materials.punch_recover_seconds.max(EPSILON);
+                turn.lean * (1.0 - smooth((self.age - turn.age) / recover))
+            }
+            None => Self::lean_at(self.age, materials),
+        }
+    }
+
+    /// The fist met something on its way out, and the punch turns back from
+    /// there, as a punch that lands is pulled back: driven on to the pose it
+    /// aimed at, a fist that met a guard pushed it aside and ground into the
+    /// neck beyond, tearing its skin.
+    fn turn_back(&mut self, materials: &Materials) {
+        if self.going_out(materials) {
+            self.turned = Some(TurnBack {
+                age: self.age,
+                reach: Self::reach_at(self.age, materials),
+                lean: Self::lean_at(self.age, materials),
+            });
+        }
+    }
+
+    /// When the arm sets off back: as it reaches the punch's pose, or as
+    /// its fist meets something.
+    fn turning(&self, materials: &Materials) -> f64 {
+        self.turned
+            .map_or(Self::landing(materials), |turn| turn.age)
+    }
+
     /// The arm is still on its way out, not yet coming back.
     pub fn going_out(&self, materials: &Materials) -> bool {
-        self.age < Self::landing(materials)
+        self.turned.is_none() && self.age < Self::landing(materials)
     }
 
     /// The arm is back in its guard.
     fn arm_home(&self, materials: &Materials) -> bool {
-        self.age >= Self::landing(materials) + materials.punch_back_seconds
+        self.age >= self.turning(materials) + materials.punch_back_seconds
     }
 
     /// The punch is over: the arm is back in its guard and the body upright.
     fn done(&self, materials: &Materials) -> bool {
         self.age
-            >= Self::landing(materials)
+            >= self.turning(materials)
                 + materials
                     .punch_back_seconds
                     .max(materials.punch_recover_seconds)
     }
 }
+
+/// How fast a fist must be going, in metres a second, for what it meets to
+/// stop it and turn its punch back: a fist barely moving that touches the
+/// other fighter's guard beside it, as a punch begins, has not landed.
+const LANDING_SPEED: f64 = 2.0;
+
+/// How far ahead of the end of the hand's bone the front of the fist lies,
+/// in body heights: the fist's flesh round the knuckles
+/// (`silhouette::FIST_TOP`).
+const FIST_FRONT: f64 = 0.023;
 
 /// Which slot of [`World::punches`] an arm's punch takes, the viewer's left
 /// arm first.
@@ -433,6 +500,7 @@ impl World {
             path,
             rise: self.materials.punch_rise,
             toward,
+            turned: None,
         })
     }
 
@@ -476,7 +544,7 @@ impl World {
             let (lean, shoulder, elbow) = if over {
                 (0.0, 0.0, 0.0)
             } else {
-                let leaning = Punch::lean_at(punch.age, &self.materials);
+                let leaning = punch.lean(&self.materials);
                 // The lower back joins the spine, above, to the pelvis:
                 // leaning the spine's top toward the punch turns the joint
                 // the other way.
@@ -493,9 +561,7 @@ impl World {
                 let leaned = punch.toward * self.trunk_turn(&punch);
                 let rise = punch.rise + leaned;
                 let line = if punch.toward > 0.0 { -rise } else { PI + rise };
-                let (shoulder, elbow) = punch
-                    .path
-                    .turns(Punch::reach_at(punch.age, &self.materials), line);
+                let (shoulder, elbow) = punch.path.turns(punch.reach(&self.materials), line);
                 // The shoulder takes off however far the arm's load has
                 // lifted the shoulder girdle, which carried the whole arm up
                 // and the fist over its path.
@@ -535,6 +601,189 @@ impl World {
                 }
             }
             self.bodies[body].punches[arm] = (!over).then_some(punch);
+        }
+    }
+
+    /// Each fist on its way through a punch lands on any other body in its
+    /// way as the bare fist does (`World::land_fist`), and what it gives
+    /// that body the punching arm loses. The force it lands with presses the
+    /// puncher's own hand too.
+    pub(super) fn land_punches(&mut self, dt: f64) {
+        self.fist_contacts.clear();
+        if self.bodies.len() < 2 {
+            return;
+        }
+        for (body, arm) in self.punch_slots() {
+            let limb = [Limb::LeftArm, Limb::RightArm][arm];
+            let Some(mut punch) = self.bodies[body].punches[arm].take() else {
+                continue;
+            };
+            if punch.swings[2].active {
+                let (landed, contact) = self.land_punch(body, limb, &punch, dt);
+                if landed {
+                    punch.turn_back(&self.materials);
+                }
+                if let Some(contact) = contact {
+                    self.fist_contacts.push(FistContact {
+                        contact,
+                        shift: Vec2::default(),
+                        body,
+                        arm,
+                    });
+                }
+            }
+            self.bodies[body].punches[arm] = Some(punch);
+        }
+    }
+
+    /// Each fist that pressed on another body through the substeps is pushed
+    /// back as far as that body pushed it, as the tool is
+    /// (`finish_tool_step`): its arm loses as much momentum as the fist's
+    /// weight moving that far in the step.
+    pub(super) fn finish_fist_contacts(&mut self, dt: f64) {
+        let contacts = std::mem::take(&mut self.fist_contacts);
+        for fist in &contacts {
+            if hypot(fist.shift.x, fist.shift.y) <= EPSILON {
+                continue;
+            }
+            let Some(punch) = self.bodies[fist.body].punches[fist.arm].take() else {
+                continue;
+            };
+            let at = lerp(
+                fist.contact.shape.axis_start,
+                fist.contact.shape.axis_end,
+                0.5,
+            );
+            let impulse = scale(fist.shift, fist.contact.inertia / dt.max(EPSILON));
+            self.push_arm_back(&punch, impulse, at, dt);
+            self.bodies[fist.body].punches[fist.arm] = Some(punch);
+        }
+    }
+
+    /// Body `body`'s `limb`, throwing `punch`, lands its fist on what lies
+    /// in its way this step; returns whether it met anything, and how it
+    /// goes on pressing through the substeps.
+    fn land_punch(
+        &mut self,
+        body: usize,
+        limb: Limb,
+        punch: &Punch,
+        dt: f64,
+    ) -> (bool, Option<ToolSolverContact>) {
+        let Some(hand_index) = self.bones.iter().position(|bone| {
+            bone.part == BonePart::Hand
+                && bone.limb == limb
+                && bone.body as usize == body
+                && !bone.splinter
+        }) else {
+            return (false, None);
+        };
+        let hand = self.bones[hand_index];
+        // The knuckles' face lies across the hand, its middle a face's
+        // radius back from the front of the fist.
+        let ahead = FIST_FRONT * self.body_height - tool_geometry(ToolMode::Fist).contact_radius;
+        let toward = Vec2 {
+            x: punch.toward,
+            y: 0.0,
+        };
+        let heading = normalized(subtract(hand.b, hand.a), toward);
+        let heading_then = normalized(subtract(hand.previous_b, hand.previous_a), heading);
+        let from = add(hand.previous_b, scale(heading_then, ahead));
+        let to = add(hand.b, scale(heading, ahead));
+        let landing = self.land_fist(body as u8, from, to, heading, dt);
+        let given = hypot(landing.given.x, landing.given.y) > EPSILON;
+        let speed = distance(from, to) / dt.max(EPSILON) * self.mm_per_px() * 0.001;
+        let landed = given && speed > LANDING_SPEED;
+        if given {
+            self.push_arm_back(punch, scale(landing.given, -1.0), to, dt);
+        }
+        if landing.blow > 0.0 {
+            self.load_puncher_hand(hand_index, landing.blow, landing.blow_normal);
+        }
+        (landed, landing.contact)
+    }
+
+    /// The punching arm, beyond its shoulder, takes the momentum `impulse`
+    /// at `at` as one piece over the step `dt`: it moves and turns about its
+    /// centre of mass, and the shoulder's hold (`solve_punch_pins`) keeps it
+    /// on the body, so it turns about the shoulder as a struck arm does.
+    fn push_arm_back(&mut self, punch: &Punch, impulse: Vec2, at: Vec2, dt: f64) {
+        let arm = &punch.links[3..=5];
+        let in_arm = |index: usize| arm.iter().any(|link| link.bones.get(index) == Some(&true));
+        let share = |index: usize| -> f64 {
+            arm.iter()
+                .map(|link| link.share.get(index).copied().unwrap_or(0.0))
+                .sum()
+        };
+        let mut sums = (0.0, Vec2::default(), 0.0);
+        let mut add_to = |mass: f64, at: Vec2| {
+            sums.0 += mass;
+            sums.1 = add(sums.1, scale(at, mass));
+            sums.2 += mass * dot(at, at);
+        };
+        for (index, bone) in self.bones.iter().enumerate() {
+            if !bone.pinned && in_arm(index) {
+                add_to(bone.mass * 0.5, bone.a);
+                add_to(bone.mass * 0.5, bone.b);
+            }
+        }
+        for (index, point) in self.points.iter().enumerate() {
+            let share = share(index);
+            if share > 0.0 && !point.pinned && !point.is_ghost() {
+                add_to(point.mass * share, point.position);
+            }
+        }
+        let (mass, moment, second) = sums;
+        if mass <= EPSILON {
+            return;
+        }
+        let centre = scale(moment, 1.0 / mass);
+        let inertia = second - mass * dot(centre, centre);
+        if inertia <= EPSILON {
+            return;
+        }
+        let speed = scale(impulse, 1.0 / mass);
+        let spin = cross(subtract(at, centre), impulse) / inertia;
+        let moved = |at: Vec2| {
+            scale(
+                add(speed, scale(perpendicular(subtract(at, centre)), spin)),
+                dt,
+            )
+        };
+        for index in 0..self.bones.len() {
+            let bone = self.bones[index];
+            if bone.pinned || !in_arm(index) {
+                continue;
+            }
+            self.bones[index].a = add(bone.a, moved(bone.a));
+            self.bones[index].b = add(bone.b, moved(bone.b));
+        }
+        for index in 0..self.points.len() {
+            let share = share(index);
+            let point = self.points[index];
+            if share <= 0.0 || point.pinned || point.is_ghost() {
+                continue;
+            }
+            self.points[index].position = add(point.position, scale(moved(point.position), share));
+        }
+    }
+
+    /// A blow of `blow`, in the units of a bone's strength, landed by the
+    /// fist whose hand's bone is `hand` the way `toward` presses back on that
+    /// hand as hard: it bends the hand's bone as far as it presses across
+    /// it, and breaks it past its strength, as a punch on a skull can break
+    /// a bare-knuckle fighter's hand.
+    fn load_puncher_hand(&mut self, hand: usize, blow: f64, toward: Vec2) {
+        let back = scale(toward, -1.0);
+        let (share, at) = self.break_share(hand, 0.8, 1.0, back);
+        let load = blow * share;
+        let mut bone = self.bones[hand];
+        bone.bear_break_load(load, at, back, Actor::Tool);
+        self.debug.max_bone_load = self.debug.max_bone_load.max(load);
+        let breaks = self.can_fracture_bone(bone) && bone.break_load > bone.fracture_impulse;
+        self.bones[hand] = bone;
+        if breaks {
+            self.fracture_bone(hand, bone.break_t, back, load);
         }
     }
 

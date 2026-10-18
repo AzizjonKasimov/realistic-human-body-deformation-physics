@@ -9,8 +9,8 @@ use std::fmt;
 use std::sync::OnceLock;
 
 use crate::{
-    body_frame, create_layered_body, swing_power, BodyFrame, BonePart, BoneSegment, InputState,
-    Limb, Materials, TissueLayer, ToolMode, Vec2, World, BONE_PARTS,
+    body_frame, create_layered_body, fighters_from, swing_power, BodyFrame, BonePart, BoneSegment,
+    InputState, Limb, Materials, TissueLayer, ToolMode, Vec2, World, BONE_PARTS, FIGHTER_SPACING,
 };
 
 /// The settings the tools were given (`--set NAME=VALUE`), applied to every
@@ -229,6 +229,24 @@ pub struct Gesture {
     pub tool: ToolMode,
     pub power: f64,
     pub steps: &'static [GestureStep],
+    /// Two fighters stand for the play, and its punches are thrown by one
+    /// at the other; or one body alone.
+    pub fight: Option<Fight>,
+}
+
+/// Two fighters standing side by side for a play, the second built as the
+/// first's mirror image, as the app stands them (`World::mirrored`): the
+/// play's punches are thrown by one at the other, the one struck.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fight {
+    /// How far apart their midlines stand, in body heights.
+    pub spacing: f64,
+    /// The struck fighter's arm nearer the puncher hangs from the start, its
+    /// guard dropped (`World::let_limb_go`), so a punch meets the head.
+    pub guard_down: bool,
+    /// How much higher the punches aim than `Materials::punch_rise`, in
+    /// radians: below it for a punch to the body.
+    pub aim: f64,
 }
 
 impl Gesture {
@@ -316,8 +334,11 @@ impl Gesture {
     }
 
     /// The same gesture with every point moved `du` across and `dv` down the
-    /// body, in body heights. Its steps are leaked to keep `Gesture` `Copy`,
-    /// which suits the short-lived programs that shift and parse gestures.
+    /// body, in body heights; in a fight, the fighters stand `du` farther
+    /// apart and the punches aim `3 dv` radians lower, as people stand and
+    /// punch a little differently. Its steps are leaked to keep `Gesture`
+    /// `Copy`, which suits the short-lived programs that shift and parse
+    /// gestures.
     pub fn shifted(&self, du: f64, dv: f64) -> Gesture {
         let steps: Vec<GestureStep> = self
             .steps
@@ -332,8 +353,21 @@ impl Gesture {
             .collect();
         Gesture {
             steps: Vec::leak(steps),
+            fight: self.fight.map(|fight| Fight {
+                spacing: fight.spacing + du,
+                aim: fight.aim - 3.0 * dv,
+                ..fight
+            }),
             ..*self
         }
+    }
+
+    /// The body that throws the gesture's first punch, if it throws one.
+    pub fn puncher(&self) -> Option<usize> {
+        self.steps.iter().find_map(|step| match *step {
+            GestureStep::Punch(body, _) => Some(body),
+            _ => None,
+        })
     }
 
     /// The same gesture mirrored left to right across the body's middle,
@@ -432,6 +466,7 @@ impl Gesture {
             tool,
             power,
             steps: Vec::leak(steps),
+            fight: None,
         })
     }
 }
@@ -794,8 +829,10 @@ impl Often {
 /// Something a blow does to the body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    /// A bone of this part breaks.
+    /// A bone of this part breaks, of the body struck.
     Breaks(BonePart),
+    /// A bone of this part of the puncher's own breaks, in a fight.
+    PuncherBreaks(BonePart),
     /// Any bone breaks.
     BreaksAnyBone,
     /// The skin splits or is cut open.
@@ -822,8 +859,9 @@ impl Outcome {
     /// Whether it happened in `result`.
     pub fn happened(self, result: &ScenarioResult) -> bool {
         match self {
-            Outcome::Breaks(part) => result.part_fractures[part.index()] > 0,
-            Outcome::BreaksAnyBone => result.bone_fractures > 0,
+            Outcome::Breaks(part) => result.struck_fractures[part.index()] > 0,
+            Outcome::PuncherBreaks(part) => result.puncher_fractures[part.index()] > 0,
+            Outcome::BreaksAnyBone => result.struck_fractures.iter().any(|&count| count > 0),
             Outcome::OpensSkin => result.skin_tears > 0 || result.cut_openings > 0,
             Outcome::CutsArtery => {
                 result.vessel_lacerations + result.fragment_vessel_lacerations > 0
@@ -831,7 +869,7 @@ impl Outcome {
             Outcome::Bruises => result.contusion_events > 0,
             Outcome::OpenFracture => result.open_fractures > 0,
             Outcome::SplitsSkinWithoutBreak => {
-                result.bone_fractures == 0 && Outcome::OpensSkin.happened(result)
+                !Outcome::BreaksAnyBone.happened(result) && Outcome::OpensSkin.happened(result)
             }
             Outcome::DropsGuard => result.final_fist_offset >= GUARD_DROP_PX,
         }
@@ -840,6 +878,7 @@ impl Outcome {
     pub fn describe(self) -> String {
         match self {
             Outcome::Breaks(part) => format!("the {} breaks", part.name()),
+            Outcome::PuncherBreaks(part) => format!("the puncher's {} breaks", part.name()),
             Outcome::BreaksAnyBone => "a bone breaks".to_string(),
             Outcome::OpensSkin => "the skin opens".to_string(),
             Outcome::CutsArtery => "an artery is cut".to_string(),
@@ -854,6 +893,9 @@ impl Outcome {
     pub fn slug(self) -> String {
         match self {
             Outcome::Breaks(part) => format!("breaks_{}", part.name().replace(' ', "_")),
+            Outcome::PuncherBreaks(part) => {
+                format!("puncher_breaks_{}", part.name().replace(' ', "_"))
+            }
             Outcome::BreaksAnyBone => "breaks_any_bone".to_string(),
             Outcome::OpensSkin => "opens_skin".to_string(),
             Outcome::CutsArtery => "cuts_artery".to_string(),
@@ -952,11 +994,56 @@ impl Scenario {
 
     /// The materials the scenario plays on: the defaults with the settings
     /// the tools were given ([`use_settings`]), on bones as strong as its
-    /// `bone_strength`.
+    /// `bone_strength`, its punches aimed as its fight aims them.
     pub fn materials(&self) -> Materials {
         let mut materials = set_materials();
         materials.bone_fracture_impulse *= self.bone_strength;
+        if let Some(fight) = self.fight() {
+            materials.punch_rise += fight.aim;
+        }
         materials
+    }
+
+    /// The fight the scenario plays, if two fighters stand for it.
+    pub fn fight(&self) -> Option<Fight> {
+        match self.play {
+            Play::Gesture(gesture) => gesture.fight,
+            Play::Swing(..) => None,
+        }
+    }
+
+    /// The world the scenario plays in, from `body`, one body settled where
+    /// the scenarios stand it ([`crate::world_frame`]): that body, or two
+    /// fighters made of it ([`fighters_from`]). A world that already holds
+    /// two fighters is the fight's own.
+    pub fn world_from(&self, body: World) -> World {
+        match self.fight() {
+            Some(fight) if body.body_count() < 2 => fighters_from(&body, fight.spacing),
+            _ => body,
+        }
+    }
+
+    /// The world the scenario plays in, ready to play: [`Scenario::world_from`]
+    /// `body`, and in a fight that drops the struck fighter's guard, that
+    /// arm let go (`World::let_limb_go`).
+    pub fn ready(&self, body: World) -> World {
+        let mut world = self.world_from(body);
+        if self.fight().is_some_and(|fight| fight.guard_down) {
+            let (_, struck) = self.puncher_and_struck();
+            let arm = world.inner_arm(struck);
+            world.let_limb_go(struck, arm);
+        }
+        world
+    }
+
+    /// The body a fight's punches are thrown by, and the one they strike;
+    /// with one body, that body as both.
+    pub fn puncher_and_struck(&self) -> (Option<usize>, usize) {
+        let puncher = match self.play {
+            Play::Gesture(gesture) if gesture.fight.is_some() => gesture.puncher(),
+            _ => None,
+        };
+        (puncher, puncher.map_or(0, |body| 1 - body.min(1)))
     }
 
     /// The real-world checks over a sweep's runs of this scenario: how often
@@ -1502,6 +1589,13 @@ pub struct ScenarioResult {
     pub muscle_gap_max: f64,
     /// Bones broken by part, indexed by [`BonePart::index`].
     pub part_fractures: [i32; BONE_PARTS],
+    /// In a fight, the body that punched, and the one struck; with one
+    /// body, it is the one struck.
+    pub puncher: Option<usize>,
+    pub struck: usize,
+    /// Bones broken by part, of the body struck and of the puncher.
+    pub struck_fractures: [i32; BONE_PARTS],
+    pub puncher_fractures: [i32; BONE_PARTS],
     /// Breaks whose ends came out through the skin.
     pub open_fractures: i32,
     /// The most load each part of the skeleton took, as a share of what
@@ -1552,7 +1646,7 @@ impl ScenarioResult {
     /// with.
     pub fn accumulate(&mut self, world: &World, input: &InputState) {
         if self.fists_at_start.is_none() {
-            self.fists_at_start = Some(fists_off_their_place(world));
+            self.fists_at_start = Some(fists_off_their_place(world, self.struck));
         }
         self.accumulate_steadiness(world, input);
         let tip = world.current_tool_pose().map(|pose| pose.contact_end);
@@ -1572,11 +1666,15 @@ impl ScenarioResult {
         }
         self.max_tool_speed = self.max_tool_speed.max(debug.striker_speed);
         self.max_punch_speed = self.max_punch_speed.max(debug.punch_speed);
-        self.max_head_turn = self.max_head_turn.max(head_turn_degrees(world));
-        for (shift, _) in fist_offsets(world, self.fists_at_start.unwrap_or_default()) {
+        self.max_head_turn = self
+            .max_head_turn
+            .max(head_turn_degrees(world, self.struck));
+        for (shift, _) in fist_offsets(world, self.struck, self.fists_at_start.unwrap_or_default())
+        {
             self.max_fist_shift = self.max_fist_shift.max(shift);
         }
-        let fists = fist_places(world);
+        // How fast a fist moves is the punching one's, in a fight.
+        let fists = fist_places(world, self.puncher.unwrap_or(self.struck));
         if let Some(last) = self.last_fists {
             let dt = world.materials().fixed_dt.max(1.0e-9);
             for (now, then) in fists.iter().zip(last) {
@@ -1762,9 +1860,20 @@ impl ScenarioResult {
         self.bone_pieces_out = bone_pieces_out(world);
         self.closed_pieces_out = closed_pieces_out(world);
         self.whole_bones_out = whole_bones_out(world);
-        for (shift, drop) in fist_offsets(world, self.fists_at_start.unwrap_or_default()) {
+        for (shift, drop) in
+            fist_offsets(world, self.struck, self.fists_at_start.unwrap_or_default())
+        {
             self.final_fist_offset = self.final_fist_offset.max(shift);
             self.final_fist_drop = self.final_fist_drop.max(drop);
+        }
+        let fractures = |body: usize| {
+            world
+                .body_state(body)
+                .map_or([0; BONE_PARTS], |state| state.fractures)
+        };
+        self.struck_fractures = fractures(self.struck);
+        if let Some(puncher) = self.puncher {
+            self.puncher_fractures = fractures(puncher);
         }
         self.measure_cut(world);
     }
@@ -1903,13 +2012,15 @@ pub fn run_on(
 /// such as the scenarios' body moved across to where a fighter stands
 /// ([`World::move_across`]): the play is aimed at the body where it is.
 pub fn run_at(
-    mut world: World,
+    world: World,
     scenario: &Scenario,
     body: BodyFrame,
     width: f64,
     mut observe: impl FnMut(i32, &InputState, &World),
 ) -> (World, ScenarioResult) {
+    let mut world = scenario.ready(world);
     let mut result = ScenarioResult::default();
+    (result.puncher, result.struck) = scenario.puncher_and_struck();
     let dt = world.materials().fixed_dt;
     for frame in 0..scenario.frames() {
         let input = scenario.input(frame, dt, body);
@@ -2075,9 +2186,13 @@ pub fn inside_the_skin(world: &World, at: Vec2) -> bool {
 
 /// How far the head is turned on the neck off the guard, in degrees: the
 /// skull's angle against the spine's, now against when the body was built.
-pub fn head_turn_degrees(world: &World) -> f64 {
+pub fn head_turn_degrees(world: &World, body: usize) -> f64 {
     let bones = world.bones();
-    let first = |part: BonePart| bones.iter().find(|bone| bone.part == part);
+    let first = |part: BonePart| {
+        bones
+            .iter()
+            .find(|bone| bone.part == part && bone.body as usize == body)
+    };
     let (Some(skull), Some(spine)) = (first(BonePart::Skull), first(BonePart::Spine)) else {
         return 0.0;
     };
@@ -2097,12 +2212,12 @@ pub fn head_turn_degrees(world: &World) -> f64 {
 /// How far each fist is from where it stood when the play began, and how
 /// far below it, in pixels: the end of each hand's bone against where it was
 /// built, less how far it stood from there then (`at_start`, by arm, from
-/// [`fists_off_their_place`]).
-pub fn fist_offsets(world: &World, at_start: [Vec2; 2]) -> Vec<(f64, f64)> {
+/// [`fists_off_their_place`]), of body `body`.
+pub fn fist_offsets(world: &World, body: usize, at_start: [Vec2; 2]) -> Vec<(f64, f64)> {
     world
         .bones()
         .iter()
-        .filter(|bone| bone.part == BonePart::Hand && !bone.splinter)
+        .filter(|bone| bone.part == BonePart::Hand && !bone.splinter && bone.body as usize == body)
         .map(|bone| {
             let start = arm_index(bone.limb).map_or(Vec2::default(), |arm| at_start[arm]);
             let (dx, dy) = (
@@ -2114,12 +2229,12 @@ pub fn fist_offsets(world: &World, at_start: [Vec2; 2]) -> Vec<(f64, f64)> {
         .collect()
 }
 
-/// How far each arm's fist stands from where it was built, the viewer's left
-/// arm first.
-pub fn fists_off_their_place(world: &World) -> [Vec2; 2] {
+/// How far each arm's fist of body `body` stands from where it was built,
+/// the viewer's left arm first.
+pub fn fists_off_their_place(world: &World, body: usize) -> [Vec2; 2] {
     let mut off = [Vec2::default(); 2];
     for bone in world.bones() {
-        if bone.part != BonePart::Hand || bone.splinter {
+        if bone.part != BonePart::Hand || bone.splinter || bone.body as usize != body {
             continue;
         }
         if let Some(arm) = arm_index(bone.limb) {
@@ -2132,12 +2247,12 @@ pub fn fists_off_their_place(world: &World) -> [Vec2; 2] {
     off
 }
 
-/// Where each arm's fist is, the end of its hand's bone, the viewer's left
-/// arm first.
-pub fn fist_places(world: &World) -> [Vec2; 2] {
+/// Where each arm's fist of body `body` is, the end of its hand's bone, the
+/// viewer's left arm first.
+pub fn fist_places(world: &World, body: usize) -> [Vec2; 2] {
     let mut places = [Vec2::default(); 2];
     for bone in world.bones() {
-        if bone.part != BonePart::Hand || bone.splinter {
+        if bone.part != BonePart::Hand || bone.splinter || bone.body as usize != body {
             continue;
         }
         if let Some(arm) = arm_index(bone.limb) {
@@ -2401,6 +2516,8 @@ const PUNCH_GUARD: &str =
     "Muzzi et al. 2022 list no broken arm in 141 bare-knuckle bouts; Begeman and Pratima 1999: 1.37 kN breaks a forearm held at both ends";
 const PUNCH_RIBS: &str =
     "Muzzi et al. 2022 list no broken rib in 141 bare-knuckle bouts; Viano et al. 1989: ribs broke under 240-1030 J side impacts";
+const PUNCH_HAND: &str =
+    "Muzzi et al. 2022: 8 hand fractures among 282 professional bare-knuckle fighters over whole bouts of punches (2.8%); Pianta et al. 2013: a metacarpal bent to failure at 1152 +/- 521 N";
 const PUNCH_SPEED: &str =
     "Adamec et al. 2021: untrained men's hardest punch 8.0 +/- 1.2 m/s (5.7-11.1)";
 
@@ -2518,6 +2635,20 @@ const fn throw_punch(arm: Limb) -> [GestureStep; 4] {
 const PUNCH_RIGHT: &[GestureStep] = &throw_punch(Limb::RightArm);
 const PUNCH_LEFT: &[GestureStep] = &throw_punch(Limb::LeftArm);
 
+/// The left fighter punches the right with its arm nearer it, once the
+/// struck fighter has stood a second (a dropped guard has fallen), and both
+/// stand on till the puncher is upright and still again. The tool hovers off
+/// to the side, out of the play.
+const FIGHTER_PUNCH: &[GestureStep] = &[
+    GestureStep::Move {
+        to: (-1.3, 0.95),
+        frames: 0,
+    },
+    GestureStep::Wait(60),
+    GestureStep::Punch(0, Limb::RightArm),
+    GestureStep::Wait(260),
+];
+
 /// The tuned scenarios, played in a 1280x720 window: scripted strikes and
 /// gestures played the way the app is. Each one checks what the play does in
 /// real life (`real`, from injury research), and that the engine and the tool
@@ -2558,7 +2689,27 @@ pub fn scenarios() -> Vec<Scenario> {
             tool,
             power: swing_power(tool),
             steps,
+            fight: None,
         })
+    };
+    // Two fighters as the app stands them, the left punching the right.
+    let fight = |guard_down, aim| {
+        Play::Gesture(Gesture {
+            tool: ToolMode::Heavy,
+            power: swing_power(ToolMode::Heavy),
+            steps: FIGHTER_PUNCH,
+            fight: Some(Fight {
+                spacing: FIGHTER_SPACING,
+                guard_down,
+                aim,
+            }),
+        })
+    };
+    // A fighter's punch lands on the other, thrown as fast as an untrained
+    // man's hardest punch.
+    let fought = ScenarioExpectations {
+        fist_speed: DoubleBand::range(1829.0, 3562.0),
+        ..punched
     };
     let strike = |tool, start, end, strike_frames, settle_frames| Strike {
         tool,
@@ -3209,6 +3360,49 @@ pub fn scenarios() -> Vec<Scenario> {
             ],
             bone_strength: 1.0,
         },
+        Scenario {
+            name: "fighter_punches_the_head",
+            region: "head",
+            intent: "fight",
+            play: fight(true, 0.0),
+            // The left fighter punches the right in the side of the head,
+            // the right fighter's guard on that side dropped: a bare-knuckle
+            // punch thrown by the figure's own muscles and body, landing as
+            // the bare fist does. The head is knocked aside on the neck and
+            // the skull holds; the puncher's hand all but always holds too.
+            expectations: ScenarioExpectations {
+                head_turn: DoubleBand::range(3.0, 45.0),
+                ..fought
+            },
+            real: &[
+                check!(Bruises, Usually, BRUISE),
+                check!(OpensSkin, Rarely, PUNCH_CUT),
+                check!(Breaks(BonePart::Skull), Never, PUNCH_SKULL),
+                check!(PuncherBreaks(BonePart::Hand), Never, PUNCH_HAND),
+            ],
+            bone_strength: 1.0,
+        },
+        Scenario {
+            name: "fighter_punches_the_guard",
+            region: "arm",
+            intent: "fight",
+            play: fight(false, 0.0),
+            // The same punch with the right fighter's guard up. The guard's
+            // fist stands beside the chin, so the punching arm rides over
+            // it, pushes the raised forearm down and aside, and the fist
+            // lands on the head; the guard's muscles bring the arm back.
+            // Aimed level at the guard instead, the fist slid off the
+            // forearm into the neck and split its skin in half the runs.
+            expectations: fought,
+            real: &[
+                check!(Bruises, Usually, BRUISE),
+                check!(OpensSkin, Rarely, PUNCH_BODY_CUT),
+                check!(Breaks(BonePart::Forearm), Never, PUNCH_GUARD),
+                check!(DropsGuard, Never, ARM_HELD),
+                check!(PuncherBreaks(BonePart::Hand), Never, PUNCH_HAND),
+            ],
+            bone_strength: 1.0,
+        },
     ]
 }
 
@@ -3222,12 +3416,15 @@ mod tests {
     #[test]
     fn fists_count_from_where_they_stood() {
         let world = create_layered_body(SCENARIO_WIDTH, SCENARIO_HEIGHT, Materials::default());
-        let at_start = fists_off_their_place(&world);
-        for (shift, drop) in fist_offsets(&world, at_start) {
+        let at_start = fists_off_their_place(&world, 0);
+        for (shift, drop) in fist_offsets(&world, 0, at_start) {
             assert!(shift < 1e-9 && drop.abs() < 1e-9, "{shift} {drop}");
         }
         let stood_lower = [Vec2 { x: 0.0, y: 10.0 }; 2];
-        for ((shift, drop), off) in fist_offsets(&world, stood_lower).into_iter().zip(at_start) {
+        for ((shift, drop), off) in fist_offsets(&world, 0, stood_lower)
+            .into_iter()
+            .zip(at_start)
+        {
             let expected = libm::hypot(off.x, off.y - 10.0);
             assert!(
                 (shift - expected).abs() < 1e-9,

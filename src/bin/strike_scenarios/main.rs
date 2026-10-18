@@ -557,7 +557,8 @@ fn play_scenarios(
     for scenario in selected {
         let mut write_error = None;
         let mut last_positions = Vec::new();
-        let body = watch.body(scenario);
+        // A fight's watchdogs watch its two fighters from the start.
+        let body = scenario.world_from(watch.body(scenario));
         let mut watchdogs = rp::inspect::Watchdogs::new(&body);
         // Only a lone scenario is recorded: a recording is for looking into one run.
         let mut recorder = record
@@ -631,7 +632,7 @@ fn play_custom(scenario: &Scenario, output_dir: &Path, watch: Watch, record: Opt
     write_frame_header(&mut frames).expect("write frame header");
     let mut write_error = None;
     let mut last_positions = Vec::new();
-    let body = watch.body(scenario);
+    let body = scenario.world_from(watch.body(scenario));
     let mut watchdogs = rp::inspect::Watchdogs::new(&body);
     let mut recorder = record.and_then(|path| Recorder::start(path, scenario.name, &body));
     let (world, result) = run_on(

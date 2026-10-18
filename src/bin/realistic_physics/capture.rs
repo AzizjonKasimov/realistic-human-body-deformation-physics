@@ -226,7 +226,9 @@ pub async fn run(request: CaptureRequest) {
         app.view = rp::View::fitting(rp::world_frame(), frame);
     }
     let world_frame = rp::world_frame();
-    if let Some(spacing) = request.spacing {
+    // A fight scenario stands its two fighters as far apart as it says.
+    let fight = request.play.and_then(|play| play.fight());
+    if let Some(spacing) = request.spacing.or(fight.map(|fight| fight.spacing)) {
         app.spacing = spacing;
         app.view_for = (0.0, 0.0, false);
         app.fit_view(width as f32, height as f32);
@@ -234,7 +236,11 @@ pub async fn run(request: CaptureRequest) {
     let materials = request
         .play
         .map_or_else(rp::Materials::default, |play| play.materials());
-    if request.fighters {
+    if let (Some(play), Some(_)) = (request.play, fight) {
+        // A fight scenario's two fighters, as the scenarios play it.
+        app.world = play.ready(rp::create_layered_body_in(world_frame, materials));
+        app.world.capture_motion(&mut app.earlier);
+    } else if request.fighters {
         app.world = rp::create_fighters_at(materials, app.spacing);
         app.world.capture_motion(&mut app.earlier);
     } else if request.play.is_some() {

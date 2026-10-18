@@ -355,12 +355,21 @@ pub fn create_fighters(materials: Materials) -> World {
 /// Two fighters as [`create_fighters`] builds them, `spacing` body heights
 /// apart.
 pub fn create_fighters_at(materials: Materials, spacing: f64) -> World {
+    fighters_from(
+        &create_layered_body_in(crate::world_frame(), materials),
+        spacing,
+    )
+}
+
+/// Two fighters made of `body`, one body built where the scenarios stand it
+/// ([`crate::world_frame`]): it moves to where the first fighter stands and
+/// its mirror image to where the second does, `spacing` body heights apart.
+pub fn fighters_from(body: &World, spacing: f64) -> World {
     let built = crate::world_frame();
     let [left, right] = crate::fighter_frames_at(spacing);
-    let body = create_layered_body_in(built, materials);
     let mut twin = body.mirrored(built.origin.x);
     twin.move_across(right.origin.x - built.origin.x);
-    let mut world = body;
+    let mut world = body.clone();
     world.move_across(left.origin.x - built.origin.x);
     world.add_body(twin);
     world
