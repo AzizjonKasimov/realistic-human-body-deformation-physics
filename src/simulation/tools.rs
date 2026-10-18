@@ -538,6 +538,15 @@ fn slide_along(velocity: Vec2, along: Vec2, keep: f64) -> Vec2 {
 }
 
 impl World {
+    /// Moves the tool and where the hand was `dx` pixels across, with the
+    /// rest of the world (`World::move_across`).
+    pub(super) fn move_tool_across(&mut self, dx: f64) {
+        self.tool.position.x += dx;
+        if let Some(hand) = &mut self.tool.last_hand {
+            hand.x += dx;
+        }
+    }
+
     /// Direction the current tool faces and strikes with.
     pub fn tool_heading(&self) -> Vec2 {
         self.tool.heading
@@ -642,7 +651,7 @@ impl World {
                     rotate_toward(self.tool.heading, target, EMBEDDED_BLADE_TURN_RATE * dt);
             }
         }
-        self.tool.side = side_toward(self.tool.heading, self.tool.side);
+        self.tool.side = side_toward(self.tool.heading, self.tool.side, self.outward());
     }
 
     /// A bat or hammer is held by its handle. Swung, it turns until its
@@ -658,7 +667,7 @@ impl World {
         if !down {
             self.tool.side = rotate_toward(side, CARRIED_HANDLE, CARRY_TURN_RATE * dt);
         } else if speed > TOOL_TURN_SPEED {
-            let across = side_toward(scale(velocity, 1.0 / speed), side);
+            let across = side_toward(scale(velocity, 1.0 / speed), side, self.outward());
             let share = if self.tool.embedded {
                 EMBEDDED_TURN_SHARE
             } else {
@@ -675,7 +684,49 @@ impl World {
         } else {
             self.tool.heading
         };
-        self.tool.heading = side_toward(self.tool.side, toward);
+        self.tool.heading = side_toward(self.tool.side, toward, self.outward());
+    }
+
+    /// A tool taken up at `at`, handle down, faces across the world toward
+    /// the middle of the nearest body, as a hand holds a tool toward what it
+    /// means to strike: taken up on either side of a body, it is held alike,
+    /// mirrored. Facing one way everywhere, a knife taken up on the body's
+    /// right pointed away from it and turned round through the arm in the
+    /// first slash.
+    fn face_the_body(&mut self, at: Vec2) {
+        let facing = match self.nearest_midline(at.x) {
+            Some(middle) if at.x > middle => Vec2 { x: -1.0, y: 0.0 },
+            _ => Vec2 { x: 1.0, y: 0.0 },
+        };
+        let outward = -facing.x;
+        self.tool.side = CARRIED_HANDLE;
+        self.tool.heading = facing;
+        if matches!(self.tool.mode, ToolMode::Sharp | ToolMode::Fist) {
+            self.tool.side = side_toward(facing, CARRIED_HANDLE, outward);
+        } else {
+            self.tool.heading = side_toward(CARRIED_HANDLE, facing, outward);
+        }
+    }
+
+    /// The midline of the body nearest `x` across the world: where its spine
+    /// stands.
+    fn nearest_midline(&self, x: f64) -> Option<f64> {
+        self.bones
+            .iter()
+            .filter(|bone| bone.kind == BoneKind::Spine && !bone.fractured && !bone.splinter)
+            .map(|spine| (spine.a.x + spine.b.x) * 0.5)
+            .min_by(|p, q| (p - x).abs().total_cmp(&(q - x).abs()))
+    }
+
+    /// Which way across the world is away from the nearest body's midline
+    /// where the tool is: 1 to the right, -1 to the left, 0 on it.
+    fn outward(&self) -> f64 {
+        let x = self.tool.position.x;
+        match self.nearest_midline(x) {
+            Some(middle) if x > middle => 1.0,
+            Some(middle) if x < middle => -1.0,
+            _ => 0.0,
+        }
     }
 
     /// A tool that appears mid-swing already faces along its motion, as one
@@ -685,7 +736,7 @@ impl World {
         let speed = hypot(velocity.x, velocity.y);
         if speed > TOOL_TURN_SPEED {
             self.tool.heading = scale(velocity, 1.0 / speed);
-            self.tool.side = side_toward(self.tool.heading, self.tool.side);
+            self.tool.side = side_toward(self.tool.heading, self.tool.side, self.outward());
         }
     }
 
@@ -707,21 +758,19 @@ impl World {
             self.tool.ghost = false;
             return;
         }
-        if input.tool != self.tool.mode {
-            // A tool taken in hand starts as the first one did, its handle
-            // down, rather than turned as the last tool was held.
-            let fresh = ToolBody::default();
-            self.tool.heading = fresh.heading;
-            self.tool.side = fresh.side;
-            self.tool.mode = input.tool;
-            self.tool.embedded = false;
-            self.tool.held = false;
-            self.tool.touch_grace = 0.0;
-        }
         let target = Vec2 {
             x: input.x,
             y: input.y,
         };
+        if input.tool != self.tool.mode {
+            // A tool taken in hand starts with its handle down, facing the
+            // body, rather than turned as the last tool was held.
+            self.tool.mode = input.tool;
+            self.face_the_body(target);
+            self.tool.embedded = false;
+            self.tool.held = false;
+            self.tool.touch_grace = 0.0;
+        }
         let handling = tool_handling(input.tool);
         let profile = tool_profile(input.tool);
         let mass = self.materials.striker_mass * input.power * profile.mass_scale;
@@ -792,6 +841,9 @@ impl World {
             self.tool.position = subtract(target, scale(self.tool.velocity, dt));
             self.tool.embedded = false;
             self.tool.held = false;
+            if hypot(input.vx, input.vy) <= TOOL_TURN_SPEED {
+                self.face_the_body(target);
+            }
             self.align_with_motion();
         } else {
             let reach = if input.down {
@@ -1368,13 +1420,14 @@ impl World {
         let mut center = self.tool.position;
         let mut shape = start;
         let mut peak_blow: f64 = 0.0;
+        let outward = self.outward();
         for step in 1..=steps {
             let t = step as f64 / steps as f64;
             center = add(center, scale(velocity, sub_dt));
             // The handle turns smoothly through the step, and the face stays
             // across it.
             let side = normalized(lerp(start_pose.side, self.tool.side, t), self.tool.side);
-            let heading = side_toward(side, self.tool.heading);
+            let heading = side_toward(side, self.tool.heading, outward);
             shape = contact_shape(&tool_pose(strike.tool, center, heading, side));
             let speed = hypot(velocity.x, velocity.y);
             // Bone breaks under the force of the blow, which grows with its
@@ -1893,13 +1946,22 @@ impl World {
 
 /// The perpendicular to `heading` on the same side as `previous`, so the
 /// handle stays on one side as the tool turns. Given a handle direction, it
-/// likewise gives the face across the handle nearest a direction.
-fn side_toward(heading: Vec2, previous: Vec2) -> Vec2 {
+/// likewise gives the face across the handle nearest a direction. Where
+/// `previous` lies exactly along `heading`, as the upright handle does when a
+/// bat is swung straight down, neither side is nearer, and it takes the side
+/// away from the body's midline, `outward` (1 right, -1 left): always the
+/// screen's left, a bat brought straight down on the right shoulder turned
+/// its handle in over the head, and on the left shoulder out away from it.
+fn side_toward(heading: Vec2, previous: Vec2, outward: f64) -> Vec2 {
     let perpendicular = Vec2 {
         x: -heading.y,
         y: heading.x,
     };
-    if dot(perpendicular, previous) >= 0.0 {
+    let nearer = match dot(perpendicular, previous) {
+        tie if tie == 0.0 => perpendicular.x * outward,
+        toward => toward,
+    };
+    if nearer >= 0.0 {
         perpendicular
     } else {
         scale(perpendicular, -1.0)

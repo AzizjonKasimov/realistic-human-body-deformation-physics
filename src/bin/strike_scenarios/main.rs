@@ -26,6 +26,9 @@
 //!                                     its path, on bones STRENGTH times as strong
 //!                                     (the sweep CSV's first columns), to look
 //!                                     into a run the sweep found out of band
+//!   --mirrored                        play the selected scenarios mirrored left
+//!                                     to right, as the moved-body tests do,
+//!                                     to look into a run they found differs
 //!   --fastest SPEED                   also print each frame on which some tissue
 //!                                     moved faster than SPEED px/s: which point,
 //!                                     its layer, weight, and what holds it
@@ -54,6 +57,15 @@
 //!                                     moved across the window, report where the
 //!                                     blows hurt it differently, and let a body
 //!                                     fall and drift free (strike_moved_report.txt)
+//!   --twin mirrored|across[=PX]       instead, play each selected scenario
+//!                                     beside a twin of the body mirrored left
+//!                                     to right or moved PX px across (208 by
+//!                                     default), compare them frame by frame,
+//!                                     and print, phase by phase, where they
+//!                                     first moved things differently: the
+//!                                     rule that is lopsided or reads where
+//!                                     the body stands; --twin-frame N explains
+//!                                     frame N instead
 //!   --random N [--seed S] [--tools T,...]
 //!                                     instead, play N random blows: any tool
 //!                                     (bat, hammer, and knife, or those --tools
@@ -124,6 +136,7 @@ mod random;
 mod record;
 mod summary;
 mod sweep;
+mod twin;
 mod watch;
 
 use bodies::*;
@@ -173,12 +186,18 @@ struct Options {
     phases: bool,
     /// One sweep run to play: along, across, and bone strength.
     variant: Option<(f64, f64, f64)>,
+    /// Play the scenarios mirrored left to right.
+    mirrored: bool,
     /// What to watch while the scenarios play.
     watch: Watch,
     /// What moved a point, bone, fiber, or joint, instead of playing.
     why: Option<rp::inspect::Why>,
     /// The moved-body tests instead of playing.
     moved: bool,
+    /// Twin runs instead of playing: each scenario beside a mirrored or
+    /// moved copy, compared phase by phase, explaining this frame.
+    twin: Option<twin::TwinWay>,
+    twin_frame: Option<i32>,
     /// Random blows to play instead, from a seed, with these tools.
     random: Option<usize>,
     seed: u64,
@@ -261,6 +280,13 @@ fn main() {
             .collect(),
         None => selected,
     };
+    // Mirrored after the variant's shift, as the moved-body tests mirror
+    // each run of the sweep.
+    let selected: Vec<Scenario> = if options.mirrored {
+        selected.iter().map(Scenario::mirrored).collect()
+    } else {
+        selected
+    };
     if options.phases {
         time_phases(&selected, &output_dir);
         return;
@@ -273,6 +299,10 @@ fn main() {
     }
     if options.moved {
         moved_body_tests(&selected, &output_dir);
+        return;
+    }
+    if let Some(way) = options.twin {
+        twin::twin_runs(&selected, way, options.twin_frame);
         return;
     }
 
@@ -344,9 +374,12 @@ fn parse_options() -> Result<Options, String> {
         list: false,
         phases: false,
         variant: None,
+        mirrored: false,
         watch: Watch::default(),
         why: None,
         moved: false,
+        twin: None,
+        twin_frame: None,
         random: None,
         seed: 1,
         tools: vec![
@@ -444,6 +477,19 @@ fn parse_options() -> Result<Options, String> {
             }
             "--journal" => options.watch.journal = true,
             "--moved" => options.moved = true,
+            "--mirrored" => options.mirrored = true,
+            "--twin" => {
+                let way = args.next().ok_or("--twin needs mirrored or across")?;
+                options.twin = Some(twin::TwinWay::parse(&way)?);
+            }
+            "--twin-frame" => {
+                let frame = args.next().ok_or("--twin-frame needs a frame")?;
+                options.twin_frame = Some(
+                    frame
+                        .parse()
+                        .map_err(|_| format!("--twin-frame takes a frame, got `{frame}`"))?,
+                );
+            }
             "--random" => {
                 let count = args.next().ok_or("--random needs a number of plays")?;
                 options.random = Some(

@@ -293,6 +293,7 @@ impl World {
         &mut self,
         joints: &[(usize, f64, f64, f64)],
         width: f64,
+        mirror: &body::MirrorPairs,
     ) -> Vec<bool> {
         let mut touched = vec![false; self.points.len()];
         if joints.is_empty() {
@@ -356,6 +357,9 @@ impl World {
                     };
                 }
                 swept.step(dt, &InputState::default(), width);
+                // Both elbows open in the one world, so the solver's order
+                // would open them a little unlike each other.
+                mirror.even_out(&mut swept);
                 for (most, now) in longest.iter_mut().zip(lengths(&swept)) {
                     *most = most.max(now);
                 }

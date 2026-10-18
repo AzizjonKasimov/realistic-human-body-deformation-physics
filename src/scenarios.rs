@@ -1840,15 +1840,27 @@ pub fn run(
 /// [`Scenario::materials`], such as one that times its phases
 /// ([`World::time_phases`]).
 pub fn run_on(
-    mut world: World,
+    world: World,
     scenario: &Scenario,
     width: f64,
     height: f64,
+    observe: impl FnMut(i32, &InputState, &World),
+) -> (World, ScenarioResult) {
+    run_at(world, scenario, body_frame(width, height), width, observe)
+}
+
+/// [`run_on`] on a body standing at `body` in a world `width` pixels wide,
+/// such as the scenarios' body moved across to where a fighter stands
+/// ([`World::move_across`]): the play is aimed at the body where it is.
+pub fn run_at(
+    mut world: World,
+    scenario: &Scenario,
+    body: BodyFrame,
+    width: f64,
     mut observe: impl FnMut(i32, &InputState, &World),
 ) -> (World, ScenarioResult) {
     let mut result = ScenarioResult::default();
     let dt = world.materials().fixed_dt;
-    let body = body_frame(width, height);
     for frame in 0..scenario.frames() {
         let input = scenario.input(frame, dt, body);
         world.step(dt, &input, width);

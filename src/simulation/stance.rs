@@ -277,18 +277,29 @@ impl World {
         let spacing = self.materials.point_spacing.max(1.0);
         for index in 0..self.points.len() {
             let point = self.points[index];
+            let mut near: Vec<(f64, usize)> = candidates(&point)
+                .into_iter()
+                .filter_map(|bone| {
+                    let segment = self.bones.get(bone)?;
+                    Some((
+                        distance_to_segment(point.home, segment.home_a, segment.home_b),
+                        bone,
+                    ))
+                })
+                .collect();
+            near.sort_by(|p, q| p.0.total_cmp(&q.0).then(p.1.cmp(&q.1)));
             let mut nearest = [(f64::INFINITY, MISSING_BONE); 2];
-            for bone in candidates(&point) {
-                let Some(segment) = self.bones.get(bone) else {
-                    continue;
-                };
-                let gap = distance_to_segment(point.home, segment.home_a, segment.home_b);
-                if gap < nearest[0].0 {
-                    nearest[1] = nearest[0];
-                    nearest[0] = (gap, bone);
-                } else if gap < nearest[1].0 {
-                    nearest[1] = (gap, bone);
-                }
+            if let Some(&first) = near.first() {
+                nearest[0] = first;
+            }
+            // A point on the midline lies as near each collarbone; taking
+            // the one built first, it held to the left side's alone, so where
+            // the next two lie alike it holds to its nearest bone only.
+            let tied = |a: (f64, usize), b: (f64, usize)| (a.0 - b.0).abs() < body::TIE_DISTANCE;
+            match (near.get(1), near.get(2)) {
+                (Some(&second), Some(&third)) if tied(second, third) => {}
+                (Some(&second), _) => nearest[1] = second,
+                _ => {}
             }
             let mut binding = PostureBinding::default();
             let mut total = 0.0;

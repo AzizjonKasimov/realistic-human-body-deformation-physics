@@ -14,6 +14,27 @@ pub fn world_frame() -> BodyFrame {
     body_frame(SCENARIO_WIDTH, SCENARIO_HEIGHT)
 }
 
+/// How far apart the two fighters' midlines stand, in body heights: their
+/// guards' elbows, 0.258 body heights out from each midline, just clear of
+/// each other.
+pub const FIGHTER_SPACING: f64 = 0.52;
+
+/// Where each of two fighters stands in the same world as [`world_frame`],
+/// at the same size, the viewer's left one first: side by side about the
+/// world's middle, [`FIGHTER_SPACING`] apart.
+pub fn fighter_frames() -> [BodyFrame; 2] {
+    let frame = world_frame();
+    let middle = SCENARIO_WIDTH * 0.5;
+    let half = FIGHTER_SPACING * frame.height * 0.5;
+    [middle - half, middle + half].map(|x| BodyFrame {
+        origin: Vec2 {
+            x,
+            y: frame.origin.y,
+        },
+        height: frame.height,
+    })
+}
+
 /// The world drawn uniformly larger or smaller and moved: a world position
 /// `p` lands on the screen at `p * scale + offset`.
 #[derive(Clone, Copy, Debug, PartialEq)]

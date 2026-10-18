@@ -119,6 +119,9 @@ pub struct TracedStage {
     /// Which traced thing, by its place in the list [`World::trace`] took.
     pub target: usize,
     pub phase: &'static str,
+    /// Which run of a phase in the step this was, counting every phase run
+    /// from the step's first, so two worlds' stages line up phase for phase.
+    pub call: usize,
     /// When in the step the phase ran, as a share of the step: 0 before
     /// the solver, the start of its substep within it, and 1 after it.
     pub time: f64,
@@ -206,6 +209,7 @@ impl World {
             let stage = TracedStage {
                 target,
                 phase,
+                call: self.trace_call,
                 time: self.trace_time,
                 moved: subtract(after.now, before.now),
                 velocity_before: velocity(before),
@@ -259,12 +263,14 @@ impl World {
         if let Some(before) = traced {
             self.record_traced_stages(name, &before);
         }
+        self.trace_call += 1;
     }
 
     /// Runs a whole step, timing it when a clock is set.
     pub(super) fn timed_step(&mut self, step: impl FnOnce(&mut Self)) {
         self.traced_stages.clear();
         self.trace_time = 0.0;
+        self.trace_call = 0;
         let Some(clock) = self.phase_clock else {
             return step(self);
         };

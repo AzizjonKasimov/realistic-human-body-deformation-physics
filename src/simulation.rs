@@ -1930,6 +1930,7 @@ pub struct World {
     traced: Vec<Traced>,
     traced_stages: Vec<TracedStage>,
     trace_time: f64,
+    trace_call: usize,
     /// What has happened to the body, when a journal is kept
     /// ([`World::keep_journal`]).
     journal: Option<Journal>,
@@ -2012,6 +2013,7 @@ impl World {
             traced: Vec::new(),
             traced_stages: Vec::new(),
             trace_time: 0.0,
+            trace_call: 0,
             journal: None,
             grid: grid::SpatialGrid::default(),
             inverse_masses: Vec::new(),
@@ -2033,6 +2035,58 @@ impl World {
     /// Lays the floor at `floor_y` pixels down the window.
     pub fn set_floor_y(&mut self, floor_y: f64) {
         self.floor_y = floor_y;
+    }
+
+    /// Moves everything in the world `dx` pixels across, as built and as it
+    /// is now: a body built in one place and moved is the same body, fiber
+    /// for fiber, wherever it is put. Built where it is to stand, a body
+    /// came out a little different: which flesh its fat ties joined was
+    /// settled by rounding where nearby points lay the same distance off,
+    /// and rounding differs from place to place (`strike_scenarios --twin
+    /// across`).
+    pub fn move_across(&mut self, dx: f64) {
+        let moved = |at: &mut Vec2| at.x += dx;
+        for point in &mut self.points {
+            moved(&mut point.position);
+            moved(&mut point.previous);
+            moved(&mut point.home);
+        }
+        for bone in &mut self.bones {
+            for at in [
+                &mut bone.a,
+                &mut bone.b,
+                &mut bone.previous_a,
+                &mut bone.previous_b,
+                &mut bone.home_a,
+                &mut bone.home_b,
+            ] {
+                moved(at);
+            }
+        }
+        for vessel in &mut self.vessels {
+            moved(&mut vessel.a);
+            moved(&mut vessel.b);
+        }
+        for organ in &mut self.organs {
+            moved(&mut organ.center);
+        }
+        for cavity in &mut self.cavities {
+            moved(&mut cavity.centroid);
+        }
+        for hold in &mut self.hip_holds {
+            moved(&mut hold.home);
+        }
+        for wound in &mut self.wounds {
+            moved(&mut wound.position);
+        }
+        for fluid in &mut self.fluids {
+            moved(&mut fluid.position);
+            moved(&mut fluid.previous);
+        }
+        for stain in &mut self.blood_stains {
+            moved(&mut stain.position);
+        }
+        self.move_tool_across(dx);
     }
 
     /// Sets every point and bone moving at `velocity`, in pixels per second,

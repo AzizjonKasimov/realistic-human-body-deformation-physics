@@ -7,10 +7,14 @@
 //! body stays inside the window, and the arrays are kept from one build to
 //! the next so a build allocates nothing.
 //!
-//! A query lists what its cells hold row by row and, within a cell, in the
-//! order the entries were added, each entry once: the order the `HashMap`
-//! grids this replaced gave. The contact passes that use it resolve their
-//! contacts one after another, so the order is part of the physics.
+//! A query lists the ids its cells hold in ascending order, each once. The
+//! contact passes that use it resolve their contacts one after another, so
+//! the order is part of the physics, and it must not depend on where things
+//! lie in the world: listed row by row across the cells, as the `HashMap`
+//! grids this replaced listed them, the same blow on a body standing
+//! elsewhere, or mirrored, resolved its broken bone's contacts in another
+//! order and hurt it differently (`strike_scenarios --twin`). A body's ids
+//! run in the order it was built, the same wherever it stands.
 
 use super::{Aabb, Vec2};
 
@@ -183,8 +187,8 @@ impl SpatialGrid {
         }
     }
 
-    /// Lists in `found` the ids in every cell `aabb` touches: row by row,
-    /// each cell's in the order they were added, each id once.
+    /// Lists in `found` the ids in every cell `aabb` touches, in ascending
+    /// order, each once.
     pub(super) fn query(&mut self, aabb: Aabb, found: &mut Vec<usize>) {
         found.clear();
         if self.columns == 0 {
@@ -217,6 +221,7 @@ impl SpatialGrid {
                 found.push(id as usize);
             }
         }
+        found.sort_unstable();
     }
 
     /// The ids in the cell holding `point`, in the order they were added.
@@ -357,7 +362,9 @@ mod tests {
             for _ in 0..200 {
                 let aabb = random.aabb(90.0);
                 grid.query(aabb, &mut found);
-                assert_eq!(found, reference.query(aabb));
+                let mut expected = reference.query(aabb);
+                expected.sort_unstable();
+                assert_eq!(found, expected);
             }
             for &(_, point) in &points {
                 let cell: Vec<usize> = grid.at(point).iter().map(|&id| id as usize).collect();
@@ -382,7 +389,9 @@ mod tests {
             for _ in 0..200 {
                 let aabb = random.aabb(150.0);
                 grid.query(aabb, &mut found);
-                assert_eq!(found, reference.query(aabb));
+                let mut expected = reference.query(aabb);
+                expected.sort_unstable();
+                assert_eq!(found, expected);
             }
             for _ in 0..200 {
                 let point = random.point();

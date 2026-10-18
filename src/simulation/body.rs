@@ -29,6 +29,16 @@ const MUSCLE_INSET_SCALE: f64 = 0.35;
 const FIBER_ALIGNMENT: f64 = 0.80;
 /// Muscle edges further than this from the bone direction act as cross fibers.
 const CROSS_ALIGNMENT: f64 = 0.45;
+/// How near the midline, in pixels, a point of the mesh counts as on it: the
+/// figure's two halves mirror each other to within a hundredth of a pixel.
+const MIDLINE_TOLERANCE: f64 = 0.01;
+/// Distances closer than this, in pixels, count as the same when the body is
+/// built: the figure's halves mirror each other to about 1e-11 px, so two
+/// muscle points the same distance from a skin point on one side are the
+/// same distance from its mirror image on the other.
+pub(super) const TIE_DISTANCE: f64 = 1.0e-6;
+/// Alignments closer than this count as the same, for the same reason.
+const TIE_ALIGNMENT: f64 = 1.0e-9;
 
 const SKULL: [Landmark; 2] = [(0.0, 0.030), (0.0, 0.118)];
 const SPINE: [Landmark; 2] = [(0.0, 0.150), (0.0, 0.495)];
@@ -167,6 +177,7 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
         &muscle,
         &muscle_edges,
         &fiber_guides,
+        frame.origin.x,
         &through_flesh,
     );
     add_layer_triangles(&mut world, &skin, &skin_edges, TissueLayer::Skin);
@@ -344,8 +355,11 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
             relaxing.push((index, way, materials.elbow_rest_opening, full));
         }
     }
+    // The figure is mirror-symmetric, so its rest is kept so wherever the
+    // solver's order would lean it a little to one side (`MirrorPairs`).
+    let mirror = MirrorPairs::of(&world, frame.origin.x);
     let rested_round_joints =
-        world.rest_flesh_round_joints(&relaxing, frame.origin.x * 2.0 + frame.height);
+        world.rest_flesh_round_joints(&relaxing, frame.origin.x * 2.0 + frame.height, &mirror);
     // It is built in the guard as drawn, without its weight. It settles
     // under that weight before anything happens to it, and its muscles
     // learn the weight on the way, so it comes to rest in the guard as
@@ -356,21 +370,175 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
     // the trunk dropped onto the pelvis before the joints and muscles had
     // learned to carry it, stretching the lower back half again past its gap
     // (and on a body drawn larger, past where it tears).
+    //
+    // The solver takes one side's joints and flesh before the other's, so
+    // left to itself the body settled a little lopsided and its muscles
+    // learned that: the skull stood 0.8 px off the midline, one fist sagged
+    // 2.3 px and the other 1.4 as play began, and a blow on one side met a
+    // different body from the same blow on the other. The figure is
+    // mirror-symmetric, so each step of the settle keeps it so, every point
+    // and bone evened out with its mirror image, and it learns its weight
+    // evenly.
     let gravity = world.materials.gravity;
     for step in 0..SETTLE_STEPS {
         let share = ((step + 1) as f64 / WEIGHT_RAMP_STEPS as f64).min(1.0);
         world.materials.gravity = gravity * share * share * (3.0 - 2.0 * share);
         world.step(dt, &InputState::default(), width);
+        mirror.even_out(&mut world);
         world.learn_the_guards_weight();
     }
     world.materials.gravity = gravity;
     world.hold_flesh_where_it_lies(&rested_round_joints);
+    // The flesh held where it lies takes up its share of the weight afresh;
+    // it settles before play rather than sagging as the first blow lands.
+    for _ in 0..SETTLE_AFTER_HOLD_STEPS {
+        world.step(dt, &InputState::default(), width);
+        mirror.even_out(&mut world);
+        world.learn_the_guards_weight();
+    }
+    // Last, it comes to rest as the solver holds it, without being evened
+    // out: held perfectly even, it swayed a pixel or two in the first frames
+    // of play, as each blow landed, toward the rest the solver gives it.
+    for _ in 0..SETTLE_AT_REST_STEPS {
+        world.step(dt, &InputState::default(), width);
+    }
     world
 }
 
 /// How many steps a new body settles under its own weight, a second and a
 /// half: the guard's slowest sway dies away in about a second.
 const SETTLE_STEPS: usize = 90;
+
+/// How many more steps it settles once the flesh round the elbows is held
+/// where it lies, half a second.
+const SETTLE_AFTER_HOLD_STEPS: usize = 30;
+
+/// How many steps it then rests as the solver holds it, a second.
+const SETTLE_AT_REST_STEPS: usize = 60;
+
+/// Each point's and bone's mirror image across the body's midline, found by
+/// where they were built: the figure, its mesh, and its skeleton are
+/// mirror-symmetric (`generated_body_mirrors_across_its_midline`).
+pub(super) struct MirrorPairs {
+    /// The midline, across the world.
+    middle: f64,
+    /// Each point's mirror image, itself on the midline, or `MISSING_POINT`.
+    points: Vec<usize>,
+    /// Each bone's mirror image, and whether its ends swap in the mirror
+    /// (the pelvis's do: it runs from one side to the other).
+    bones: Vec<Option<(usize, bool)>>,
+}
+
+impl MirrorPairs {
+    fn of(world: &World, middle: f64) -> Self {
+        let mirrored = |at: Vec2| Vec2 {
+            x: 2.0 * middle - at.x,
+            y: at.y,
+        };
+        let near = |a: Vec2, b: Vec2| (a.x - b.x).abs() < 0.01 && (a.y - b.y).abs() < 0.01;
+        let points = world
+            .points
+            .iter()
+            .map(|point| {
+                let image = mirrored(point.home);
+                world
+                    .points
+                    .iter()
+                    .position(|other| other.layer == point.layer && near(other.home, image))
+                    .unwrap_or(MISSING_POINT)
+            })
+            .collect();
+        let bones = world
+            .bones
+            .iter()
+            .map(|bone| {
+                let (a, b) = (mirrored(bone.home_a), mirrored(bone.home_b));
+                world.bones.iter().enumerate().find_map(|(index, other)| {
+                    if near(other.home_a, a) && near(other.home_b, b) {
+                        Some((index, false))
+                    } else if near(other.home_a, b) && near(other.home_b, a) {
+                        Some((index, true))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+        Self {
+            middle,
+            points,
+            bones,
+        }
+    }
+
+    /// The place halfway between `at` and the mirror image of `image`, and
+    /// that place's own mirror image: where a point and its image stand once
+    /// evened out.
+    fn evened(&self, at: Vec2, image: Vec2) -> (Vec2, Vec2) {
+        let even = Vec2 {
+            x: (at.x + 2.0 * self.middle - image.x) * 0.5,
+            y: (at.y + image.y) * 0.5,
+        };
+        (
+            even,
+            Vec2 {
+                x: 2.0 * self.middle - even.x,
+                y: even.y,
+            },
+        )
+    }
+
+    /// Evens every point and bone out with its mirror image, where it is and
+    /// where it was a step ago, so the body and its motion are mirror images
+    /// of themselves.
+    pub(super) fn even_out(&self, world: &mut World) {
+        for (index, &image) in self.points.iter().enumerate() {
+            if image == MISSING_POINT || image < index {
+                continue;
+            }
+            let (at, then) = (world.points[index], world.points[image]);
+            let (position, image_position) = self.evened(at.position, then.position);
+            let (previous, image_previous) = self.evened(at.previous, then.previous);
+            world.points[index].position = position;
+            world.points[index].previous = previous;
+            world.points[image].position = image_position;
+            world.points[image].previous = image_previous;
+        }
+        for (index, &pair) in self.bones.iter().enumerate() {
+            let Some((image, swapped)) = pair else {
+                continue;
+            };
+            if image < index {
+                continue;
+            }
+            let (bone, other) = (world.bones[index], world.bones[image]);
+            let (other_a, other_b, other_previous_a, other_previous_b) = if swapped {
+                (other.b, other.a, other.previous_b, other.previous_a)
+            } else {
+                (other.a, other.b, other.previous_a, other.previous_b)
+            };
+            let (a, image_a) = self.evened(bone.a, other_a);
+            let (b, image_b) = self.evened(bone.b, other_b);
+            let (previous_a, image_previous_a) = self.evened(bone.previous_a, other_previous_a);
+            let (previous_b, image_previous_b) = self.evened(bone.previous_b, other_previous_b);
+            // A mirror image turns the other way.
+            let spin = (bone.angular_velocity - other.angular_velocity) * 0.5;
+            let segment = &mut world.bones[index];
+            (segment.a, segment.b) = (a, b);
+            (segment.previous_a, segment.previous_b) = (previous_a, previous_b);
+            segment.angular_velocity = spin;
+            let segment = &mut world.bones[image];
+            if swapped {
+                (segment.a, segment.b) = (image_b, image_a);
+                (segment.previous_a, segment.previous_b) = (image_previous_b, image_previous_a);
+            } else {
+                (segment.a, segment.b) = (image_a, image_b);
+                (segment.previous_a, segment.previous_b) = (image_previous_a, image_previous_b);
+            }
+            segment.angular_velocity = -spin;
+        }
+    }
+}
 
 /// Over how many of those steps the body takes its weight, easing in.
 const WEIGHT_RAMP_STEPS: usize = 30;
@@ -994,11 +1162,17 @@ fn edge_key(a: usize, b: usize) -> (usize, usize) {
 
 /// Unit direction of the bone guide nearest to `point`.
 pub(super) fn fiber_direction(point: Vec2, guides: &[(Vec2, Vec2)]) -> Vec2 {
-    let mut best = (f64::INFINITY, Vec2 { x: 0.0, y: 1.0 });
-    for &(a, b) in guides {
+    let (a, b) = guides[nearest_guide(point, guides)];
+    normalized(subtract(b, a), Vec2 { x: 0.0, y: 1.0 })
+}
+
+/// Which of `guides` lies nearest to `point`.
+fn nearest_guide(point: Vec2, guides: &[(Vec2, Vec2)]) -> usize {
+    let mut best = (f64::INFINITY, 0);
+    for (index, &(a, b)) in guides.iter().enumerate() {
         let d = distance_to_segment(point, a, b);
         if d < best.0 {
-            best = (d, normalized(subtract(b, a), Vec2 { x: 0.0, y: 1.0 }));
+            best = (d, index);
         }
     }
     best.1
@@ -1093,10 +1267,10 @@ fn add_long_fiber_springs(
     mesh: &LayerMesh,
     edges: &HashMap<(usize, usize), usize>,
     guides: &[(Vec2, Vec2)],
+    middle: f64,
     through_flesh: &dyn Fn(Vec2, Vec2) -> bool,
 ) {
-    let m = world.materials;
-    let lattice_edge = m.point_spacing * LATTICE_EDGE_SCALE;
+    let lattice_edge = world.materials.point_spacing * LATTICE_EDGE_SCALE;
     let mut neighbors: HashMap<usize, Vec<usize>> = HashMap::new();
     let mut sorted_edges: Vec<(usize, usize)> = edges.keys().copied().collect();
     sorted_edges.sort_unstable();
@@ -1107,41 +1281,94 @@ fn add_long_fiber_springs(
     let mut added: HashMap<(usize, usize), ()> = HashMap::new();
     for &p in &mesh.points {
         let position = world.points[p].position;
-        let fiber = fiber_direction(position, guides);
-        let mut best: Option<(f64, usize)> = None;
-        for &q in neighbors.get(&p).map(Vec::as_slice).unwrap_or(&[]) {
-            for &r in neighbors.get(&q).map(Vec::as_slice).unwrap_or(&[]) {
-                if r == p || edges.contains_key(&edge_key(p, r)) {
-                    continue;
-                }
-                let delta = subtract(world.points[r].position, position);
-                let length = hypot(delta.x, delta.y);
-                if !(1.5 * lattice_edge..=2.6 * lattice_edge).contains(&length) {
-                    continue;
-                }
-                let alignment = dot(delta, fiber) / length;
-                if alignment >= 0.9
-                    && best.is_none_or(|(score, _)| alignment > score)
-                    && through_flesh(position, world.points[r].position)
-                {
-                    best = Some((alignment, r));
-                }
+        // Each point reaches on along its bone's direction, and the point
+        // before reaches it, so the fibers chain. A guide across the
+        // midline, the shoulder girdle's or the pelvis's, runs from the
+        // viewer's left to right, which would chain the left side's fibers
+        // in toward the midline and the right side's out from it: read
+        // outward from the midline on either side instead, and both ways on
+        // it, so the two sides' fibers are mirror images.
+        let (a, b) = guides[nearest_guide(position, guides)];
+        let along = normalized(subtract(b, a), Vec2 { x: 0.0, y: 1.0 });
+        let out = scale(along, if along.x < 0.0 { -1.0 } else { 1.0 });
+        let ways = if (a.x - middle) * (b.x - middle) >= 0.0 {
+            vec![along]
+        } else if position.x > middle + MIDLINE_TOLERANCE {
+            vec![out]
+        } else if position.x < middle - MIDLINE_TOLERANCE {
+            vec![scale(out, -1.0)]
+        } else {
+            vec![out, scale(out, -1.0)]
+        };
+        for fiber in ways {
+            add_long_fiber(
+                world,
+                p,
+                fiber,
+                &neighbors,
+                edges,
+                lattice_edge,
+                through_flesh,
+                &mut added,
+            );
+        }
+    }
+}
+
+/// Joins `p` by a long fiber to the point two edges away round the mesh that
+/// lines up best with `fiber`, if one does.
+#[allow(clippy::too_many_arguments)]
+fn add_long_fiber(
+    world: &mut World,
+    p: usize,
+    fiber: Vec2,
+    neighbors: &HashMap<usize, Vec<usize>>,
+    edges: &HashMap<(usize, usize), usize>,
+    lattice_edge: f64,
+    through_flesh: &dyn Fn(Vec2, Vec2) -> bool,
+    added: &mut HashMap<(usize, usize), ()>,
+) {
+    let m = world.materials;
+    let position = world.points[p].position;
+    let mut lined_up: Vec<(f64, usize)> = Vec::new();
+    for &q in neighbors.get(&p).map(Vec::as_slice).unwrap_or(&[]) {
+        for &r in neighbors.get(&q).map(Vec::as_slice).unwrap_or(&[]) {
+            if r == p || edges.contains_key(&edge_key(p, r)) {
+                continue;
+            }
+            let delta = subtract(world.points[r].position, position);
+            let length = hypot(delta.x, delta.y);
+            if !(1.5 * lattice_edge..=2.6 * lattice_edge).contains(&length) {
+                continue;
+            }
+            let alignment = dot(delta, fiber) / length;
+            if alignment >= 0.9 && through_flesh(position, world.points[r].position) {
+                lined_up.push((alignment, r));
             }
         }
-        if let Some((_, r)) = best {
-            if added.insert(edge_key(p, r), ()).is_none() {
-                push_spring(
-                    world,
-                    p,
-                    r,
-                    TissueLayer::Muscle,
-                    (
-                        SpringKind::LongFiber,
-                        m.muscle_tear_stretch * 1.05,
-                        m.muscle_tear_impulse,
-                    ),
-                );
-            }
+    }
+    // The best lined up, and any as well lined up: a point on the midline
+    // reaching down it finds two, mirror images of each other.
+    let best = lined_up
+        .iter()
+        .map(|&(alignment, _)| alignment)
+        .fold(f64::NEG_INFINITY, f64::max);
+    for (_, r) in lined_up
+        .into_iter()
+        .filter(|&(alignment, _)| alignment >= best - TIE_ALIGNMENT)
+    {
+        if added.insert(edge_key(p, r), ()).is_none() {
+            push_spring(
+                world,
+                p,
+                r,
+                TissueLayer::Muscle,
+                (
+                    SpringKind::LongFiber,
+                    m.muscle_tear_stretch * 1.05,
+                    m.muscle_tear_impulse,
+                ),
+            );
         }
     }
 }
@@ -1196,21 +1423,30 @@ fn attach_skin_to_muscle(
     let max_distance = spacing * 3.15;
     for &skin_point in skin_points {
         let skin_position = world.points[skin_point].position;
-        let mut nearest = [(usize::MAX, f64::INFINITY); SKIN_ATTACHMENT_CANDIDATES];
-        for &muscle_point in muscle_points {
-            let d = distance(skin_position, world.points[muscle_point].position);
-            if d > max_distance
-                || !through_flesh(skin_position, world.points[muscle_point].position)
-            {
-                continue;
-            }
-            if let Some(slot) = nearest.iter().position(|&(_, best)| d < best) {
-                nearest[slot..].rotate_right(1);
-                nearest[slot] = (muscle_point, d);
-            }
-        }
-        for (muscle_point, d) in nearest {
-            if muscle_point != usize::MAX {
+        let mut near: Vec<(usize, f64)> = muscle_points
+            .iter()
+            .map(|&muscle_point| {
+                (
+                    muscle_point,
+                    distance(skin_position, world.points[muscle_point].position),
+                )
+            })
+            .filter(|&(muscle_point, d)| {
+                d <= max_distance
+                    && through_flesh(skin_position, world.points[muscle_point].position)
+            })
+            .collect();
+        near.sort_by(|p, q| p.1.total_cmp(&q.1).then(p.0.cmp(&q.0)));
+        // The nearest few, and every one as near as the last of them: the
+        // mesh's points lie on one lattice, so a skin point is often as near
+        // several muscle points as the last it takes, and picking among them
+        // by the order they were built in tied the flesh of the body's two
+        // halves differently.
+        let enough = near
+            .get(SKIN_ATTACHMENT_CANDIDATES.saturating_sub(1))
+            .map_or(f64::INFINITY, |&(_, d)| d + TIE_DISTANCE);
+        for (muscle_point, d) in near {
+            if d <= enough {
                 world.attachments.push(Attachment {
                     skin_point,
                     muscle_point,

@@ -1,52 +1,84 @@
-//! Moved-body tests. The same blows on the body mirrored left to right or
-//! moved across the window should hurt it alike, judged over the sweep's
-//! runs: a rule that differs is reading where something is on the screen
+//! Moved-body tests. The same blows on the body mirrored left to right, or
+//! standing where either of two fighters stands, should hurt it alike,
+//! judged over the sweep's runs: a rule that differs is reading where
+//! something is in the world, or is not the same on the body's two sides,
 //! rather than what is happening to the body. And a body falling or
 //! drifting free, nothing touching it, should come to no harm, its flesh
 //! staying put on its bones: anything else is a rule judging motion against
-//! the screen instead of against the flesh around it, as broken pieces were
+//! the world instead of against the flesh around it, as broken pieces were
 //! once damped against the world.
 //!
-//! A body built larger, as the app once built it for a big screen, is no
-//! longer played: every body is simulated at the scenarios' size and only
-//! drawn larger or smaller (`rp::View`), and `tools\capture.ps1` checks that
-//! the app plays a blow alike in every window.
+//! Differences are judged as the sweep comparison judges them (`diff.rs`):
+//! how often each count and real-life outcome happened by Fisher's exact
+//! test, and the main numbers by the sign test on matching runs, each run
+//! set beside its own mirror image or moved copy. With some 400 such tests
+//! a few come out unlikely by chance alone, so the same sweep aimed a
+//! millionth of a pixel off is judged too: how far runs part on chance
+//! alone, which the others are read against.
+//!
+//! A body standing elsewhere is the scenarios' body moved there
+//! (`World::move_across`), as a second fighter is; `--twin` says why two
+//! runs part.
 
 use super::*;
+use diff::{fisher, sign_test};
 
 /// A way to move the body and its blows that should change nothing but
 /// where things happen.
 #[derive(Clone, Copy, PartialEq)]
 enum Moved {
     Same,
+    /// Aimed a millionth of a pixel off: what chance alone does.
+    Nudged,
     Mirrored,
-    Across,
+    /// Moved to where fighter N stands (`rp::fighter_frames`).
+    AtFighter(usize),
 }
 
+/// How far off the nudged runs are aimed, in body heights: about a
+/// millionth of a pixel.
+const NUDGE: f64 = 2.0e-9;
+
 impl Moved {
-    const ALL: [Moved; 3] = [Moved::Same, Moved::Mirrored, Moved::Across];
+    const ALL: [Moved; 5] = [
+        Moved::Same,
+        Moved::Nudged,
+        Moved::Mirrored,
+        Moved::AtFighter(0),
+        Moved::AtFighter(1),
+    ];
 
-    fn describe(self) -> &'static str {
+    /// How far across the body stands from the scenarios' place.
+    fn across(self) -> f64 {
         match self {
-            Moved::Same => "as tuned",
-            Moved::Mirrored => "mirrored left to right",
-            Moved::Across => "moved 208 px across the window",
+            Moved::AtFighter(fighter) => {
+                rp::fighter_frames()[fighter].origin.x - rp::world_frame().origin.x
+            }
+            _ => 0.0,
         }
     }
 
-    /// The window it plays in: wider moves the body across without
-    /// changing its size.
-    fn window(self) -> (f64, f64) {
+    fn describe(self) -> String {
         match self {
-            Moved::Same | Moved::Mirrored => (SCENARIO_WIDTH, SCENARIO_HEIGHT),
-            Moved::Across => (SCENARIO_WIDTH + 400.0, SCENARIO_HEIGHT),
+            Moved::Same => "as tuned".to_string(),
+            Moved::Nudged => "aimed a millionth of a pixel off (chance alone)".to_string(),
+            Moved::Mirrored => "mirrored left to right".to_string(),
+            Moved::AtFighter(fighter) => format!(
+                "where the {} fighter stands, {:+.0} px across",
+                if fighter == 0 { "left" } else { "right" },
+                self.across()
+            ),
         }
     }
 
-    fn scenario(self, scenario: &Scenario) -> Scenario {
+    /// The sweep's run `along`, `across` of `scenario`, moved this way: a
+    /// mirrored run is the mirror image of the same run as tuned, so the two
+    /// can be set side by side.
+    fn scenario(self, scenario: &Scenario, along: f64, across: f64) -> Scenario {
         match self {
-            Moved::Mirrored => scenario.mirrored(),
-            _ => *scenario,
+            Moved::Mirrored => scenario.shifted(along, across).mirrored(),
+            Moved::Nudged => scenario.shifted(along + NUDGE, across),
+            _ => scenario.shifted(along, across),
         }
     }
 }
@@ -114,25 +146,41 @@ fn median(mut values: Vec<f64>) -> f64 {
     values.get(values.len() / 2).copied().unwrap_or(0.0)
 }
 
-/// Where `moved`'s runs of `scenario` differ from `base`'s by more than the
-/// aim and the bones' strength spread them: how often each real-life
-/// outcome happened, how often the runs stayed in band, and the medians.
+/// A difference between two ways of playing a scenario's sweep, and how
+/// likely chance is to make one as large.
+struct Difference {
+    text: String,
+    p: f64,
+}
+
+fn stars(p: f64) -> &'static str {
+    if p < 0.01 {
+        "**"
+    } else {
+        "*"
+    }
+}
+
+/// Where `moved`'s runs of `scenario` differ from `base`'s, run for
+/// matching run, by more than chance gives one time in twenty: how often
+/// each real-life outcome happened, how often the runs stayed in band, and
+/// the medians of the main numbers, which must also move a tenth and past
+/// their floor to count.
 fn differences(
     scenario: &Scenario,
     base: &[(ScenarioResult, bool)],
     other: &[(ScenarioResult, bool)],
-) -> Vec<String> {
-    let runs = base.len().max(1);
-    // A fifth of the runs, at least nine of the sweep's 45.
-    let count_limit = (runs / 5).max(2);
+) -> Vec<Difference> {
+    let runs = base.len();
     let mut found = Vec::new();
     let in_band = |runs: &[(ScenarioResult, bool)]| runs.iter().filter(|(_, ok)| *ok).count();
     let (base_band, other_band) = (in_band(base), in_band(other));
-    if base_band.abs_diff(other_band) >= count_limit {
-        found.push(format!(
-            "in band {base_band}/{runs} -> {other_band}/{}",
-            other.len()
-        ));
+    let p = fisher(base_band, runs, other_band, other.len());
+    if p < 0.05 {
+        found.push(Difference {
+            text: format!("in band {base_band}/{runs} -> {other_band}/{}", other.len()),
+            p,
+        });
     }
     for check in scenario.real {
         let hits = |runs: &[(ScenarioResult, bool)]| {
@@ -141,34 +189,53 @@ fn differences(
                 .count()
         };
         let (before, after) = (hits(base), hits(other));
-        if before.abs_diff(after) >= count_limit {
-            found.push(format!(
-                "{}: {before}/{runs} -> {after}/{}",
-                check.outcome.describe(),
-                other.len()
-            ));
+        let p = fisher(before, runs, after, other.len());
+        if p < 0.05 {
+            found.push(Difference {
+                text: format!(
+                    "{}: {before}/{runs} -> {after}/{}",
+                    check.outcome.describe(),
+                    other.len()
+                ),
+                p,
+            });
         }
     }
     for metric in &metrics() {
-        let median_of = |runs: &[(ScenarioResult, bool)]| {
-            median(
-                runs.iter()
-                    .map(|(result, _)| (metric.value)(result))
-                    .collect(),
-            )
-        };
-        let (before, after) = (median_of(base), median_of(other));
-        let limit = (0.3 * before.abs().max(after.abs())).max(metric.floor);
-        if (after - before).abs() > limit {
-            found.push(format!("median {} {before:.1} -> {after:.1}", metric.name));
+        let pairs: Vec<(f64, f64)> = base
+            .iter()
+            .zip(other)
+            .map(|((a, _), (b, _))| ((metric.value)(a), (metric.value)(b)))
+            .collect();
+        let (more, less) = pairs.iter().fold((0, 0), |(more, less), (x, y)| {
+            if y > x {
+                (more + 1, less)
+            } else if y < x {
+                (more, less + 1)
+            } else {
+                (more, less)
+            }
+        });
+        let p = sign_test(more, less);
+        let before = median(pairs.iter().map(|pair| pair.0).collect());
+        let after = median(pairs.iter().map(|pair| pair.1).collect());
+        let moved = (after - before).abs();
+        if p < 0.05 && moved >= 0.1 * before.abs().max(after.abs()) && moved >= metric.floor {
+            found.push(Difference {
+                text: format!(
+                    "median {} {before:.1} -> {after:.1} (higher in {more} runs, lower in {less})",
+                    metric.name
+                ),
+                p,
+            });
         }
     }
     found
 }
 
 /// Plays every selected scenario's sweep as tuned and moved each way, on
-/// all cores, and reports where a move changed what the blows did; then
-/// lets a body fall and drift free.
+/// all cores, and reports where a move changed what the blows did beyond
+/// chance; then lets a body fall and drift free.
 pub(crate) fn moved_body_tests(selected: &[Scenario], output_dir: &Path) {
     let started = Instant::now();
     let mut jobs = Vec::new();
@@ -186,6 +253,7 @@ pub(crate) fn moved_body_tests(selected: &[Scenario], output_dir: &Path) {
     let next = AtomicUsize::new(0);
     let finished = Mutex::new(Vec::with_capacity(jobs.len()));
     let workers = thread::available_parallelism().map_or(4, |count| count.get());
+    let tuned_frame = rp::body_frame(SCENARIO_WIDTH, SCENARIO_HEIGHT);
     thread::scope(|scope| {
         for _ in 0..workers.min(jobs.len()) {
             scope.spawn(|| loop {
@@ -195,12 +263,20 @@ pub(crate) fn moved_body_tests(selected: &[Scenario], output_dir: &Path) {
                 };
                 let moved = Moved::ALL[way];
                 let scenario = moved
-                    .scenario(&selected[index])
-                    .shifted(along, across)
+                    .scenario(&selected[index], along, across)
                     .with_bone_strength(strength);
-                let (width, height) = moved.window();
-                let body = settled_body(width, height, scenario.materials());
-                let (_, result) = run_on(body, &scenario, width, height, |_, _, _| {});
+                let mut body = settled_body(SCENARIO_WIDTH, SCENARIO_HEIGHT, scenario.materials());
+                let dx = moved.across();
+                body.move_across(dx);
+                let frame = rp::BodyFrame {
+                    origin: rp::Vec2 {
+                        x: tuned_frame.origin.x + dx,
+                        y: tuned_frame.origin.y,
+                    },
+                    ..tuned_frame
+                };
+                let (_, result) =
+                    rp::scenarios::run_at(body, &scenario, frame, SCENARIO_WIDTH, |_, _, _| {});
                 let ok = scenario.violations(&result).is_empty();
                 finished
                     .lock()
@@ -219,7 +295,9 @@ pub(crate) fn moved_body_tests(selected: &[Scenario], output_dir: &Path) {
     }
 
     let mut report = String::new();
-    let mut differing = vec![0; Moved::ALL.len()];
+    // For each way: the scenarios with a difference chance gives under 1% of
+    // the time, and the differences under 5% and under 1%.
+    let mut tally = vec![(0, 0, 0); Moved::ALL.len()];
     for (index, scenario) in selected.iter().enumerate() {
         let base = &played[index][0];
         for (way, &moved) in Moved::ALL.iter().enumerate().skip(1) {
@@ -227,21 +305,30 @@ pub(crate) fn moved_body_tests(selected: &[Scenario], output_dir: &Path) {
             if found.is_empty() {
                 continue;
             }
-            differing[way] += 1;
+            let sure = found.iter().filter(|d| d.p < 0.01).count();
+            tally[way].0 += usize::from(sure > 0);
+            tally[way].1 += found.len();
+            tally[way].2 += sure;
             report.push_str(&format!(
                 "  {} {}: {}\n",
                 scenario.name,
                 moved.describe(),
-                found.join("; ")
+                found
+                    .iter()
+                    .map(|d| format!("{} {}", stars(d.p), d.text))
+                    .collect::<Vec<_>>()
+                    .join("; ")
             ));
         }
     }
-    let mut text = String::from("Moved-body tests: the same blows should hurt the body alike\n");
+    let mut text = String::from(
+        "Moved-body tests: the same blows should hurt the body alike\n(* a difference chance gives under 5% of the time, ** under 1%; read them against the runs aimed a millionth of a pixel off, which differ by chance alone)\n",
+    );
     for (way, &moved) in Moved::ALL.iter().enumerate().skip(1) {
+        let (scenarios, differences, sure) = tally[way];
         text.push_str(&format!(
-            "  {}: {} of {} scenarios differ\n",
+            "  {}: {scenarios} of {} scenarios differ under 1%; {differences} differences under 5%, {sure} under 1%\n",
             moved.describe(),
-            differing[way],
             selected.len()
         ));
     }

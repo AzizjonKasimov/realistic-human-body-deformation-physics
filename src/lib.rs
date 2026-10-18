@@ -10,7 +10,7 @@ mod view;
 pub use silhouette::silhouette_distance;
 pub use simulation::*;
 pub use version::version_label;
-pub use view::{world_frame, View};
+pub use view::{fighter_frames, world_frame, View, FIGHTER_SPACING};
 
 #[cfg(test)]
 mod tests {
