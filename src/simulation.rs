@@ -16,6 +16,7 @@ mod phases;
 mod properties;
 mod soft;
 mod stance;
+mod tendons;
 mod tissue;
 mod tools;
 mod tuning;
@@ -30,6 +31,7 @@ pub use journal::{Actor, Event, EventKind, Journal, Measure, StepNote, Subject};
 pub use motion::MotionSnapshot;
 pub use phases::{PhaseClock, PhaseTime, PhaseTimes, Traced, TracedStage};
 pub use stance::{HipHold, JointDrive, Limb, PostureBinding};
+pub use tendons::{Muscle, Tendon, TendonEnd};
 pub use tissue::SpringKind;
 pub use tools::{swing_power, tool_geometry, tool_pose, ToolGeometry, ToolPose, ToolReach};
 pub use tuning::{apply_settings, parse_settings, trying};
@@ -339,6 +341,10 @@ pub struct Materials {
     pub bone_tie_hertz: f64,
     pub foot_tie_hertz: f64,
     pub bone_tie_damping_ratio: f64,
+    /// How far past the guard the flesh round the elbow rests, in radians: a
+    /// relaxed elbow rests part way open (`rest_flesh_round_joints`); none
+    /// rests it in the guard, as the body is built.
+    pub elbow_rest_opening: f64,
     pub muscle_fiber_rupture_damage_floor: f64,
     pub muscle_tear_stretch: f64,
     pub muscle_tear_impulse: f64,
@@ -592,6 +598,9 @@ impl Default for Materials {
             bone_tie_hertz: 30.0,
             foot_tie_hertz: 55.0,
             bone_tie_damping_ratio: 0.4,
+            // A relaxed elbow rests at 107 degrees, 10 either way (Wiegner and
+            // Watts 1986), 61 degrees more open than the guard's 46.
+            elbow_rest_opening: 1.06,
             muscle_fiber_rupture_damage_floor: 0.0,
             muscle_tear_stretch: 1.92,
             muscle_tear_impulse: 1180.0,
@@ -1482,6 +1491,8 @@ pub struct Stats {
 
 #[derive(Clone, Copy, Debug)]
 pub struct ContactDebug {
+    /// Times the skin held a closed break's piece from passing out through it.
+    pub skin_held_pieces: i32,
     pub active: bool,
     pub down: bool,
     pub striker_position: Vec2,
@@ -1549,9 +1560,11 @@ pub struct ContactDebug {
     pub solver_iterations: i32,
     /// Times this step an outline point was pushed out from behind another
     /// part of the outline, as an arm pressed against the chest is, and the
-    /// deepest such overlap in pixels.
+    /// deepest such overlap in pixels, and the deepest between two parts of
+    /// the body, a limb and the trunk or two limbs.
     pub outline_contacts: i32,
     pub max_outline_overlap: f64,
+    pub max_overlap_between_parts: f64,
     pub fragment_sleep_events: i32,
     pub fragment_wake_events: i32,
     pub fragment_budget_skips: i32,
@@ -1589,6 +1602,7 @@ pub struct ContactDebug {
 impl Default for ContactDebug {
     fn default() -> Self {
         Self {
+            skin_held_pieces: 0,
             active: false,
             down: false,
             striker_position: Vec2::default(),
@@ -1652,6 +1666,7 @@ impl Default for ContactDebug {
             solver_iterations: 0,
             outline_contacts: 0,
             max_outline_overlap: 0.0,
+            max_overlap_between_parts: 0.0,
             fragment_sleep_events: 0,
             fragment_wake_events: 0,
             fragment_budget_skips: 0,
@@ -1817,6 +1832,8 @@ pub struct World {
     bone_covers: Vec<cover::BoneCover>,
     bone_attachments: Vec<BoneAttachment>,
     bone_joints: Vec<BoneJoint>,
+    /// The muscles and tendons across the joints (`tendons.rs`).
+    tendons: Vec<Tendon>,
     vessels: Vec<VesselSegment>,
     cavities: Vec<CavityRegion>,
     organs: Vec<OrganRegion>,
@@ -1919,6 +1936,7 @@ impl World {
             bone_covers: Vec::new(),
             bone_attachments: Vec::new(),
             bone_joints: Vec::new(),
+            tendons: Vec::new(),
             vessels: Vec::new(),
             cavities: Vec::new(),
             organs: Vec::new(),
@@ -7096,6 +7114,7 @@ impl World {
             }
         }
         self.split_stance_at_break(bone_index, second_index, break_t);
+        self.split_tendons_at_break(bone_index, second_index, break_t);
         self.let_go_of_broken_limb(old.limb, old.part);
         // The periosteum and the muscle round a break hold its pieces
         // together: they bend and shift at the break but do not come apart.

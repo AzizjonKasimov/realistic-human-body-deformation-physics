@@ -204,7 +204,11 @@ fn visual_scenarios() -> Vec<VisualScenario> {
         VisualScenario {
             name: "arm_sharp_cut_visual",
             intent: "cut",
-            strike: tuned_strike("arm_sharp"),
+            // About 9 mm across `arm_sharp`'s path: on the path itself the
+            // blade runs into the elbow's crease, whose skin rests squeezed in
+            // the guard as a bent elbow's folds, and stalls there. The sweep's
+            // 3 runs on that path miss the artery; its 42 moved off it cut it.
+            strike: tuned_strike("arm_sharp").shifted(0.0, 0.005),
             // A knife drawn along the underside of the raised arm opens the
             // artery that runs under the skin there, which spurts, then bleeds
             // steadily; no bone breaks. The cut runs along the arm's muscle

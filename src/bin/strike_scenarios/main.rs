@@ -80,9 +80,10 @@
 //!                                     the play (0, the start, by default): bones
 //!                                     where they lie and how far from where they
 //!                                     were built, joints turned and slipped,
-//!                                     arteries, flesh slid off each bone; WHAT is
-//!                                     bones, joints, vessels, ties, flesh=N (the
-//!                                     flesh held to bone N), or all
+//!                                     tendons against their slack, arteries,
+//!                                     flesh slid off each bone; WHAT is bones,
+//!                                     joints, tendons, vessels, ties, flesh=N
+//!                                     (the flesh held to bone N), or all
 //!   --mesh U,V[,R][:FRAME]            draw the skin's and the muscle's triangles
 //!                                     round (U, V), R body heights either way
 //!                                     (0.04), on a frame of the play, slivers
@@ -433,7 +434,7 @@ fn parse_options() -> Result<Options, String> {
             "--dump" => {
                 let spec = args
                     .next()
-                    .ok_or("--dump needs bones, joints, vessels, ties, or all")?;
+                    .ok_or("--dump needs bones, joints, tendons, vessels, ties, or all")?;
                 options.watch.dump = Some(Dump::parse(&spec)?);
             }
             "--mesh" => {

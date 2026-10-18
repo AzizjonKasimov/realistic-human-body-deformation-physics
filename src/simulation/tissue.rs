@@ -274,6 +274,197 @@ impl World {
         self.carry_rest_tension();
     }
 
+    /// The flesh round the elbows rests as a living arm's does: a relaxed
+    /// elbow rests part way open (Wiegner and Watts 1986), not bent as far as
+    /// the guard holds it, and its skin and muscle bear being stretched as
+    /// far as the elbow's whole range takes them. A weightless copy of the
+    /// body turns each joint in `joints` (its index, the way it opens, how far
+    /// it opens to relax, and how far its range takes it that way) from the
+    /// guard to where it relaxes, and on to the end of its range; each spring
+    /// and triangle near those joints then rests at the length and area it
+    /// had relaxed, and tires, sets, and tears only past the longest the
+    /// range stretched it. Built at rest in the guard, the fold held a limp
+    /// forearm up, and the skin at the elbow's crease, stretched half again
+    /// with the arm straight, tore as it tired. The shoulders rest as built:
+    /// rested hanging at the side, a struck upper arm broke more often and
+    /// its flesh turned inside out. Returns the points whose flesh took new
+    /// lengths; `width` is the window the body stands in.
+    pub(super) fn rest_flesh_round_joints(
+        &mut self,
+        joints: &[(usize, f64, f64, f64)],
+        width: f64,
+    ) -> Vec<bool> {
+        let mut touched = vec![false; self.points.len()];
+        if joints.is_empty() {
+            return touched;
+        }
+        // Only the flesh round the joints takes new lengths: the sweep moves
+        // nothing else on purpose, and whatever else it nudged is not the
+        // joints' to set.
+        let reach = JOINT_REST_REACH * self.materials.point_spacing;
+        let pivots: Vec<Vec2> = joints
+            .iter()
+            .map(|&(index, ..)| self.bones[self.bone_joints[index].b].home_a)
+            .collect();
+        let near: Vec<bool> = self
+            .points
+            .iter()
+            .map(|point| {
+                pivots
+                    .iter()
+                    .any(|&pivot| distance(point.home, pivot) < reach)
+            })
+            .collect();
+        let mut swept = self.clone();
+        swept.materials.gravity = 0.0;
+        let dt = swept.materials.fixed_dt;
+        let lengths = |world: &World| -> Vec<f64> {
+            world
+                .springs
+                .iter()
+                .map(|spring| {
+                    distance(
+                        world.points[spring.a].position,
+                        world.points[spring.b].position,
+                    )
+                })
+                .collect()
+        };
+        let built = lengths(self);
+        let mut longest = built.clone();
+        let mut opened = Vec::new();
+        let mut opened_areas = Vec::new();
+        // Muscles stiff enough to hold the elbow where they aim it against
+        // the flesh: opened to the relaxed angle and held there while the
+        // flesh settles, then on to straight.
+        for (phase, ramp, hold) in [(0, 24, 24), (1, 36, 12)] {
+            for step in 0..ramp + hold {
+                let share = ((step + 1) as f64 / ramp as f64).min(1.0);
+                for &(index, way, relaxed, full) in joints {
+                    let (from, to) = if phase == 0 {
+                        (0.0, relaxed)
+                    } else {
+                        (relaxed, full)
+                    };
+                    let drive = swept.bone_joints[index].drive;
+                    swept.bone_joints[index].drive = JointDrive {
+                        stiffness: 300.0,
+                        damping: 15.0,
+                        max_torque: 200.0,
+                        aim: way * (from + (to - from) * share),
+                        ..drive
+                    };
+                }
+                swept.step(dt, &InputState::default(), width);
+                for (most, now) in longest.iter_mut().zip(lengths(&swept)) {
+                    *most = most.max(now);
+                }
+            }
+            if opened.is_empty() {
+                opened = lengths(&swept);
+                opened_areas = swept
+                    .areas
+                    .iter()
+                    .map(|area| {
+                        signed_area(
+                            swept.points[area.a].position,
+                            swept.points[area.b].position,
+                            swept.points[area.c].position,
+                        )
+                    })
+                    .collect();
+            }
+        }
+        for (index, (spring, wear)) in self
+            .springs
+            .iter_mut()
+            .zip(&mut self.spring_wear)
+            .enumerate()
+        {
+            let (was, now, most) = (built[index], opened[index], longest[index]);
+            if !(near[spring.a] && near[spring.b])
+                || was <= EPSILON
+                || ((now / was - 1.0).abs() < 0.01 && most / was - 1.0 < 0.01)
+            {
+                continue;
+            }
+            spring.rest *= now / was;
+            wear.rest_reference = spring.rest;
+            wear.prestretch = most / spring.rest;
+            touched[spring.a] = true;
+            touched[spring.b] = true;
+        }
+        for (area, &now) in self.areas.iter_mut().zip(&opened_areas) {
+            if !(near[area.a] && near[area.b] && near[area.c]) {
+                continue;
+            }
+            let was = signed_area(
+                self.points[area.a].home,
+                self.points[area.b].home,
+                self.points[area.c].home,
+            );
+            if was.abs() <= EPSILON || (now / was - 1.0).abs() < 0.01 {
+                continue;
+            }
+            area.rest_area *= now / was;
+            for corner in [area.a, area.b, area.c] {
+                touched[corner] = true;
+            }
+        }
+        self.carry_rest_tension();
+        touched
+    }
+
+    /// Once the body has settled, the flesh `touched` takes its hold on the
+    /// muscle under it, on its bones, and its place on the skeleton from
+    /// where it now lies: rested part way open (`rest_flesh_round_joints`),
+    /// the flesh round the elbow settles a little off where it was built,
+    /// and held to where it was built, the fat there started sheared, so a
+    /// jolt to the other side of the body tore it and let the elbow sag open.
+    pub(super) fn hold_flesh_where_it_lies(&mut self, touched: &[bool]) {
+        let touches = |point: usize| touched.get(point).copied().unwrap_or(false);
+        let spacing = self.materials.point_spacing;
+        for attachment in &mut self.attachments {
+            if attachment.broken
+                || !(touches(attachment.skin_point) || touches(attachment.muscle_point))
+            {
+                continue;
+            }
+            attachment.rest = distance(
+                self.points[attachment.skin_point].position,
+                self.points[attachment.muscle_point].position,
+            )
+            .max(spacing * 0.34);
+            attachment.impulse = 0.0;
+        }
+        for attachment in &mut self.bone_attachments {
+            if attachment.broken || !touches(attachment.point) {
+                continue;
+            }
+            let bone = self.bones[attachment.bone];
+            let point = self.points[attachment.point].position;
+            attachment.offset = subtract(point, bone_point(bone, attachment.t));
+            attachment.rest = distance(point, bone_point(bone, attachment.t)).max(1.0);
+            (attachment.along, attachment.across) = bone_tie_frame(&bone, attachment.t, point);
+            attachment.impulse = Vec2::default();
+        }
+        for (index, hold) in self.point_holds.iter_mut().enumerate() {
+            if !touches(index) {
+                continue;
+            }
+            let point = self.points[index].position;
+            let binding = &mut hold.posture;
+            for slot in 0..2 {
+                let Some(bone) = self.bones.get(binding.bones[slot]) else {
+                    continue;
+                };
+                (binding.tau[slot], binding.sigma[slot]) =
+                    stance::bone_frame(bone.a, bone.b, point);
+            }
+            hold.posture_impulse = Vec2::default();
+        }
+    }
+
     /// Lets the stretched skin settle where it pulls itself even, its outline
     /// held: on an uneven mesh its springs do not quite balance as built, and
     /// what is left would slide it over the muscle. Each point inside moves
@@ -419,6 +610,11 @@ impl World {
         (length - attachment.rest).abs() / thickness.max(EPSILON)
     }
 }
+
+/// How far round a joint's turning point, in point spacings, the flesh rests
+/// as a relaxed arm's does (`rest_flesh_round_joints`): the elbow's crease
+/// and its point, where the fold bends the flesh.
+const JOINT_REST_REACH: f64 = 4.0;
 
 /// How many passes the stretched skin takes to settle as the body is built.
 const SKIN_SETTLE_PASSES: usize = 300;

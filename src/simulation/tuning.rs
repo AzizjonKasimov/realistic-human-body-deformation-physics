@@ -83,6 +83,7 @@ named_settings!(
     bone_tie_hertz,
     foot_tie_hertz,
     bone_tie_damping_ratio,
+    elbow_rest_opening,
     muscle_fiber_rupture_damage_floor,
     muscle_tear_stretch,
     muscle_tear_impulse,

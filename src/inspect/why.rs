@@ -180,6 +180,7 @@ fn phase_note(phase: &str) -> &'static str {
     match phase {
         "integrate" => " (gravity, drag)",
         "outline hold" => " (the skin outline's hold, which balances its pull at rest)",
+        "skin holds pieces" => " (whole skin holding a closed break's pieces in)",
         "ghosts" => " (a cut's ghost points)",
         "predict" => " (its own momentum)",
         "fibers" => " (the tissue's springs)",
@@ -190,6 +191,7 @@ fn phase_note(phase: &str) -> &'static str {
         "hip hold" => " (the hips held where they stood, as legs would)",
         "joint muscles" => " (the muscles across the joints)",
         "joints" => " (joints holding their bones)",
+        "tendons" => " (the muscles and tendons across the joints)",
         "warm start: fibers" => " (the pull the springs carried in)",
         "warm start: areas" => " (the push the triangles carried in)",
         "warm start: fat" => " (the pull skin and muscle carried in)",
@@ -198,6 +200,7 @@ fn phase_note(phase: &str) -> &'static str {
         "warm start: hip hold" => " (the hold on the hips carried in)",
         "warm start: joint muscles" => " (the pull the joint muscles carried in)",
         "warm start: joints" => " (the pull the joints carried in)",
+        "warm start: tendons" => " (the pull the tendons carried in)",
         "bones" => " (bone lengths, breaks)",
         "world bounds" => " (floor and window)",
         _ => "",

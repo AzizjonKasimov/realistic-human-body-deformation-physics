@@ -204,7 +204,7 @@ fn perpendicular(value: Vec2) -> Vec2 {
 /// Where `p` sits on a bone running from `a` to `b`: how far along it, as a
 /// share of its length, and how far across it, a quarter turn
 /// counterclockwise, as a share of its length.
-fn bone_frame(a: Vec2, b: Vec2, p: Vec2) -> (f64, f64) {
+pub(super) fn bone_frame(a: Vec2, b: Vec2, p: Vec2) -> (f64, f64) {
     let along = subtract(b, a);
     let length_sq = dot(along, along).max(EPSILON);
     let offset = subtract(p, a);
@@ -220,6 +220,11 @@ impl World {
     pub(super) fn newton_metres(&self) -> f64 {
         let m_per_px = self.mm_per_px() * 0.001;
         1.0 / (KG_PER_MASS * m_per_px * m_per_px)
+    }
+
+    /// One newton in the engine's units of force.
+    pub(super) fn newtons(&self) -> f64 {
+        1.0 / (KG_PER_MASS * self.mm_per_px() * 0.001)
     }
 
     /// How far joint `joint` is turned off the angle it was built at, in
@@ -592,7 +597,15 @@ impl World {
     /// A bone of `part` in `limb` broke: if that leaves the limb hanging,
     /// its muscles let go.
     pub(super) fn let_go_of_broken_limb(&mut self, limb: Limb, part: BonePart) {
-        let Some(index) = limb.index().filter(|_| limb.falls_when_broken(part)) else {
+        if limb.falls_when_broken(part) {
+            self.let_limb_go(limb);
+        }
+    }
+
+    /// The muscles of `limb` let go, as a broken bone makes them, and it
+    /// hangs, only damped: as a person's arm hangs once they are knocked out.
+    pub fn let_limb_go(&mut self, limb: Limb) {
+        let Some(index) = limb.index() else {
             return;
         };
         if !self.limp_limbs[index] {

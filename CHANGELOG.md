@@ -2,6 +2,12 @@
 
 What each version of Realistic Physics changed, newest first. The game shows its version on the start screen and in its bottom-left corner, and every Short made from the game shows the version it was made with. Only the newest version is online.
 
+## v0.11 (2026-10-18)
+
+- A broken arm drops out of the guard and hangs at the side instead of staying raised: the elbow's flesh rests as a relaxed elbow does, and the inside of the elbow is a crease, so the arm can also straighten all the way without tearing.
+- The muscles across the elbow hold a smashed arm together, so its broken bone stays inside it, and tear when it is pulled too far.
+- Unbroken skin holds the pieces of a closed break in, so they poke out through it less often.
+
 ## v0.10.2 (2026-10-17)
 
 - A blow hurts the body the same on every screen. A big window used to build a finer body with relatively smaller tools, and a small one a coarser body; now every screen plays the same body and only draws it larger or smaller.

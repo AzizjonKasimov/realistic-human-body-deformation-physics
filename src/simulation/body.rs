@@ -10,10 +10,11 @@
 use std::collections::HashMap;
 
 use super::*;
-use crate::mesh::{delaunay, hex_lattice, resample_loop, P2};
+use crate::mesh::{delaunay, distance as mesh_distance, hex_lattice, resample_loop_refined, P2};
 use crate::silhouette::{
-    figure_part, human_silhouette, FigurePart, Landmark, SilhouetteField, ANKLE, ELBOW,
-    FIELD_HALF_WIDTH, HIP, KNEE, KNUCKLES, SHOULDER, TOES, WRIST,
+    figure_part, human_silhouette, muscle_silhouette, on_elbow_crease, FigurePart, Landmark,
+    SilhouetteField, ANKLE, CREASE_POINT_SPACING, ELBOW, FIELD_HALF_WIDTH, HIP, KNEE, KNUCKLES,
+    SHOULDER, TOES, WRIST,
 };
 
 /// Outline points are spaced this many point spacings apart.
@@ -147,14 +148,14 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
     world.body_height = frame.height;
     let spacing = materials.point_spacing;
     // Flesh is tied only to what it reaches through flesh, not to what lies
-    // across a gap in the figure, such as the armpit.
+    // across a gap such as the inner elbow's crease or the armpit.
     let through_flesh = |from: Vec2, to: Vec2| reaches_through_flesh(field, frame, from, to);
 
     let skin = build_layer_mesh(&mut world, frame, field, TissueLayer::Skin, 0.0);
     let muscle = build_layer_mesh(
         &mut world,
         frame,
-        field,
+        muscle_silhouette(),
         TissueLayer::Muscle,
         spacing * MUSCLE_INSET_SCALE,
     );
@@ -230,6 +231,9 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
     );
 
     let skeleton = add_skeleton(&mut world, frame, materials);
+    for (side, limb) in [Limb::LeftArm, Limb::RightArm].into_iter().enumerate() {
+        world.add_arm_tendons(limb, skeleton.upper_arms[side], skeleton.forearms[side]);
+    }
     cover::measure_bone_covers(&mut world, frame, field);
 
     for &muscle_point in &muscle.points {
@@ -246,7 +250,13 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
                 nearest_t = t;
             }
         }
-        if nearest_bone != usize::MAX {
+        // Flesh past the end of an arm bone at the elbow wraps round the
+        // joint, over the point of the elbow, and slides over it as the elbow
+        // turns: tied to the end of the upper arm, it was torn off as the
+        // elbow straightened, and held a broken forearm bent up in the guard.
+        let past_elbow = (skeleton.upper_arms.contains(&nearest_bone) && nearest_t >= 1.0)
+            || (skeleton.forearms.contains(&nearest_bone) && nearest_t <= 0.0);
+        if nearest_bone != usize::MAX && !past_elbow {
             world.add_bone_attachment(muscle_point, nearest_bone, nearest_t);
         }
     }
@@ -289,7 +299,8 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
     world.give_tissue_physical_properties(frame);
     // Tissue keeps its place on the bones of its own part of the body: the
     // flesh of an arm on the arm's bones, the chest's on the trunk's, and
-    // only on bones it reaches through flesh.
+    // only on bones it reaches through flesh, so the forearm's side of the
+    // elbow's crease keeps its place on the forearm alone.
     let bone_homes: Vec<(Vec2, Vec2)> = world
         .bones
         .iter()
@@ -316,6 +327,25 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
     world.set_floor_y(frame.point(0.0, 1.0).y);
     world.hold_hip(skeleton.pelvis, false);
     world.hold_hip(skeleton.pelvis, true);
+    // The elbows, the way each opens, toward the larger end of its range,
+    // how far it opens to relax, and how far its range takes it.
+    let mut relaxing = Vec::new();
+    for side in 0..2 {
+        let elbow = world.bone_joints.iter().position(|joint| {
+            joint.a == skeleton.upper_arms[side] && joint.b == skeleton.forearms[side]
+        });
+        if let Some(index) = elbow.filter(|_| materials.elbow_rest_opening > 0.0) {
+            let joint = world.bone_joints[index];
+            let (way, full) = if joint.max_angle > -joint.min_angle {
+                (1.0, joint.max_angle)
+            } else {
+                (-1.0, -joint.min_angle)
+            };
+            relaxing.push((index, way, materials.elbow_rest_opening, full));
+        }
+    }
+    let rested_round_joints =
+        world.rest_flesh_round_joints(&relaxing, frame.origin.x * 2.0 + frame.height);
     // It is built in the guard as drawn, without its weight. It settles
     // under that weight before anything happens to it, and its muscles
     // learn the weight on the way, so it comes to rest in the guard as
@@ -334,6 +364,7 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
         world.learn_the_guards_weight();
     }
     world.materials.gravity = gravity;
+    world.hold_flesh_where_it_lies(&rested_round_joints);
     world
 }
 
@@ -865,7 +896,21 @@ fn build_layer_mesh(
             })
             .collect();
         let first = candidates.len();
-        let resampled = resample_loop(&world_outline, spacing * BOUNDARY_SPACING_SCALE);
+        // Along the elbow's narrow crease the outline's points lie closer
+        // than its width, so the mesh follows the slit.
+        let on_crease = |p: P2| {
+            let (u, v) = frame.body_coords(Vec2 { x: p.0, y: p.1 });
+            on_elbow_crease(u, v, -inset / frame.height)
+        };
+        let crease_spacing = CREASE_POINT_SPACING * frame.height;
+        let resampled =
+            resample_loop_refined(&world_outline, spacing * BOUNDARY_SPACING_SCALE, |a, b| {
+                if on_crease(a) || on_crease(b) {
+                    (mesh_distance(a, b) / crease_spacing).ceil() as usize
+                } else {
+                    1
+                }
+            });
         let count = resampled.len();
         candidates.extend(resampled);
         next_on_outline.extend((0..count).map(|k| first + (k + 1) % count));
@@ -1181,7 +1226,7 @@ fn attach_skin_to_muscle(
 
 /// Whether the straight way from `from` to `to` runs through the body's
 /// flesh, within a pixel of its outline: flesh is tied to a bone or to other
-/// flesh through flesh, not across a gap in the figure such as the armpit.
+/// flesh through flesh, not across a gap such as the inner elbow's crease.
 fn reaches_through_flesh(field: &SilhouetteField, frame: BodyFrame, from: Vec2, to: Vec2) -> bool {
     let steps = (distance(from, to) / 2.0).ceil().max(1.0) as usize;
     (1..steps).all(|step| {
