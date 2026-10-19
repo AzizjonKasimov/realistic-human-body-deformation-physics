@@ -936,4 +936,86 @@ mod tests {
             "a bone stands {worst:.1} px from where it was built"
         );
     }
+
+    /// How far body `body`'s feet rise off where they stood, and slide
+    /// along the floor, at most, over `steps` steps of `world` with `input`
+    /// on the first.
+    fn feet_moved(world: &mut World, body: usize, input: InputState, steps: usize) -> (f64, f64) {
+        let dt = world.materials.fixed_dt;
+        let feet: Vec<usize> = (0..world.bones.len())
+            .filter(|&index| {
+                let bone = world.bones[index];
+                bone.part == BonePart::Foot && bone.body as usize == body
+            })
+            .collect();
+        let start: Vec<(Vec2, Vec2)> = feet
+            .iter()
+            .map(|&foot| (world.bones[foot].a, world.bones[foot].b))
+            .collect();
+        let (mut rose, mut slid) = (0.0_f64, 0.0_f64);
+        for step in 0..steps {
+            let input = if step == 0 {
+                input
+            } else {
+                InputState {
+                    leans: input.leans,
+                    ..InputState::default()
+                }
+            };
+            world.step(dt, &input, crate::scenarios::SCENARIO_WIDTH);
+            for (&foot, &(a, b)) in feet.iter().zip(&start) {
+                let bone = world.bones[foot];
+                rose = rose.max(a.y - bone.a.y).max(b.y - bone.b.y);
+                slid = slid.max((bone.a.x - a.x).abs()).max((bone.b.x - b.x).abs());
+            }
+        }
+        (rose, slid)
+    }
+
+    /// A fighter punching keeps its feet where they stand, the legs leaning
+    /// as the hips go in: held up at the hips, its legs swung from them like
+    /// a pendulum, both feet sliding 40 cm toward the other fighter and the
+    /// near one rising 8 cm.
+    #[test]
+    fn a_puncher_keeps_its_feet_on_the_floor() {
+        let mut world = create_fighters(Materials::default());
+        let arm = world.inner_arm(0);
+        let input = InputState {
+            punches: [Some((0, arm)), None, None, None],
+            ..InputState::default()
+        };
+        let (rose, slid) = feet_moved(&mut world, 0, input, 120);
+        assert!(rose < 4.0, "a foot rose {rose:.1} px off the floor");
+        assert!(slid < 6.0, "a foot slid {slid:.1} px along the floor");
+    }
+
+    /// A fighter leaning back a quarter metre keeps both feet on the floor,
+    /// sinking into the lean as the legs reach: held up at their height, the
+    /// hips pulled the near foot off the floor and tore its ankle.
+    #[test]
+    fn a_leaning_fighter_keeps_its_feet_on_the_floor() {
+        let mut world = create_fighters(Materials::default());
+        let input = InputState {
+            leans: [Some((1, true)), None],
+            ..InputState::default()
+        };
+        let (rose, slid) = feet_moved(&mut world, 1, input, 120);
+        assert!(rose < 4.0, "a foot rose {rose:.1} px off the floor");
+        assert!(slid < 6.0, "a foot slid {slid:.1} px along the floor");
+        assert_eq!(
+            world.stats.broken_bone_joints, 0,
+            "leaning back tore a joint"
+        );
+    }
+
+    /// A leg hanging limp bears no weight, and its foot is not held.
+    #[test]
+    fn a_limp_leg_stands_on_nothing() {
+        let mut world = create_layered_body(1280.0, 720.0, Materials::default());
+        let hold = world.foot_holds[0];
+        assert!(world.standing_foot(&hold).is_some());
+        let leg = world.bones[hold.bone].limb;
+        world.let_limb_go(0, leg);
+        assert!(world.standing_foot(&hold).is_none());
+    }
 }

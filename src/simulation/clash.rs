@@ -387,3 +387,120 @@ impl World {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scenarios::SCENARIO_WIDTH;
+
+    /// Two fighters each throwing a punch with the arm nearer the other,
+    /// the left one `apart` steps after the right, played for a second and
+    /// a half: how near the two near arms' bones came, as a share of the
+    /// flesh both carry, and the world after.
+    fn crossing_punches(apart: usize) -> (f64, World) {
+        let mut world = create_fighters(Materials::default());
+        let dt = world.materials.fixed_dt;
+        let arms = [world.inner_arm(0), world.inner_arm(1)];
+        let arm_bones: Vec<usize> = (0..world.bones.len())
+            .filter(|&index| {
+                let bone = world.bones[index];
+                matches!(bone.part, BonePart::UpperArm | BonePart::Forearm)
+                    && bone.limb == arms[bone.body as usize]
+            })
+            .collect();
+        let mut nearest = f64::INFINITY;
+        for step in 0..90 {
+            let mut input = InputState::default();
+            if step == 10 {
+                input.punches[0] = Some((1, arms[1]));
+            }
+            if step == 10 + apart {
+                input.punches[1] = Some((0, arms[0]));
+            }
+            world.step(dt, &input, SCENARIO_WIDTH);
+            for &a in &arm_bones {
+                for &b in &arm_bones {
+                    let (first, second) = (world.bones[a], world.bones[b]);
+                    if first.body != 0 || second.body != 1 {
+                        continue;
+                    }
+                    let pair = closest_segment_points(first.a, first.b, second.a, second.b);
+                    nearest = nearest.min(pair.distance / (first.flesh + second.flesh));
+                }
+            }
+        }
+        (nearest, world)
+    }
+
+    /// Two fighters punching at nearly the same moment drive their near arms
+    /// into each other, guard on guard and then arm across arm: the arms
+    /// press on each other's bones through their flesh and give way, so the
+    /// bones keep most of their flesh between them and nothing tears. With
+    /// only skin pushing on skin, the bones crossed, the skin crumpled, the
+    /// muscle came off the bone, and a wrist tore.
+    #[test]
+    fn crossing_punches_keep_the_arms_whole() {
+        for apart in [0, 4, 8] {
+            let (nearest, world) = crossing_punches(apart);
+            assert!(
+                nearest > 0.5,
+                "{apart} steps apart, the arms' bones came within {:.0}% of the flesh between them",
+                nearest * 100.0
+            );
+            let stats = world.stats;
+            assert_eq!(
+                (
+                    stats.broken_skin,
+                    stats.broken_muscle,
+                    stats.broken_bone_joints,
+                    stats.fractured_bones
+                ),
+                (0, 0, 0, 0),
+                "{apart} steps apart, the crossing punches hurt an arm"
+            );
+        }
+    }
+
+    /// The two fighters punching on the same step stay each other's mirror
+    /// images, their arms meeting alike: neither is solved first.
+    #[test]
+    fn fighters_punching_together_stay_mirror_images() {
+        let mut world = create_fighters(Materials::default());
+        let dt = world.materials.fixed_dt;
+        let [left, right] = crate::fighter_frames();
+        let middle = (left.origin.x + right.origin.x) * 0.5;
+        let half = world.points.len() / 2;
+        let input = InputState {
+            punches: [
+                Some((0, world.inner_arm(0))),
+                Some((1, world.inner_arm(1))),
+                None,
+                None,
+            ],
+            ..InputState::default()
+        };
+        world.step(dt, &input, SCENARIO_WIDTH);
+        // Holding one punch a step, the second pressed on it was lost.
+        assert!(
+            world.punch(0, world.inner_arm(0)).is_some()
+                && world.punch(1, world.inner_arm(1)).is_some(),
+            "both fighters' punches pressed on one step throw"
+        );
+        for _ in 0..45 {
+            world.step(dt, &InputState::default(), SCENARIO_WIDTH);
+        }
+        let apart = (0..half)
+            .map(|index| {
+                let (a, b) = (
+                    world.points[index].position,
+                    world.points[half + index].position,
+                );
+                (a.x + b.x - 2.0 * middle).abs().max((a.y - b.y).abs())
+            })
+            .fold(0.0, f64::max);
+        assert!(
+            apart < 1.0e-3,
+            "punching together, the fighters stood {apart:.2e} px off mirror images"
+        );
+    }
+}
