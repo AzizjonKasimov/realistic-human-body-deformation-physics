@@ -862,7 +862,12 @@ impl Outcome {
             Outcome::Breaks(part) => result.struck_fractures[part.index()] > 0,
             Outcome::PuncherBreaks(part) => result.puncher_fractures[part.index()] > 0,
             Outcome::BreaksAnyBone => result.struck_fractures.iter().any(|&count| count > 0),
-            Outcome::OpensSkin => result.skin_tears > 0 || result.cut_openings > 0,
+            // In a fight, the struck fighter's skin: its opening needs its
+            // fibers torn first, and the puncher's own skin is not the blow's.
+            Outcome::OpensSkin => {
+                result.struck_skin_tears > 0
+                    || (result.puncher.is_none() && result.cut_openings > 0)
+            }
             Outcome::CutsArtery => {
                 result.vessel_lacerations + result.fragment_vessel_lacerations > 0
             }
@@ -1596,6 +1601,8 @@ pub struct ScenarioResult {
     /// Bones broken by part, of the body struck and of the puncher.
     pub struck_fractures: [i32; BONE_PARTS],
     pub puncher_fractures: [i32; BONE_PARTS],
+    /// Fibers of the struck body's skin torn or cut.
+    pub struck_skin_tears: i32,
     /// Breaks whose ends came out through the skin.
     pub open_fractures: i32,
     /// The most load each part of the skeleton took, as a share of what
@@ -1875,6 +1882,9 @@ impl ScenarioResult {
         if let Some(puncher) = self.puncher {
             self.puncher_fractures = fractures(puncher);
         }
+        self.struck_skin_tears = world
+            .body_state(self.struck)
+            .map_or(0, |state| state.skin_tears);
         self.measure_cut(world);
     }
 

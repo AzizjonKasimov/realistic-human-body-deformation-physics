@@ -1310,7 +1310,7 @@ impl World {
         self.bump_point_exposure_load(spring.a, exposure, pressure * 0.18);
         self.bump_point_exposure_load(spring.b, exposure, pressure * 0.18);
         if skin {
-            self.stats.broken_skin += 1;
+            self.count_skin_tear(spring.a);
             self.fresh_skin_cuts.push(spring_index);
         } else {
             self.stats.broken_muscle += 1;
@@ -2079,7 +2079,7 @@ impl World {
             self.bump_point_exposure_load(spring.a, exposure, pressure * 0.18);
             self.bump_point_exposure_load(spring.b, exposure, pressure * 0.18);
             if spring.layer == TissueLayer::Skin {
-                self.stats.broken_skin += 1;
+                self.count_skin_tear(spring.a);
             } else {
                 self.stats.broken_muscle += 1;
             }

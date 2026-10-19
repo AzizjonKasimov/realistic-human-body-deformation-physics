@@ -35,6 +35,9 @@ pub struct BodyState {
     /// How many of its bones of each part have broken, by
     /// [`BonePart::index`]; `Stats` counts every body's together.
     pub fractures: [i32; BONE_PARTS],
+    /// How many of its skin's fibers have torn or been cut; `Stats` counts
+    /// every body's together.
+    pub skin_tears: i32,
 }
 
 impl BodyState {
@@ -46,6 +49,7 @@ impl BodyState {
             hip_shift: Vec2::default(),
             mirrored: false,
             fractures: [0; BONE_PARTS],
+            skin_tears: 0,
         }
     }
 }

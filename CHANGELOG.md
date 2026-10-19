@@ -2,6 +2,13 @@
 
 What each version of Realistic Physics changed, newest first. The game shows its version on the start screen and in its bottom-left corner, and every Short made from the game shows the version it was made with. Only the newest version is online.
 
+## v0.13 (2026-10-19)
+
+- Two fighters stand side by side. The left arrow key, or the LEFT punch button, makes the left fighter punch the right one, and the right arrow key, or RIGHT, the right fighter punch the left one, each with its arm nearer the other.
+- A punch leans the body into it and reaches the other fighter's head over its guard, and lands as the bare fist does: it bruises and knocks the head aside, rarely splits the skin, and breaks no skull, forearm, or hand of the puncher's.
+- Every tool strikes either fighter, and the fighters' bodies push against each other where they touch.
+- A blow hurts the body the same wherever it stands and nearly the same on either side: a knife taken up on the body's right no longer turns round through the arm in its first slash.
+
 ## v0.12 (2026-10-18)
 
 - The figure throws punches: the left and right arrow keys, or the LEFT and RIGHT punch buttons, make it punch with that arm, out to its side as fast as a hard real punch, and bring the arm back into its guard.

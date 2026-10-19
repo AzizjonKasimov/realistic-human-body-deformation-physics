@@ -5069,7 +5069,7 @@ impl World {
                     self.pending_tears.push(i);
                 }
                 if spring.layer == TissueLayer::Skin {
-                    self.stats.broken_skin += 1;
+                    self.count_skin_tear(spring.a);
                     events.push((
                         midpoint,
                         normal,
@@ -7603,6 +7603,19 @@ impl World {
                 self.hold_piece_in_flesh(index);
             }
         }
+    }
+
+    /// A fiber of skin from point `point` has torn or been cut: counted for
+    /// the world and for the body it belongs to.
+    fn count_skin_tear(&mut self, point: usize) {
+        let body = self
+            .points
+            .get(point)
+            .map_or(0, |point| point.body as usize);
+        if let Some(state) = self.bodies.get_mut(body) {
+            state.skin_tears += 1;
+        }
+        self.stats.broken_skin += 1;
     }
 
     fn count_fracture(&mut self, body: usize, part: BonePart, kind: BoneKind, load: f64) {
