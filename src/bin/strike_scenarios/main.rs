@@ -89,6 +89,15 @@
 //!                                     and what the watchdogs flagged, each with
 //!                                     a play to replay (random_blows_report.txt,
 //!                                     random_blows.csv)
+//!   --fights N [--seed S]             instead, play N random fights as the
+//!                                     Fight page plays them: the left fighter
+//!                                     taps punch and lean back at random, the
+//!                                     right one punches every 1.5 to 3.5 s;
+//!                                     report each fighter's torn and slipped
+//!                                     joints, broken bones, and torn skin, and
+//!                                     what the watchdogs flagged, each with a
+//!                                     fight to replay (random_fights_report.txt,
+//!                                     random_fights.csv)
 //!   --set NAME=VALUE[,NAME=VALUE...]  change any setting of `Materials` from its
 //!                                     default for every world played (gravity,
 //!                                     bone_joint_hertz, ...), to try a value
@@ -156,6 +165,7 @@ mod blanks;
 mod bodies;
 mod diff;
 mod dump;
+mod fights;
 mod grid;
 mod inspect;
 mod moved;
@@ -230,6 +240,8 @@ struct Options {
     twin_frame: Option<i32>,
     /// Random blows to play instead, from a seed, with these tools.
     random: Option<usize>,
+    /// Random fights to play instead, from the same seed.
+    fights: Option<usize>,
     seed: u64,
     tools: Vec<rp::ToolMode>,
     /// Settings changed from the defaults for every world, `NAME=VALUE`.
@@ -290,6 +302,10 @@ fn main() {
             &output_dir,
             options.shrink,
         );
+        return;
+    }
+    if let Some(count) = options.fights {
+        fights::random_fights(count, options.seed, &output_dir);
         return;
     }
 
@@ -437,6 +453,7 @@ fn parse_options() -> Result<Options, String> {
         twin: None,
         twin_frame: None,
         random: None,
+        fights: None,
         seed: 1,
         tools: vec![
             rp::ToolMode::Blunt,
@@ -578,6 +595,13 @@ fn parse_options() -> Result<Options, String> {
                         .map_err(|_| format!("--random takes a number of plays, got `{count}`"))?,
                 );
             }
+            "--fights" => {
+                let count = args.next().ok_or("--fights needs a number of fights")?;
+                options.fights =
+                    Some(count.parse().map_err(|_| {
+                        format!("--fights takes a number of fights, got `{count}`")
+                    })?);
+            }
             "--seed" => {
                 let seed = args.next().ok_or("--seed needs a number")?;
                 options.seed = seed
@@ -637,6 +661,7 @@ fn check_grid_options(options: &Options) -> Result<(), String> {
     let others = [
         (options.diff.is_some(), "--diff"),
         (options.random.is_some(), "--random"),
+        (options.fights.is_some(), "--fights"),
         (options.moved, "--moved"),
         (options.twin.is_some(), "--twin"),
         (options.why.is_some(), "--why"),

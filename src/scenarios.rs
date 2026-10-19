@@ -814,6 +814,7 @@ pub struct ScenarioExpectations {
     pub fragment_pair_contacts: IntBand,
     pub fragment_skin_punctures: IntBand,
     pub bone_joint_subluxations: IntBand,
+    pub bone_joint_breaks: IntBand,
     pub joint_ligament_damage_events: IntBand,
     pub joint_corrections: IntBand,
     pub fragment_overlap: DoubleBand,
@@ -1486,6 +1487,11 @@ impl Scenario {
                 "bone_joint_subluxations",
                 r.bone_joint_subluxations,
                 e.bone_joint_subluxations,
+            ),
+            int(
+                "bone_joint_breaks",
+                r.bone_joint_breaks,
+                e.bone_joint_breaks,
             ),
             int(
                 "joint_ligament_damage_events",
@@ -2761,6 +2767,47 @@ const FIGHTER_PUNCH: &[GestureStep] = &[
     GestureStep::Wait(260),
 ];
 
+/// The left fighter punches the right's raised guard again and again, as a
+/// player taps the punch button fast: a press every 8 steps (7.5 a second)
+/// for six presses, each throwing a new punch from wherever the arm got once
+/// the last has turned back, then both stand on till still.
+const FIGHTER_PUNCH_SPAMMED: &[GestureStep] = &[
+    GestureStep::Move {
+        to: (-1.3, 0.95),
+        frames: 0,
+    },
+    GestureStep::Wait(60),
+    GestureStep::Punch(0, Limb::RightArm),
+    GestureStep::Wait(8),
+    GestureStep::Punch(0, Limb::RightArm),
+    GestureStep::Wait(8),
+    GestureStep::Punch(0, Limb::RightArm),
+    GestureStep::Wait(8),
+    GestureStep::Punch(0, Limb::RightArm),
+    GestureStep::Wait(8),
+    GestureStep::Punch(0, Limb::RightArm),
+    GestureStep::Wait(8),
+    GestureStep::Punch(0, Limb::RightArm),
+    GestureStep::Wait(200),
+];
+
+/// The left fighter leans back and, a fifth of a second in, punches the
+/// right's raised guard from there, holds the lean most of a second more,
+/// and comes upright.
+const FIGHTER_PUNCH_FROM_A_LEAN: &[GestureStep] = &[
+    GestureStep::Move {
+        to: (-1.3, 0.95),
+        frames: 0,
+    },
+    GestureStep::Wait(60),
+    GestureStep::Lean(0, true),
+    GestureStep::Wait(12),
+    GestureStep::Punch(0, Limb::RightArm),
+    GestureStep::Wait(48),
+    GestureStep::Lean(0, false),
+    GestureStep::Wait(200),
+];
+
 /// The same punch at the right fighter while it leans back, from a third of
 /// a second before the punch is thrown until a second after, then comes
 /// upright (`World::hold_lean`).
@@ -2834,10 +2881,26 @@ pub fn scenarios() -> Vec<Scenario> {
             }),
         })
     };
+    // Two fighters as the app stands them, the left throwing what `steps`
+    // throws at the right's raised guard.
+    let fight_with = |steps| {
+        Play::Gesture(Gesture {
+            tool: ToolMode::Heavy,
+            power: swing_power(ToolMode::Heavy),
+            steps,
+            fight: Some(Fight {
+                spacing: FIGHTER_SPACING,
+                guard_down: false,
+                aim: 0.0,
+            }),
+        })
+    };
     // A fighter's punch lands on the other, thrown as fast as an untrained
-    // man's hardest punch.
+    // man's hardest punch, and no joint of either comes apart: pulled apart
+    // in a fight, an arm hung in two.
     let fought = ScenarioExpectations {
         fist_speed: DoubleBand::range(1829.0, 3562.0),
+        bone_joint_breaks: IntBand::range(0, 0),
         ..punched
     };
     let strike = |tool, start, end, strike_frames, settle_frames| Strike {
@@ -3554,12 +3617,55 @@ pub fn scenarios() -> Vec<Scenario> {
             expectations: ScenarioExpectations {
                 contacts: IntBand::range(0, 0),
                 fist_speed: DoubleBand::range(1829.0, 3562.0),
+                bone_joint_breaks: IntBand::range(0, 0),
                 ..steady
             },
             real: &[
                 check!(BreaksAnyBone, Never, PUNCH_SPEED),
                 check!(OpensSkin, Never, PUNCH_SPEED),
                 check!(DropsGuard, Never, ARM_HELD),
+            ],
+            bone_strength: 1.0,
+        },
+        Scenario {
+            name: "fighter_punches_again_and_again",
+            region: "arm",
+            intent: "fight",
+            play: fight_with(FIGHTER_PUNCH_SPAMMED),
+            // Six punches on the raised guard, a press every 8 steps, as a
+            // player taps the punch button fast. Each lands on the guard or
+            // the head, or is blocked and turns back, and the next is thrown
+            // from wherever the arm got. Pressed against the guard's bones
+            // as it gave way, the punching arm let go of its own joints and
+            // the guard went on pushing: the wrist and elbow came apart
+            // (v0.15.1: the puncher's joints tore 35 times in 30 random
+            // fights of spammed punches, `--fights`).
+            expectations: fought,
+            real: &[
+                check!(Bruises, Usually, BRUISE),
+                check!(OpensSkin, Rarely, PUNCH_BODY_CUT),
+                check!(Breaks(BonePart::Forearm), Never, PUNCH_GUARD),
+                check!(DropsGuard, Never, ARM_HELD),
+                check!(PuncherBreaks(BonePart::Hand), Never, PUNCH_HAND),
+            ],
+            bone_strength: 1.0,
+        },
+        Scenario {
+            name: "fighter_punches_from_a_lean",
+            region: "arm",
+            intent: "fight",
+            play: fight_with(FIGHTER_PUNCH_FROM_A_LEAN),
+            // The left fighter leans back and punches from the lean a fifth
+            // of a second in: the punch takes the lean's joints over, and
+            // the arm goes out past the right fighter's raised guard.
+            expectations: ScenarioExpectations {
+                bone_joint_breaks: IntBand::range(0, 0),
+                ..steady
+            },
+            real: &[
+                check!(Breaks(BonePart::Forearm), Never, PUNCH_GUARD),
+                check!(DropsGuard, Never, ARM_HELD),
+                check!(PuncherBreaks(BonePart::Hand), Never, PUNCH_HAND),
             ],
             bone_strength: 1.0,
         },

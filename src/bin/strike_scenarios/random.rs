@@ -13,10 +13,10 @@ use std::f64::consts::{PI, TAU};
 
 /// A small generator that throws the same plays for the same seed
 /// (SplitMix64, Steele, Lea, and Flood 2014).
-struct Dice(u64);
+pub(crate) struct Dice(pub(crate) u64);
 
 impl Dice {
-    fn next(&mut self) -> u64 {
+    pub(crate) fn next(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.0;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -25,16 +25,16 @@ impl Dice {
     }
 
     /// A number from `low` up to `high`.
-    fn range(&mut self, low: f64, high: f64) -> f64 {
+    pub(crate) fn range(&mut self, low: f64, high: f64) -> f64 {
         low + (high - low) * ((self.next() >> 11) as f64 / (1u64 << 53) as f64)
     }
 
     /// A whole number from `low` to `high`, both included.
-    fn whole(&mut self, low: i32, high: i32) -> i32 {
+    pub(crate) fn whole(&mut self, low: i32, high: i32) -> i32 {
         low + (self.next() % (high - low + 1) as u64) as i32
     }
 
-    fn pick<T: Copy>(&mut self, items: &[T]) -> T {
+    pub(crate) fn pick<T: Copy>(&mut self, items: &[T]) -> T {
         items[(self.next() % items.len() as u64) as usize]
     }
 }
