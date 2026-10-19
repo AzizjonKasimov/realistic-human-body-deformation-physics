@@ -18,10 +18,9 @@
 //!                                     punch=, lean=, and with fighters, two
 //!                                     fighters, punch2= and lean2=);
 //!                                     writes strike_custom_frames.csv too
-//!   --fighters [--spacing S]          play the gesture on two fighters, as the
-//!                                     app and `capture.ps1 -Fighters` stand
-//!                                     them, S body heights apart (0.52), its
-//!                                     punch2= steps thrown by the right one
+//!   --fighters [--spacing S]          play the gesture on two fighters, S body
+//!                                     heights apart (0.52): short for adding
+//!                                     :fighters=S to it
 //!   --sound DIR                       instead, write what each scenario (or the
 //!                                     custom swing) sounds like in the app as
 //!                                     DIR/NAME.wav, list its sounds and levels
@@ -613,16 +612,12 @@ fn parse_options() -> Result<Options, String> {
         }
     }
     if let Some(spacing) = options.fighters {
-        // Stood as a fight scenario stands its fighters, with nothing more
-        // set up: both guards up, the punches aimed as tuned.
-        let Some(Play::Gesture(gesture)) = &mut options.custom else {
+        // The gesture's own `fighters=S`, written for it, so a grid fills
+        // in the same play: both guards up, the punches aimed as tuned.
+        let Some(blanks::Written::Gesture(spec)) = &mut options.written else {
             return Err("--fighters plays a --gesture on two fighters".to_string());
         };
-        gesture.fight = Some(rp::scenarios::Fight {
-            spacing,
-            guard_down: false,
-            aim: 0.0,
-        });
+        spec.push_str(&format!(":fighters={spacing}"));
     }
     rp::scenarios::use_settings(rp::parse_settings(&options.settings)?);
     if options.grid.is_empty() {

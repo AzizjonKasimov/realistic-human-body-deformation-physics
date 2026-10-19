@@ -29,6 +29,7 @@ impl Watch {
         self.fastest.is_some()
             || self.trace.is_some()
             || self.stance.is_some()
+            || self.between.is_some()
             || self.journal
             || self.dump.is_some()
             || self.mesh.is_some()
