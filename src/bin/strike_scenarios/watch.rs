@@ -22,6 +22,16 @@ pub(crate) struct Watch {
 }
 
 impl Watch {
+    /// Whether anything is asked to be watched.
+    pub(crate) fn any(&self) -> bool {
+        self.fastest.is_some()
+            || self.trace.is_some()
+            || self.stance.is_some()
+            || self.journal
+            || self.dump.is_some()
+            || self.mesh.is_some()
+    }
+
     /// The body for `scenario`, following what `--trace` names and keeping
     /// the journal `--journal` asks for.
     pub(crate) fn body(&self, scenario: &Scenario) -> rp::World {

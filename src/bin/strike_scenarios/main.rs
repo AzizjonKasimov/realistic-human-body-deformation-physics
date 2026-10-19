@@ -14,7 +14,9 @@
 //!                                     print its injuries and how steady the tool
 //!                                     was; with --sweep, their spread
 //!   --gesture TOOL:U,V[:STEP...]      the same for a gesture played the way the
-//!                                     app is (steps: U,V/N, down, up, wait=N);
+//!                                     app is (steps: U,V/N, down, up, wait=N,
+//!                                     punch=, lean=, and with fighters, two
+//!                                     fighters, punch2= and lean2=);
 //!                                     writes strike_custom_frames.csv too
 //!   --sound DIR                       instead, write what each scenario (or the
 //!                                     custom swing) sounds like in the app as
@@ -92,6 +94,18 @@
 //!                                     band, real-life check, watchdog, and main
 //!                                     number that moved, with how likely chance
 //!                                     is to move it as far (sweep_diff.txt)
+//!   --grid NAME=V1,V2,...             instead, play the scenarios (or the custom
+//!                                     play) over every combination of the values
+//!                                     given, repeatable: NAME a setting, as
+//!                                     --set takes, or a blank {NAME} in the
+//!                                     custom play, which also takes sums such as
+//!                                     {60-lead}; one run a row, or 9 with
+//!                                     --quick and 45 with --sweep; prints a
+//!                                     table, each row set against the first by
+//!                                     how unlikely chance is to make the
+//!                                     difference (strike_grid.txt,
+//!                                     strike_grid.csv, each row's runs in
+//!                                     grid/rowNN for --diff)
 //!   --dump WHAT[:FRAME]               lay the body out in numbers on a frame of
 //!                                     the play (0, the start, by default): bones
 //!                                     where they lie and how far from where they
@@ -130,9 +144,11 @@
 //!
 //! Outputs go next to the CSV path (default `output/strike_scenarios.csv`).
 
+mod blanks;
 mod bodies;
 mod diff;
 mod dump;
+mod grid;
 mod inspect;
 mod moved;
 mod random;
@@ -207,6 +223,10 @@ struct Options {
     tools: Vec<rp::ToolMode>,
     /// Settings changed from the defaults for every world, `NAME=VALUE`.
     settings: Vec<String>,
+    /// The custom swing or gesture as written, which a grid fills in.
+    written: Option<blanks::Written>,
+    /// The axes of a grid to play instead: settings, or blanks in the play.
+    grid: Vec<grid::Axis>,
 }
 
 fn main() {
@@ -217,6 +237,9 @@ fn main() {
         );
         eprintln!(
             "       strike_scenarios [CSV] [--only NAME,...] [--strike SPEC | --gesture SPEC] --phases"
+        );
+        eprintln!(
+            "       strike_scenarios [CSV] [--only NAME,... | --strike SPEC | --gesture SPEC] --grid NAME=V1,V2,... [--grid ...] [--quick | --sweep]"
         );
         process::exit(2);
     });
@@ -276,6 +299,24 @@ fn main() {
                 .collect()
         }
     };
+    if !options.grid.is_empty() {
+        let plays = if options.sweep {
+            grid::Plays::Sweep(options.quick)
+        } else {
+            grid::Plays::Once(options.variant.unwrap_or((0.0, 0.0, 1.0)))
+        };
+        if let Err(message) = grid::grid(
+            &options.grid,
+            options.written.as_ref(),
+            &selected,
+            plays,
+            &output_dir,
+        ) {
+            eprintln!("{message}");
+            process::exit(2);
+        }
+        return;
+    }
     let selected: Vec<Scenario> = match options.variant {
         Some((along, across, strength)) => selected
             .iter()
@@ -395,6 +436,8 @@ fn parse_options() -> Result<Options, String> {
         diff: None,
         record: None,
         shrink: false,
+        written: None,
+        grid: Vec::new(),
     };
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -422,11 +465,11 @@ fn parse_options() -> Result<Options, String> {
             }
             "--strike" => {
                 let spec = args.next().ok_or("--strike needs a swing")?;
-                options.custom = Some(Play::Swing(Strike::parse(&spec)?, None));
+                options.written = Some(blanks::Written::Strike(spec));
             }
             "--gesture" => {
                 let spec = args.next().ok_or("--gesture needs a gesture")?;
-                options.custom = Some(Play::Gesture(Gesture::parse(&spec)?));
+                options.written = Some(blanks::Written::Gesture(spec));
             }
             "--variant" => {
                 let spec = args.next().ok_or("--variant needs ALONG,ACROSS,STRENGTH")?;
@@ -462,6 +505,10 @@ fn parse_options() -> Result<Options, String> {
             "--set" => {
                 let item = args.next().ok_or("--set needs NAME=VALUE")?;
                 options.settings.push(item);
+            }
+            "--grid" => {
+                let spec = args.next().ok_or("--grid needs NAME=V1,V2,...")?;
+                options.grid.push(grid::Axis::parse(&spec)?);
             }
             "--shrink" => options.shrink = true,
             "--record" => {
@@ -535,7 +582,53 @@ fn parse_options() -> Result<Options, String> {
         }
     }
     rp::scenarios::use_settings(rp::parse_settings(&options.settings)?);
+    if options.grid.is_empty() {
+        // A play with blanks left in it says to give them with --grid.
+        if let Some(written) = &options.written {
+            options.custom = Some(written.play(&[])?);
+        }
+    } else {
+        check_grid_options(&options)?;
+    }
     Ok(options)
+}
+
+/// A grid plays rows of runs for one table, so it takes neither the modes
+/// that play something else nor what follows one run frame by frame.
+fn check_grid_options(options: &Options) -> Result<(), String> {
+    let others = [
+        (options.diff.is_some(), "--diff"),
+        (options.random.is_some(), "--random"),
+        (options.moved, "--moved"),
+        (options.twin.is_some(), "--twin"),
+        (options.why.is_some(), "--why"),
+        (options.phases, "--phases"),
+        (options.sound.is_some(), "--sound"),
+        (options.list, "--list"),
+        (options.record.is_some(), "--record"),
+        (options.mirrored, "--mirrored"),
+        (
+            options.watch.any(),
+            "--journal, --fastest, --trace, --stance, --dump, or --mesh",
+        ),
+    ];
+    if let Some((_, flag)) = others.iter().find(|(given, _)| *given) {
+        return Err(format!(
+            "--grid plays rows of runs for one table; it does not take {flag}"
+        ));
+    }
+    if options.variant.is_some() && options.sweep {
+        return Err(
+            "--grid plays one run a row (--variant's) or the sweep's (--quick, --sweep), not both"
+                .to_string(),
+        );
+    }
+    if options.written.is_some() && !options.only.is_empty() {
+        return Err(
+            "--grid plays the custom play or the scenarios --only names, not both".to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Plays each scenario once with the per-frame CSV, summary, and tuning report.

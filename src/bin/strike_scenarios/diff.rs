@@ -13,9 +13,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 pub(crate) const RUNS_FILE: &str = "strike_sweep_runs.csv";
 
 /// The numbers a run's line keeps besides its outcomes: the ones that most
-/// often move when the engine changes.
+/// often move when the engine changes, and how much the play touched the
+/// body (points and bones touched, summed over its frames).
 pub(crate) fn run_numbers(result: &ScenarioResult) -> Vec<(String, f64)> {
     let mut numbers = vec![
+        (
+            "contacts".to_string(),
+            f64::from(result.tissue_contacts + result.bone_contacts),
+        ),
         ("bones_broken".to_string(), f64::from(result.bone_fractures)),
         ("skin_torn".to_string(), f64::from(result.skin_tears)),
         ("muscle_torn".to_string(), f64::from(result.muscle_tears)),
@@ -146,8 +151,17 @@ pub(crate) fn sign_test(more: usize, less: usize) -> f64 {
     (2.0 * tail).min(1.0)
 }
 
+/// Whether a number's median moved enough to list: chance makes a shift as
+/// sure as `p` less than 5% of the time, and it moved a tenth and more than
+/// a hundredth. A shift every run makes alike can be sure and still too
+/// small to matter.
+pub(crate) fn number_moved(before: f64, after: f64, p: f64) -> bool {
+    let moved = (after - before).abs();
+    p < 0.05 && moved >= 0.1 * before.abs().max(after.abs()) && moved > 0.01
+}
+
 /// How sure a difference is, for a report: `**` past 1% chance, `*` past 5%.
-fn stars(p: f64) -> &'static str {
+pub(crate) fn stars(p: f64) -> &'static str {
     if p < 0.01 {
         "**"
     } else if p < 0.05 {
@@ -166,6 +180,8 @@ struct Runs {
     variants: BTreeMap<String, BTreeSet<String>>,
     /// For each scenario, kind, and name, each run's value by its variant.
     values: HashMap<(String, String, String), HashMap<String, f64>>,
+    /// Every number the sweep wrote, in any scenario.
+    numbers: BTreeSet<String>,
 }
 
 impl Runs {
@@ -187,6 +203,7 @@ impl Runs {
             trying: String::new(),
             variants: BTreeMap::new(),
             values: HashMap::new(),
+            numbers: BTreeSet::new(),
         };
         for line in text.lines() {
             if let Some(settings) = line.strip_prefix("# settings:") {
@@ -212,6 +229,9 @@ impl Runs {
                 .entry(scenario.to_string())
                 .or_default()
                 .insert(variant.clone());
+            if kind == "number" {
+                runs.numbers.insert(name.to_string());
+            }
             runs.values
                 .entry((scenario.to_string(), kind.to_string(), name.to_string()))
                 .or_default()
@@ -242,6 +262,14 @@ impl Runs {
             .collect()
     }
 
+    /// Whether the sweep keeps the number `name` at all, so that a run
+    /// without it had it at nought. A sweep made before a number was added
+    /// keeps none of it, and setting it against nought would list a change
+    /// in every scenario. A bone's load is written only when it was loaded.
+    fn keeps(&self, name: &str) -> bool {
+        name.starts_with("load_") || self.numbers.contains(name)
+    }
+
     fn value(&self, scenario: &str, name: &str, variant: &str) -> Option<f64> {
         self.values
             .get(&(scenario.to_string(), "number".to_string(), name.to_string()))
@@ -250,7 +278,7 @@ impl Runs {
     }
 }
 
-fn median(mut values: Vec<f64>) -> f64 {
+pub(crate) fn median(mut values: Vec<f64>) -> f64 {
     if values.is_empty() {
         return 0.0;
     }
@@ -302,6 +330,9 @@ pub(crate) fn diff_sweeps(a: &Path, b: &Path, output: &Path) -> Result<(), Strin
         .collect();
     let names: BTreeSet<&String> = left.variants.keys().chain(right.variants.keys()).collect();
     let mut totals: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    // Numbers only one sweep keeps, such as one added after the other was
+    // made: not compared, and named once at the end.
+    let mut one_sided: BTreeSet<String> = BTreeSet::new();
     let (mut runs_left, mut runs_right) = (0, 0);
     for scenario in names {
         let (n1, n2) = (left.runs(scenario), right.runs(scenario));
@@ -403,6 +434,10 @@ pub(crate) fn diff_sweeps(a: &Path, b: &Path, output: &Path) -> Result<(), Strin
             .intersection(&right.variants[scenario.as_str()])
             .collect();
         for number in numbers {
+            if !left.keeps(&number) || !right.keeps(&number) {
+                one_sided.insert(number);
+                continue;
+            }
             let pairs: Vec<(f64, f64)> = variants
                 .iter()
                 .map(|variant| {
@@ -426,11 +461,7 @@ pub(crate) fn diff_sweeps(a: &Path, b: &Path, output: &Path) -> Result<(), Strin
                 median(pairs.iter().map(|pair| pair.0).collect()),
                 median(pairs.iter().map(|pair| pair.1).collect()),
             );
-            // A shift every run makes alike can be sure and still too small
-            // to matter: a number must move a tenth, and more than a
-            // hundredth, to be listed.
-            let moved = (m2 - m1).abs();
-            if p < 0.05 && moved >= 0.1 * m1.abs().max(m2.abs()) && moved > 0.01 {
+            if number_moved(m1, m2, p) {
                 lines.push(format!(
                     "{} median {number} {} -> {} (higher in {more} runs, lower in {less})",
                     stars(p),
@@ -459,6 +490,21 @@ pub(crate) fn diff_sweeps(a: &Path, b: &Path, output: &Path) -> Result<(), Strin
             "  {} {}: {x} -> {y}\n",
             stars(p),
             watchdog.describe()
+        ));
+    }
+    if !one_sided.is_empty() {
+        let named: Vec<String> = one_sided
+            .iter()
+            .map(|number| {
+                format!(
+                    "{number} (only {})",
+                    if left.keeps(number) { "A" } else { "B" }
+                )
+            })
+            .collect();
+        report.push_str(&format!(
+            "\nNumbers only one sweep keeps, not compared: {}\n",
+            named.join(", ")
         ));
     }
     let path = output.join("sweep_diff.txt");
@@ -526,6 +572,21 @@ mod tests {
             Some(9.0)
         );
         assert!(Runs::parse("tap,1,2\n").is_err());
+    }
+
+    /// A number a sweep never wrote, as one made before the number was
+    /// added, is not set against nought; a bone's load, written only when
+    /// the bone was loaded, is.
+    #[test]
+    fn a_number_one_sweep_never_kept_is_not_compared() {
+        let older = Runs::parse(
+            "scenario,along,across,strength,kind,name,value\n\
+            tap,0.0000,0.0000,1.00,number,bruises,3.0000\n",
+        )
+        .unwrap();
+        assert!(older.keeps("bruises"));
+        assert!(!older.keeps("contacts"));
+        assert!(older.keeps("load_skull"));
     }
 
     #[test]

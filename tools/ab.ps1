@@ -10,7 +10,10 @@ scenario) written to output\ab\A and output\ab\B, then compared with
 strike_scenarios --diff into output\ab\sweep_diff.txt. Settings are any of the
 engine's Materials by name (strike_scenarios --set). Experiments are changes
 being tried behind trying("name") in the code, switched on through RP_TRY;
-the test nothing_is_left_being_tried fails until one way is chosen.
+the test nothing_is_left_being_tried fails until one way is chosen. To play
+more than two settings, or a timing in a gesture, use strike_scenarios
+--grid, which sets every combination against the first in one table
+(README, "Look Into A Run").
 
 .PARAMETER A
 Settings for side A, "NAME=VALUE,NAME=VALUE"; the defaults if empty.

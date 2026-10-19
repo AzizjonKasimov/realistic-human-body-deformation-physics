@@ -19,17 +19,86 @@ pub(crate) const SWEEP_ACROSS: [f64; 3] = [-0.005, 0.0, 0.005];
 /// some people and not in others.
 pub(crate) const SWEEP_STRENGTH: [f64; 3] = [0.8, 1.0, 1.25];
 
-struct SweepRun {
-    scenario: usize,
-    along: f64,
-    across: f64,
-    strength: f64,
-    result: ScenarioResult,
-    violations: Vec<String>,
+/// One run of a sweep: which scenario, aimed how and on bones how strong,
+/// and what it did.
+pub(crate) struct SweepRun {
+    pub(crate) scenario: usize,
+    pub(crate) along: f64,
+    pub(crate) across: f64,
+    pub(crate) strength: f64,
+    pub(crate) result: ScenarioResult,
+    pub(crate) violations: Vec<String>,
     /// What the watchdogs flagged: each watchdog with the first frame it
     /// tripped on and the first thing it flagged, as `--why` takes it and by
     /// name.
-    flagged: Vec<(Watchdog, i32, String)>,
+    pub(crate) flagged: Vec<(Watchdog, i32, String)>,
+}
+
+impl SweepRun {
+    /// Plays `scenario`, scenario number `index` of those played, as the
+    /// sweep's run `(along, across, strength)` does, on a settled body made
+    /// of `base` (`Scenario::materials_on`), watched by the watchdogs.
+    pub(crate) fn play(
+        index: usize,
+        scenario: &Scenario,
+        (along, across, strength): (f64, f64, f64),
+        base: rp::Materials,
+    ) -> SweepRun {
+        let scenario = scenario.shifted(along, across).with_bone_strength(strength);
+        let body = scenario.world_from(settled_body(
+            SCENARIO_WIDTH,
+            SCENARIO_HEIGHT,
+            scenario.materials_on(base),
+        ));
+        let mut watchdogs = rp::inspect::Watchdogs::new(&body);
+        let (world, result) = run_on(
+            body,
+            &scenario,
+            SCENARIO_WIDTH,
+            SCENARIO_HEIGHT,
+            |frame, _, world| watchdogs.check(frame, world),
+        );
+        let violations = scenario.violations(&result);
+        let flagged = flagged(&world, watchdogs.trips());
+        SweepRun {
+            scenario: index,
+            along,
+            across,
+            strength,
+            result,
+            violations,
+            flagged,
+        }
+    }
+
+    /// Whether the run is the play as tuned: unmoved, on bones of their own
+    /// strength.
+    pub(crate) fn unmoved(&self) -> bool {
+        self.along == 0.0 && self.across == 0.0 && self.strength == 1.0
+    }
+}
+
+/// Plays every job on all cores, `play` making each one's result, and
+/// gives the results in the jobs' order.
+pub(crate) fn on_all_cores<J: Sync, R: Send>(jobs: &[J], play: impl Fn(&J) -> R + Sync) -> Vec<R> {
+    let next = AtomicUsize::new(0);
+    let finished = Mutex::new(Vec::with_capacity(jobs.len()));
+    let workers = thread::available_parallelism().map_or(4, |count| count.get());
+    thread::scope(|scope| {
+        for _ in 0..workers.min(jobs.len()) {
+            scope.spawn(|| loop {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(job) = jobs.get(index) else {
+                    break;
+                };
+                let result = play(job);
+                finished.lock().expect("results").push((index, result));
+            });
+        }
+    });
+    let mut results = finished.into_inner().expect("results");
+    results.sort_by_key(|(index, _)| *index);
+    results.into_iter().map(|(_, result)| result).collect()
 }
 
 /// The first trip of each watchdog in a run, the thing named while the
@@ -64,72 +133,36 @@ pub(crate) fn flagged(
 /// sweep judges it.
 const QUICK_ALONG: [f64; 3] = [-0.005, 0.0, 0.005];
 
-/// Replays each scenario with its swing moved by every combination of
-/// `SWEEP_ALONG` and `SWEEP_ACROSS` (with `quick`, `QUICK_ALONG` alone), on
-/// all cores, and reports the spread.
-pub(crate) fn sweep(selected: &[Scenario], output_dir: &Path, custom: bool, quick: bool) {
+/// The runs a sweep plays of each scenario, as (along, across, strength):
+/// every combination of `SWEEP_ALONG`, `SWEEP_ACROSS`, and `SWEEP_STRENGTH`,
+/// or with `quick`, of `QUICK_ALONG` and `SWEEP_STRENGTH` alone.
+pub(crate) fn sweep_variants(quick: bool) -> Vec<(f64, f64, f64)> {
     let (along, across): (&[f64], &[f64]) = if quick {
         (&QUICK_ALONG, &[0.0])
     } else {
         (&SWEEP_ALONG, &SWEEP_ACROSS)
     };
-    let jobs: Vec<(usize, f64, f64, f64)> = (0..selected.len())
-        .flat_map(|index| {
-            SWEEP_STRENGTH.iter().flat_map(move |&strength| {
-                along.iter().flat_map(move |&along| {
-                    across
-                        .iter()
-                        .map(move |&across| (index, along, across, strength))
-                })
-            })
+    SWEEP_STRENGTH
+        .iter()
+        .flat_map(|&strength| {
+            along
+                .iter()
+                .flat_map(move |&along| across.iter().map(move |&across| (along, across, strength)))
         })
+        .collect()
+}
+
+/// Replays each scenario as each of [`sweep_variants`] plays it, on all
+/// cores, and reports the spread.
+pub(crate) fn sweep(selected: &[Scenario], output_dir: &Path, custom: bool, quick: bool) {
+    let variants = sweep_variants(quick);
+    let jobs: Vec<(usize, (f64, f64, f64))> = (0..selected.len())
+        .flat_map(|index| variants.iter().map(move |&variant| (index, variant)))
         .collect();
-    let next = AtomicUsize::new(0);
-    let finished = Mutex::new(Vec::with_capacity(jobs.len()));
-    let workers = thread::available_parallelism().map_or(4, |count| count.get());
-    thread::scope(|scope| {
-        for _ in 0..workers.min(jobs.len()) {
-            scope.spawn(|| loop {
-                let job = next.fetch_add(1, Ordering::Relaxed);
-                let Some(&(index, along, across, strength)) = jobs.get(job) else {
-                    break;
-                };
-                let scenario = selected[index]
-                    .shifted(along, across)
-                    .with_bone_strength(strength);
-                let body = scenario.world_from(settled_body(
-                    SCENARIO_WIDTH,
-                    SCENARIO_HEIGHT,
-                    scenario.materials(),
-                ));
-                let mut watchdogs = rp::inspect::Watchdogs::new(&body);
-                let (world, result) = run_on(
-                    body,
-                    &scenario,
-                    SCENARIO_WIDTH,
-                    SCENARIO_HEIGHT,
-                    |frame, _, world| watchdogs.check(frame, world),
-                );
-                let violations = scenario.violations(&result);
-                let flagged = flagged(&world, watchdogs.trips());
-                finished.lock().expect("sweep results").push((
-                    job,
-                    SweepRun {
-                        scenario: index,
-                        along,
-                        across,
-                        strength,
-                        result,
-                        violations,
-                        flagged,
-                    },
-                ));
-            });
-        }
+    let base = rp::scenarios::set_materials();
+    let runs = on_all_cores(&jobs, |&(index, variant)| {
+        SweepRun::play(index, &selected[index], variant, base)
     });
-    let mut runs = finished.into_inner().expect("sweep results");
-    runs.sort_by_key(|(job, _)| *job);
-    let runs: Vec<SweepRun> = runs.into_iter().map(|(_, run)| run).collect();
 
     let csv_path = output_dir.join("strike_sweep.csv");
     let mut csv = BufWriter::new(File::create(&csv_path).expect("create sweep CSV"));
@@ -172,7 +205,13 @@ pub(crate) fn sweep(selected: &[Scenario], output_dir: &Path, custom: bool, quic
         .expect("write sweep CSV");
     }
 
-    write_runs(selected, &runs, output_dir);
+    let runs_path = write_runs(
+        selected,
+        &runs,
+        output_dir,
+        &rp::scenarios::settings_used().join(" "),
+    );
+    println!("wrote {}", runs_path.display());
 
     let mut report = String::new();
     let settings = rp::scenarios::settings_used();
@@ -254,12 +293,18 @@ pub(crate) fn sweep(selected: &[Scenario], output_dir: &Path, custom: bool, quic
 /// Writes every run's outcomes one to a line (`RUNS_FILE`), for `--diff` to
 /// set two sweeps side by side: whether it stayed in band and each band it
 /// missed, each real-life check, each watchdog, and the numbers that most
-/// often move (`run_numbers`).
-fn write_runs(selected: &[Scenario], runs: &[SweepRun], output_dir: &Path) {
+/// often move (`run_numbers`). `settings` says what the runs were played
+/// with, as `NAME=VALUE` items. Returns the file written.
+pub(crate) fn write_runs(
+    selected: &[Scenario],
+    runs: &[SweepRun],
+    output_dir: &Path,
+    settings: &str,
+) -> PathBuf {
     let path = output_dir.join(RUNS_FILE);
     let mut out = BufWriter::new(File::create(&path).expect("create sweep runs"));
     let mut lines = vec![
-        format!("# settings: {}", rp::scenarios::settings_used().join(" ")),
+        format!("# settings: {settings}"),
         format!("# trying: {}", env::var("RP_TRY").unwrap_or_default()),
         "scenario,along,across,strength,kind,name,value".to_string(),
     ];
@@ -298,7 +343,7 @@ fn write_runs(selected: &[Scenario], runs: &[SweepRun], output_dir: &Path) {
     for line in lines {
         writeln!(out, "{line}").expect("write sweep runs");
     }
-    println!("wrote {}", path.display());
+    path
 }
 
 /// For each scenario, how many runs each watchdog tripped in, with one to
@@ -320,7 +365,7 @@ fn watchdog_summary(selected: &[Scenario], runs: &[SweepRun]) -> String {
                 .collect();
             let example = tripped
                 .iter()
-                .find(|run| run.along == 0.0 && run.across == 0.0 && run.strength == 1.0)
+                .find(|run| run.unmoved())
                 .or(tripped.first())
                 .expect("a tripped watchdog has runs");
             let (_, frame, what) = example
@@ -356,7 +401,7 @@ fn sweep_summary(scenario: &Scenario, runs: &[&SweepRun], custom: bool) -> Strin
     // The swing as tuned: unmoved, at the bones' own strength.
     let unmoved = runs
         .iter()
-        .find(|run| run.along == 0.0 && run.across == 0.0 && run.strength == 1.0)
+        .find(|run| run.unmoved())
         .map_or("missing", |run| {
             if run.violations.is_empty() {
                 "in band"

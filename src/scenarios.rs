@@ -173,6 +173,9 @@ impl Strike {
                 .trim()
                 .parse::<f64>()
                 .map_err(|_| format!("`{value}` is not a number"))?;
+            if number < 0.0 && key.trim() != "power" && key.trim() != "p" {
+                return Err(format!("`{option}`: a number of steps is 0 or more"));
+            }
             match key.trim() {
                 "power" | "p" => strike.power = number,
                 "frames" | "f" => strike.strike_frames = number as i32,
@@ -445,10 +448,19 @@ impl Gesture {
     /// `power=P` tries a strength other than the tool's swing power. For example
     /// `bat:-0.3,0.4:wait=10:down:0.05,0.4/12:wait=40:up:wait=30` hovers,
     /// presses, swings into the chest, leans there, and lets go.
+    ///
+    /// `fighters` stands two fighters for the play, as the fight scenarios
+    /// do ([`Fight`]), [`FIGHTER_SPACING`] apart or S body heights with
+    /// `fighters=S`; `guard=down` drops the struck fighter's near guard
+    /// first, and `aim=A` aims the punches A radians above
+    /// `Materials::punch_rise`.
     pub fn parse(spec: &str) -> Result<Gesture, String> {
         let mut parts = spec.split(':');
         let tool = parse_tool(parts.next().unwrap_or(""))?;
         let mut power = swing_power(tool);
+        let mut spacing = None;
+        let mut guard_down = false;
+        let mut aim = None;
         let mut steps = Vec::new();
         for part in parts {
             let part = part.trim();
@@ -456,6 +468,14 @@ impl Gesture {
                 text.trim()
                     .parse::<f64>()
                     .map_err(|_| format!("`{text}` is not a number"))
+            };
+            // A number of steps, which a grid's sum may have made negative.
+            let steps_of = |text: &str| {
+                let count = number(text)?;
+                if count < 0.0 {
+                    return Err(format!("`{part}`: a number of steps is 0 or more"));
+                }
+                Ok(count as i32)
             };
             match part {
                 "down" => steps.push(GestureStep::Press(true)),
@@ -468,14 +488,26 @@ impl Gesture {
                 "lean=off" => steps.push(GestureStep::Lean(0, false)),
                 "lean2=on" => steps.push(GestureStep::Lean(1, true)),
                 "lean2=off" => steps.push(GestureStep::Lean(1, false)),
+                "fighters" => spacing = Some(FIGHTER_SPACING),
+                "guard=down" => guard_down = true,
                 _ => {
                     if let Some(frames) = part.strip_prefix("wait=") {
-                        steps.push(GestureStep::Wait(number(frames)? as i32));
+                        steps.push(GestureStep::Wait(steps_of(frames)?));
                     } else if let Some(value) = part.strip_prefix("power=") {
                         power = number(value)?;
+                    } else if let Some(value) = part.strip_prefix("fighters=") {
+                        let apart = number(value)?;
+                        if !(0.2..=1.5).contains(&apart) {
+                            return Err(format!(
+                                "`{value}` is not a spacing in body heights (0.2 to 1.5)"
+                            ));
+                        }
+                        spacing = Some(apart);
+                    } else if let Some(value) = part.strip_prefix("aim=") {
+                        aim = Some(number(value)?);
                     } else {
                         let (point, frames) = match part.split_once('/') {
-                            Some((point, frames)) => (point, number(frames)? as i32),
+                            Some((point, frames)) => (point, steps_of(frames)?),
                             None => (part, 0),
                         };
                         let (u, v) = point
@@ -492,11 +524,22 @@ impl Gesture {
         if !matches!(steps.first(), Some(GestureStep::Move { .. })) {
             return Err("a gesture starts with the point where the hand is".to_string());
         }
+        let fight = match spacing {
+            Some(spacing) => Some(Fight {
+                spacing,
+                guard_down,
+                aim: aim.unwrap_or(0.0),
+            }),
+            None if guard_down || aim.is_some() => {
+                return Err("guard=down and aim= are for two fighters: add fighters".to_string())
+            }
+            None => None,
+        };
         Ok(Gesture {
             tool,
             power,
             steps: Vec::leak(steps),
-            fight: None,
+            fight,
         })
     }
 }
@@ -540,7 +583,17 @@ impl fmt::Display for Gesture {
                 )?,
             }
         }
-        write!(f, ":power={}", self.power)
+        write!(f, ":power={}", self.power)?;
+        if let Some(fight) = self.fight {
+            write!(f, ":fighters={}", fight.spacing)?;
+            if fight.guard_down {
+                write!(f, ":guard=down")?;
+            }
+            if fight.aim != 0.0 {
+                write!(f, ":aim={}", fight.aim)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1038,10 +1091,17 @@ impl Scenario {
     }
 
     /// The materials the scenario plays on: the defaults with the settings
-    /// the tools were given ([`use_settings`]), on bones as strong as its
-    /// `bone_strength`, its punches aimed as its fight aims them.
+    /// the tools were given ([`use_settings`]), as [`Scenario::materials_on`]
+    /// makes them.
     pub fn materials(&self) -> Materials {
-        let mut materials = set_materials();
+        self.materials_on(set_materials())
+    }
+
+    /// `base` as the scenario plays on it: on bones as strong as its
+    /// `bone_strength`, its punches aimed as its fight aims them. A grid of
+    /// settings plays each of its rows on its own base.
+    pub fn materials_on(&self, base: Materials) -> Materials {
+        let mut materials = base;
         materials.bone_fracture_impulse *= self.bone_strength;
         if let Some(fight) = self.fight() {
             materials.punch_rise += fight.aim;
@@ -3564,6 +3624,7 @@ mod tests {
         assert_eq!(Strike::parse("knife:0,0:1,1:power=5").unwrap().power, 5.0);
         assert!(Strike::parse("spoon:0,0:1,1").is_err());
         assert!(Strike::parse("bat:0,0").is_err());
+        assert!(Strike::parse("bat:0,0:1,1:settle=-1").is_err());
     }
 
     #[test]
@@ -3590,6 +3651,36 @@ mod tests {
         assert_eq!(Gesture::parse(&gesture.to_string()), Ok(gesture));
         assert!(Gesture::parse("bat:down:0,0.4/4").is_err());
         assert!(Gesture::parse("bat:0,0.4:sideways").is_err());
+        assert!(Gesture::parse("bat:0,0.4:wait=-3").is_err());
+        assert!(Gesture::parse("bat:0,0.4:0.1,0.4/-2").is_err());
+    }
+
+    /// Every gesture scenario, fights included, is written in the syntax
+    /// `--gesture` reads and reads back as the same play, its two fighters
+    /// with it: `--list` prints plays that replay as they are.
+    #[test]
+    fn gesture_scenarios_read_back_as_written() {
+        let mut fights = 0;
+        for scenario in scenarios() {
+            if let Play::Gesture(gesture) = scenario.play {
+                let spec = gesture.to_string();
+                assert_eq!(Gesture::parse(&spec), Ok(gesture), "{}", scenario.name);
+                fights += usize::from(gesture.fight.is_some());
+            }
+        }
+        assert!(fights >= 2, "the fights were left out");
+        let fight =
+            Gesture::parse("fist:-1.3,0.95:wait=4:punch=right:fighters:guard=down:aim=-0.1")
+                .unwrap()
+                .fight
+                .unwrap();
+        assert_eq!(fight.spacing, FIGHTER_SPACING);
+        assert!(fight.guard_down);
+        assert_eq!(fight.aim, -0.1);
+        let apart = Gesture::parse("fist:-1.3,0.95:fighters=0.6").unwrap();
+        assert_eq!(apart.fight.map(|fight| fight.spacing), Some(0.6));
+        assert!(Gesture::parse("fist:-1.3,0.95:guard=down").is_err());
+        assert!(Gesture::parse("fist:-1.3,0.95:fighters=9").is_err());
     }
 
     #[test]
