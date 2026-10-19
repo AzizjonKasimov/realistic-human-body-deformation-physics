@@ -34,15 +34,29 @@ Path to a Chromium browser; Edge or Chrome is found by default.
 .\tools\touch_check.ps1
 Builds the web version and plays the touches on a 390x844 phone.
 
+.PARAMETER Fight
+Play the site's Fight page (fight/) instead, as built with build_web.ps1 -Fight
+(so it implies -SkipBuild): tap Start, then with real fingers press PUNCH,
+hold LEAN BACK, and press the right fighter's PUNCH while still holding LEAN
+BACK, as two players sharing a phone do. It checks that the page counted the
+punch, the lean, and the second player (fight-punch, fight-lean,
+fight-two-players), and that it logged no errors. The game tells the page
+where its buttons are (window.__fightButtons).
+
 .EXAMPLE
 .\tools\touch_check.ps1 -Size 844x390 -SkipBuild
 The same on a phone held sideways.
+
+.EXAMPLE
+.\tools\build_web.ps1 -Fight ..\realistic_physics_fight; .\tools\touch_check.ps1 -Fight
+The Fight page's buttons under real fingers on a 390x844 phone.
 #>
 param(
     [string]$Size = "390x844",
     [switch]$SkipBuild,
     [int]$Port = 8093,
-    [string]$Browser = ""
+    [string]$Browser = "",
+    [switch]$Fight
 )
 
 . "$PSScriptRoot\common.ps1"
@@ -55,7 +69,7 @@ $width, $height = $Size -split "[xX]" | ForEach-Object { [int]$_ }
 if (-not $width -or -not $height) {
     throw "-Size should look like 390x844."
 }
-if (-not $SkipBuild) {
+if (-not $SkipBuild -and -not $Fight) {
     & (Join-Path $PSScriptRoot "build_web.ps1")
 }
 $siteDir = Join-Path $repoRoot "target\web"
@@ -65,6 +79,14 @@ if (-not (Test-Path -LiteralPath (Join-Path $siteDir "index.html"))) {
 
 $problems = [System.Collections.Generic.List[string]]::new()
 $errors = [System.Collections.Generic.List[string]]::new()
+
+# Fingers on the screen after a change: each @{ x; y; id }, in CSS pixels.
+# A touchStart with one more finger than before puts it down, and a touchEnd
+# lists the fingers still down.
+function Send-Fingers([string]$Type, [object[]]$Fingers) {
+    $points = @($Fingers | ForEach-Object { @{ x = $_.x; y = $_.y; id = $_.id; radiusX = 6; radiusY = 6; force = 1 } })
+    Invoke-Cdp $page "Input.dispatchTouchEvent" @{ type = $Type; touchPoints = $points } | Out-Null
+}
 
 # One finger, put down, moved, or lifted at (X, Y) in CSS pixels.
 function Send-Touch([string]$Type, [double]$X, [double]$Y) {
@@ -129,7 +151,11 @@ try {
         width = $width; height = $height; deviceScaleFactor = 3; mobile = $true
     } | Out-Null
     Invoke-Cdp $page "Emulation.setTouchEmulationEnabled" @{ enabled = $true; maxTouchPoints = 5 } | Out-Null
-    Invoke-Cdp $page "Page.navigate" @{ url = $url } | Out-Null
+    $pageUrl = if ($Fight) { $url + "fight/" } else { $url }
+    if ($Fight -and -not (Test-Path -LiteralPath (Join-Path $siteDir "fight\index.html"))) {
+        throw "No Fight page in $siteDir; build it with .\tools\build_web.ps1 -Fight <the game's checkout>."
+    }
+    Invoke-Cdp $page "Page.navigate" @{ url = $pageUrl } | Out-Null
     # Waits until the page answers `$Script` with true.
     function Wait-Until([string]$Script, [string]$What) {
         $deadline = (Get-Date).AddSeconds(30)
@@ -170,6 +196,51 @@ return await new Promise(done => {
         $problems.Add("The page drew only $fps frames a second, too few for a swipe to be a swing.")
     }
 
+    if ($Fight) {
+        # A first touch away from the buttons turns the game to finger-sized
+        # buttons; then it says where they are.
+        Send-Touch "touchStart" ($width * 0.5) ($height * 0.3)
+        Wait-Page 0.2
+        Send-Touch "touchEnd" ($width * 0.5) ($height * 0.3)
+        Wait-Page 0.5
+        $buttons = @{}
+        foreach ($button in @(Invoke-PageScript $page "return window.__fightButtons || [];")) {
+            $buttons[$button.name] = @{ x = $button.x + $button.w / 2; y = $button.y + $button.h / 2 }
+        }
+        foreach ($name in @("lean1", "punch1", "punch2", "lean2")) {
+            if (-not $buttons.ContainsKey($name)) {
+                throw "The game told the page of no $name button (window.__fightButtons)."
+            }
+        }
+        # A tap on PUNCH.
+        Send-Fingers "touchStart" @(@{ x = $buttons.punch1.x; y = $buttons.punch1.y; id = 1 })
+        Wait-Page 0.15
+        Send-Fingers "touchEnd" @()
+        Wait-Page 1.5
+        Save-Screenshot "fight-punch.png"
+        # LEAN BACK held, and while it is, a second player's finger on the
+        # right fighter's PUNCH.
+        $lean = @{ x = $buttons.lean1.x; y = $buttons.lean1.y; id = 1 }
+        Send-Fingers "touchStart" @($lean)
+        Wait-Page 0.6
+        Send-Fingers "touchStart" @($lean, @{ x = $buttons.punch2.x; y = $buttons.punch2.y; id = 2 })
+        Wait-Page 0.15
+        Send-Fingers "touchEnd" @($lean)
+        Wait-Page 0.3
+        Save-Screenshot "fight-lean.png"
+        Wait-Page 0.5
+        Send-Fingers "touchEnd" @()
+        Wait-Page 1.0
+        Save-Screenshot "fight-after.png"
+        $counted = Get-Counted
+        foreach ($name in @("fight-start", "fight-loaded", "fight-punch", "fight-lean", "fight-two-players")) {
+            if ($counted -notcontains $name) {
+                $problems.Add("The page did not count $name (it counted: $($counted -join ', ')).")
+            }
+        }
+    }
+
+    if (-not $Fight) {
     # The chest lies about here in a phone's window, the body drawn about
     # 0.62 of its height tall between the HUD and the buttons.
     $bodyHeight = $height * 0.62
@@ -206,6 +277,7 @@ return await new Promise(done => {
     if ($counted -notcontains "tool-sledgehammer") {
         $problems.Add("The swipe across the body did not strike it (the page counted: $($counted -join ', ')).")
     }
+    }
 } finally {
     Stop-HeadlessBrowser $page
     if ($server -and -not $server.HasExited) {
@@ -217,8 +289,10 @@ foreach ($line in $errors) {
     $problems.Add("The page logged $line")
 }
 Write-Host ""
-Write-Host "Touch on a $Size phone, $fps fps:"
-if ($problems.Count -eq 0) {
+Write-Host "Touch on a $Size phone, $fps fps$(if ($Fight) { ', the Fight page' }):"
+if ($problems.Count -eq 0 -and $Fight) {
+    Write-Host "  PUNCH punched, LEAN BACK leaned while held, two fingers played both fighters, and the console stayed clean."
+} elseif ($problems.Count -eq 0) {
     Write-Host "  the first touch took the hammer up without striking, the swipe struck the body, and the console stayed clean."
 } else {
     $problems | ForEach-Object { Write-Host "  FAIL: $_" }

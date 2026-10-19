@@ -683,12 +683,13 @@ impl Default for Materials {
             // as far as its lean in carries it, and the guard's fist stands
             // beside the chin, so a lean back must carry the head and the
             // guard further than a punch's lean in to make it fall short:
-            // 20 degrees at the lower back, well inside the trunk's 30-35
-            // degrees of sideways bend, and the weight 25 cm over toward the
-            // back foot. As far as a punch leans in (0.21 rad, 15 cm), the
-            // fist still met the guard or grazed the head. It comes back as
-            // slowly as a punch's lean: brought back in half a second, the
-            // head swung 16 cm past upright toward the other fighter.
+            // 20 degrees at the lower back, well inside the 35 degrees a
+            // trunk bends sideways (docs/INJURY_REFERENCE.md, Leaning back),
+            // and the weight 25 cm over toward the back foot. As far as a
+            // punch leans in (0.21 rad, 15 cm), the fist still met the guard
+            // or grazed the head. It comes back as slowly as a punch's lean:
+            // brought back in half a second, the head swung 16 cm past
+            // upright toward the other fighter.
             lean_back: 0.35,
             lean_back_seconds: 0.25,
             lean_recover_seconds: 1.0,
