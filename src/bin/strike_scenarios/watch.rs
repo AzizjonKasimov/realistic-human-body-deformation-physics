@@ -383,12 +383,13 @@ fn report_stance(name: &str, frame: i32, world: &rp::World, last_positions: &[rp
         uneven.0
     );
     println!(
-        "{name} frame {frame}: hips off {} px, fists off {} px, fastest tissue {:.0} px/s, outline contacts {} (deepest {:.1} px)",
+        "{name} frame {frame}: hips off {} px, fists off {} px, fastest tissue {:.0} px/s, outline contacts {} (deepest {:.1} px, between parts {:.1} px)",
         hips.join(" "),
         fists.join(" "),
         fastest_point_speed(world, last_positions),
         world.debug().outline_contacts,
         world.debug().max_outline_overlap,
+        world.debug().max_overlap_between_parts,
     );
     for line in feet_and_hips(world) {
         println!("{name} frame {frame}: {line}");
