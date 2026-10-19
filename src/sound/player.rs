@@ -1,17 +1,16 @@
-//! Plays the game's sound: `realistic_physics::sound` hears each simulation
-//! step and says what to play, and this plays it through macroquad. The
-//! sounds are synthesized and handed to the audio device in the background,
-//! because a browser decodes each clip asynchronously; the game is silent for
-//! the few frames that takes.
+//! Plays the game's sound: [`Foley`] hears each simulation step and says
+//! what to play, and this plays it through macroquad. The sounds are
+//! synthesized and handed to the audio device in the background, because a
+//! browser decodes each clip asynchronously; the game is silent for the few
+//! frames that takes.
 
 use macroquad::audio::{
     load_sound_from_bytes, play_sound, set_sound_volume, PlaySoundParams, Sound,
 };
 use macroquad::experimental::coroutines::{start_coroutine, Coroutine};
-use realistic_physics as rp;
-use rp::sound::{
-    ease_bed, wav_bytes, Beds, Cue, Foley, SoundBank, Takes, Voice, Voices, BED_COUNT,
-};
+
+use super::{ease_bed, wav_bytes, Beds, Cue, Foley, SoundBank, Takes, Voice, Voices, BED_COUNT};
+use crate::World;
 
 /// The sound bank, loaded into the audio device.
 struct Loaded {
@@ -19,7 +18,8 @@ struct Loaded {
     sounds: Vec<Sound>,
 }
 
-pub struct Audio {
+/// The sound an app plays as its world steps.
+pub struct Player {
     foley: Foley,
     loading: Option<Coroutine<Option<Loaded>>>,
     loaded: Option<Loaded>,
@@ -32,9 +32,9 @@ pub struct Audio {
     takes: Takes,
 }
 
-impl Audio {
+impl Player {
     /// Starts synthesizing and loading the sounds.
-    pub fn start() -> Audio {
+    pub fn start() -> Player {
         let loading = start_coroutine(async move {
             let SoundBank { clips, voices } = SoundBank::render();
             let mut sounds = Vec::with_capacity(clips.len());
@@ -47,7 +47,7 @@ impl Audio {
             }
             Some(Loaded { voices, sounds })
         });
-        Audio {
+        Player {
             foley: Foley::new(),
             loading: Some(loading),
             loaded: None,
@@ -60,7 +60,7 @@ impl Audio {
     }
 
     /// Hears the step the world just took.
-    pub fn hear(&mut self, world: &rp::World) {
+    pub fn hear(&mut self, world: &World) {
         let heard = self.foley.hear(world);
         self.cues.extend(heard.cues);
         self.beds = heard.beds;

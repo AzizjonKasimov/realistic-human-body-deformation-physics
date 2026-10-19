@@ -1,3 +1,4 @@
+pub mod draw;
 pub mod inspect;
 mod mesh;
 pub mod scenarios;
@@ -10,7 +11,10 @@ mod view;
 pub use silhouette::silhouette_distance;
 pub use simulation::*;
 pub use version::version_label;
-pub use view::{fighter_frames, fighter_frames_at, world_frame, View, FIGHTER_SPACING};
+pub use view::{
+    fighter_frames, fighter_frames_at, fighters_across, world_frame, View, FIGHTER_REACH,
+    FIGHTER_SPACING,
+};
 
 #[cfg(test)]
 mod tests {
@@ -26,9 +30,10 @@ mod tests {
     ];
 
     /// Modules under `src` that never feed the simulation, so they may use
-    /// either: the binaries' own code (drawing and the native-only
-    /// diagnostics) and the sound, which only reads the world.
-    const NOT_SIMULATED: &[&str] = &["bin", "sound"];
+    /// either: the binaries' own code (the apps and the native-only
+    /// diagnostics), and the drawing and the sound, which only read the
+    /// world.
+    const NOT_SIMULATED: &[&str] = &["bin", "draw", "sound"];
 
     /// The browser build must simulate exactly like the native one, but the
     /// two runtimes differ in the last bit on many inputs (about a fifth of

@@ -41,6 +41,32 @@ pub fn fighter_frames_at(spacing: f64) -> [BodyFrame; 2] {
     })
 }
 
+/// How far out from its midline a fighter reaches in the guard, in body
+/// heights, with room for a punch's fist.
+pub const FIGHTER_REACH: f64 = 0.31;
+
+/// Where to draw the scenarios' body frame ([`world_frame`]) so that two
+/// fighters `spacing` body heights apart fit across a window `width` pixels
+/// wide, from the left fighter's outer side to the right's with room for a
+/// fist, `margin` pixels in from each side: no larger than `frame`, where a
+/// lone body would be drawn, and smaller still if they would not fit, the
+/// two centred across the window.
+pub fn fighters_across(frame: BodyFrame, spacing: f64, width: f64, margin: f64) -> BodyFrame {
+    let world = world_frame();
+    let [left, right] = fighter_frames_at(spacing);
+    let reach = FIGHTER_REACH * world.height;
+    let (from, to) = (left.origin.x - reach, right.origin.x + reach);
+    let room = (width - 2.0 * margin).max(1.0);
+    let scale = (frame.height / world.height).min(room / (to - from));
+    BodyFrame {
+        origin: Vec2 {
+            x: width * 0.5 + (world.origin.x - (from + to) * 0.5) * scale,
+            y: frame.origin.y,
+        },
+        height: world.height * scale,
+    }
+}
+
 /// The world drawn uniformly larger or smaller and moved: a world position
 /// `p` lands on the screen at `p * scale + offset`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -134,6 +160,32 @@ mod tests {
                 (back.x - at.x).abs() < 1.0e-9 && (back.y - at.y).abs() < 1.0e-9,
                 "{at:?} came back as {back:?}"
             );
+        }
+    }
+
+    /// Two fighters drawn across a window fit inside it with their reach and
+    /// stand centred in it, at the lone body's size where that fits.
+    #[test]
+    fn two_fighters_fit_across_the_window() {
+        let world = world_frame();
+        let [left, right] = fighter_frames();
+        for width in [1280.0, 800.0, 390.0] {
+            let lone = crate::body_frame(width, 720.0);
+            let frame = fighters_across(lone, FIGHTER_SPACING, width, 12.0);
+            assert!(frame.height <= lone.height + 1.0e-9);
+            assert_eq!(frame.origin.y, lone.origin.y);
+            let view = View::fitting(world, frame);
+            let reach = FIGHTER_REACH * world.height;
+            let from = view.to_screen(Vec2 {
+                x: left.origin.x - reach,
+                y: 0.0,
+            });
+            let to = view.to_screen(Vec2 {
+                x: right.origin.x + reach,
+                y: 0.0,
+            });
+            assert!(from.x >= 12.0 - 1.0e-9 && to.x <= width - 12.0 + 1.0e-9);
+            assert!(((from.x + to.x) * 0.5 - width * 0.5).abs() < 1.0e-9);
         }
     }
 

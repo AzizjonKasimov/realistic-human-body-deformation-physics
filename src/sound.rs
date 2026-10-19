@@ -6,18 +6,21 @@
 //! artery spurts lands, air rushing past a swung tool, and a slice while the
 //! knife cuts.
 //! [`SoundBank`] synthesizes those sounds once (`synth.rs`) and [`Voices`]
-//! says which clip plays for each and how loud. The app plays them through
-//! macroquad; [`Mixdown`] mixes the same thing offline, so tools and tests can
-//! listen to a scenario (`strike_scenarios --sound DIR`).
+//! says which clip plays for each and how loud. [`Player`] plays them through
+//! macroquad, for the sandbox and the game built on the engine alike;
+//! [`Mixdown`] mixes the same thing offline, so tools and tests can listen to
+//! a scenario (`strike_scenarios --sound DIR`).
 //!
 //! Rebuilt from the foley that makes the sound of the project's videos
 //! (`video_tools/tools/foley.py`, which reads the same counts from the capture
 //! mode's `--events` log), so the game sounds like them.
 
 mod mixdown;
+mod player;
 mod synth;
 
 pub use mixdown::Mixdown;
+pub use player::Player;
 
 use crate::{ToolMode, World};
 

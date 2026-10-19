@@ -255,7 +255,7 @@ pub async fn run(request: CaptureRequest) {
     if let Some(world) = world {
         app.world = world;
         app.world.capture_motion(&mut app.earlier);
-        app.skin_rim = skin_rim(&app.world);
+        app.skin_rim = SkinRim::of(&app.world);
     }
     app.hide_ui = request.hide_ui;
     app.hide_tool = request.hide_tool;

@@ -21,8 +21,8 @@ use std::process;
 type Rgb = [f64; 3];
 type Vec2 = (f64, f64);
 
-// The game's colors, from `render_palette` and `draw_sledgehammer` in
-// `src/bin/realistic_physics/main.rs`, and the start screen's glow.
+// The game's colors, from `Palette` in `src/draw.rs` and `draw_sledgehammer`
+// in `src/draw/tools.rs`, and the start screen's glow.
 const BACKGROUND: Rgb = [15.0, 15.0, 17.0];
 const BACKGROUND_LOW: Rgb = [26.0, 22.0, 22.0];
 const GLOW: Rgb = [33.0, 29.0, 30.0];

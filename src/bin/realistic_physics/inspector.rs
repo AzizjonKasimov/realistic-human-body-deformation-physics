@@ -30,6 +30,7 @@ use std::env;
 use std::path::PathBuf;
 use std::process;
 
+use rp::draw::{add, bone_point, draw_line_vec, length, mix, scale, sub, to_mq};
 use rp::inspect::{
     actor_name, bone_name, joint_name, measure_text as measure_words, place_name, story,
     subject_name, subject_spec, BlameTarget, Trip, Watchdogs, Why,
@@ -232,7 +233,7 @@ impl Moment {
         app.pointer_down = self.pointer_down;
         app.tool_blood = self.tool_blood;
         app.seen_fluid = self.seen_fluid;
-        app.skin_rim = skin_rim(&app.world);
+        app.skin_rim = SkinRim::of(&app.world);
     }
 }
 
@@ -292,7 +293,7 @@ impl Viewer {
             scenario.materials(),
         ));
         app.world.keep_journal();
-        app.skin_rim = skin_rim(&app.world);
+        app.skin_rim = SkinRim::of(&app.world);
         let mut watchdogs = Watchdogs::new(&app.world);
         let frames = scenario.frames().max(1);
         let mut moments = Vec::new();
