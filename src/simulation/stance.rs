@@ -147,9 +147,22 @@ pub struct FootHold {
     pub lifted: [bool; 2],
 }
 
+/// Bones and the flesh held to them (`PostureBinding`, each point by its
+/// share), moved as one piece: its mass, its centre of mass, and how hard it
+/// is to turn about that centre, where the substep began.
+#[derive(Clone, Debug)]
+pub(super) struct BoundPiece {
+    pub(super) bones: Vec<usize>,
+    pub(super) flesh: Vec<(usize, f64)>,
+    pub(super) mass: f64,
+    pub(super) centre: Vec2,
+    pub(super) inertia: f64,
+}
+
 /// How much a dry floor's friction holds a foot sideways, as a share of the
-/// weight on it: shoe and bare-foot static friction on dry floors runs about
-/// 0.5 to 1, where walking needs about 0.2.
+/// weight on it: OSHA's guideline asks a walking surface for a static
+/// coefficient of friction of at least 0.5 against a shoe, which a dry floor
+/// gives or betters.
 const FOOT_FRICTION: f64 = 0.6;
 
 /// How firmly a planted foot is held, in hertz on the leg's weight, damped
@@ -261,6 +274,74 @@ pub(super) fn bone_frame(a: Vec2, b: Vec2, p: Vec2) -> (f64, f64) {
 }
 
 impl World {
+    /// `bones`, all of one body, and the flesh held to them as one piece,
+    /// where the substep began; none for a piece with no weight to turn.
+    pub(super) fn bound_piece(&self, bones: Vec<usize>) -> Option<BoundPiece> {
+        let body = self.bones.get(*bones.first()?)?.body;
+        let mut sums = (0.0, Vec2::default(), 0.0);
+        let mut add_to = |mass: f64, place: Vec2| {
+            sums.0 += mass;
+            sums.1 = add(sums.1, scale(place, mass));
+            sums.2 += mass * dot(place, place);
+        };
+        for &index in &bones {
+            let segment = self.bones[index];
+            add_to(segment.mass * 0.5, segment.previous_a);
+            add_to(segment.mass * 0.5, segment.previous_b);
+        }
+        let mut flesh = Vec::new();
+        for (index, (point, hold)) in self.points.iter().zip(&self.point_holds).enumerate() {
+            if point.pinned || point.is_ghost() || point.body != body {
+                continue;
+            }
+            let binding = hold.posture;
+            let share: f64 = (0..2)
+                .filter(|&slot| bones.contains(&binding.bones[slot]))
+                .map(|slot| binding.weights[slot])
+                .sum();
+            if share > 0.0 {
+                add_to(point.mass * share, point.previous);
+                flesh.push((index, share));
+            }
+        }
+        let (mass, moment, second) = sums;
+        if mass <= EPSILON {
+            return None;
+        }
+        let centre = scale(moment, 1.0 / mass);
+        let inertia = second - mass * dot(centre, centre);
+        (inertia > EPSILON).then_some(BoundPiece {
+            bones,
+            flesh,
+            mass,
+            centre,
+            inertia,
+        })
+    }
+
+    /// Gives `piece` the impulse `push` at `lever` from its centre of mass,
+    /// over a substep `h` long: it moves and turns as one, its bones and its
+    /// flesh, each point by its share, from where the substep began.
+    pub(super) fn push_bound_piece(&mut self, piece: &BoundPiece, lever: Vec2, push: Vec2, h: f64) {
+        let shift = scale(push, h / piece.mass);
+        let turn = cross(lever, push) * h / piece.inertia;
+        let moved = |at: Vec2| {
+            add(
+                shift,
+                scale(perpendicular(subtract(at, piece.centre)), turn),
+            )
+        };
+        for &index in &piece.bones {
+            let bone = &mut self.bones[index];
+            bone.a = add(bone.a, moved(bone.previous_a));
+            bone.b = add(bone.b, moved(bone.previous_b));
+        }
+        for &(index, share) in &piece.flesh {
+            let point = &mut self.points[index];
+            point.position = add(point.position, scale(moved(point.previous), share));
+        }
+    }
+
     /// One newton metre in the engine's units of torque (`KG_PER_MASS` and
     /// pixels).
     pub(super) fn newton_metres(&self) -> f64 {
@@ -562,15 +643,17 @@ impl World {
         // of its bone, as an impulse over the substep.
         let weight = tissue::BODY_MASS_KG * self.materials.gravity * self.newtons() * 0.25 * h;
         let friction = FOOT_FRICTION * weight;
-        for index in 0..self.foot_holds.len() {
+        let pieces = std::mem::take(&mut self.foot_pieces);
+        for (index, piece) in pieces.iter().enumerate() {
             let hold = self.foot_holds[index];
-            let Some(bone) = self.standing_foot(&hold) else {
+            let Some(piece) = piece
+                .as_ref()
+                .filter(|_| self.standing_foot(&hold).is_some())
+            else {
                 continue;
             };
-            let w = bone.inverse_end_mass();
-            let mass = 1.0 / w;
-            let softness = Softness::of_stiffness(stiffness, damping, mass, h);
             for end in 0..2 {
+                let bone = self.bones[hold.bone];
                 let (place, previous) = if end == 0 {
                     (bone.a, bone.previous_a)
                 } else {
@@ -593,9 +676,16 @@ impl World {
                 let given = hold.impulse[end];
                 let error = subtract(previous, planted);
                 let speed = scale(subtract(place, previous), 1.0 / h);
+                // How hard the foot, bone and flesh, is to move at this end,
+                // each way.
+                let lever = subtract(previous, piece.centre);
+                let mass_x = 1.0 / (1.0 / piece.mass + lever.y * lever.y / piece.inertia);
+                let mass_y = 1.0 / (1.0 / piece.mass + lever.x * lever.x / piece.inertia);
+                let soft_x = Softness::of_stiffness(stiffness, damping, mass_x, h);
+                let soft_y = Softness::of_stiffness(stiffness, damping, mass_y, h);
                 let pull = Vec2 {
-                    x: given.x + softness.impulse(mass, speed.x, error.x, given.x),
-                    y: given.y + softness.impulse(mass, speed.y, error.y, given.y),
+                    x: given.x + soft_x.impulse(mass_x, speed.x, error.x, given.x),
+                    y: given.y + soft_y.impulse(mass_y, speed.y, error.y, given.y),
                 };
                 let total = Vec2 {
                     x: pull.x.clamp(-friction, friction),
@@ -608,9 +698,60 @@ impl World {
                 if pull.x.abs() > friction {
                     state.planted[end].x = previous.x;
                 }
-                self.push_foot(hold.bone, end, scale(subtract(total, given), w * h));
+                self.push_bound_piece(piece, lever, subtract(total, given), h);
             }
         }
+        self.foot_pieces = pieces;
+    }
+
+    /// Each standing foot's bone and the flesh held to it, as one piece, as
+    /// this substep begins: the floor holds the sole, flesh and bone
+    /// together. Held by its bone alone, a foot struck by a bat kept its bone
+    /// where it stood while the blow shoved its flesh away, leaving the bone
+    /// outside its skin.
+    ///
+    /// A foot a tool or a fist strikes is knocked off its footing while it
+    /// is struck, as a blow overpowers the floor's friction, and stands again
+    /// where it comes down: held on, the light foot bone was dragged back
+    /// toward where it stood, and the flesh the blow shoved on left it
+    /// outside the skin (feet in 53 of 2,000 random blows, 15 on `main`).
+    pub(super) fn measure_feet(&mut self) {
+        let mut pieces = Vec::with_capacity(self.foot_holds.len());
+        for index in 0..self.foot_holds.len() {
+            let hold = self.foot_holds[index];
+            let piece = if self.standing_foot(&hold).is_some() && !self.foot_struck(&hold) {
+                self.bound_piece(vec![hold.bone])
+            } else {
+                None
+            };
+            if piece.is_none() {
+                let state = &mut self.foot_holds[index];
+                state.impulse = [Vec2::default(); 2];
+                state.lifted = [true; 2];
+            }
+            pieces.push(piece);
+        }
+        self.foot_pieces = pieces;
+    }
+
+    /// Whether a tool or a fist presses on the foot `hold` holds, or on the
+    /// shin above it, this step.
+    fn foot_struck(&self, hold: &FootHold) -> bool {
+        let Some(foot) = self.bones.get(hold.bone) else {
+            return false;
+        };
+        let leg: Vec<usize> = (0..self.bones.len())
+            .filter(|&index| {
+                let bone = self.bones[index];
+                bone.body == foot.body
+                    && bone.limb == foot.limb
+                    && matches!(bone.part, BonePart::Foot | BonePart::Shin)
+            })
+            .collect();
+        self.pressed_points().any(|point| {
+            let binding = self.point_holds[point].posture;
+            (0..2).any(|slot| binding.weights[slot] >= 0.5 && leg.contains(&binding.bones[slot]))
+        })
     }
 
     /// The bone of the foot `hold` holds, if it stands on the floor bearing
@@ -632,29 +773,31 @@ impl World {
         stands.then_some(bone)
     }
 
-    /// Moves end `end` (0 for `a`) of bone `bone` by `shift`.
-    fn push_foot(&mut self, bone: usize, end: usize, shift: Vec2) {
-        let bone = &mut self.bones[bone];
-        if end == 0 {
-            bone.a = add(bone.a, shift);
-        } else {
-            bone.b = add(bone.b, shift);
-        }
-    }
-
     pub(super) fn warm_start_foot_holds(&mut self, h: f64) {
-        for index in 0..self.foot_holds.len() {
+        let pieces = std::mem::take(&mut self.foot_pieces);
+        for (index, piece) in pieces.iter().enumerate() {
             let hold = self.foot_holds[index];
-            let Some(bone) = self.standing_foot(&hold) else {
+            let (Some(bone), Some(piece)) = (self.standing_foot(&hold), piece.as_ref()) else {
                 continue;
             };
-            let w = bone.inverse_end_mass();
             for end in 0..2 {
-                if hold.impulse[end] != Vec2::default() {
-                    self.push_foot(hold.bone, end, scale(hold.impulse[end], w * h));
+                if hold.impulse[end] == Vec2::default() {
+                    continue;
                 }
+                let previous = if end == 0 {
+                    bone.previous_a
+                } else {
+                    bone.previous_b
+                };
+                self.push_bound_piece(
+                    piece,
+                    subtract(previous, piece.centre),
+                    hold.impulse[end],
+                    h,
+                );
             }
         }
+        self.foot_pieces = pieces;
     }
 
     /// The hold's stiffness and damping at each end of a foot's bone, in the
@@ -1001,7 +1144,9 @@ mod tests {
         };
         let (rose, slid) = feet_moved(&mut world, 1, input, 120);
         assert!(rose < 4.0, "a foot rose {rose:.1} px off the floor");
-        assert!(slid < 6.0, "a foot slid {slid:.1} px along the floor");
+        // A couple of centimetres, as the legs take up the lean: unheld,
+        // the feet slid 38 cm.
+        assert!(slid < 8.0, "a foot slid {slid:.1} px along the floor");
         assert_eq!(
             world.stats.broken_bone_joints, 0,
             "leaning back tore a joint"

@@ -223,6 +223,7 @@ impl World {
             self.timed("punch sides", Self::measure_punches);
             self.timed("lean sides", Self::measure_leans);
             self.timed("limbs meet", |world| world.measure_clashes(h));
+            self.timed("foot pieces", Self::measure_feet);
             if self.materials.warm_starting {
                 self.warm_start_soft(h);
             } else {
@@ -275,6 +276,7 @@ impl World {
         }
         self.join_substeps(substeps);
         self.clashes.clear();
+        self.foot_pieces.clear();
         self.solver_dt = dt;
         self.solver_progress = 1.0;
         self.mark_trace_time(1.0);

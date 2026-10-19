@@ -15,7 +15,8 @@
 //! arm is stopped or turned aside by the other instead of passing through. A
 //! punching arm pressed hard gives way (`World::block_punch`).
 
-use super::soft::{perpendicular, Softness};
+use super::soft::Softness;
+use super::stance::BoundPiece;
 use super::*;
 
 /// How stiff the push between two limbs is, in hertz, and how damped: Box2D's
@@ -57,15 +58,9 @@ struct ClashSide {
     bone: usize,
     /// Where along the bone, from its `a` end, the two bones come closest.
     along: f64,
-    /// The bones moved as one piece: the bone met, and for an arm throwing
-    /// a punch, the bones beyond it out to the hand.
-    bones: Vec<usize>,
-    /// The points of flesh held to those bones, each by its share
-    /// (`PostureBinding`).
-    flesh: Vec<(usize, f64)>,
-    mass: f64,
-    centre: Vec2,
-    inertia: f64,
+    /// The bone met, and for an arm throwing a punch, the bones beyond it
+    /// out to the hand, with the flesh held to them (`clash_bones`).
+    piece: BoundPiece,
     /// From the piece's centre of mass to where the bones come closest.
     lever: Vec2,
 }
@@ -196,7 +191,7 @@ impl World {
                 };
                 let turning = |side: &ClashSide| {
                     let arm = side.lever.x * normal.y - side.lever.y * normal.x;
-                    1.0 / side.mass + arm * arm / side.inertia
+                    1.0 / side.piece.mass + arm * arm / side.piece.inertia
                 };
                 let normal_mass = 1.0 / (turning(&side_a) + turning(&side_b));
                 self.clashes.push(Clash {
@@ -258,49 +253,13 @@ impl World {
     /// held to them as one piece, as the substep began, pressed at `at`,
     /// `along` the bone.
     fn clash_side(&self, index: usize, along: f64, at: Vec2) -> Option<ClashSide> {
-        let bone = self.bones[index];
-        let bones = self.clash_bones(index);
-        let mut sums = (0.0, Vec2::default(), 0.0);
-        let mut add_to = |mass: f64, place: Vec2| {
-            sums.0 += mass;
-            sums.1 = add(sums.1, scale(place, mass));
-            sums.2 += mass * dot(place, place);
-        };
-        for &piece in &bones {
-            let segment = self.bones[piece];
-            add_to(segment.mass * 0.5, segment.previous_a);
-            add_to(segment.mass * 0.5, segment.previous_b);
-        }
-        let mut flesh = Vec::new();
-        for (point_index, (point, hold)) in self.points.iter().zip(&self.point_holds).enumerate() {
-            if point.pinned || point.is_ghost() || point.body != bone.body {
-                continue;
-            }
-            let binding = hold.posture;
-            let share: f64 = (0..2)
-                .filter(|&slot| bones.contains(&binding.bones[slot]))
-                .map(|slot| binding.weights[slot])
-                .sum();
-            if share > 0.0 {
-                add_to(point.mass * share, point.previous);
-                flesh.push((point_index, share));
-            }
-        }
-        let (mass, moment, second) = sums;
-        if mass <= EPSILON {
-            return None;
-        }
-        let centre = scale(moment, 1.0 / mass);
-        let inertia = second - mass * dot(centre, centre);
-        (inertia > EPSILON).then(|| ClashSide {
+        let piece = self.bound_piece(self.clash_bones(index))?;
+        let lever = subtract(at, piece.centre);
+        Some(ClashSide {
             bone: index,
             along,
-            bones,
-            flesh,
-            mass,
-            centre,
-            inertia,
-            lever: subtract(at, centre),
+            piece,
+            lever,
         })
     }
 
@@ -318,7 +277,7 @@ impl World {
         let softness = Softness::new(2.0 * PI * hertz, CLASH_DAMPING_RATIO, h);
         let max_push = CLASH_PUSH_SPEED * 1000.0 / self.mm_per_px();
         let mut pushes = Vec::with_capacity(self.clashes.len());
-        for clash in &mut self.clashes {
+        for (index, clash) in self.clashes.iter_mut().enumerate() {
             let [first, second] = &clash.sides;
             let (a, b) = (self.bones[first.bone], self.bones[second.bone]);
             let gap = dot(
@@ -342,13 +301,16 @@ impl World {
             let applied = total - clash.impulse;
             clash.impulse = total;
             if applied != 0.0 {
-                pushes.push((first.clone(), second.clone(), scale(clash.normal, applied)));
+                pushes.push((index, scale(clash.normal, applied)));
             }
         }
-        for (first, second, push) in pushes {
-            self.push_clash_side(&first, scale(push, -1.0), h);
-            self.push_clash_side(&second, push, h);
+        let clashes = std::mem::take(&mut self.clashes);
+        for (index, push) in pushes {
+            let [first, second] = &clashes[index].sides;
+            self.push_bound_piece(&first.piece, first.lever, scale(push, -1.0), h);
+            self.push_bound_piece(&second.piece, second.lever, push, h);
         }
+        self.clashes = clashes;
         self.debug.limb_clashes = self.clashes.len() as i32;
         let newtons = self.newtons();
         let mut blocked = Vec::new();
@@ -366,24 +328,6 @@ impl World {
         }
         for (bone, other, force) in blocked {
             self.block_punch(bone, other, Measure::Force, force, CLASH_BLOCK_FORCE);
-        }
-    }
-
-    /// Gives `side`'s piece the impulse `push` where the bones came closest,
-    /// over a substep `h` long: it moves and turns as one, its bone and its
-    /// flesh, each point by its share.
-    fn push_clash_side(&mut self, side: &ClashSide, push: Vec2, h: f64) {
-        let shift = scale(push, h / side.mass);
-        let turn = (side.lever.x * push.y - side.lever.y * push.x) * h / side.inertia;
-        let moved = |at: Vec2| add(shift, scale(perpendicular(subtract(at, side.centre)), turn));
-        for &index in &side.bones {
-            let bone = &mut self.bones[index];
-            bone.a = add(bone.a, moved(bone.previous_a));
-            bone.b = add(bone.b, moved(bone.previous_b));
-        }
-        for &(index, share) in &side.flesh {
-            let point = &mut self.points[index];
-            point.position = add(point.position, scale(moved(point.previous), share));
         }
     }
 }

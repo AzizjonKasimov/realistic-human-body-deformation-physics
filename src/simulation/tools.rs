@@ -1938,6 +1938,16 @@ impl World {
         self.tool.contact = Some(contact);
     }
 
+    /// The points of flesh the tool and the figures' landed fists press on
+    /// through this step's substeps.
+    pub(super) fn pressed_points(&self) -> impl Iterator<Item = usize> + '_ {
+        self.tool
+            .contact
+            .iter()
+            .chain(self.fist_contacts.iter().map(|fist| &fist.contact))
+            .flat_map(|contact| contact.candidates.iter().copied())
+    }
+
     /// Each fist a figure threw presses on the body it struck through the
     /// substeps as the tool does, and is pushed back as hard.
     pub(super) fn solve_fist_contacts(&mut self) {

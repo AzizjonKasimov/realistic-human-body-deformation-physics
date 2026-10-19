@@ -2054,6 +2054,9 @@ pub struct World {
     /// Where two bodies' limbs press on each other this substep
     /// (`clash.rs`).
     clashes: Vec<clash::Clash>,
+    /// Each foot hold's foot, bone and flesh, as one piece this substep
+    /// (`stance.rs`).
+    foot_pieces: Vec<Option<stance::BoundPiece>>,
 }
 
 impl Default for World {
@@ -2123,6 +2126,7 @@ impl World {
             hip_holds: Vec::new(),
             foot_holds: Vec::new(),
             clashes: Vec::new(),
+            foot_pieces: Vec::new(),
         }
     }
 
