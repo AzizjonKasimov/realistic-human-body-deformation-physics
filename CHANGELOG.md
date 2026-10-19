@@ -2,6 +2,12 @@
 
 What each version of Realistic Physics changed, newest first. The game shows its version on the start screen and in its bottom-left corner, and every Short made from the game shows the version it was made with. Only the newest version is online.
 
+## v0.15.1 (2026-10-19)
+
+- Two fighters punching at nearly the same moment no longer crush each other's arms: their arms push on each other's bones, so the guards bump and both punches come back.
+- A fighter's feet stay on the floor when it punches or leans back: its legs lean in, and leaning far it sinks into a lunge, instead of a leg swinging out.
+- Both fighters' punches pressed at the same moment now both count.
+
 ## v0.15 (2026-10-19)
 
 - A Fight page, opened by the Fight button on the start screen: you play the left fighter, punch, and hold to lean back so a punch falls short, while the right fighter spars on its own or a friend plays it.

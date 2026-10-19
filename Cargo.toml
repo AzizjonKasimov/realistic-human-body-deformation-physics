@@ -2,7 +2,7 @@
 name = "realistic_physics"
 # The version players see in the game and on videos of it; CHANGELOG.md lists
 # what each one changed, and README.md's Versions section says when to bump it.
-version = "0.15.0"
+version = "0.15.1"
 edition = "2021"
 license = "PolyForm-Noncommercial-1.0.0 OR PolyForm-Small-Business-1.0.0"
 
