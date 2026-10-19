@@ -32,8 +32,9 @@ try {
         $response = $context.Response
         try {
             $relative = [Uri]::UnescapeDataString($context.Request.Url.AbsolutePath).TrimStart('/')
-            if (-not $relative) {
-                $relative = "index.html"
+            # A folder's page, as GitHub Pages serves fight/ for the Fight page.
+            if (-not $relative -or $relative.EndsWith('/')) {
+                $relative += "index.html"
             }
             $path = [IO.Path]::GetFullPath((Join-Path $Root $relative))
             $type = $contentTypes[[IO.Path]::GetExtension($path).ToLowerInvariant()]

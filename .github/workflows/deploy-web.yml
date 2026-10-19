@@ -2,7 +2,9 @@ name: Deploy web build
 
 # Builds the WebAssembly version with tools/build_web.ps1 and publishes it to
 # GitHub Pages, so the browser version always matches main, then tags a new
-# version the first time it goes live.
+# version the first time it goes live. The site's Fight page is the game built
+# on the engine, from its own repository at the version web/fight.version
+# names; change that line to change what the Fight page shows.
 on:
   push:
     branches: [main]
@@ -27,9 +29,20 @@ jobs:
       - name: Install Rust WebAssembly target
         run: rustup target add wasm32-unknown-unknown
 
+      - name: Read the Fight page's version
+        id: fight
+        run: echo "ref=$(tr -d '[:space:]' < web/fight.version)" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the game at that version
+        uses: actions/checkout@v7
+        with:
+          repository: AzizjonKasimov/realistic-physics-fight
+          ref: ${{ steps.fight.outputs.ref }}
+          path: fight-src
+
       - name: Build web version
         shell: pwsh
-        run: ./tools/build_web.ps1
+        run: ./tools/build_web.ps1 -Fight fight-src
 
       - uses: actions/configure-pages@v6
 

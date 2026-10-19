@@ -9,8 +9,16 @@
 // parity check, the browser pane), copies published elsewhere, and ?selftest
 // runs count nothing. Every event, sent or not, also lands in
 // window.__analytics, so a local check sees what the live site would send.
+//
+// The Fight page (fight/, the game built on the engine) loads this script
+// too, with data-events="fight-" on its script tag, so its events count apart
+// from the sandbox's: fight-start, fight-loaded, fight-played-1min, and the
+// game's own, such as fight-punch.
 (function () {
   "use strict";
+
+  // What this page's event names begin with: nothing for the sandbox.
+  const EVENT_PREFIX = (document.currentScript && document.currentScript.dataset.events) || "";
 
   // The GoatCounter site the counts go to; its dashboard is
   // https://<code>.goatcounter.com. Left empty, nothing is sent.
@@ -57,6 +65,8 @@
   }
 
   function count(name, title) {
+    name = EVENT_PREFIX + name;
+    title = (EVENT_PREFIX ? "Fight: " : "") + title;
     events.push({ name: name, title: title, at: Math.round(performance.now()) });
     send({ path: name, title: title, event: true });
   }
@@ -135,9 +145,19 @@
   const toolsUsed = {};
   let struck = false;
   let playedMs = 0;
+  // Things the game does once, which it names itself (fight-punch, for the
+  // game's first punch).
+  const counted = {};
   window.rpAnalytics = {
     playedSeconds: function () {
       return playedMs / 1000;
+    },
+    event: function (name) {
+      if (counted[name]) {
+        return;
+      }
+      counted[name] = true;
+      count(name, name.replace(/-/g, " "));
     },
     toolUsed: function (tool) {
       if (toolsUsed[tool]) {

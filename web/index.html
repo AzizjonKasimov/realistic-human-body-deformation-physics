@@ -92,6 +92,23 @@
     cursor: pointer;
   }
   #start:hover, #start:focus-visible { filter: brightness(1.1); outline: 2px solid var(--text); outline-offset: 2px; }
+  /* Start, and beside it the way to the Fight page, built from the game's
+     own repository (tools/build_web.ps1 -Fight shows it). */
+  .actions { display: flex; gap: 8px; }
+  .actions #start { width: auto; flex: 1; }
+  #fight {
+    flex: none;
+    display: flex;
+    align-items: center;
+    padding: 0 22px;
+    font-size: 17px;
+    font-weight: 600;
+    color: var(--accent);
+    text-decoration: none;
+    border: 2px solid var(--accent);
+  }
+  #fight[hidden] { display: none; }
+  #fight:hover, #fight:focus-visible { background: rgba(255, 188, 66, 0.12); outline: 2px solid var(--text); outline-offset: 2px; }
   .controls {
     display: grid;
     grid-template-columns: auto 1fr;
@@ -183,7 +200,10 @@
     <h1 id="title">Realistic Physics <span class="version"></span></h1>
     <p class="tagline">A 2D simulation of realistic injuries: skin, muscle and bone stretch, tear, break and bleed through real physics, not canned animations.</p>
     <p class="warning"><strong>Content warning:</strong> graphic simulated injury, including blood, torn tissue and broken bones.</p>
-    <button id="start" type="button">Start simulation</button>
+    <div class="actions">
+      <button id="start" type="button">Start simulation</button>
+      <a id="fight" href="fight/" hidden>Fight</a>
+    </div>
     <!-- Right under Start, so visitors see that they can install the game
          before they scroll; filled in for their browser by the script below. -->
     <section class="install" id="install" aria-labelledby="install-title" hidden>

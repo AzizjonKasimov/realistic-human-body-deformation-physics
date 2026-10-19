@@ -1,6 +1,11 @@
 param(
     [switch]$Serve,
-    [int]$Port = 8080
+    [int]$Port = 8080,
+    # A checkout of the game's repository (realistic-physics-fight): its
+    # browser build is served as the site's Fight page, at fight/, and the
+    # start screen shows its Fight button. The deploy checks out the version
+    # web/fight.version names.
+    [string]$Fight = ""
 )
 
 . "$PSScriptRoot/common.ps1"
@@ -133,6 +138,20 @@ $references = @(
     @{ From = 'src="analytics.js"'; To = "src=`"analytics.js?v=$analyticsStamp`"" },
     @{ From = 'load("realistic_physics.wasm")'; To = "load(`"realistic_physics.wasm?v=$wasmStamp`")" }
 )
+if ($Fight) {
+    # The game builds itself, with its own version and the engine its
+    # Cargo.toml pins, and lands at fight/ beside the sandbox.
+    $fightRoot = (Resolve-Path -LiteralPath $Fight).Path
+    $fightBuild = Join-Path $fightRoot "tools/build_web.ps1"
+    if (-not (Test-Path -LiteralPath $fightBuild)) {
+        throw "$fightRoot has no tools/build_web.ps1; -Fight takes a checkout of the game's repository."
+    }
+    Invoke-Checked -Label "Build the Fight page from $fightRoot" -Command { & $fightBuild }
+    $fightSite = Join-Path $siteDir "fight"
+    New-Item -ItemType Directory -Force -Path $fightSite | Out-Null
+    Copy-Item -Path (Join-Path $fightRoot "target/web/*") -Destination $fightSite -Recurse
+    $references += @{ From = '<a id="fight" href="fight/" hidden>'; To = '<a id="fight" href="fight/">' }
+}
 foreach ($reference in $references) {
     $count = ([regex]::Matches($page, [regex]::Escape($reference.From))).Count
     if ($count -ne 1) {
@@ -144,7 +163,7 @@ foreach ($reference in $references) {
 
 $wasmKb = (Get-Item -LiteralPath (Join-Path $siteDir "realistic_physics.wasm")).Length / 1KB
 Write-Host ""
-Write-Host ("Built web version {0} in {1} (wasm {2:N0} KB)" -f $versionLabel, $siteDir, $wasmKb)
+Write-Host ("Built web version {0} in {1} (wasm {2:N0} KB){3}" -f $versionLabel, $siteDir, $wasmKb, $(if ($Fight) { ", with the Fight page at fight/" } else { "" }))
 
 if ($Serve) {
     & (Join-Path $PSScriptRoot "serve_web.ps1") -Port $Port -Root $siteDir

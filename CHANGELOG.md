@@ -2,6 +2,11 @@
 
 What each version of Realistic Physics changed, newest first. The game shows its version on the start screen and in its bottom-left corner, and every Short made from the game shows the version it was made with. Only the newest version is online.
 
+## v0.15 (2026-10-19)
+
+- A Fight page, opened by the Fight button on the start screen: you play the left fighter, punch, and hold to lean back so a punch falls short, while the right fighter spars on its own or a friend plays it.
+- A fighter can lean back, away from the other: its upper body leans and its weight shifts away for as long as it is held, so a punch thrown at it falls short, and it comes back upright when let go.
+
 ## v0.14 (2026-10-19)
 
 - You can choose one body alone instead of two fighters, to use as a punching bag: the 2 key, or the "2 fighters" button, switches between them.
