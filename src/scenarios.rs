@@ -110,6 +110,7 @@ impl Strike {
             power: self.power,
             tool: self.tool,
             punch: None,
+            lean: None,
         }
     }
 
@@ -217,6 +218,9 @@ pub enum GestureStep {
     /// fighter) throws a punch with this arm on the next step, as its key or
     /// button does in the app.
     Punch(usize, Limb),
+    /// Body `0` or `1` starts holding a lean back (`true`) or lets it go on
+    /// the next step, as its key or button does in the game.
+    Lean(usize, bool),
 }
 
 /// A tool used the way a person plays the app: the tool is in hand from the
@@ -255,7 +259,7 @@ impl Gesture {
             .iter()
             .map(|step| match *step {
                 GestureStep::Move { frames, .. } | GestureStep::Wait(frames) => frames.max(0),
-                GestureStep::Press(_) | GestureStep::Punch(..) => 0,
+                GestureStep::Press(_) | GestureStep::Punch(..) | GestureStep::Lean(..) => 0,
             })
             .sum()
     }
@@ -272,7 +276,7 @@ impl Gesture {
         for step in self.steps {
             match *step {
                 GestureStep::Press(state) => down = state,
-                GestureStep::Punch(..) => {}
+                GestureStep::Punch(..) | GestureStep::Lean(..) => {}
                 GestureStep::Wait(frames) => {
                     if frame < elapsed + frames {
                         return (position, down);
@@ -315,6 +319,26 @@ impl Gesture {
         None
     }
 
+    /// The body that starts or stops holding a lean back on `frame`, and
+    /// which: a lean step fires on the first frame after the steps before
+    /// it.
+    pub fn lean(&self, frame: i32) -> Option<(usize, bool)> {
+        let mut elapsed = 0;
+        for step in self.steps {
+            match *step {
+                GestureStep::Lean(body, held) if elapsed == frame => return Some((body, held)),
+                GestureStep::Move { frames, .. } | GestureStep::Wait(frames) => {
+                    elapsed += frames.max(0);
+                }
+                _ => {}
+            }
+            if elapsed > frame {
+                break;
+            }
+        }
+        None
+    }
+
     /// Pointer input on `frame` against a body placed at `body`. The tool is
     /// in play on every frame, as it is in the app.
     pub fn input(&self, frame: i32, body: BodyFrame) -> InputState {
@@ -330,6 +354,7 @@ impl Gesture {
             power: self.power,
             tool: self.tool,
             punch: self.punch(frame),
+            lean: self.lean(frame),
         }
     }
 
@@ -415,8 +440,9 @@ impl Gesture {
     /// there at once, `u,v/N` moves it there over N steps, `down` and `up`
     /// press and release the button, `wait=N` holds still for N steps, and
     /// `punch=left` or `punch=right` throws a punch with the arm on that
-    /// side of the window. `power=P` tries a strength other than the tool's
-    /// swing power. For example
+    /// side of the window, and `lean=on` and `lean=off` start and stop
+    /// holding a lean back (`punch2=` and `lean2=` for the second fighter).
+    /// `power=P` tries a strength other than the tool's swing power. For example
     /// `bat:-0.3,0.4:wait=10:down:0.05,0.4/12:wait=40:up:wait=30` hovers,
     /// presses, swings into the chest, leans there, and lets go.
     pub fn parse(spec: &str) -> Result<Gesture, String> {
@@ -438,6 +464,10 @@ impl Gesture {
                 "punch=right" => steps.push(GestureStep::Punch(0, Limb::RightArm)),
                 "punch2=left" => steps.push(GestureStep::Punch(1, Limb::LeftArm)),
                 "punch2=right" => steps.push(GestureStep::Punch(1, Limb::RightArm)),
+                "lean=on" => steps.push(GestureStep::Lean(0, true)),
+                "lean=off" => steps.push(GestureStep::Lean(0, false)),
+                "lean2=on" => steps.push(GestureStep::Lean(1, true)),
+                "lean2=off" => steps.push(GestureStep::Lean(1, false)),
                 _ => {
                     if let Some(frames) = part.strip_prefix("wait=") {
                         steps.push(GestureStep::Wait(number(frames)? as i32));
@@ -497,6 +527,16 @@ impl fmt::Display for Gesture {
                     } else {
                         "right"
                     }
+                )?,
+                GestureStep::Lean(body, held) => write!(
+                    f,
+                    ":lean{}={}",
+                    if body == 0 {
+                        "".to_string()
+                    } else {
+                        (body + 1).to_string()
+                    },
+                    if held { "on" } else { "off" }
                 )?,
             }
         }
@@ -2659,6 +2699,23 @@ const FIGHTER_PUNCH: &[GestureStep] = &[
     GestureStep::Wait(260),
 ];
 
+/// The same punch at the right fighter while it leans back, from a third of
+/// a second before the punch is thrown until a second after, then comes
+/// upright (`World::hold_lean`).
+const FIGHTER_PUNCH_LEANED_FROM: &[GestureStep] = &[
+    GestureStep::Move {
+        to: (-1.3, 0.95),
+        frames: 0,
+    },
+    GestureStep::Wait(40),
+    GestureStep::Lean(1, true),
+    GestureStep::Wait(20),
+    GestureStep::Punch(0, Limb::RightArm),
+    GestureStep::Wait(60),
+    GestureStep::Lean(1, false),
+    GestureStep::Wait(200),
+];
+
 /// The tuned scenarios, played in a 1280x720 window: scripted strikes and
 /// gestures played the way the app is. Each one checks what the play does in
 /// real life (`real`, from injury research), and that the engine and the tool
@@ -3410,6 +3467,37 @@ pub fn scenarios() -> Vec<Scenario> {
                 check!(Breaks(BonePart::Forearm), Never, PUNCH_GUARD),
                 check!(DropsGuard, Never, ARM_HELD),
                 check!(PuncherBreaks(BonePart::Hand), Never, PUNCH_HAND),
+            ],
+            bone_strength: 1.0,
+        },
+        Scenario {
+            name: "fighter_leans_back_from_a_punch",
+            region: "head",
+            intent: "fight",
+            play: Play::Gesture(Gesture {
+                tool: ToolMode::Heavy,
+                power: swing_power(ToolMode::Heavy),
+                steps: FIGHTER_PUNCH_LEANED_FROM,
+                fight: Some(Fight {
+                    spacing: FIGHTER_SPACING,
+                    guard_down: false,
+                    aim: 0.0,
+                }),
+            }),
+            // The same punch at a guard held up, the right fighter leaning
+            // back as it comes: the fist falls short and lands on nothing,
+            // and both fighters come back upright into their guards. A lean
+            // begun as late as the punch, or held over a second, lets the
+            // fist clip the guard's fist or graze the head.
+            expectations: ScenarioExpectations {
+                contacts: IntBand::range(0, 0),
+                fist_speed: DoubleBand::range(1829.0, 3562.0),
+                ..steady
+            },
+            real: &[
+                check!(BreaksAnyBone, Never, PUNCH_SPEED),
+                check!(OpensSkin, Never, PUNCH_SPEED),
+                check!(DropsGuard, Never, ARM_HELD),
             ],
             bone_strength: 1.0,
         },

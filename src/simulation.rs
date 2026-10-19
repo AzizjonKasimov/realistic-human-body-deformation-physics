@@ -10,6 +10,7 @@ mod cover;
 mod cuts;
 mod grid;
 mod journal;
+mod lean;
 mod motion;
 mod outline;
 mod phases;
@@ -243,6 +244,9 @@ pub struct InputState {
     /// player pressed its key or button. The body is its index in the world,
     /// 0 for the only one.
     pub punch: Option<(usize, Limb)>,
+    /// A body starts holding a lean back (`true`) or lets it go on this step
+    /// (`lean.rs`, `World::hold_lean`), as its key or button does.
+    pub lean: Option<(usize, bool)>,
 }
 
 impl Default for InputState {
@@ -257,6 +261,7 @@ impl Default for InputState {
             power: 2.0,
             tool: ToolMode::Blunt,
             punch: None,
+            lean: None,
         }
     }
 }
@@ -382,6 +387,17 @@ pub struct Materials {
     /// How long the body takes to come back upright and over its feet
     /// after a punch, in seconds (`punch.rs`).
     pub punch_recover_seconds: f64,
+    /// How far a fighter leans back, away from the other, at the lower
+    /// back, in radians, how long it takes to lean that far, and how long
+    /// to come back upright once let go, in seconds (`lean.rs`): seen from
+    /// the front, pulling the head back out of a punch's way shows as a
+    /// lean away from it.
+    pub lean_back: f64,
+    pub lean_back_seconds: f64,
+    pub lean_recover_seconds: f64,
+    /// How far a lean back shifts the body's weight away from the other
+    /// fighter, in metres (`lean.rs`): the hips go back as the head does.
+    pub lean_hip_shift: f64,
     pub muscle_fiber_rupture_damage_floor: f64,
     pub muscle_tear_stretch: f64,
     pub muscle_tear_impulse: f64,
@@ -663,6 +679,20 @@ impl Default for Materials {
             punch_lean_seconds: 0.3,
             punch_hip_shift: 0.15,
             punch_recover_seconds: 1.0,
+            // A punch reaches past the guard of an upright fighter by about
+            // as far as its lean in carries it, and the guard's fist stands
+            // beside the chin, so a lean back must carry the head and the
+            // guard further than a punch's lean in to make it fall short:
+            // 20 degrees at the lower back, well inside the trunk's 30-35
+            // degrees of sideways bend, and the weight 25 cm over toward the
+            // back foot. As far as a punch leans in (0.21 rad, 15 cm), the
+            // fist still met the guard or grazed the head. It comes back as
+            // slowly as a punch's lean: brought back in half a second, the
+            // head swung 16 cm past upright toward the other fighter.
+            lean_back: 0.35,
+            lean_back_seconds: 0.25,
+            lean_recover_seconds: 1.0,
+            lean_hip_shift: 0.25,
             muscle_fiber_rupture_damage_floor: 0.0,
             muscle_tear_stretch: 1.92,
             muscle_tear_impulse: 1180.0,
@@ -2664,7 +2694,11 @@ impl World {
         if let Some((body, limb)) = input.punch {
             self.throw_punch(body, limb);
         }
+        if let Some((body, held)) = input.lean {
+            self.hold_lean(body, held);
+        }
         self.timed("punches", |world| world.drive_punches(dt));
+        self.timed("leans", |world| world.drive_leans(dt));
         self.acting(Actor::Tool);
         self.timed("punches land", |world| world.land_punches(dt));
         self.acting(Actor::Tissue);
@@ -8881,6 +8915,7 @@ mod tests {
                 power: 2.0,
                 tool: ToolMode::Sharp,
                 punch: None,
+                lean: None,
             },
         );
 
@@ -8923,6 +8958,7 @@ mod tests {
                 power: 4.0,
                 tool: ToolMode::Blunt,
                 punch: None,
+                lean: None,
             },
         );
 
@@ -9798,6 +9834,7 @@ mod tests {
                 power: 2.0,
                 tool: ToolMode::Blunt,
                 punch: None,
+                lean: None,
             },
         );
 
@@ -9890,6 +9927,7 @@ mod tests {
                 power: swing_power(tool),
                 tool,
                 punch: None,
+                lean: None,
             };
             world.step(dt, &input, 640.0);
             contacts += world.debug.tissue_contacts;
@@ -9955,6 +9993,7 @@ mod tests {
                 power: 2.0,
                 tool: ToolMode::Blunt,
                 punch: None,
+                lean: None,
             },
         );
 
@@ -10219,6 +10258,7 @@ mod tests {
                 power: 3.0,
                 tool: ToolMode::Sharp,
                 punch: None,
+                lean: None,
             },
         );
 
@@ -10262,6 +10302,7 @@ mod tests {
                 power: 1.0,
                 tool: ToolMode::Blunt,
                 punch: None,
+                lean: None,
             },
         );
 

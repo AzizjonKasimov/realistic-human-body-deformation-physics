@@ -579,8 +579,9 @@ impl World {
                 self.bone_joints[index].drive_impulse = 0.0;
                 continue;
             }
-            // A punch's muscles move the whole limb (`punch.rs`).
-            if self.punch_drives(index) {
+            // A punch's or a lean's muscles move the whole limb or trunk
+            // (`punch.rs`, `lean.rs`).
+            if self.punch_drives(index) || self.lean_drives(index) {
                 continue;
             }
             let turn = JointTurn::of(&joint, &self.bones);
@@ -669,7 +670,7 @@ impl World {
 
     pub(super) fn warm_start_joint_drives(&mut self, h: f64) {
         for index in 0..self.bone_joints.len() {
-            if self.punch_drives(index) {
+            if self.punch_drives(index) || self.lean_drives(index) {
                 continue;
             }
             let joint = self.bone_joints[index];

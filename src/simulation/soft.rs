@@ -197,6 +197,7 @@ impl World {
             self.timed("bone joints", Self::judge_bone_joints);
             self.refresh_inverse_masses();
             self.timed("punch sides", Self::measure_punches);
+            self.timed("lean sides", Self::measure_leans);
             if self.materials.warm_starting {
                 self.warm_start_soft(h);
             } else {
@@ -221,6 +222,7 @@ impl World {
                 self.timed("hip hold", |world| world.solve_hip_hold(h));
                 self.timed("joint muscles", |world| world.solve_joint_drives(h));
                 self.timed("punch muscles", |world| world.solve_punch_drives(h));
+                self.timed("lean muscles", |world| world.solve_lean_drives(h));
                 self.timed("joints", |world| world.solve_soft_joints(h));
                 self.timed("punch joints", |world| world.solve_punch_pins(h));
                 self.timed("tendons", |world| world.solve_tendons(h));
@@ -431,6 +433,9 @@ impl World {
         });
         self.timed("warm start: punch muscles", |world| {
             world.warm_start_punch_drives(h)
+        });
+        self.timed("warm start: lean muscles", |world| {
+            world.warm_start_lean_drives(h)
         });
         self.timed("warm start: joints", |world| world.warm_start_joints(h));
         self.timed("warm start: punch joints", |world| {

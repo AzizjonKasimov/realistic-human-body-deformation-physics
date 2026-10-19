@@ -27,55 +27,55 @@ use super::*;
 /// elbow held the arm down with nearly the shoulder's whole strength, and
 /// the fist never rose above the shoulder.
 #[derive(Clone, Debug, PartialEq)]
-struct Swing {
-    joint: usize,
+pub(super) struct Swing {
+    pub(super) joint: usize,
     /// The body whose arm swings.
-    body: usize,
+    pub(super) body: usize,
     /// The pieces on the body's side of the joint and beyond it, by their
     /// place in [`Punch::links`].
-    inner: usize,
-    outer: usize,
+    pub(super) inner: usize,
+    pub(super) outer: usize,
     /// Whether the punch holds the joint together round its pieces too, or
     /// leaves that to the joint's own hold on its bones.
-    pinned: bool,
+    pub(super) pinned: bool,
     /// What the joint's own muscles and hold carried in the guard as the
     /// punch began, which they take up again once it is over.
-    guard_impulses: (f64, Vec2),
+    pub(super) guard_impulses: (f64, Vec2),
     /// Whether the punch still drives the joint: the arm's joints go back
     /// to their own muscles once the arm is back in its guard, while the
     /// lower back's stay with the punch until the body is upright again.
-    active: bool,
+    pub(super) active: bool,
     /// How hard each side is to move this substep (`World::measure_punches`).
-    sides: Option<Sides>,
+    pub(super) sides: Option<Sides>,
 }
 
 /// One piece of a punching arm's chain: the rest of the body, the
 /// collarbone, the upper arm, the forearm, or the hand, each with the flesh
 /// bound to it.
 #[derive(Clone, Debug, PartialEq)]
-struct Link {
+pub(super) struct Link {
     /// Which bones it holds, by index as the punch began.
-    bones: Vec<bool>,
+    pub(super) bones: Vec<bool>,
     /// How much of each point's place on the skeleton lies on those bones
     /// (`PostureBinding`), by index as the punch began.
-    share: Vec<f64>,
+    pub(super) share: Vec<f64>,
 }
 
 /// The two sides of a joint a punch drives, where the substep began: the
 /// piece before it and the piece beyond, each moved as one piece.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Sides {
-    inner: Piece,
-    outer: Piece,
+pub(super) struct Sides {
+    pub(super) inner: Piece,
+    pub(super) outer: Piece,
 }
 
 /// A side moved as one piece: its mass, its centre of mass, and how hard it
 /// is to turn about that centre.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Piece {
+pub(super) struct Piece {
     mass: f64,
     centre: Vec2,
-    inertia: f64,
+    pub(super) inertia: f64,
 }
 
 /// A punch an arm is throwing.
@@ -85,7 +85,7 @@ pub struct Punch {
     pub age: f64,
     /// The lower back, the shoulder girdle, the shoulder, the elbow, the
     /// wrist, the neck, and the other arm's shoulder, which it drives.
-    swings: [Swing; 7],
+    pub(super) swings: [Swing; 7],
     /// The pieces those joints join: the hips and legs, the trunk above
     /// them, the arm's collarbone, upper arm, forearm, and hand, the head,
     /// and the other arm beyond its shoulder.
@@ -169,7 +169,7 @@ impl ArmPath {
 
 /// How far from 0 to 1 the smoothest path, the one that keeps the change of
 /// acceleration least, has gone at `t` of its way (Flash and Hogan 1985).
-fn smooth(t: f64) -> f64 {
+pub(super) fn smooth(t: f64) -> f64 {
     let t = t.clamp(0.0, 1.0);
     t * t * t * (10.0 + t * (6.0 * t - 15.0))
 }
@@ -267,7 +267,7 @@ impl Punch {
     }
 
     /// The arm is back in its guard.
-    fn arm_home(&self, materials: &Materials) -> bool {
+    pub(super) fn arm_home(&self, materials: &Materials) -> bool {
         self.age >= self.turning(materials) + materials.punch_back_seconds
     }
 
@@ -350,6 +350,8 @@ impl World {
                     }
                 }
             }
+            // And a lean back ends, its joints passing to the punch.
+            self.hand_lean_to_punch(body, &mut punch.swings);
             self.bodies[body].punches[arm] = Some(punch);
         }
     }
@@ -506,7 +508,7 @@ impl World {
 
     /// The piece of body `body` made of the bones `holds` picks, and the
     /// flesh bound to them.
-    fn link_of(&self, body: usize, holds: impl Fn(&BoneSegment) -> bool) -> Link {
+    pub(super) fn link_of(&self, body: usize, holds: impl Fn(&BoneSegment) -> bool) -> Link {
         let bones: Vec<bool> = self
             .bones
             .iter()
@@ -933,7 +935,7 @@ impl World {
         }
     }
 
-    fn solve_swing(&mut self, swing: &Swing, links: &[Link], h: f64) {
+    pub(super) fn solve_swing(&mut self, swing: &Swing, links: &[Link], h: f64) {
         let joint = self.bone_joints[swing.joint];
         let limit = self.drive_limit(&joint) * h;
         if limit <= 0.0 {
@@ -967,7 +969,7 @@ impl World {
     /// The two sides of `swing`'s joint as pieces, where the substep began:
     /// each bone as two halves at its ends, and each point of flesh by its
     /// share in each.
-    fn sides(&self, swing: &Swing, links: &[Link]) -> Option<Sides> {
+    pub(super) fn sides(&self, swing: &Swing, links: &[Link]) -> Option<Sides> {
         let (inner, outer) = (links.get(swing.inner)?, links.get(swing.outer)?);
         // Each side's mass, its first moment, and its second moment about
         // the window's corner, from which its centre and its turning inertia
@@ -1021,7 +1023,7 @@ impl World {
     /// Moves each piece of `swing`'s sides as one, from where the substep
     /// began: `motion` gives a piece's shift and its turn about its centre,
     /// for the piece before the joint and then the piece beyond.
-    fn move_pieces(
+    pub(super) fn move_pieces(
         &mut self,
         swing: &Swing,
         links: &[Link],
@@ -1071,7 +1073,14 @@ impl World {
     /// way, each about its own centre of mass by its own inertia, as a joint
     /// motor turns two bodies (Box2D's revolute joint); the joint's hold on
     /// its bones keeps them together.
-    fn turn_pieces(&mut self, swing: &Swing, links: &[Link], sides: &Sides, impulse: f64, h: f64) {
+    pub(super) fn turn_pieces(
+        &mut self,
+        swing: &Swing,
+        links: &[Link],
+        sides: &Sides,
+        impulse: f64,
+        h: f64,
+    ) {
         let motion = [
             (Vec2::default(), -impulse * h / sides.inner.inertia),
             (Vec2::default(), impulse * h / sides.outer.inertia),

@@ -311,12 +311,13 @@ impl Watchdogs {
             .fastest_tool
             .max(debug.striker_speed)
             .max(debug.punch_speed);
-        // A body throwing a punch moves on purpose: it is not left alone
-        // to come to rest until the punch is over.
+        // A body throwing a punch or leaning back moves on purpose: it is
+        // not left alone to come to rest until it is upright again.
         let punching = (0..world.body_count()).any(|body| {
-            [Limb::LeftArm, Limb::RightArm]
-                .iter()
-                .any(|&arm| world.punch(body, arm).is_some())
+            world.leaning(body) > 0.0
+                || [Limb::LeftArm, Limb::RightArm]
+                    .iter()
+                    .any(|&arm| world.punch(body, arm).is_some())
         });
         if debug.tissue_contacts + debug.bone_contacts > 0 || punching {
             self.quiet = 0;

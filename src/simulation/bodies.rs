@@ -25,8 +25,12 @@ pub struct BodyState {
     /// The punch each arm is throwing, the viewer's left arm first
     /// (`punch.rs`).
     pub(super) punches: [Option<Punch>; 2],
-    /// How far its punches carry its hips toward what they hit, in pixels,
-    /// from where they are held (`stance.rs`).
+    /// Whether it holds a lean back (`World::hold_lean`), and the lean it
+    /// is holding or coming back upright from (`lean.rs`).
+    pub(super) lean_held: bool,
+    pub(super) lean: Option<super::lean::Lean>,
+    /// How far its punches and leans carry its hips toward or away from
+    /// what they hit, in pixels, from where they are held (`stance.rs`).
     pub(super) hip_shift: Vec2,
     /// Whether it was built as another body's mirror image
     /// ([`World::mirrored`]), so what was taken on a bone's left as the
@@ -46,6 +50,8 @@ impl BodyState {
             blood_volume: materials.blood_volume_capacity.max(0.0),
             limp_limbs: [false; 4],
             punches: [None, None],
+            lean_held: false,
+            lean: None,
             hip_shift: Vec2::default(),
             mirrored: false,
             fractures: [0; BONE_PARTS],
