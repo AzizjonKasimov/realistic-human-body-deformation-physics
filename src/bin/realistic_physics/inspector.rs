@@ -280,6 +280,12 @@ impl Viewer {
     fn record(scenario: Scenario) -> Self {
         let mut app = AppState::new(screen_width() as f64, screen_height() as f64);
         app.hide_ui = true;
+        // A lone body is drawn as the app draws one body alone.
+        if scenario.fight().is_none() {
+            app.bodies = Bodies::One;
+            app.view_for = None;
+            app.fit_view(screen_width(), screen_height());
+        }
         // A fight scenario plays on its two fighters, as the scenarios do.
         app.world = scenario.ready(rp::create_layered_body_in(
             rp::world_frame(),

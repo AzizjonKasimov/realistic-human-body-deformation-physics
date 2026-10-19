@@ -2,6 +2,10 @@
 
 What each version of Realistic Physics changed, newest first. The game shows its version on the start screen and in its bottom-left corner, and every Short made from the game shows the version it was made with. Only the newest version is online.
 
+## v0.14 (2026-10-19)
+
+- You can choose one body alone instead of two fighters, to use as a punching bag: the 2 key, or the "2 fighters" button, switches between them.
+
 ## v0.13 (2026-10-19)
 
 - Two fighters stand side by side. The left arrow key, or the LEFT punch button, makes the left fighter punch the right one, and the right arrow key, or RIGHT, the right fighter punch the left one, each with its arm nearer the other.

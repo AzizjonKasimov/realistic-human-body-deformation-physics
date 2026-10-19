@@ -222,31 +222,40 @@ pub async fn run(request: CaptureRequest) {
     warm_glyphs().await;
     let (width, height) = (screen_width() as f64, screen_height() as f64);
     let mut app = AppState::new(width, height);
-    if let Some(frame) = request.body_frame {
-        app.view = rp::View::fitting(rp::world_frame(), frame);
-    }
     let world_frame = rp::world_frame();
     // A fight scenario stands its two fighters as far apart as it says.
     let fight = request.play.and_then(|play| play.fight());
     if let Some(spacing) = request.spacing.or(fight.map(|fight| fight.spacing)) {
         app.spacing = spacing;
-        app.view_for = (0.0, 0.0, false);
-        app.fit_view(width as f32, height as f32);
+    }
+    // A lone body's play is drawn as the app draws one body alone; a fight,
+    // two fighters asked for, or the app left at rest, as it draws two.
+    if request.play.is_some() && fight.is_none() && !request.fighters {
+        app.bodies = Bodies::One;
+    }
+    app.view_for = None;
+    app.fit_view(width as f32, height as f32);
+    if let Some(frame) = request.body_frame {
+        app.view = rp::View::fitting(world_frame, frame);
     }
     let materials = request
         .play
         .map_or_else(rp::Materials::default, |play| play.materials());
-    if let (Some(play), Some(_)) = (request.play, fight) {
+    let world = if let (Some(play), Some(_)) = (request.play, fight) {
         // A fight scenario's two fighters, as the scenarios play it.
-        app.world = play.ready(rp::create_layered_body_in(world_frame, materials));
-        app.world.capture_motion(&mut app.earlier);
+        Some(play.ready(rp::create_layered_body_in(world_frame, materials)))
     } else if request.fighters {
-        app.world = rp::create_fighters_at(materials, app.spacing);
-        app.world.capture_motion(&mut app.earlier);
+        Some(rp::create_fighters_at(materials, app.spacing))
     } else if request.play.is_some() {
         // Bones as strong as the play asks, for a run of the sweep.
-        app.world = rp::create_layered_body_in(world_frame, materials);
+        Some(rp::create_layered_body_in(world_frame, materials))
+    } else {
+        None
+    };
+    if let Some(world) = world {
+        app.world = world;
         app.world.capture_motion(&mut app.earlier);
+        app.skin_rim = skin_rim(&app.world);
     }
     app.hide_ui = request.hide_ui;
     app.hide_tool = request.hide_tool;
