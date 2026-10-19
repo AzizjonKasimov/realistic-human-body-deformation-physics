@@ -251,6 +251,7 @@ impl World {
             inner,
             outer,
             pinned: false,
+            planted: false,
             guard_impulses: (
                 self.bone_joints[joint].drive_impulse,
                 self.bone_joints[joint].hold_impulse,
@@ -258,7 +259,18 @@ impl World {
             active: true,
             sides: None,
         };
-        let mut swings = vec![swing(back, 1, 0), swing(neck, 2, 1)];
+        // The feet stand on the floor, which takes the lower back's push:
+        // only the trunk turns. Pushed back as a punch's lower back once
+        // pushed them, the hips and legs swung round their middle, a leg
+        // kicked out, and the whole body rocked for a second, so a lean held
+        // long swayed back into the punch it was leaning from.
+        let mut swings = vec![
+            Swing {
+                planted: true,
+                ..swing(back, 1, 0)
+            },
+            swing(neck, 2, 1),
+        ];
         for (index, &(_, joint)) in arms.iter().enumerate() {
             swings.push(swing(joint, 1, 3 + index));
         }
@@ -358,9 +370,7 @@ impl World {
         let Some(sides) = swing.sides else {
             return;
         };
-        // The feet stand on the floor, which takes the lower back's push:
-        // only the trunk turns.
-        let mass = sides.inner.inertia;
+        let mass = sides.turning_mass(swing);
         let softness = Softness::new(2.0 * PI * LEAN_HERTZ, 1.0, h);
         let turn = JointTurn::of(&joint, &self.bones);
         let angle = wrap_angle(turn.angle - joint.rest_angle - joint.drive.aim - joint.drive.swing);
@@ -368,29 +378,7 @@ impl World {
         let given = joint.drive_impulse.clamp(-limit, limit);
         let total = (given + softness.impulse(mass, speed, angle, given)).clamp(-limit, limit);
         self.bone_joints[swing.joint].drive_impulse = total;
-        self.turn_trunk(swing, links, &sides, total - given, h);
-    }
-
-    /// Turns the trunk, the piece before the lower back, by the angular
-    /// impulse `impulse` over a substep `h` long about its own centre of
-    /// mass, the hips and legs left where they stand: the floor under the
-    /// feet takes the push back. Pushed back as a punch's lower back pushes
-    /// them (`turn_pieces`), the hips and legs swung round their middle, a
-    /// leg kicked out, and the whole body rocked for a second, so a lean
-    /// held long swayed back into the punch it was leaning from.
-    fn turn_trunk(
-        &mut self,
-        swing: &Swing,
-        links: &[Link],
-        sides: &super::punch::Sides,
-        impulse: f64,
-        h: f64,
-    ) {
-        let motion = [
-            (Vec2::default(), -impulse * h / sides.inner.inertia),
-            (Vec2::default(), 0.0),
-        ];
-        self.move_pieces(swing, links, sides, motion);
+        self.turn_pieces(swing, links, &sides, total - given, h);
     }
 
     /// Gives each joint a lean drives the impulse it carried last substep.
@@ -399,20 +387,13 @@ impl World {
             let Some(lean) = self.bodies[body].lean.take() else {
                 continue;
             };
-            for (index, swing) in lean.swings.iter().enumerate() {
-                if !swing.active {
-                    continue;
-                }
+            for swing in lean.swings.iter().filter(|swing| swing.active) {
                 let joint = self.bone_joints[swing.joint];
                 let limit = self.drive_limit(&joint) * h;
                 let given = joint.drive_impulse.clamp(-limit, limit);
                 self.bone_joints[swing.joint].drive_impulse = given;
                 if let (true, Some(sides)) = (given != 0.0, swing.sides) {
-                    if index == 0 {
-                        self.turn_trunk(swing, &lean.links, &sides, given, h);
-                    } else {
-                        self.turn_pieces(swing, &lean.links, &sides, given, h);
-                    }
+                    self.turn_pieces(swing, &lean.links, &sides, given, h);
                 }
             }
             self.bodies[body].lean = Some(lean);

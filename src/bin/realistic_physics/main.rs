@@ -119,9 +119,10 @@ struct AppState {
     /// While the browser's about card covers the app: whether the simulation
     /// ran before it opened, so it runs again once the card closes.
     about_open: Option<bool>,
-    /// A punch key or button pressed since the last simulation step, which
-    /// throws on the next one: which fighter throws it.
-    pending_punch: Option<usize>,
+    /// The punch keys or buttons pressed since the last simulation step,
+    /// which throw on the next one: each fighter's, the left one's first,
+    /// so both fighters' punches pressed together both throw.
+    pending_punches: [bool; 2],
     /// How far apart the two fighters stand, in body heights.
     spacing: f64,
 }
@@ -159,7 +160,7 @@ impl AppState {
             hide_tool: false,
             about_requested: false,
             about_open: None,
-            pending_punch: None,
+            pending_punches: [false; 2],
             spacing: rp::FIGHTER_SPACING,
         };
         app.fit_view(width as f32, height as f32);
@@ -415,7 +416,11 @@ fn apply_control(app: &mut AppState, action: ControlAction) {
                 app.tool_blood = 0.0;
             }
         }
-        ControlAction::Punch(side) => app.pending_punch = Some(side),
+        ControlAction::Punch(side) => {
+            if let Some(pending) = app.pending_punches.get_mut(side) {
+                *pending = true;
+            }
+        }
         ControlAction::ToggleBodies => app.switch_bodies(),
         ControlAction::ToggleDebug => app.debug_overlay = !app.debug_overlay,
         ControlAction::TogglePause => app.running = !app.running,
@@ -429,6 +434,18 @@ fn apply_control(app: &mut AppState, action: ControlAction) {
 /// 1 the right) throws with: the fighter on that side of the screen, at the
 /// other with its arm toward it, or a body alone, with its arm on that side,
 /// out to that side.
+/// The punches pressed since the last step, each fighter's at most once,
+/// which they throw on this one; none are left pending after.
+fn pending_punches(app: &mut AppState) -> [Option<(usize, rp::Limb)>; 4] {
+    let mut punches = [None; 4];
+    for side in 0..2 {
+        if std::mem::take(&mut app.pending_punches[side]) {
+            punches[side] = Some(punch_for(app, side));
+        }
+    }
+    punches
+}
+
 fn punch_for(app: &AppState, side: usize) -> (usize, rp::Limb) {
     match app.bodies {
         Bodies::Two => (side, app.world.inner_arm(side)),
@@ -463,8 +480,8 @@ fn step_simulation(app: &mut AppState, frame_dt: f64, audio: &mut rp::sound::Pla
             vy: 0.0,
             power: rp::swing_power(app.tool),
             tool: app.tool,
-            punch: app.pending_punch.take().map(|side| punch_for(app, side)),
-            lean: None,
+            punches: pending_punches(app),
+            leans: [None; 2],
         };
         app.world.capture_motion(&mut app.earlier);
         step_world(app, &input);

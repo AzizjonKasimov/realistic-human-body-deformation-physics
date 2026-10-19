@@ -334,10 +334,16 @@ pub fn create_layered_body_in(frame: BodyFrame, materials: Materials) -> World {
             reached
         }
     });
-    // The body stands on the floor at its soles, and its hips are held up.
+    // How thick each bone's flesh is, which another body's limbs meet.
+    world.measure_bone_flesh();
+    // The body stands on the floor at its soles, its hips are held up, and
+    // its feet stand where they are.
     world.set_floor_y(frame.point(0.0, 1.0).y);
     world.hold_hip(skeleton.pelvis, false);
     world.hold_hip(skeleton.pelvis, true);
+    for foot in skeleton.feet {
+        world.plant_foot(foot);
+    }
     // The elbows, the way each opens, toward the larger end of its range,
     // how far it opens to relax, and how far its range takes it.
     let mut relaxing = Vec::new();

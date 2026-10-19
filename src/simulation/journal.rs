@@ -64,6 +64,9 @@ pub enum EventKind {
     /// A wound began to bleed, or a clotted one bled again.
     WoundOpened,
     WoundReopened,
+    /// A punching arm met another body's limb on its way out and the punch
+    /// gave way (`clash.rs`).
+    PunchTurnedBack,
 }
 
 impl EventKind {
@@ -102,6 +105,7 @@ impl EventKind {
             EventKind::CavityRuptured => "chest or belly burst",
             EventKind::WoundOpened => "wound opened",
             EventKind::WoundReopened => "wound reopened",
+            EventKind::PunchTurnedBack => "punch turned back",
         }
     }
 
@@ -177,6 +181,10 @@ pub enum Measure {
     Damage,
     /// How many points or drops.
     Count,
+    /// How fast two things met, in metres a second.
+    Speed,
+    /// How hard one pressed on another, in newtons.
+    Force,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

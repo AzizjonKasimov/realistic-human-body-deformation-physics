@@ -36,6 +36,10 @@ Step through the hard bat blow on the raised forearm.
 A play random testing found, on the frame it broke the spine.
 
 .EXAMPLE
+.\tools\inspect.ps1 -Fighters -Gesture "hammer:-1.3,0.95:wait=10:punch2=right:wait=4:punch=right:wait=40" -Frame 27 -Overlays bones
+Two fighters throwing punches four frames apart, as their arms meet.
+
+.EXAMPLE
 .\tools\inspect.ps1 -Scenario bat_hard_forearm -Frame 12 -Overlays stretch,events -Select bone:14 -Why -Shot output\inspect\forearm.png
 Save frame 12 with the skin's stretch, what happened, and what moved the forearm's piece.
 #>
@@ -45,6 +49,10 @@ param(
     [string]$Gesture = "",
     # One run of the strike sweep, ALONG,ACROSS,STRENGTH (strike_scenarios --variant).
     [string]$Variant = "",
+    # Play the gesture on two fighters, as the app stands them; punch2= is the right one's.
+    [switch]$Fighters,
+    # With -Fighters, how far apart they stand, in body heights.
+    [double]$Spacing = 0,
     # The frame to start on; by default the first.
     [int]$Frame = -1,
     # What to draw over the body: stretch, muscle, bruise, speed, events, bones.
@@ -72,6 +80,8 @@ if ($Scenario) { $arguments += @("--scenario", $Scenario) }
 if ($Strike) { $arguments += @("--strike", $Strike) }
 if ($Gesture) { $arguments += @("--gesture", $Gesture) }
 if ($Variant) { $arguments += @("--variant", $Variant) }
+if ($Fighters) { $arguments += "--fighters" }
+if ($Spacing -gt 0) { $arguments += @("--spacing", "$Spacing") }
 if ($Frame -ge 0) { $arguments += @("--frame", "$Frame") }
 if ($Overlays) { $arguments += @("--overlays", $Overlays) }
 if ($Select) { $arguments += @("--select", $Select) }

@@ -124,6 +124,49 @@ pub struct HipHold {
     pub impulse: Vec2,
 }
 
+/// A foot standing on the floor, held where it stands as the friction under
+/// a foot bearing its share of the body's weight holds it. The body is held
+/// up at the hips (`HipHold`), which carry its weight, so its feet press the
+/// floor too lightly for friction to hold them: as a punch or a lean shifted
+/// the hips, the legs swung from them like a pendulum, the feet sliding
+/// 40 cm and the near one lifting 8 cm. Held as a loaded foot is, a foot
+/// stays where it stands and the leg leans between it and the hips; pushed
+/// sideways harder than friction holds, it slides, and lifted harder than
+/// its share of the weight presses it down, it comes off the floor.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FootHold {
+    /// The foot's bone, both of whose ends stand on the floor.
+    pub bone: usize,
+    /// Where each end of the bone stands, its `a` end first.
+    pub planted: [Vec2; 2],
+    /// The impulse it gave each end last substep, which warm starts the
+    /// next.
+    pub impulse: [Vec2; 2],
+    /// Whether each end has come up off the floor, so that it stands again
+    /// wherever it comes down.
+    pub lifted: [bool; 2],
+}
+
+/// How much a dry floor's friction holds a foot sideways, as a share of the
+/// weight on it: shoe and bare-foot static friction on dry floors runs about
+/// 0.5 to 1, where walking needs about 0.2.
+const FOOT_FRICTION: f64 = 0.6;
+
+/// How firmly a planted foot is held, in hertz on the leg's weight, damped
+/// critically: as firmly as the hips are held, a foot standing on the floor
+/// moves only as far as its friction lets it.
+const FOOT_HOLD_HERTZ: f64 = 15.0;
+
+/// The weight of a leg, in kilograms, which a planted foot's hold is set by:
+/// about a sixth of the body (de Leva 1996: thigh 14.2%, shin 4.3%, foot
+/// 1.4% of a man's mass).
+const LEG_MASS_KG: f64 = 0.199 * tissue::BODY_MASS_KG;
+
+/// How far above where it stands a foot may rise, in pixels, and still
+/// stand on the floor: past that, it has come off it and nothing holds it
+/// until it comes down again.
+const FOOT_LIFT_MARGIN: f64 = 3.0;
+
 /// How much of a joint's turn off its guard, and of the hips' sinking, the
 /// muscles take up on each step of a new body's settling: a twelfth, so the
 /// body learns its weight within its second of settling, more slowly than
@@ -442,8 +485,11 @@ impl World {
                 (bone.a, bone.previous_a)
             };
             let softness = Softness::of_stiffness(stiffness, damping, mass, h);
-            // A punch carries the hips toward what it hits (`punch.rs`).
-            let shift = self.bodies[self.bone_body(hold.bone)].hip_shift;
+            // A punch carries the hips toward what it hits (`punch.rs`), a
+            // lean away from it (`lean.rs`), and they sink as far as the leg
+            // below needs to still reach its planted foot.
+            let mut shift = self.bodies[self.bone_body(hold.bone)].hip_shift;
+            shift.y += self.lunge_drop(&hold, shift.x);
             let error = subtract(previous, add(add(hold.home, hold.aim), shift));
             let speed = scale(subtract(place, previous), 1.0 / h);
             let impulse = Vec2 {
@@ -453,6 +499,37 @@ impl World {
             self.hip_holds[index].impulse = add(hold.impulse, impulse);
             self.push_hip(hold, scale(impulse, w * h));
         }
+    }
+
+    /// How far the end of the pelvis `hold` holds must sink, the hips
+    /// shifted `shift` pixels across, for the leg below it to still reach
+    /// its foot planted on the floor: a leg is no longer than it was built,
+    /// as a person shifting their hips far to one side sinks into it. Held
+    /// up at their height, hips shifted a quarter metre across pulled the
+    /// far foot off the floor and tore its ankle.
+    fn lunge_drop(&self, hold: &HipHold, shift: f64) -> f64 {
+        if shift == 0.0 {
+            return 0.0;
+        }
+        let body = self.bone_body(hold.bone);
+        let end = add(hold.home, hold.aim);
+        // The foot standing below this end of the pelvis: its leg's.
+        let foot = self
+            .foot_holds
+            .iter()
+            .filter(|foot| self.bone_body(foot.bone) == body)
+            .filter_map(|foot| {
+                let bone = self.standing_foot(foot)?;
+                Some((bone.home_a, foot.planted[0]))
+            })
+            .min_by(|p, q| (p.0.x - end.x).abs().total_cmp(&(q.0.x - end.x).abs()));
+        let Some((ankle_built, ankle)) = foot else {
+            return 0.0;
+        };
+        let length = distance(end, ankle_built);
+        let across = (ankle.x - (end.x + shift)).abs().min(length);
+        let highest = ankle.y - (length * length - across * across).sqrt();
+        (highest - end.y).max(0.0)
     }
 
     /// Moves the end of the pelvis `hold` holds by `shift`.
@@ -465,10 +542,128 @@ impl World {
         }
     }
 
-    /// Lets go of the hips: nothing holds the body up any more, as when it
-    /// is thrown or falls.
+    /// Lets go of the hips and the feet: nothing holds the body up any more,
+    /// as when it is thrown or falls.
     pub fn release_hips(&mut self) {
         self.hip_holds.clear();
+        self.foot_holds.clear();
+    }
+
+    /// Each foot standing on the floor is held where it stands
+    /// (`FootHold`): sideways no harder than the floor's friction under its
+    /// share of the body's weight, and down, never up (the floor holds it
+    /// up), no harder than that weight. Pushed harder, it slides and stands
+    /// where it ends up; lifted off the floor, nothing holds it until it
+    /// comes down again. A leg hanging limp bears no weight, and its foot
+    /// is not held.
+    pub(super) fn solve_foot_holds(&mut self, h: f64) {
+        let (stiffness, damping) = self.foot_hold_spring();
+        // Half the body's weight on each foot and half of that on each end
+        // of its bone, as an impulse over the substep.
+        let weight = tissue::BODY_MASS_KG * self.materials.gravity * self.newtons() * 0.25 * h;
+        let friction = FOOT_FRICTION * weight;
+        for index in 0..self.foot_holds.len() {
+            let hold = self.foot_holds[index];
+            let Some(bone) = self.standing_foot(&hold) else {
+                continue;
+            };
+            let w = bone.inverse_end_mass();
+            let mass = 1.0 / w;
+            let softness = Softness::of_stiffness(stiffness, damping, mass, h);
+            for end in 0..2 {
+                let (place, previous) = if end == 0 {
+                    (bone.a, bone.previous_a)
+                } else {
+                    (bone.b, bone.previous_b)
+                };
+                let planted = hold.planted[end];
+                if previous.y < planted.y - FOOT_LIFT_MARGIN {
+                    let state = &mut self.foot_holds[index];
+                    state.impulse[end] = Vec2::default();
+                    state.lifted[end] = true;
+                    continue;
+                }
+                if hold.lifted[end] {
+                    // Down again: it stands where it came down.
+                    let state = &mut self.foot_holds[index];
+                    state.planted[end].x = previous.x;
+                    state.lifted[end] = false;
+                    continue;
+                }
+                let given = hold.impulse[end];
+                let error = subtract(previous, planted);
+                let speed = scale(subtract(place, previous), 1.0 / h);
+                let pull = Vec2 {
+                    x: given.x + softness.impulse(mass, speed.x, error.x, given.x),
+                    y: given.y + softness.impulse(mass, speed.y, error.y, given.y),
+                };
+                let total = Vec2 {
+                    x: pull.x.clamp(-friction, friction),
+                    y: pull.y.clamp(0.0, weight),
+                };
+                let state = &mut self.foot_holds[index];
+                state.impulse[end] = total;
+                // Pushed harder than friction holds, it slides: it stands
+                // again wherever the push leaves it.
+                if pull.x.abs() > friction {
+                    state.planted[end].x = previous.x;
+                }
+                self.push_foot(hold.bone, end, scale(subtract(total, given), w * h));
+            }
+        }
+    }
+
+    /// The bone of the foot `hold` holds, if it stands on the floor bearing
+    /// weight: whole, on a leg that does not hang limp and whose hip, knee,
+    /// and ankle still join it to the body. Held on after a hard bat blow
+    /// tore the knee and the ankle apart, the foot stayed where it stood
+    /// while the shin was knocked away from it and out of its flesh.
+    fn standing_foot(&self, hold: &FootHold) -> Option<BoneSegment> {
+        let bone = *self.bones.get(hold.bone)?;
+        let body = bone.body as usize;
+        let leg_torn = self.bone_joints.iter().any(|joint| {
+            joint.broken && joint.drive.limb == bone.limb && self.joint_body(joint) == body
+        });
+        let stands = !bone.pinned
+            && !bone.fractured
+            && !bone.splinter
+            && !leg_torn
+            && !self.limp(body, bone.limb);
+        stands.then_some(bone)
+    }
+
+    /// Moves end `end` (0 for `a`) of bone `bone` by `shift`.
+    fn push_foot(&mut self, bone: usize, end: usize, shift: Vec2) {
+        let bone = &mut self.bones[bone];
+        if end == 0 {
+            bone.a = add(bone.a, shift);
+        } else {
+            bone.b = add(bone.b, shift);
+        }
+    }
+
+    pub(super) fn warm_start_foot_holds(&mut self, h: f64) {
+        for index in 0..self.foot_holds.len() {
+            let hold = self.foot_holds[index];
+            let Some(bone) = self.standing_foot(&hold) else {
+                continue;
+            };
+            let w = bone.inverse_end_mass();
+            for end in 0..2 {
+                if hold.impulse[end] != Vec2::default() {
+                    self.push_foot(hold.bone, end, scale(hold.impulse[end], w * h));
+                }
+            }
+        }
+    }
+
+    /// The hold's stiffness and damping at each end of a foot's bone, in the
+    /// engine's units: the leg springs back on it at `FOOT_HOLD_HERTZ`,
+    /// critically damped.
+    fn foot_hold_spring(&self) -> (f64, f64) {
+        let leg = LEG_MASS_KG / KG_PER_MASS;
+        let omega = 2.0 * PI * FOOT_HOLD_HERTZ;
+        (leg * omega * omega / 2.0, 2.0 * leg * omega / 2.0)
     }
 
     pub(super) fn warm_start_hip_hold(&mut self, h: f64) {

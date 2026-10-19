@@ -13,6 +13,8 @@ pub(crate) struct Watch {
     pub(crate) trace: Option<(rp::Traced, i32, i32)>,
     /// Print how the body holds its stance every this many frames.
     pub(crate) stance: Option<i32>,
+    /// Print how close two fighters' bones come every this many frames.
+    pub(crate) between: Option<i32>,
     /// Keep a journal of what happens, to print when the run ends.
     pub(crate) journal: bool,
     /// Lay the body out in numbers on one frame.
@@ -72,7 +74,186 @@ impl Watch {
                 report_stance(name, frame, world, last_positions);
             }
         }
+        if let Some(every) = self.between {
+            if (frame + 1) % every.max(1) == 0 {
+                report_between(name, frame, world);
+            }
+        }
     }
+}
+
+/// For each body, where its hips and feet are against where they stood as
+/// built: how far the pelvis has moved and tilted, how far each foot has
+/// lifted off the floor (its bone's lower end, which rests just above it)
+/// and slid along it, and how far each leg leans from upright. Left and
+/// right are as seen on screen, from each body's own middle.
+fn feet_and_hips(world: &rp::World) -> Vec<String> {
+    let bones = world.bones();
+    let angle = |a: rp::Vec2, b: rp::Vec2| (b.y - a.y).atan2(b.x - a.x);
+    (0..world.body_count())
+        .filter_map(|body| {
+            let of = |part: rp::BonePart| {
+                bones
+                    .iter()
+                    .filter(move |bone| {
+                        bone.body as usize == body
+                            && bone.part == part
+                            && !bone.fractured
+                            && !bone.splinter
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let pelvis = *of(rp::BonePart::Pelvis).first()?;
+            let middle = (pelvis.home_a.x + pelvis.home_b.x) * 0.5;
+            let moved = rp::Vec2 {
+                x: (pelvis.a.x + pelvis.b.x - pelvis.home_a.x - pelvis.home_b.x) * 0.5,
+                y: (pelvis.a.y + pelvis.b.y - pelvis.home_a.y - pelvis.home_b.y) * 0.5,
+            };
+            let tilt = (angle(pelvis.a, pelvis.b) - angle(pelvis.home_a, pelvis.home_b))
+                .to_degrees();
+            let mut feet: Vec<(f64, String)> = of(rp::BonePart::Foot)
+                .into_iter()
+                .map(|foot| {
+                    let low = foot.a.y.max(foot.b.y);
+                    let rest = foot.home_a.y.max(foot.home_b.y);
+                    let slid = (foot.a.x + foot.b.x - foot.home_a.x - foot.home_b.x) * 0.5;
+                    let side = if (foot.home_a.x + foot.home_b.x) * 0.5 < middle {
+                        "left"
+                    } else {
+                        "right"
+                    };
+                    (
+                        foot.home_a.x,
+                        format!("{side} foot up {:.1} px, slid {slid:+.1}", rest - low),
+                    )
+                })
+                .collect();
+            feet.sort_by(|p, q| p.0.total_cmp(&q.0));
+            let legs: Vec<String> = of(rp::BonePart::Thigh)
+                .into_iter()
+                .map(|thigh| {
+                    let lean = (angle(thigh.a, thigh.b) - angle(thigh.home_a, thigh.home_b))
+                        .to_degrees();
+                    format!("{lean:+.1}")
+                })
+                .collect();
+            let feet: Vec<String> = feet.into_iter().map(|(_, text)| text).collect();
+            Some(format!(
+                "body {body}: hips moved ({:+.1}, {:+.1}) px, tilted {tilt:+.1} deg; {}; thighs turned {} deg",
+                moved.x,
+                moved.y,
+                feet.join(", "),
+                legs.join(" ")
+            ))
+        })
+        .collect()
+}
+
+/// How far each bone's skin lies from it at rest, in pixels: the farthest
+/// of the skin points whose place on the skeleton lies mostly on it, as
+/// built. A bone no skin keeps its place on, such as a broken piece, has
+/// none.
+fn flesh_radii(world: &rp::World) -> Vec<f64> {
+    let bones = world.bones();
+    let mut radii = vec![0.0_f64; bones.len()];
+    for (point, hold) in world.points().iter().zip(world.point_holds()) {
+        if point.layer != rp::TissueLayer::Skin || point.is_ghost() {
+            continue;
+        }
+        let binding = hold.posture;
+        for slot in 0..2 {
+            let bone = binding.bones[slot];
+            if binding.weights[slot] < 0.5 {
+                continue;
+            }
+            let Some(segment) = bones.get(bone) else {
+                continue;
+            };
+            if segment.fractured || segment.splinter {
+                continue;
+            }
+            let reach = point_to_segment(point.home, segment.home_a, segment.home_b);
+            radii[bone] = radii[bone].max(reach);
+        }
+    }
+    radii
+}
+
+fn point_to_segment(p: rp::Vec2, a: rp::Vec2, b: rp::Vec2) -> f64 {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let length_sq = dx * dx + dy * dy;
+    let t = if length_sq > 1.0e-12 {
+        (((p.x - a.x) * dx + (p.y - a.y) * dy) / length_sq).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (p.x - (a.x + dx * t)).hypot(p.y - (a.y + dy * t))
+}
+
+/// How close two segments come: nothing where they cross, or else the
+/// nearest any end of one comes to the other.
+fn segment_gap(a: rp::Vec2, b: rp::Vec2, c: rp::Vec2, d: rp::Vec2) -> f64 {
+    let turn = |p: rp::Vec2, q: rp::Vec2, r: rp::Vec2| {
+        (q.x - p.x) * (r.y - p.y) - (q.y - p.y) * (r.x - p.x)
+    };
+    let crosses = turn(a, b, c) * turn(a, b, d) < 0.0 && turn(c, d, a) * turn(c, d, b) < 0.0;
+    if crosses {
+        return 0.0;
+    }
+    point_to_segment(a, c, d)
+        .min(point_to_segment(b, c, d))
+        .min(point_to_segment(c, a, b))
+        .min(point_to_segment(d, a, b))
+}
+
+/// Prints, on `frame`, how close two fighters' bones have come where their
+/// flesh meets: each pair of bones of different bodies nearer than the skin
+/// both carry at rest, how far apart they lie against that, the closest
+/// first, and how deep one fighter's skin pressed into the other's. The
+/// flesh between two bones nearer than that is squeezed by as much.
+fn report_between(name: &str, frame: i32, world: &rp::World) {
+    if world.body_count() < 2 {
+        return;
+    }
+    let bones = world.bones();
+    let radii = flesh_radii(world);
+    let mut pairs = Vec::new();
+    for (i, a) in bones.iter().enumerate() {
+        for (j, b) in bones.iter().enumerate().skip(i + 1) {
+            let flesh = radii[i] + radii[j];
+            if a.body == b.body || flesh <= 0.0 {
+                continue;
+            }
+            let apart = segment_gap(a.a, a.b, b.a, b.b);
+            if apart < flesh {
+                pairs.push((apart / flesh, i, j, apart, flesh));
+            }
+        }
+    }
+    pairs.sort_by(|p, q| p.0.total_cmp(&q.0));
+    let squeezed: Vec<String> = pairs
+        .iter()
+        .take(3)
+        .map(|&(share, i, j, apart, flesh)| {
+            format!(
+                "{} (bone {i}) and {} (bone {j}) {apart:.1} px apart, {flesh:.1} px of skin between at rest ({:.0}%)",
+                rp::inspect::bone_name(world, i),
+                rp::inspect::bone_name(world, j),
+                share * 100.0
+            )
+        })
+        .collect();
+    println!(
+        "{name} frame {frame}: limbs pressing {} (hardest {:.0} N); skin pressed {:.1} px into the other fighter's; bones nearer than their flesh: {}",
+        world.debug().limb_clashes,
+        world.debug().max_clash_force,
+        world.debug().max_overlap_between_bodies,
+        if squeezed.is_empty() {
+            "none".to_string()
+        } else {
+            squeezed.join("; ")
+        }
+    );
 }
 
 /// Prints how the body holds its stance on `frame`: each joint's turn off
@@ -208,6 +389,9 @@ fn report_stance(name: &str, frame: i32, world: &rp::World, last_positions: &[rp
         world.debug().outline_contacts,
         world.debug().max_outline_overlap,
     );
+    for line in feet_and_hips(world) {
+        println!("{name} frame {frame}: {line}");
+    }
     // How far the flesh hangs off its place on the skeleton
     // (`PostureBinding`): on average, at most, and how far down on average.
     let flesh: Vec<String> = [

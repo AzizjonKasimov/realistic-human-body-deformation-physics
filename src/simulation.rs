@@ -6,6 +6,7 @@ mod blood;
 mod bodies;
 mod body;
 mod bruises;
+mod clash;
 mod cover;
 mod cuts;
 mod grid;
@@ -35,7 +36,7 @@ pub use journal::{Actor, Event, EventKind, Journal, Measure, StepNote, Subject};
 pub use motion::MotionSnapshot;
 pub use phases::{PhaseClock, PhaseTime, PhaseTimes, Traced, TracedStage};
 pub use punch::Punch;
-pub use stance::{HipHold, JointDrive, Limb, PostureBinding};
+pub use stance::{FootHold, HipHold, JointDrive, Limb, PostureBinding};
 pub use tendons::{Muscle, Tendon, TendonEnd};
 pub use tissue::SpringKind;
 pub use tools::{swing_power, tool_geometry, tool_pose, ToolGeometry, ToolPose, ToolReach};
@@ -240,13 +241,16 @@ pub struct InputState {
     pub vy: f64,
     pub power: f64,
     pub tool: ToolMode,
-    /// A body throws a punch with an arm on this step (`punch.rs`): the
-    /// player pressed its key or button. The body is its index in the world,
-    /// 0 for the only one.
-    pub punch: Option<(usize, Limb)>,
-    /// A body starts holding a lean back (`true`) or lets it go on this step
-    /// (`lean.rs`, `World::hold_lean`), as its key or button does.
-    pub lean: Option<(usize, bool)>,
+    /// The punches thrown on this step (`punch.rs`), each by a body with an
+    /// arm, as players pressed their keys or buttons: the body is its index
+    /// in the world, 0 for the only one. Two fighters may punch on the same
+    /// step, with either arm or both; holding one punch a step, a second
+    /// pressed on the same step was lost.
+    pub punches: [Option<(usize, Limb)>; 4],
+    /// The bodies that start holding a lean back (`true`) or let it go on
+    /// this step (`lean.rs`, `World::hold_lean`), as their keys or buttons
+    /// do.
+    pub leans: [Option<(usize, bool)>; 2],
 }
 
 impl Default for InputState {
@@ -260,8 +264,8 @@ impl Default for InputState {
             vy: 0.0,
             power: 2.0,
             tool: ToolMode::Blunt,
-            punch: None,
-            lean: None,
+            punches: [None; 4],
+            leans: [None; 2],
         }
     }
 }
@@ -674,8 +678,13 @@ impl Default for Materials {
             // from the front, the hips shift and the trunk leans. Set so the
             // fist reaches the head of a fighter standing `FIGHTER_SPACING`
             // away, at the trunk's own strength (`Joint::Back`), which takes
-            // a third of a second to lean it in.
-            punch_lean: 0.21,
+            // a third of a second to lean it in. The lower back holds the
+            // trunk upright as the hips go in: before the feet were planted
+            // (`FootHold`), the hips and legs took the lower back's push of a
+            // 0.21 lean and swung, the trunk never leaning at all, and leaned
+            // on planted feet it carried the fist 12 px further than the
+            // punch was tuned to, driving through the guard.
+            punch_lean: 0.0,
             punch_lean_seconds: 0.3,
             punch_hip_shift: 0.15,
             punch_recover_seconds: 1.0,
@@ -1209,6 +1218,11 @@ pub struct BoneSegment {
     /// Which body in the world it belongs to (`bodies.rs`); its pieces keep
     /// it.
     pub body: u8,
+    /// How far the skin round it lies from it, in pixels, as built: the
+    /// flesh another body's limb meets before it reaches this bone
+    /// (`clash.rs`). None round a broken piece, or a bone no skin keeps its
+    /// place on.
+    pub flesh: f64,
 }
 
 impl Default for BoneSegment {
@@ -1248,6 +1262,7 @@ impl Default for BoneSegment {
             mass: 2.0,
             limb: Limb::None,
             body: 0,
+            flesh: 0.0,
         }
     }
 }
@@ -1670,6 +1685,10 @@ pub struct ContactDebug {
     pub max_outline_overlap: f64,
     pub max_overlap_between_parts: f64,
     pub max_overlap_between_bodies: f64,
+    /// How many places two bodies' limbs pressed on each other's bones this
+    /// step, and the hardest any pressed, in newtons (`clash.rs`).
+    pub limb_clashes: i32,
+    pub max_clash_force: f64,
     pub fragment_sleep_events: i32,
     pub fragment_wake_events: i32,
     pub fragment_budget_skips: i32,
@@ -1774,6 +1793,8 @@ impl Default for ContactDebug {
             max_outline_overlap: 0.0,
             max_overlap_between_parts: 0.0,
             max_overlap_between_bodies: 0.0,
+            limb_clashes: 0,
+            max_clash_force: 0.0,
             fragment_sleep_events: 0,
             fragment_wake_events: 0,
             fragment_budget_skips: 0,
@@ -2028,6 +2049,11 @@ pub struct World {
     floor_y: f64,
     /// The ends of the pelvis, held up where the body stands (`stance.rs`).
     hip_holds: Vec<HipHold>,
+    /// The feet, held where they stand on the floor (`stance.rs`).
+    foot_holds: Vec<FootHold>,
+    /// Where two bodies' limbs press on each other this substep
+    /// (`clash.rs`).
+    clashes: Vec<clash::Clash>,
 }
 
 impl Default for World {
@@ -2095,6 +2121,8 @@ impl World {
             outline_wrap_stale: false,
             floor_y: f64::INFINITY,
             hip_holds: Vec::new(),
+            foot_holds: Vec::new(),
+            clashes: Vec::new(),
         }
     }
 
@@ -2147,6 +2175,11 @@ impl World {
         for hold in &mut self.hip_holds {
             moved(&mut hold.home);
         }
+        for hold in &mut self.foot_holds {
+            for planted in &mut hold.planted {
+                moved(planted);
+            }
+        }
         for wound in &mut self.wounds {
             moved(&mut wound.position);
         }
@@ -2194,6 +2227,25 @@ impl World {
             home: if end_b { segment.b } else { segment.a },
             aim: Vec2::default(),
             impulse: Vec2::default(),
+        });
+    }
+
+    /// The feet held where they stand on the floor.
+    pub fn foot_holds(&self) -> &[FootHold] {
+        &self.foot_holds
+    }
+
+    /// Holds bone `bone`, a foot, where it stands now, as the friction under
+    /// a foot bearing weight holds it (`stance.rs`).
+    pub fn plant_foot(&mut self, bone: usize) {
+        let Some(segment) = self.bones.get(bone) else {
+            return;
+        };
+        self.foot_holds.push(FootHold {
+            bone,
+            planted: [segment.a, segment.b],
+            impulse: [Vec2::default(); 2],
+            lifted: [false; 2],
         });
     }
 
@@ -2692,10 +2744,10 @@ impl World {
         });
         self.timed("wounds", Self::disturb_wounds_from_loaded_tissue);
         self.timed("outline pairs", Self::gather_outline_pairs);
-        if let Some((body, limb)) = input.punch {
+        for (body, limb) in input.punches.into_iter().flatten() {
             self.throw_punch(body, limb);
         }
-        if let Some((body, held)) = input.lean {
+        for (body, held) in input.leans.into_iter().flatten() {
             self.hold_lean(body, held);
         }
         self.timed("punches", |world| world.drive_punches(dt));
@@ -8915,8 +8967,8 @@ mod tests {
                 vy: 0.0,
                 power: 2.0,
                 tool: ToolMode::Sharp,
-                punch: None,
-                lean: None,
+                punches: [None; 4],
+                leans: [None; 2],
             },
         );
 
@@ -8958,8 +9010,8 @@ mod tests {
                 vy: 0.0,
                 power: 4.0,
                 tool: ToolMode::Blunt,
-                punch: None,
-                lean: None,
+                punches: [None; 4],
+                leans: [None; 2],
             },
         );
 
@@ -9834,8 +9886,8 @@ mod tests {
                 vy: 0.0,
                 power: 2.0,
                 tool: ToolMode::Blunt,
-                punch: None,
-                lean: None,
+                punches: [None; 4],
+                leans: [None; 2],
             },
         );
 
@@ -9927,8 +9979,8 @@ mod tests {
                 vy: 0.0,
                 power: swing_power(tool),
                 tool,
-                punch: None,
-                lean: None,
+                punches: [None; 4],
+                leans: [None; 2],
             };
             world.step(dt, &input, 640.0);
             contacts += world.debug.tissue_contacts;
@@ -9993,8 +10045,8 @@ mod tests {
                 vy: 0.0,
                 power: 2.0,
                 tool: ToolMode::Blunt,
-                punch: None,
-                lean: None,
+                punches: [None; 4],
+                leans: [None; 2],
             },
         );
 
@@ -10258,8 +10310,8 @@ mod tests {
                 vy: 0.0,
                 power: 3.0,
                 tool: ToolMode::Sharp,
-                punch: None,
-                lean: None,
+                punches: [None; 4],
+                leans: [None; 2],
             },
         );
 
@@ -10302,8 +10354,8 @@ mod tests {
                 vy: 0.0,
                 power: 1.0,
                 tool: ToolMode::Blunt,
-                punch: None,
-                lean: None,
+                punches: [None; 4],
+                leans: [None; 2],
             },
         );
 

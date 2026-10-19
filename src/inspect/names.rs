@@ -7,29 +7,54 @@ use crate::simulation::{
     World, WoundKind,
 };
 
-/// Where the body's middle lies across the screen: the spine as built.
-fn midline(world: &World) -> Option<f64> {
+/// Where body `body`'s middle lies across the screen: its spine as built.
+fn midline(world: &World, body: u8) -> Option<f64> {
     world
         .bones()
         .iter()
-        .find(|bone| bone.part == BonePart::Spine)
+        .find(|bone| bone.part == BonePart::Spine && bone.body == body)
         .map(|spine| (spine.home_a.x + spine.home_b.x) * 0.5)
 }
 
-/// "left " or "right " for something at `x` across the screen, or nothing
-/// on the body's middle.
-fn side(world: &World, x: f64) -> &'static str {
-    match midline(world) {
+/// "left " or "right " for something of body `body` at `x` across the
+/// screen, from that body's own middle, or nothing on its middle.
+fn side(world: &World, body: u8, x: f64) -> &'static str {
+    match midline(world, body) {
         Some(middle) if x < middle - 2.0 => "left ",
         Some(middle) if x > middle + 2.0 => "right ",
         _ => "",
     }
 }
 
-/// The side a bone lies on, by where it was built: a limb swung across the
-/// body is still on its own side.
-fn bone_side(world: &World, bone: &BoneSegment) -> &'static str {
-    side(world, (bone.home_a.x + bone.home_b.x) * 0.5)
+/// Whose a thing of body `body` is, where two fighters stand: "left
+/// fighter's " or "right fighter's ", by where each stands; nothing for a
+/// body alone. Judged from the first body's middle alone, every part of the
+/// fighter on the right read as on the right.
+fn whose(world: &World, body: u8) -> &'static str {
+    if world.body_count() < 2 {
+        return "";
+    }
+    let Some(middle) = midline(world, body) else {
+        return "";
+    };
+    let others = (0..world.body_count() as u8)
+        .filter(|&other| other != body)
+        .filter_map(|other| midline(world, other));
+    if others.map(|x| x - middle).sum::<f64>() > 0.0 {
+        "left fighter's "
+    } else {
+        "right fighter's "
+    }
+}
+
+/// Whose a bone is and the side it lies on, by where it was built: a limb
+/// swung across the body is still on its own side.
+fn bone_side(world: &World, bone: &BoneSegment) -> String {
+    format!(
+        "{}{}",
+        whose(world, bone.body),
+        side(world, bone.body, (bone.home_a.x + bone.home_b.x) * 0.5)
+    )
 }
 
 fn distance_to_segment(at: Vec2, a: Vec2, b: Vec2) -> f64 {
@@ -85,7 +110,8 @@ pub fn place_name(world: &World, at: Vec2) -> String {
             let length_sq = (dx * dx + dy * dy).max(1.0e-12);
             ((at.x - bone.a.x) * dx + (at.y - bone.a.y) * dy) / length_sq
         };
-        return if t < 0.55 { "the chest" } else { "the belly" }.to_string();
+        let place = if t < 0.55 { "chest" } else { "belly" };
+        return format!("the {}{place}", whose(world, bone.body));
     }
     format!("the {}{}", bone_side(world, bone), region(bone.part))
 }
@@ -116,7 +142,9 @@ pub fn joint_name(world: &World, index: usize) -> String {
     let (Some(a), Some(b)) = (bones.get(joint.a), bones.get(joint.b)) else {
         return format!("joint {index}");
     };
-    let side = if bone_side(world, b).is_empty() {
+    // The side of the bone beyond the joint, or for one on the body's
+    // middle, as the neck's skull is, the side of the bone before it.
+    let side = if side(world, b.body, (b.home_a.x + b.home_b.x) * 0.5).is_empty() {
         bone_side(world, a)
     } else {
         bone_side(world, b)
@@ -223,13 +251,20 @@ pub fn subject_name(world: &World, subject: Subject) -> String {
             None => format!("artery {index}"),
         },
         Subject::Organ(index) => match world.organs().get(index) {
-            Some(organ) => match organ.kind {
-                OrganKind::LeftLung | OrganKind::RightLung => {
-                    format!("the {}lung", side(world, organ.center.x))
+            Some(organ) => {
+                let body = world
+                    .points()
+                    .get(organ.anchor_point)
+                    .map_or(0, |point| point.body);
+                let whose = whose(world, body);
+                match organ.kind {
+                    OrganKind::LeftLung | OrganKind::RightLung => {
+                        format!("the {whose}{}lung", side(world, body, organ.center.x))
+                    }
+                    OrganKind::Liver => format!("the {whose}liver"),
+                    OrganKind::Spleen => format!("the {whose}spleen"),
                 }
-                OrganKind::Liver => "the liver".to_string(),
-                OrganKind::Spleen => "the spleen".to_string(),
-            },
+            }
             None => format!("organ {index}"),
         },
         Subject::Cavity(_) => "the chest and belly".to_string(),
@@ -313,5 +348,7 @@ pub fn measure_text(measure: Measure, value: f64, limit: f64) -> String {
         Measure::Pressure => format!("pressure {value:.2}"),
         Measure::Damage => format!("damage {value:.2} (ruptures at {limit:.2})"),
         Measure::Count => format!("{value:.0}"),
+        Measure::Speed => format!("met at {value:.1} m/s (limit {limit:.1} m/s)"),
+        Measure::Force => format!("pressed {value:.0} N (limit {limit:.0} N)"),
     }
 }

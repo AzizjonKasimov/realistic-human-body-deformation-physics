@@ -1422,8 +1422,8 @@ mod tests {
                 vy: 0.0,
                 power: swing_power(ToolMode::Sharp),
                 tool: ToolMode::Sharp,
-                punch: None,
-                lean: None,
+                punches: [None; 4],
+                leans: [None; 2],
             };
             world.step(dt, &input, 640.0);
         }

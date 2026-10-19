@@ -251,6 +251,10 @@ impl World {
             hold.bone = bone(hold.bone);
             self.hip_holds.push(hold);
         }
+        for mut hold in other.foot_holds {
+            hold.bone = bone(hold.bone);
+            self.foot_holds.push(hold);
+        }
         self.open_skin
             .extend(other.open_skin.into_iter().map(spring));
         self.flesh.extend(other.flesh);
@@ -349,6 +353,10 @@ impl World {
             hold.home = place(hold.home);
             hold.aim = motion(hold.aim);
             hold.impulse = motion(hold.impulse);
+        }
+        for hold in &mut world.foot_holds {
+            hold.planted = hold.planted.map(place);
+            hold.impulse = hold.impulse.map(motion);
         }
         world
     }

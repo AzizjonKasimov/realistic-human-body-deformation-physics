@@ -38,6 +38,11 @@ pub(super) struct Swing {
     /// Whether the punch holds the joint together round its pieces too, or
     /// leaves that to the joint's own hold on its bones.
     pub(super) pinned: bool,
+    /// Whether the piece beyond the joint stands on the floor, which takes
+    /// the joint's push back through the feet (`FootHold`), so that only the
+    /// piece before it turns: the lower back turns the trunk against the
+    /// hips and legs standing on their feet.
+    pub(super) planted: bool,
     /// What the joint's own muscles and hold carried in the guard as the
     /// punch began, which they take up again once it is over.
     pub(super) guard_impulses: (f64, Vec2),
@@ -67,6 +72,19 @@ pub(super) struct Link {
 pub(super) struct Sides {
     pub(super) inner: Piece,
     pub(super) outer: Piece,
+}
+
+impl Sides {
+    /// How hard `swing`'s joint is to turn: both pieces against each other,
+    /// or, with the piece beyond it planted on the floor, the piece before
+    /// it alone.
+    pub(super) fn turning_mass(&self, swing: &Swing) -> f64 {
+        if swing.planted {
+            self.inner.inertia
+        } else {
+            1.0 / (1.0 / self.inner.inertia + 1.0 / self.outer.inertia)
+        }
+    }
 }
 
 /// A side moved as one piece: its mass, its centre of mass, and how hard it
@@ -245,11 +263,17 @@ impl Punch {
     /// aimed at, a fist that met a guard pushed it aside and ground into the
     /// neck beyond, tearing its skin.
     fn turn_back(&mut self, materials: &Materials) {
+        self.turn_back_from(materials, 1.0);
+    }
+
+    /// The punch turns back as [`Punch::turn_back`] does, the body coming
+    /// back from no further in than `reached` of the way.
+    fn turn_back_from(&mut self, materials: &Materials, reached: f64) {
         if self.going_out(materials) {
             self.turned = Some(TurnBack {
                 age: self.age,
                 reach: Self::reach_at(self.age, materials),
-                lean: Self::lean_at(self.age, materials),
+                lean: Self::lean_at(self.age, materials).min(reached),
             });
         }
     }
@@ -264,6 +288,12 @@ impl Punch {
     /// The arm is still on its way out, not yet coming back.
     pub fn going_out(&self, materials: &Materials) -> bool {
         self.turned.is_none() && self.age < Self::landing(materials)
+    }
+
+    /// The punch still drives the arm, out or back, rather than its own
+    /// muscles.
+    pub(super) fn drives_arm(&self) -> bool {
+        self.swings[1..=4].iter().any(|swing| swing.active)
     }
 
     /// The arm is back in its guard.
@@ -450,6 +480,7 @@ impl World {
             inner,
             outer,
             pinned: true,
+            planted: false,
             guard_impulses: (
                 self.bone_joints[joint].drive_impulse,
                 self.bone_joints[joint].hold_impulse,
@@ -466,9 +497,14 @@ impl World {
                 // and rocked after it. The joint's own hold keeps its bones
                 // together, as it carries the trunk's weight in the guard;
                 // held round the pieces, the trunk's flesh was held up twice
-                // and flew up as the punch began.
+                // and flew up as the punch began. The feet stand on the
+                // floor, which takes the push back: pushed back on, the hips
+                // and legs swung round their middle as the trunk leaned,
+                // sliding both feet 40 cm toward the other fighter and
+                // lifting the near one, while the trunk itself hardly leaned.
                 Swing {
                     pinned: false,
+                    planted: true,
                     ..swing(back, 1, 0)
                 },
                 swing(girdle, 1, 2),
@@ -492,6 +528,7 @@ impl World {
                     None => Swing {
                         joint: usize::MAX,
                         pinned: false,
+                        planted: false,
                         active: false,
                         guard_impulses: (0.0, Vec2::default()),
                         ..swing(shoulder, 1, 7)
@@ -590,19 +627,27 @@ impl World {
             let arm_home = punch.arm_home(&self.materials);
             for (index, swing) in punch.swings.iter_mut().enumerate() {
                 let release = over || ((1..=4).contains(&index) && arm_home);
-                if !(swing.active && release) {
-                    continue;
-                }
-                swing.active = false;
-                if let Some(joint) = self.bone_joints.get_mut(swing.joint) {
-                    joint.drive.swing = 0.0;
-                    joint.drive_impulse = swing.guard_impulses.0;
-                    if swing.pinned {
-                        joint.hold_impulse = swing.guard_impulses.1;
-                    }
+                if release {
+                    self.release_swing(swing);
                 }
             }
             self.bodies[body].punches[arm] = (!over).then_some(punch);
+        }
+    }
+
+    /// The joint `swing` drives goes back to its own muscles and hold, from
+    /// what they carried in the guard, unless already back.
+    fn release_swing(&mut self, swing: &mut Swing) {
+        if !swing.active {
+            return;
+        }
+        swing.active = false;
+        if let Some(joint) = self.bone_joints.get_mut(swing.joint) {
+            joint.drive.swing = 0.0;
+            joint.drive_impulse = swing.guard_impulses.0;
+            if swing.pinned {
+                joint.hold_impulse = swing.guard_impulses.1;
+            }
         }
     }
 
@@ -636,6 +681,79 @@ impl World {
             }
             self.bodies[body].punches[arm] = Some(punch);
         }
+    }
+
+    /// Body `body`'s punch with `limb`, its arm pressed hard by another
+    /// body's limb (`clash.rs`), gives way: the arm goes back to its own
+    /// muscles, which bring it home as they do once a punch is done with it,
+    /// and a punch still on its way out turns back as a landed fist does,
+    /// the body coming back from as far in as its hips got. Driven on at
+    /// full strength, two fighters' blocked arms pressed each other's guards
+    /// into their own bodies; and aimed on from where they aimed, the hips'
+    /// hold drove the two bodies into each other with all its stiffness
+    /// through their arms.
+    ///
+    /// The bone `bone` of the punching arm was met by the bone `by` of the
+    /// other body, as `measure`'s `value` crossed its `limit`, which the
+    /// journal keeps.
+    pub(super) fn block_punch(
+        &mut self,
+        bone: usize,
+        by: usize,
+        measure: Measure,
+        value: f64,
+        limit: f64,
+    ) {
+        let segment = self.bones[bone];
+        let (body, limb) = (segment.body as usize, segment.limb);
+        let (Some(arm), Some(toward)) = (
+            arm_slot(limb),
+            self.punch(body, limb)
+                .filter(|punch| punch.drives_arm())
+                .map(|punch| punch.toward),
+        ) else {
+            return;
+        };
+        let reached = self.hips_gone_in(body, toward);
+        let materials = self.materials;
+        let Some(mut punch) = self.bodies[body].punches[arm].take() else {
+            return;
+        };
+        punch.turn_back_from(&materials, reached);
+        for swing in &mut punch.swings[1..=4] {
+            self.release_swing(swing);
+        }
+        self.bodies[body].punches[arm] = Some(punch);
+        self.note(
+            EventKind::PunchTurnedBack,
+            Subject::Bone(bone),
+            lerp(segment.a, segment.b, 0.5),
+            Some(Actor::Bone(by)),
+            measure,
+            value,
+            limit,
+        );
+    }
+
+    /// How far body `body`'s hips have gone in toward `toward` (1 the
+    /// window's right, -1 its left), as a share of a punch's hip shift.
+    fn hips_gone_in(&self, body: usize, toward: f64) -> f64 {
+        let full = self.materials.punch_hip_shift * 1000.0 / self.mm_per_px();
+        let offsets: Vec<f64> = self
+            .hip_holds
+            .iter()
+            .filter(|hold| self.bone_body(hold.bone) == body)
+            .filter_map(|hold| {
+                let bone = self.bones.get(hold.bone)?;
+                let at = if hold.end_b { bone.b } else { bone.a };
+                Some((at.x - hold.home.x - hold.aim.x) * toward)
+            })
+            .collect();
+        if offsets.is_empty() || full <= EPSILON {
+            return 1.0;
+        }
+        let gone = offsets.iter().sum::<f64>() / offsets.len() as f64;
+        (gone / full).clamp(0.0, 1.0)
     }
 
     /// Each fist that pressed on another body through the substeps is pushed
@@ -692,10 +810,29 @@ impl World {
         let heading_then = normalized(subtract(hand.previous_b, hand.previous_a), heading);
         let from = add(hand.previous_b, scale(heading_then, ahead));
         let to = add(hand.b, scale(heading, ahead));
+        // The knuckles face the way the fist points: a fist pushed back,
+        // as another fighter's arm in its way shoves it (`clash.rs`), lands
+        // on nothing. Swept backward, its knuckles shoved the flesh behind
+        // them toward the puncher, and that flesh's push back threw the
+        // fist forward 40 px in a step.
+        if dot(subtract(to, from), heading) <= 0.0 {
+            return (false, None);
+        }
         let landing = self.land_fist(body as u8, from, to, heading, dt);
         let given = hypot(landing.given.x, landing.given.y) > EPSILON;
         let speed = distance(from, to) / dt.max(EPSILON) * self.mm_per_px() * 0.001;
         let landed = given && speed > LANDING_SPEED;
+        if landed && punch.going_out(&self.materials) {
+            self.note(
+                EventKind::PunchTurnedBack,
+                Subject::Bone(hand_index),
+                to,
+                Some(Actor::Tissue),
+                Measure::Speed,
+                speed,
+                LANDING_SPEED,
+            );
+        }
         if given {
             self.push_arm_back(punch, scale(landing.given, -1.0), to, dt);
         }
@@ -945,7 +1082,7 @@ impl World {
         let Some(sides) = swing.sides else {
             return;
         };
-        let mass = 1.0 / (1.0 / sides.inner.inertia + 1.0 / sides.outer.inertia);
+        let mass = sides.turning_mass(swing);
         let newton_metres = self.newton_metres();
         // The muscles of a punch are fully active, not braced as the
         // guard's: they pull with all their strength until the arm is within
@@ -1072,7 +1209,8 @@ impl World {
     /// `impulse` over a substep `h` long, and the piece before it the other
     /// way, each about its own centre of mass by its own inertia, as a joint
     /// motor turns two bodies (Box2D's revolute joint); the joint's hold on
-    /// its bones keeps them together.
+    /// its bones keeps them together. A piece planted on the floor stays,
+    /// the floor taking the push.
     pub(super) fn turn_pieces(
         &mut self,
         swing: &Swing,
@@ -1081,9 +1219,14 @@ impl World {
         impulse: f64,
         h: f64,
     ) {
+        let outer = if swing.planted {
+            0.0
+        } else {
+            impulse * h / sides.outer.inertia
+        };
         let motion = [
             (Vec2::default(), -impulse * h / sides.inner.inertia),
-            (Vec2::default(), impulse * h / sides.outer.inertia),
+            (Vec2::default(), outer),
         ];
         self.move_pieces(swing, links, sides, motion);
     }
@@ -1245,7 +1388,7 @@ mod tests {
         let (mut farthest, mut fastest, mut last) = (0.0_f64, 0.0_f64, start);
         for step in 0..120 {
             let input = InputState {
-                punch: (step == 0).then_some((0, limb)),
+                punches: [(step == 0).then_some((0, limb)), None, None, None],
                 ..InputState::default()
             };
             world.step(dt, &input, 1280.0);

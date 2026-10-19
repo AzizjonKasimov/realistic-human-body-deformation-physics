@@ -18,6 +18,10 @@
 //!                                     punch=, lean=, and with fighters, two
 //!                                     fighters, punch2= and lean2=);
 //!                                     writes strike_custom_frames.csv too
+//!   --fighters [--spacing S]          play the gesture on two fighters, as the
+//!                                     app and `capture.ps1 -Fighters` stand
+//!                                     them, S body heights apart (0.52), its
+//!                                     punch2= steps thrown by the right one
 //!   --sound DIR                       instead, write what each scenario (or the
 //!                                     custom swing) sounds like in the app as
 //!                                     DIR/NAME.wav, list its sounds and levels
@@ -44,6 +48,11 @@
 //!                                     the guard and its muscles' torque, the
 //!                                     hips' and fists' offsets, the flesh's
 //!                                     sag off its bones, and the fastest tissue
+//!   --between N                       also print, every N frames, how close two
+//!                                     fighters' bones come against the skin
+//!                                     both carry at rest, closest first, and
+//!                                     how deep one's skin pressed into the
+//!                                     other's: flesh squeezed between them
 //!   --journal                         also print what happened, frame by frame:
 //!                                     each injury, where, what did it, and the
 //!                                     measure that crossed its rule's limit
@@ -198,6 +207,9 @@ struct Options {
     shrink: bool,
     /// A custom swing or gesture to play instead of the scenarios.
     custom: Option<Play>,
+    /// Play the custom gesture on two fighters, this many body heights
+    /// apart, rather than on a lone body.
+    fighters: Option<f64>,
     /// Where to write what each one sounds like, instead of the CSVs.
     sound: Option<PathBuf>,
     list: bool,
@@ -414,6 +426,7 @@ fn parse_options() -> Result<Options, String> {
         only: Vec::new(),
         sweep: false,
         custom: None,
+        fighters: None,
         sound: None,
         list: false,
         phases: false,
@@ -471,6 +484,17 @@ fn parse_options() -> Result<Options, String> {
                 let spec = args.next().ok_or("--gesture needs a gesture")?;
                 options.written = Some(blanks::Written::Gesture(spec));
             }
+            "--fighters" => {
+                options.fighters = Some(options.fighters.unwrap_or(rp::FIGHTER_SPACING));
+            }
+            "--spacing" => {
+                let spacing = args.next().ok_or("--spacing needs body heights")?;
+                options.fighters = Some(
+                    spacing
+                        .parse()
+                        .map_err(|_| format!("--spacing takes body heights, got `{spacing}`"))?,
+                );
+            }
             "--variant" => {
                 let spec = args.next().ok_or("--variant needs ALONG,ACROSS,STRENGTH")?;
                 let numbers: Vec<f64> = spec
@@ -494,6 +518,13 @@ fn parse_options() -> Result<Options, String> {
             "--trace" => {
                 let spec = args.next().ok_or("--trace needs point:N or bone:N")?;
                 options.watch.trace = Some(parse_trace(&spec)?);
+            }
+            "--between" => {
+                let every = args.next().ok_or("--between needs a number of frames")?;
+                options.watch.between =
+                    Some(every.parse::<i32>().map_err(|_| {
+                        format!("--between takes a number of frames, got `{every}`")
+                    })?);
             }
             "--stance" => {
                 let every = args.next().ok_or("--stance needs a number of frames")?;
@@ -580,6 +611,18 @@ fn parse_options() -> Result<Options, String> {
             flag if flag.starts_with("--") => return Err(format!("unknown option `{flag}`")),
             path => options.csv_path = PathBuf::from(path),
         }
+    }
+    if let Some(spacing) = options.fighters {
+        // Stood as a fight scenario stands its fighters, with nothing more
+        // set up: both guards up, the punches aimed as tuned.
+        let Some(Play::Gesture(gesture)) = &mut options.custom else {
+            return Err("--fighters plays a --gesture on two fighters".to_string());
+        };
+        gesture.fight = Some(rp::scenarios::Fight {
+            spacing,
+            guard_down: false,
+            aim: 0.0,
+        });
     }
     rp::scenarios::use_settings(rp::parse_settings(&options.settings)?);
     if options.grid.is_empty() {

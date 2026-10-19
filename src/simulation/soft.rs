@@ -95,6 +95,30 @@ impl Softness {
     pub(super) fn impulse(&self, mass: f64, speed: f64, error: f64, given: f64) -> f64 {
         -self.mass_scale * mass * (speed + self.bias_rate * error) - self.impulse_scale * given
     }
+
+    /// The impulse to add to a contact of effective mass `mass` whose two
+    /// sides part at `speed` (negative closing) with `gap` between their
+    /// surfaces (negative where they overlap), that has given `given`
+    /// already, as Box2D v3 solves a contact point (`b2SolveContact`, Erin
+    /// Catto, MIT): apart, only enough that they do not meet within the
+    /// substep `h` (speculative); overlapping, softly, pushing them apart no
+    /// faster than `max_push`.
+    pub(super) fn contact_impulse(
+        &self,
+        mass: f64,
+        speed: f64,
+        gap: f64,
+        given: f64,
+        max_push: f64,
+        h: f64,
+    ) -> f64 {
+        if gap > 0.0 {
+            -mass * (speed + gap / h)
+        } else {
+            let bias = (self.bias_rate * gap).max(-max_push);
+            -self.mass_scale * mass * (speed + bias) - self.impulse_scale * given
+        }
+    }
 }
 
 /// Where a point was when the substep began, which a constraint is judged
@@ -198,6 +222,7 @@ impl World {
             self.refresh_inverse_masses();
             self.timed("punch sides", Self::measure_punches);
             self.timed("lean sides", Self::measure_leans);
+            self.timed("limbs meet", |world| world.measure_clashes(h));
             if self.materials.warm_starting {
                 self.warm_start_soft(h);
             } else {
@@ -220,9 +245,11 @@ impl World {
                     self.timed("posture", |world| world.solve_posture(h));
                 }
                 self.timed("hip hold", |world| world.solve_hip_hold(h));
+                self.timed("foot hold", |world| world.solve_foot_holds(h));
                 self.timed("joint muscles", |world| world.solve_joint_drives(h));
                 self.timed("punch muscles", |world| world.solve_punch_drives(h));
                 self.timed("lean muscles", |world| world.solve_lean_drives(h));
+                self.timed("limbs clash", |world| world.solve_clashes(h));
                 self.timed("joints", |world| world.solve_soft_joints(h));
                 self.timed("punch joints", |world| world.solve_punch_pins(h));
                 self.timed("tendons", |world| world.solve_tendons(h));
@@ -247,6 +274,7 @@ impl World {
             );
         }
         self.join_substeps(substeps);
+        self.clashes.clear();
         self.solver_dt = dt;
         self.solver_progress = 1.0;
         self.mark_trace_time(1.0);
@@ -428,6 +456,9 @@ impl World {
         });
         self.timed("warm start: posture", |world| world.warm_start_posture(h));
         self.timed("warm start: hip hold", |world| world.warm_start_hip_hold(h));
+        self.timed("warm start: foot hold", |world| {
+            world.warm_start_foot_holds(h)
+        });
         self.timed("warm start: joint muscles", |world| {
             world.warm_start_joint_drives(h)
         });
@@ -563,6 +594,9 @@ impl World {
         }
         for hold in &mut self.hip_holds {
             hold.impulse = Vec2::default();
+        }
+        for hold in &mut self.foot_holds {
+            hold.impulse = [Vec2::default(); 2];
         }
         for joint in &mut self.bone_joints {
             joint.impulse = 0.0;

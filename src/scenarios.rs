@@ -109,8 +109,8 @@ impl Strike {
             },
             power: self.power,
             tool: self.tool,
-            punch: None,
-            lean: None,
+            punches: [None; 4],
+            leans: [None; 2],
         }
     }
 
@@ -303,43 +303,45 @@ impl Gesture {
         (position, down)
     }
 
-    /// The arm that throws a punch on `frame`: a punch step fires on the
-    /// first frame after the steps before it.
-    pub fn punch(&self, frame: i32) -> Option<(usize, Limb)> {
+    /// The steps that fire on `frame`: a punch or a lean step fires on the
+    /// first frame after the steps before it, so several written one after
+    /// another fire together.
+    fn firing(&self, frame: i32) -> impl Iterator<Item = GestureStep> + '_ {
         let mut elapsed = 0;
-        for step in self.steps {
-            match *step {
-                GestureStep::Punch(body, limb) if elapsed == frame => return Some((body, limb)),
-                GestureStep::Move { frames, .. } | GestureStep::Wait(frames) => {
-                    elapsed += frames.max(0);
-                }
-                _ => {}
+        self.steps.iter().filter_map(move |step| {
+            let fires = elapsed == frame;
+            if let GestureStep::Move { frames, .. } | GestureStep::Wait(frames) = *step {
+                elapsed += frames.max(0);
             }
-            if elapsed > frame {
-                break;
-            }
-        }
-        None
+            fires.then_some(*step)
+        })
     }
 
-    /// The body that starts or stops holding a lean back on `frame`, and
-    /// which: a lean step fires on the first frame after the steps before
-    /// it.
-    pub fn lean(&self, frame: i32) -> Option<(usize, bool)> {
-        let mut elapsed = 0;
-        for step in self.steps {
-            match *step {
-                GestureStep::Lean(body, held) if elapsed == frame => return Some((body, held)),
-                GestureStep::Move { frames, .. } | GestureStep::Wait(frames) => {
-                    elapsed += frames.max(0);
-                }
-                _ => {}
-            }
-            if elapsed > frame {
-                break;
-            }
+    /// The punches thrown on `frame`, by body and arm, in the order written.
+    pub fn punches(&self, frame: i32) -> [Option<(usize, Limb)>; 4] {
+        let mut punches = [None; 4];
+        let thrown = self.firing(frame).filter_map(|step| match step {
+            GestureStep::Punch(body, limb) => Some((body, limb)),
+            _ => None,
+        });
+        for (slot, punch) in punches.iter_mut().zip(thrown) {
+            *slot = Some(punch);
         }
-        None
+        punches
+    }
+
+    /// The bodies that start or stop holding a lean back on `frame`, and
+    /// which, in the order written.
+    pub fn leans(&self, frame: i32) -> [Option<(usize, bool)>; 2] {
+        let mut leans = [None; 2];
+        let held = self.firing(frame).filter_map(|step| match step {
+            GestureStep::Lean(body, held) => Some((body, held)),
+            _ => None,
+        });
+        for (slot, lean) in leans.iter_mut().zip(held) {
+            *slot = Some(lean);
+        }
+        leans
     }
 
     /// Pointer input on `frame` against a body placed at `body`. The tool is
@@ -356,8 +358,8 @@ impl Gesture {
             vy: 0.0,
             power: self.power,
             tool: self.tool,
-            punch: self.punch(frame),
-            lean: self.lean(frame),
+            punches: self.punches(frame),
+            leans: self.leans(frame),
         }
     }
 
@@ -3601,16 +3603,36 @@ mod tests {
             Gesture::parse("fist:-0.4,0.3:wait=5:punch=right:wait=3:punch=left:wait=9").unwrap();
         assert_eq!(gesture.tool, ToolMode::Fist);
         let thrown: Vec<(i32, Limb)> = (0..gesture.frames())
-            .filter_map(|frame| gesture.punch(frame).map(|(_, limb)| (frame, limb)))
+            .flat_map(|frame| {
+                gesture
+                    .punches(frame)
+                    .into_iter()
+                    .flatten()
+                    .map(move |(_, limb)| (frame, limb))
+            })
             .collect();
         assert_eq!(thrown, vec![(5, Limb::RightArm), (8, Limb::LeftArm)]);
         assert_eq!(Gesture::parse(&gesture.to_string()).unwrap(), gesture);
         let mirrored = gesture.mirrored();
-        assert_eq!(mirrored.punch(5), Some((0, Limb::LeftArm)));
-        assert_eq!(mirrored.punch(8), Some((0, Limb::RightArm)));
+        assert_eq!(mirrored.punches(5)[0], Some((0, Limb::LeftArm)));
+        assert_eq!(mirrored.punches(8)[0], Some((0, Limb::RightArm)));
         let second = Gesture::parse("fist:-0.4,0.3:wait=2:punch2=right:wait=4").unwrap();
-        assert_eq!(second.punch(2), Some((1, Limb::RightArm)));
+        assert_eq!(second.punches(2)[0], Some((1, Limb::RightArm)));
         assert_eq!(Gesture::parse(&second.to_string()).unwrap(), second);
+        // Both fighters punching on the same step both punch: holding one
+        // punch a step, the second was lost.
+        let both = Gesture::parse("fist:-0.4,0.3:wait=2:punch=right:punch2=right:wait=4").unwrap();
+        assert_eq!(
+            both.punches(2),
+            [
+                Some((0, Limb::RightArm)),
+                Some((1, Limb::RightArm)),
+                None,
+                None
+            ]
+        );
+        let leans = Gesture::parse("fist:-0.4,0.3:wait=2:lean=on:lean2=on:wait=4").unwrap();
+        assert_eq!(leans.leans(2), [Some((0, true)), Some((1, true))]);
     }
 
     #[test]

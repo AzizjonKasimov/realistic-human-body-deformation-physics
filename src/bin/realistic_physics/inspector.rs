@@ -11,6 +11,8 @@
 //! --scenario NAME | --strike SPEC | --gesture SPEC
 //!                                 what to play (by default bat_hard_forearm)
 //! --variant ALONG,ACROSS,STRENGTH one run of the sweep
+//! --fighters [--spacing S]        play the gesture on two fighters, S body
+//!                                 heights apart (0.52), as the app stands them
 //! --frame N                       start on frame N
 //! --overlays LIST                 start with these drawn: stretch, muscle,
 //!                                 bruise, speed, events, bones
@@ -112,6 +114,7 @@ pub fn request() -> Option<InspectRequest> {
         shot: None,
     };
     let mut variant = None;
+    let mut fighters = None;
     let mut settings = Vec::new();
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -134,6 +137,14 @@ pub fn request() -> Option<InspectRequest> {
                 let gesture =
                     Gesture::parse(&value("--gesture")).unwrap_or_else(|error| fail(&error));
                 request.scenario = Scenario::custom(Play::Gesture(gesture));
+            }
+            "--fighters" => fighters = Some(fighters.unwrap_or(rp::FIGHTER_SPACING)),
+            "--spacing" => {
+                let text = value("--spacing");
+                fighters = Some(
+                    text.parse()
+                        .unwrap_or_else(|_| fail(&format!("`{text}` is not a spacing"))),
+                );
             }
             "--variant" => {
                 let spec = value("--variant");
@@ -195,6 +206,19 @@ pub fn request() -> Option<InspectRequest> {
     }
     #[cfg(target_arch = "wasm32")]
     let _ = settings;
+    // A gesture played on two fighters, stood as a fight scenario stands
+    // them, as the scenario tool's --fighters plays it.
+    if let Some(spacing) = fighters {
+        let Play::Gesture(mut gesture) = request.scenario.play else {
+            fail("--fighters plays a --gesture on two fighters");
+        };
+        gesture.fight = Some(rp::scenarios::Fight {
+            spacing,
+            guard_down: false,
+            aim: 0.0,
+        });
+        request.scenario = Scenario::custom(Play::Gesture(gesture));
+    }
     if let Some((along, across, strength)) = variant {
         request.scenario = request
             .scenario
