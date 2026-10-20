@@ -255,6 +255,11 @@ impl World {
                 self.timed("limbs clash", |world| world.solve_clashes(h));
                 self.timed("joints", |world| world.solve_soft_joints(h));
                 self.timed("tendons", |world| world.solve_tendons(h));
+                // The bones the holds, the joints and their muscles moved
+                // this pass carry their flesh with them (`sides.rs`), before
+                // anything that presses the flesh: none of them reads where
+                // the flesh is, so it follows once for them all.
+                self.timed("flesh follows", Self::move_flesh_with_sides);
                 self.timed("tool contact", Self::solve_tool_contact);
                 self.timed("fist contact", Self::solve_fist_contacts);
                 self.timed("bones", Self::solve_bones);
@@ -283,6 +288,8 @@ impl World {
         self.side_motion.clear();
         self.loose_skin.clear();
         self.side_flesh.clear();
+        self.side_bones.clear();
+        self.tool_pressed.clear();
         self.solver_dt = dt;
         self.solver_progress = 1.0;
         self.mark_trace_time(1.0);
@@ -478,6 +485,7 @@ impl World {
         });
         self.timed("warm start: joints", |world| world.warm_start_joints(h));
         self.timed("warm start: tendons", |world| world.warm_start_tendons(h));
+        self.timed("warm start: flesh follows", Self::move_flesh_with_sides);
     }
 
     fn warm_start_fibers(&mut self, h: f64) {
@@ -557,6 +565,7 @@ impl World {
             }
             self.apply_bone_tie(index, attachment.impulse, h);
         }
+        self.move_flesh_with_sides();
     }
 
     fn warm_start_joints(&mut self, h: f64) {
@@ -597,7 +606,6 @@ impl World {
             }
         }
         self.joint_sides = sides;
-        self.move_flesh_with_sides();
     }
 
     /// Starts every soft constraint afresh, with no impulse carried over.
@@ -784,7 +792,6 @@ impl World {
             self.solve_joint_limit(index, &hold, None, cap, h);
         }
         self.joint_sides = sides;
-        self.move_flesh_with_sides();
     }
 
     /// Joint `index`'s hold on its bones' turn, `hold` as it holds them now:
@@ -1087,22 +1094,37 @@ impl World {
                 scale(subtract(bone.b, bone.previous_b), 1.0 / h),
             );
             let speed = subtract(velocity(&point, h), bone_velocity);
-            let mass = 1.0 / tie.inverse_mass;
-            let softness = if attachment.holds_piece {
-                Softness::new(omega, zeta, h)
-            } else {
-                // The tie is as stiff as the flesh it holds is heavy, whatever
-                // the bone weighs.
-                let stiffness = point.mass * KG_PER_MASS * omega * omega;
-                Softness::of_spring(stiffness, mass, zeta, h)
+            // A bone of the hips or a leg is pulled with its flesh, as heavy
+            // as the piece its joints move it as (`World::side_piece`).
+            let masses = match (attachment.holds_piece, self.side_piece(attachment.bone)) {
+                (false, Some(piece)) => {
+                    let lever = subtract(tie.anchor(a, b), piece.centre);
+                    let flesh = tie.point_inverse_mass;
+                    (
+                        1.0 / (flesh + 1.0 / piece.mass + lever.y * lever.y / piece.inertia),
+                        1.0 / (flesh + 1.0 / piece.mass + lever.x * lever.x / piece.inertia),
+                    )
+                }
+                _ => (1.0 / tie.inverse_mass, 1.0 / tie.inverse_mass),
+            };
+            let soft = |mass: f64| {
+                if attachment.holds_piece {
+                    Softness::new(omega, zeta, h)
+                } else {
+                    // The tie is as stiff as the flesh it holds is heavy,
+                    // whatever the bone weighs.
+                    let stiffness = point.mass * KG_PER_MASS * omega * omega;
+                    Softness::of_spring(stiffness, mass, zeta, h)
+                }
             };
             let impulse = Vec2 {
-                x: softness.impulse(mass, speed.x, error.x, attachment.impulse.x),
-                y: softness.impulse(mass, speed.y, error.y, attachment.impulse.y),
+                x: soft(masses.0).impulse(masses.0, speed.x, error.x, attachment.impulse.x),
+                y: soft(masses.1).impulse(masses.1, speed.y, error.y, attachment.impulse.y),
             };
             self.bone_attachments[index].impulse = add(attachment.impulse, impulse);
             self.apply_bone_tie(index, impulse, h);
         }
+        self.move_flesh_with_sides();
     }
 
     /// Gives the flesh and bone of tie `index` the impulse `impulse`, the
@@ -1117,6 +1139,12 @@ impl World {
             h,
         );
         if tie.end_inverse_mass <= 0.0 {
+            return;
+        }
+        if let (false, Some(piece)) = (attachment.holds_piece, self.side_piece(attachment.bone)) {
+            let (a, b) = bone_place(&bone);
+            let lever = subtract(tie.anchor(a, b), piece.centre);
+            self.push_piece(&piece, lever, scale(impulse, -1.0), h);
             return;
         }
         // The anchor is (1 - tau) a + tau b + sigma times b - a turned a

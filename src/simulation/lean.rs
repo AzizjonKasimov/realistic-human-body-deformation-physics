@@ -350,7 +350,6 @@ impl World {
             }
             self.bodies[body].lean = Some(lean);
         }
-        self.move_flesh_with_sides();
     }
 
     /// The lower back's muscles leaning the trunk toward the lean they aim
@@ -395,7 +394,6 @@ impl World {
             }
             self.bodies[body].lean = Some(lean);
         }
-        self.move_flesh_with_sides();
     }
 }
 

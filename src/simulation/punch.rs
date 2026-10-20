@@ -11,7 +11,7 @@
 //! across in front of the body. Each arm punches to its own side.
 
 use super::soft::{perpendicular, JointTurn, Softness};
-use super::tools::{FistContact, ToolSolverContact};
+use super::tools::{FistContact, FistLanding};
 use super::*;
 
 /// One joint a punch drives, and the two pieces of the arm's chain it joins
@@ -326,6 +326,15 @@ fn arm_slot(limb: Limb) -> Option<usize> {
         Limb::RightArm => Some(1),
         _ => None,
     }
+}
+
+/// Where a punching fist's knuckles sweep this step (`World::fist_sweep`).
+struct FistSweep {
+    /// The puncher's hand bone.
+    hand: usize,
+    from: Vec2,
+    to: Vec2,
+    heading: Vec2,
 }
 
 impl World {
@@ -645,30 +654,68 @@ impl World {
     /// Each fist on its way through a punch lands on any other body in its
     /// way as the bare fist does (`World::land_fist`), and what it gives
     /// that body the punching arm loses. The force it lands with presses the
-    /// puncher's own hand too.
+    /// puncher's own hand too. Every fist's sweep is worked out before any
+    /// lands, and every one lands before any arm takes back what it gave, so
+    /// that no fist lands first: landed one after the other, the first
+    /// fist's arm, pushed back, moved what the second landed on, and two
+    /// fighters punching together parted from mirror images.
     pub(super) fn land_punches(&mut self, dt: f64) {
         self.fist_contacts.clear();
         if self.bodies.len() < 2 {
             return;
         }
-        for (body, arm) in self.punch_slots() {
-            let limb = [Limb::LeftArm, Limb::RightArm][arm];
+        let sweeps: Vec<(usize, usize, FistSweep)> = self
+            .punch_slots()
+            .into_iter()
+            .filter_map(|(body, arm)| {
+                let punch = self.bodies[body].punches[arm].as_ref()?;
+                if !punch.swings[2].active {
+                    return None;
+                }
+                let limb = [Limb::LeftArm, Limb::RightArm][arm];
+                Some((body, arm, self.fist_sweep(body, limb, punch)?))
+            })
+            .collect();
+        let landings: Vec<FistLanding> = sweeps
+            .iter()
+            .map(|(body, _, sweep)| {
+                self.land_fist(*body as u8, sweep.from, sweep.to, sweep.heading, dt)
+            })
+            .collect();
+        for ((body, arm, sweep), landing) in sweeps.into_iter().zip(landings) {
             let Some(mut punch) = self.bodies[body].punches[arm].take() else {
                 continue;
             };
-            if punch.swings[2].active {
-                let (landed, contact) = self.land_punch(body, limb, &punch, dt);
-                if landed {
-                    punch.turn_back(&self.materials);
-                }
-                if let Some(contact) = contact {
-                    self.fist_contacts.push(FistContact {
-                        contact,
-                        shift: Vec2::default(),
-                        body,
-                        arm,
-                    });
-                }
+            let given = hypot(landing.given.x, landing.given.y) > EPSILON;
+            let speed = distance(sweep.from, sweep.to) / dt.max(EPSILON) * self.mm_per_px() * 0.001;
+            let landed = given && speed > LANDING_SPEED;
+            if landed && punch.going_out(&self.materials) {
+                self.note(
+                    EventKind::PunchTurnedBack,
+                    Subject::Bone(sweep.hand),
+                    sweep.to,
+                    Some(Actor::Tissue),
+                    Measure::Speed,
+                    speed,
+                    LANDING_SPEED,
+                );
+            }
+            if given {
+                self.push_arm_back(&punch, scale(landing.given, -1.0), sweep.to, dt);
+            }
+            if landing.blow > 0.0 {
+                self.load_puncher_hand(sweep.hand, landing.blow, landing.blow_normal);
+            }
+            if landed {
+                punch.turn_back(&self.materials);
+            }
+            if let Some(contact) = landing.contact {
+                self.fist_contacts.push(FistContact {
+                    contact,
+                    shift: Vec2::default(),
+                    body,
+                    arm,
+                });
             }
             self.bodies[body].punches[arm] = Some(punch);
         }
@@ -771,24 +818,16 @@ impl World {
         }
     }
 
-    /// Body `body`'s `limb`, throwing `punch`, lands its fist on what lies
-    /// in its way this step; returns whether it met anything, and how it
-    /// goes on pressing through the substeps.
-    fn land_punch(
-        &mut self,
-        body: usize,
-        limb: Limb,
-        punch: &Punch,
-        dt: f64,
-    ) -> (bool, Option<ToolSolverContact>) {
-        let Some(hand_index) = self.bones.iter().position(|bone| {
+    /// Where body `body`'s fist, punching with `limb` in `punch`, sweeps
+    /// this step: its knuckles' face, from where it was to where it is; none
+    /// for a fist pushed backward, which lands on nothing.
+    fn fist_sweep(&self, body: usize, limb: Limb, punch: &Punch) -> Option<FistSweep> {
+        let hand_index = self.bones.iter().position(|bone| {
             bone.part == BonePart::Hand
                 && bone.limb == limb
                 && bone.body as usize == body
                 && !bone.splinter
-        }) else {
-            return (false, None);
-        };
+        })?;
         let hand = self.bones[hand_index];
         // The knuckles' face lies across the hand, its middle a face's
         // radius back from the front of the fist.
@@ -806,31 +845,12 @@ impl World {
         // on nothing. Swept backward, its knuckles shoved the flesh behind
         // them toward the puncher, and that flesh's push back threw the
         // fist forward 40 px in a step.
-        if dot(subtract(to, from), heading) <= 0.0 {
-            return (false, None);
-        }
-        let landing = self.land_fist(body as u8, from, to, heading, dt);
-        let given = hypot(landing.given.x, landing.given.y) > EPSILON;
-        let speed = distance(from, to) / dt.max(EPSILON) * self.mm_per_px() * 0.001;
-        let landed = given && speed > LANDING_SPEED;
-        if landed && punch.going_out(&self.materials) {
-            self.note(
-                EventKind::PunchTurnedBack,
-                Subject::Bone(hand_index),
-                to,
-                Some(Actor::Tissue),
-                Measure::Speed,
-                speed,
-                LANDING_SPEED,
-            );
-        }
-        if given {
-            self.push_arm_back(punch, scale(landing.given, -1.0), to, dt);
-        }
-        if landing.blow > 0.0 {
-            self.load_puncher_hand(hand_index, landing.blow, landing.blow_normal);
-        }
-        (landed, landing.contact)
+        (dot(subtract(to, from), heading) > 0.0).then_some(FistSweep {
+            hand: hand_index,
+            from,
+            to,
+            heading,
+        })
     }
 
     /// The punching arm, beyond its shoulder, takes the momentum `impulse`
@@ -1027,7 +1047,6 @@ impl World {
             }
             self.bodies[body].punches[arm] = Some(punch);
         }
-        self.move_flesh_with_sides();
     }
 
     /// How hard `swing`'s joint is to turn: its two bones with their flesh,
@@ -1078,7 +1097,6 @@ impl World {
             }
             self.bodies[body].punches[arm] = Some(punch);
         }
-        self.move_flesh_with_sides();
     }
 
     pub(super) fn solve_swing(&mut self, swing: &Swing, links: &[Link], h: f64) {
