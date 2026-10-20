@@ -2,6 +2,13 @@
 
 What each version of Realistic Physics changed, newest first. The game shows its version on the start screen and in its bottom-left corner, and every Short made from the game shows the version it was made with. Only the newest version is online.
 
+## v0.15.2 (2026-10-20)
+
+- Punching again and again, or punching from a lean, no longer tears the puncher's wrist, elbow, or lower back: every joint now holds its bones and the flesh round them together, as a real body's joints do.
+- Punches landing on the other fighter's raised guard no longer tear its elbow or shoulder, and tear its wrist far less often; the guard takes them with an arm's real weight, so they land a little lighter.
+- Leaning back carries the head as far as before without swinging past it first, and both feet stay where they stand.
+- Known issue: a bat blow leaves a whole bone outside the skin a little more often than in v0.15.1, in about 4 random blows in 100 rather than 3.
+
 ## v0.15.1 (2026-10-19)
 
 - Two fighters punching at nearly the same moment no longer crush each other's arms: their arms push on each other's bones, so the guards bump and both punches come back.
