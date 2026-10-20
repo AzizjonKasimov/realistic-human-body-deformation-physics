@@ -218,6 +218,26 @@ pub(crate) fn random_fights(count: usize, seed: u64, output_dir: &Path) {
     report.push_str(&tally("joints torn apart", &|fight, side| {
         fight.torn[side].len()
     }));
+    // Which joints tore, most often first, to tell a joint that comes apart
+    // again and again from one that tore once.
+    let mut by_joint: Vec<(&str, usize)> = Vec::new();
+    for name in fought.iter().flat_map(|fight| fight.torn.iter().flatten()) {
+        match by_joint
+            .iter_mut()
+            .find(|(joint, _)| *joint == name.as_str())
+        {
+            Some((_, count)) => *count += 1,
+            None => by_joint.push((name, 1)),
+        }
+    }
+    by_joint.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    if !by_joint.is_empty() {
+        let parts: Vec<String> = by_joint
+            .iter()
+            .map(|(joint, count)| format!("{joint} {count}"))
+            .collect();
+        report.push_str(&format!("    by joint: {}\n", parts.join(", ")));
+    }
     report.push_str(&tally("joints slipped out of place", &|fight, side| {
         fight.slipped[side].len()
     }));

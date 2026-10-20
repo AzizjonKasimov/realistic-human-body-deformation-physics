@@ -3585,7 +3585,15 @@ pub fn scenarios() -> Vec<Scenario> {
             // lands on the head; the guard's muscles bring the arm back.
             // Aimed level at the guard instead, the fist slid off the
             // forearm into the neck and split its skin in half the runs.
-            expectations: fought,
+            // The punching forearm meets the guard's before the fist is at
+            // full speed, and the guard's arm, moving with its own flesh
+            // (`sides.rs`), slows it to 5.6 to 6.6 m/s; held on its light
+            // bones alone, the guard gave way, and the fist went on to 7.4
+            // to 7.6.
+            expectations: ScenarioExpectations {
+                fist_speed: DoubleBand::range(1700.0, 3562.0),
+                ..fought
+            },
             real: &[
                 check!(Bruises, Usually, BRUISE),
                 check!(OpensSkin, Rarely, PUNCH_BODY_CUT),

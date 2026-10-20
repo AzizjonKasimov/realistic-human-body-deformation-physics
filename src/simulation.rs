@@ -18,6 +18,7 @@ mod phases;
 #[cfg(test)]
 mod properties;
 mod punch;
+mod sides;
 mod soft;
 mod stance;
 mod tendons;
@@ -2057,6 +2058,22 @@ pub struct World {
     /// Each foot hold's foot, bone and flesh, as one piece this substep
     /// (`stance.rs`).
     foot_pieces: Vec<Option<stance::BoundPiece>>,
+    /// Each bone with its share of the flesh held to it, as one piece this
+    /// substep (`sides.rs`).
+    bone_pieces: Vec<Option<sides::BonePiece>>,
+    /// The two pieces each joint that holds its bones with their flesh holds
+    /// together this substep (`sides.rs`).
+    joint_sides: Vec<Option<sides::JointSides>>,
+    /// How those joints moved each bone this phase, as a shift and a turn
+    /// about the centre of its piece, which the flesh held to it follows
+    /// (`World::move_flesh_with_sides`).
+    side_motion: Vec<(Vec2, f64)>,
+    /// Each point of skin come away from the muscle under it this substep,
+    /// which no bone carries with its flesh (`World::loose_skin`).
+    loose_skin: Vec<bool>,
+    /// The flesh each bone carries in its piece this substep, each point
+    /// with its share (`sides::share_of`).
+    side_flesh: Vec<Vec<(usize, f64)>>,
 }
 
 impl Default for World {
@@ -2127,6 +2144,11 @@ impl World {
             foot_holds: Vec::new(),
             clashes: Vec::new(),
             foot_pieces: Vec::new(),
+            bone_pieces: Vec::new(),
+            joint_sides: Vec::new(),
+            side_motion: Vec::new(),
+            loose_skin: Vec::new(),
+            side_flesh: Vec::new(),
         }
     }
 
@@ -3770,6 +3792,7 @@ impl World {
         }
 
         for (wound_index, severity, direction) in events {
+            let body = self.wound_body(&self.wounds[wound_index]);
             let wound = &mut self.wounds[wound_index];
             let reopened_pressure =
                 0.18 + self.materials.wound_reopen_pressure_scale * (1.0 + severity);
@@ -3777,7 +3800,12 @@ impl World {
             wound.clot =
                 (wound.clot - self.materials.wound_reopen_clot_loss * (0.8 + severity)).max(0.0);
             wound.clot = wound.clot.min(0.36);
-            wound.accumulator = wound.accumulator.max(0.16 + severity * 0.22);
+            // The blood gathered in it comes out as it opens again, so its
+            // next drop shows sooner: lost blood, as every drop shown stands
+            // for (`update_wounds`). Shown before the body had lost it, a
+            // reopened wound's drop let out more blood than was lost.
+            let gathered = (0.16 + severity * 0.22 - wound.accumulator).max(0.0);
+            wound.accumulator += gathered;
             wound.direction = normalized(
                 add(scale(wound.direction, 0.58), scale(direction, 0.42)),
                 direction,
@@ -3799,6 +3827,7 @@ impl World {
             );
             self.debug.max_wound_pressure = self.debug.max_wound_pressure.max(wound.pressure);
             self.debug.max_wound_clot = self.debug.max_wound_clot.max(wound.clot);
+            self.drain_blood_ml(body, gathered * BLOOD_DROP_ML);
         }
 
         if self.debug.wound_reopens > 0 {

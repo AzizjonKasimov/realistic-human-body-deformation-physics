@@ -291,13 +291,20 @@ impl World {
         }
         let mut flesh = Vec::new();
         for (index, (point, hold)) in self.points.iter().zip(&self.point_holds).enumerate() {
-            if point.pinned || point.is_ghost() || point.body != body {
+            // Skin come away from its muscle is no bone's to carry
+            // (`World::loose_skin`).
+            if point.pinned
+                || point.is_ghost()
+                || point.body != body
+                || self.loose_skin.get(index) == Some(&true)
+            {
                 continue;
             }
+            // Each point's share as the joints share it out (`sides.rs`).
             let binding = hold.posture;
             let share: f64 = (0..2)
                 .filter(|&slot| bones.contains(&binding.bones[slot]))
-                .map(|slot| binding.weights[slot])
+                .map(|slot| super::sides::share_of(binding.weights[slot]))
                 .sum();
             if share > 0.0 {
                 add_to(point.mass * share, point.previous);
@@ -910,6 +917,7 @@ impl World {
         // Box2D caps a joint's stiffness at a quarter of the substep rate on
         // its bones' own mass (`joint.c`), past which it rings.
         let cap = 2.0 * PI * 0.25 / h;
+        let sides = std::mem::take(&mut self.joint_sides);
         for index in 0..self.bone_joints.len() {
             let joint = self.bone_joints[index];
             let limit = self.drive_limit(&joint) * h;
@@ -926,7 +934,10 @@ impl World {
             if turn.inverse_mass <= 0.0 {
                 continue;
             }
-            let mass = 1.0 / turn.inverse_mass;
+            // A joint that holds its bones with their flesh turns them with
+            // it (`sides.rs`).
+            let pieces = sides.get(index).and_then(Option::as_ref);
+            let mass = pieces.map_or(1.0 / turn.inverse_mass, |pieces| pieces.turning_mass(false));
             // A limb hanging from a break holds no pose, but its relaxed
             // muscles still damp how it swings.
             let (stiffness, damping) = if self.limp(self.joint_body(&joint), joint.drive.limb) {
@@ -943,8 +954,13 @@ impl World {
             let given = joint.drive_impulse.clamp(-limit, limit);
             let total = (given + softness.impulse(mass, speed, angle, given)).clamp(-limit, limit);
             self.bone_joints[index].drive_impulse = total;
-            self.apply_joint_turn(&joint, &turn, total - given, h);
+            match pieces {
+                Some(pieces) => self.turn_joint_sides(pieces, total - given, h),
+                None => self.apply_joint_turn(&joint, &turn, total - given, h),
+            }
         }
+        self.joint_sides = sides;
+        self.move_flesh_with_sides();
     }
 
     /// The most torque the muscles across `joint` give, in the engine's
@@ -1007,6 +1023,7 @@ impl World {
     }
 
     pub(super) fn warm_start_joint_drives(&mut self, h: f64) {
+        let sides = std::mem::take(&mut self.joint_sides);
         for index in 0..self.bone_joints.len() {
             if self.punch_drives(index) || self.lean_drives(index) {
                 continue;
@@ -1016,10 +1033,17 @@ impl World {
             let given = joint.drive_impulse.clamp(-limit, limit);
             self.bone_joints[index].drive_impulse = given;
             if given != 0.0 {
-                let turn = JointTurn::of(&joint, &self.bones);
-                self.apply_joint_turn(&joint, &turn, given, h);
+                match sides.get(index).and_then(Option::as_ref) {
+                    Some(pieces) => self.turn_joint_sides(pieces, given, h),
+                    None => {
+                        let turn = JointTurn::of(&joint, &self.bones);
+                        self.apply_joint_turn(&joint, &turn, given, h);
+                    }
+                }
             }
         }
+        self.joint_sides = sides;
+        self.move_flesh_with_sides();
     }
 
     /// Moves the skeleton's places for tissue and the hip hold off bone

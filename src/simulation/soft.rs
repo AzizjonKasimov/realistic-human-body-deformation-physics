@@ -222,8 +222,10 @@ impl World {
             self.refresh_inverse_masses();
             self.timed("punch sides", Self::measure_punches);
             self.timed("lean sides", Self::measure_leans);
+            self.timed("bone pieces", Self::measure_bone_pieces);
             self.timed("limbs meet", |world| world.measure_clashes(h));
             self.timed("foot pieces", Self::measure_feet);
+            self.timed("joint sides", Self::measure_joint_sides);
             if self.materials.warm_starting {
                 self.warm_start_soft(h);
             } else {
@@ -252,7 +254,6 @@ impl World {
                 self.timed("lean muscles", |world| world.solve_lean_drives(h));
                 self.timed("limbs clash", |world| world.solve_clashes(h));
                 self.timed("joints", |world| world.solve_soft_joints(h));
-                self.timed("punch joints", |world| world.solve_punch_pins(h));
                 self.timed("tendons", |world| world.solve_tendons(h));
                 self.timed("tool contact", Self::solve_tool_contact);
                 self.timed("fist contact", Self::solve_fist_contacts);
@@ -277,6 +278,11 @@ impl World {
         self.join_substeps(substeps);
         self.clashes.clear();
         self.foot_pieces.clear();
+        self.bone_pieces.clear();
+        self.joint_sides.clear();
+        self.side_motion.clear();
+        self.loose_skin.clear();
+        self.side_flesh.clear();
         self.solver_dt = dt;
         self.solver_progress = 1.0;
         self.mark_trace_time(1.0);
@@ -471,9 +477,6 @@ impl World {
             world.warm_start_lean_drives(h)
         });
         self.timed("warm start: joints", |world| world.warm_start_joints(h));
-        self.timed("warm start: punch joints", |world| {
-            world.warm_start_punch_pins(h)
-        });
         self.timed("warm start: tendons", |world| world.warm_start_tendons(h));
     }
 
@@ -557,6 +560,7 @@ impl World {
     }
 
     fn warm_start_joints(&mut self, h: f64) {
+        let sides = std::mem::take(&mut self.joint_sides);
         for index in 0..self.bone_joints.len() {
             let joint = self.bone_joints[index];
             let Some(hold) = self.joint_hold(&joint) else {
@@ -564,17 +568,36 @@ impl World {
             };
             if joint.impulse != 0.0 {
                 let link = JointLink::of(&joint, &self.bones);
-                self.apply_joint_link(&joint, &link, joint.impulse, h);
+                match sides.get(index).and_then(Option::as_ref) {
+                    Some(pieces) => {
+                        let push = scale(link.normal, joint.impulse);
+                        let (a, b) = (self.bones[joint.a], self.bones[joint.b]);
+                        let inner_at = lerp(a.previous_a, a.previous_b, joint.t_a);
+                        let outer_at = lerp(b.previous_a, b.previous_b, joint.t_b);
+                        self.push_link_sides(pieces, (inner_at, outer_at), push, h);
+                    }
+                    None => self.apply_joint_link(&joint, &link, joint.impulse, h),
+                }
             }
-            if joint.hold_impulse != Vec2::default() && !self.punch_pins(index) {
+            if joint.hold_impulse != Vec2::default() {
                 let pin = JointPin::of(&joint, &self.bones, hold.reach());
-                self.apply_joint_pin(&joint, &pin, joint.hold_impulse, h);
+                match sides.get(index).and_then(Option::as_ref) {
+                    Some(sides) => self.push_joint_sides(&pin, sides, joint.hold_impulse, h),
+                    None => self.apply_joint_pin(&joint, &pin, joint.hold_impulse, h),
+                }
             }
             if joint.angular_impulse != 0.0 {
-                let turn = JointTurn::of(&joint, &self.bones);
-                self.apply_joint_turn(&joint, &turn, joint.angular_impulse, h);
+                match sides.get(index).and_then(Option::as_ref) {
+                    Some(sides) => self.turn_joint_sides(sides, joint.angular_impulse, h),
+                    None => {
+                        let turn = JointTurn::of(&joint, &self.bones);
+                        self.apply_joint_turn(&joint, &turn, joint.angular_impulse, h);
+                    }
+                }
             }
         }
+        self.joint_sides = sides;
+        self.move_flesh_with_sides();
     }
 
     /// Starts every soft constraint afresh, with no impulse carried over.
@@ -689,6 +712,7 @@ impl World {
     fn solve_soft_joints(&mut self, h: f64) {
         let cap = 0.25 / h;
         let zeta = self.materials.bone_joint_damping_ratio;
+        let sides = std::mem::take(&mut self.joint_sides);
         for index in 0..self.bone_joints.len() {
             let joint = self.bone_joints[index];
             let Some(hold) = self.joint_hold(&joint) else {
@@ -696,9 +720,11 @@ impl World {
             };
             if !hold.pulls_only {
                 self.bone_joints[index].impulse = 0.0;
-                // A punch holds its joints round the whole limb (`punch.rs`).
-                if self.punch_pins(index) {
-                    self.solve_joint_limit(index, &hold, cap, h);
+                // An arm's joints hold their bones with their flesh
+                // (`sides.rs`).
+                if let Some(sides) = sides.get(index).and_then(Option::as_ref) {
+                    self.solve_side_pin(index, &hold, sides, cap, h);
+                    self.solve_joint_limit(index, &hold, Some(sides), cap, h);
                     continue;
                 }
                 let pin = JointPin::of(&joint, &self.bones, hold.reach());
@@ -717,10 +743,17 @@ impl World {
                 } else {
                     self.bone_joints[index].hold_impulse = Vec2::default();
                 }
-                self.solve_joint_limit(index, &hold, cap, h);
+                self.solve_joint_limit(index, &hold, None, cap, h);
                 continue;
             }
             self.bone_joints[index].hold_impulse = Vec2::default();
+            // A slipped joint of an arm still holds its bones with their
+            // flesh (`sides.rs`).
+            if let Some(sides) = sides.get(index).and_then(Option::as_ref) {
+                self.solve_side_link(index, sides, hold.length, hold.loosened, cap, h);
+                self.solve_joint_limit(index, &hold, Some(sides), cap, h);
+                continue;
+            }
             let link = JointLink::of(&joint, &self.bones);
             let error = link.length - hold.length;
             if hold.loose {
@@ -748,13 +781,23 @@ impl World {
             } else {
                 self.bone_joints[index].impulse = 0.0;
             }
-            self.solve_joint_limit(index, &hold, cap, h);
+            self.solve_joint_limit(index, &hold, None, cap, h);
         }
+        self.joint_sides = sides;
+        self.move_flesh_with_sides();
     }
 
     /// Joint `index`'s hold on its bones' turn, `hold` as it holds them now:
-    /// it pushes them back once they turn past its range.
-    fn solve_joint_limit(&mut self, index: usize, hold: &JointHold, cap: f64, h: f64) {
+    /// it pushes them back once they turn past its range, turning `sides`,
+    /// its bones with their flesh, where it holds them so.
+    fn solve_joint_limit(
+        &mut self,
+        index: usize,
+        hold: &JointHold,
+        sides: Option<&sides::JointSides>,
+        cap: f64,
+        h: f64,
+    ) {
         let joint = self.bone_joints[index];
         let turn = JointTurn::of(&joint, &self.bones);
         let angle = wrap_angle(turn.angle - hold.rest_angle);
@@ -774,7 +817,8 @@ impl World {
         let hertz = (self.materials.bone_joint_angle_hertz * hold.loosened).min(cap);
         let softness = Softness::new(2.0 * PI * hertz, zeta, h);
         let speed = turn.speed(&self.bones, h);
-        let mut impulse = softness.impulse(1.0 / turn.inverse_mass, speed, past, given);
+        let mass = sides.map_or(1.0 / turn.inverse_mass, |sides| sides.turning_mass(false));
+        let mut impulse = softness.impulse(mass, speed, past, given);
         // A limit only pushes back toward the range.
         let total = if past > 0.0 {
             (given + impulse).min(0.0)
@@ -783,7 +827,10 @@ impl World {
         };
         impulse = total - given;
         self.bone_joints[index].angular_impulse = total;
-        self.apply_joint_turn(&joint, &turn, impulse, h);
+        match sides {
+            Some(sides) => self.turn_joint_sides(sides, impulse, h),
+            None => self.apply_joint_turn(&joint, &turn, impulse, h),
+        }
         if hold.loose {
             // A broken piece that turns against what holds it stops
             // spinning on its own.

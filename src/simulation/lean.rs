@@ -160,7 +160,7 @@ impl World {
                 for old in &mut punch.swings {
                     if old.active && old.joint == swing.joint {
                         old.active = false;
-                        swing.guard_impulses = old.guard_impulses;
+                        swing.guard_impulse = old.guard_impulse;
                     }
                 }
             }
@@ -250,12 +250,8 @@ impl World {
             body,
             inner,
             outer,
-            pinned: false,
             planted: false,
-            guard_impulses: (
-                self.bone_joints[joint].drive_impulse,
-                self.bone_joints[joint].hold_impulse,
-            ),
+            guard_impulse: self.bone_joints[joint].drive_impulse,
             active: true,
             sides: None,
         };
@@ -290,7 +286,7 @@ impl World {
             swing.active = false;
             if let Some(joint) = self.bone_joints.get_mut(swing.joint) {
                 joint.drive.swing = 0.0;
-                joint.drive_impulse = swing.guard_impulses.0;
+                joint.drive_impulse = swing.guard_impulse;
             }
         }
     }
@@ -311,7 +307,7 @@ impl World {
             for old in lean.swings.iter_mut().filter(|old| old.active) {
                 if old.joint == swing.joint {
                     old.active = false;
-                    swing.guard_impulses = old.guard_impulses;
+                    swing.guard_impulse = old.guard_impulse;
                 }
             }
         }
@@ -354,6 +350,7 @@ impl World {
             }
             self.bodies[body].lean = Some(lean);
         }
+        self.move_flesh_with_sides();
     }
 
     /// The lower back's muscles leaning the trunk toward the lean they aim
@@ -370,7 +367,7 @@ impl World {
         let Some(sides) = swing.sides else {
             return;
         };
-        let mass = sides.turning_mass(swing);
+        let mass = self.swing_mass(swing, &sides);
         let softness = Softness::new(2.0 * PI * LEAN_HERTZ, 1.0, h);
         let turn = JointTurn::of(&joint, &self.bones);
         let angle = wrap_angle(turn.angle - joint.rest_angle - joint.drive.aim - joint.drive.swing);
@@ -378,7 +375,7 @@ impl World {
         let given = joint.drive_impulse.clamp(-limit, limit);
         let total = (given + softness.impulse(mass, speed, angle, given)).clamp(-limit, limit);
         self.bone_joints[swing.joint].drive_impulse = total;
-        self.turn_pieces(swing, links, &sides, total - given, h);
+        self.turn_swing(swing, links, &sides, total - given, h);
     }
 
     /// Gives each joint a lean drives the impulse it carried last substep.
@@ -393,11 +390,12 @@ impl World {
                 let given = joint.drive_impulse.clamp(-limit, limit);
                 self.bone_joints[swing.joint].drive_impulse = given;
                 if let (true, Some(sides)) = (given != 0.0, swing.sides) {
-                    self.turn_pieces(swing, &lean.links, &sides, given, h);
+                    self.turn_swing(swing, &lean.links, &sides, given, h);
                 }
             }
             self.bodies[body].lean = Some(lean);
         }
+        self.move_flesh_with_sides();
     }
 }
 
@@ -446,10 +444,12 @@ mod tests {
             "the head leaned only {:.2} m away from the other fighter",
             least / px
         );
-        // It eases in a few centimetres as the flesh settles on the leaning
-        // bones; driven at full strength, it swayed back 8 cm and more.
+        // It eases back as the flesh settles on the leaning bones: 15.7 cm in
+        // v0.15.1, 17.5 cm since the arms are held at their joints with
+        // their flesh and swing with the trunk (`sides.rs`); driven at full
+        // strength, it swayed back 8 cm more.
         assert!(
-            held - least < 0.16 * px,
+            held - least < 0.19 * px,
             "the leaning head swayed {:.1} cm once leaned",
             (held - least) / px * 100.0
         );

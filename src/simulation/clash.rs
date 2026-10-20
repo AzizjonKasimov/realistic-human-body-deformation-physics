@@ -15,8 +15,8 @@
 //! arm is stopped or turned aside by the other instead of passing through. A
 //! punching arm pressed hard gives way (`World::block_punch`).
 
+use super::sides::BonePiece;
 use super::soft::Softness;
-use super::stance::BoundPiece;
 use super::*;
 
 /// How stiff the push between two limbs is, in hertz, and how damped: Box2D's
@@ -32,8 +32,12 @@ const CLASH_PUSH_SPEED: f64 = 3.0;
 /// How hard, in newtons, another body may press on an arm its punch drives
 /// before the punch gives way: driven on at full strength into an arm held
 /// there, a punching arm pressed it into its own body until a forearm's bone
-/// came out through its skin, the hips' hold pushing behind both.
-const CLASH_BLOCK_FORCE: f64 = 400.0;
+/// came out through its skin, the hips' hold pushing behind both. Since the
+/// arms' joints hold their bones with their flesh (`sides.rs`), the guard a
+/// punch rides over presses back with the arm's weight: at 400 N the punch
+/// gave way to it short of the head, and at 800 N punches thrown again and
+/// again pressed on into the guard until a wrist tore.
+const CLASH_BLOCK_FORCE: f64 = 600.0;
 
 /// A bone of one body and a bone of another whose flesh overlaps, or may
 /// overlap within this substep, and how they press on each other.
@@ -58,9 +62,9 @@ struct ClashSide {
     bone: usize,
     /// Where along the bone, from its `a` end, the two bones come closest.
     along: f64,
-    /// The bone met, and for an arm throwing a punch, the bones beyond it
-    /// out to the hand, with the flesh held to them (`clash_bones`).
-    piece: BoundPiece,
+    /// The bone met with its share of the flesh, the piece the joints hold
+    /// it by (`World::measure_bone_pieces`).
+    piece: BonePiece,
     /// From the piece's centre of mass to where the bones come closest.
     lever: Vec2,
 }
@@ -108,9 +112,10 @@ impl World {
 
     /// Whether bone `index` meets other bodies' limbs: a whole bone of an
     /// arm or a leg, or the skull, with flesh round it. The hand of an arm
-    /// whose punch is on its way out is left to its knuckles, which land as
-    /// the bare fist does (`land_fist`); coming back, left out, it sank
-    /// into the arm that had blocked it.
+    /// whose punch is on its way out meets only another such fist
+    /// (`punching_fist`); on anything else it is left to its knuckles, which
+    /// land as the bare fist does (`land_fist`). Coming back, left out, it
+    /// sank into the arm that had blocked it.
     fn clashes_with_others(&self, index: usize) -> bool {
         let Some(bone) = self.bones.get(index) else {
             return false;
@@ -125,16 +130,20 @@ impl World {
                 | BonePart::Foot
                 | BonePart::Skull
         );
-        let punching_fist = bone.part == BonePart::Hand
-            && self
-                .punch(bone.body as usize, bone.limb)
-                .is_some_and(|punch| punch.going_out(&self.materials));
-        limb_part
-            && bone.flesh > 0.0
-            && !bone.fractured
-            && !bone.splinter
-            && !bone.pinned
-            && !punching_fist
+        limb_part && bone.flesh > 0.0 && !bone.fractured && !bone.splinter && !bone.pinned
+    }
+
+    /// Whether bone `index` is the fist of a punch still on its way out.
+    /// Two such fists meet bone on bone, as two arms do: left both to their
+    /// knuckles, crossing punches' fists rode over each other, and one
+    /// folded the other's hand back until the wrist tore.
+    fn punching_fist(&self, index: usize) -> bool {
+        self.bones.get(index).is_some_and(|bone| {
+            bone.part == BonePart::Hand
+                && self
+                    .punch(bone.body as usize, bone.limb)
+                    .is_some_and(|punch| punch.going_out(&self.materials))
+        })
     }
 
     /// Finds, as this substep begins, the bones of different bodies whose
@@ -152,6 +161,9 @@ impl World {
             for &second in &candidates[slot + 1..] {
                 let (a, b) = (self.bones[first], self.bones[second]);
                 if a.body == b.body {
+                    continue;
+                }
+                if self.punching_fist(first) != self.punching_fist(second) {
                     continue;
                 }
                 let (t_a, t_b, p_a, p_b) =
@@ -221,39 +233,25 @@ impl World {
                 .is_some_and(Punch::drives_arm)
     }
 
-    /// The bones moved with bone `index` when another body's limb presses
-    /// on it: the bone, and for an arm throwing a punch, the bones beyond it
-    /// out to the hand, which the punch's muscles hold as one with it.
-    /// Pressed on its own, a punching forearm was shoved one way while its
-    /// muscles drove it the other, and the hand beyond it, left behind,
-    /// pulled the wrist apart.
-    fn clash_bones(&self, index: usize) -> Vec<usize> {
-        let bone = self.bones[index];
-        let beyond: &[BonePart] = match bone.part {
-            BonePart::UpperArm => &[BonePart::Forearm, BonePart::Hand],
-            BonePart::Forearm => &[BonePart::Hand],
-            _ => &[],
-        };
-        let punching = self.punch(bone.body as usize, bone.limb).is_some();
-        let mut bones = vec![index];
-        if punching {
-            bones.extend((0..self.bones.len()).filter(|&other| {
-                let piece = self.bones[other];
-                piece.body == bone.body
-                    && piece.limb == bone.limb
-                    && beyond.contains(&piece.part)
-                    && !piece.fractured
-                    && !piece.splinter
-            }));
-        }
-        bones
+    /// Whether bone `index` is of a limb hanging limp (`World::let_limb_go`),
+    /// which knocked aside blocks no punch: held at its joints with its
+    /// flesh, a dropped guard's hanging hand pressed on the punching arm
+    /// going over it harder than an arm gives way to, and the punch turned
+    /// back short of the head.
+    fn hangs_limp(&self, index: usize) -> bool {
+        self.bones
+            .get(index)
+            .is_some_and(|bone| self.limp(bone.body as usize, bone.limb))
     }
 
-    /// Bone `index`, with any it moves with (`clash_bones`), and the flesh
-    /// held to them as one piece, as the substep began, pressed at `at`,
-    /// `along` the bone.
+    /// Bone `index` with its share of the flesh, the piece the joints hold
+    /// it by (`World::measure_bone_pieces`), as the substep began, pressed at
+    /// `at`, `along` the bone. The joints carry the push on to the bones
+    /// beyond: held on their light bones alone, a punching forearm pressed
+    /// on its own, its hand left behind, pulled the wrist apart, and the
+    /// bones out to the hand were pushed with it.
     fn clash_side(&self, index: usize, along: f64, at: Vec2) -> Option<ClashSide> {
-        let piece = self.bound_piece(self.clash_bones(index))?;
+        let piece = self.bone_pieces.get(index)?.clone()?;
         let lever = subtract(at, piece.centre);
         Some(ClashSide {
             bone: index,
@@ -307,10 +305,11 @@ impl World {
         let clashes = std::mem::take(&mut self.clashes);
         for (index, push) in pushes {
             let [first, second] = &clashes[index].sides;
-            self.push_bound_piece(&first.piece, first.lever, scale(push, -1.0), h);
-            self.push_bound_piece(&second.piece, second.lever, push, h);
+            self.push_piece(&first.piece, first.lever, scale(push, -1.0), h);
+            self.push_piece(&second.piece, second.lever, push, h);
         }
         self.clashes = clashes;
+        self.move_flesh_with_sides();
         self.debug.limb_clashes = self.clashes.len() as i32;
         let newtons = self.newtons();
         let mut blocked = Vec::new();
@@ -320,7 +319,7 @@ impl World {
             if force > CLASH_BLOCK_FORCE {
                 let [first, second] = &clash.sides;
                 for (bone, other) in [(first.bone, second.bone), (second.bone, first.bone)] {
-                    if self.punching_arm(bone, other) {
+                    if self.punching_arm(bone, other) && !self.hangs_limp(other) {
                         blocked.push((bone, other, force));
                     }
                 }
