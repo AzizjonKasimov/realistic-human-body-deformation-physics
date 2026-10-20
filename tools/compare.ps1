@@ -19,6 +19,15 @@ Also compare how often each scenario stays in band when its swing moves a
 little (both sides need strike_scenarios --sweep).
 
 .EXAMPLE
+.\tools\compare.ps1 -Ref main -Fights 100
+Also play 100 random fights on both sides, the same presses on each, and set
+them fight against fight: each fighter's torn and slipped joints, joint by
+joint, broken bones, torn skin, and watchdogs, with how likely chance is to
+make each difference (fights_diff.txt; both sides need strike_scenarios
+--fights). -Seed picks other fights, and -Mix spam or spam-lean leaves the
+leans or the partner's punches out.
+
+.EXAMPLE
 .\tools\compare.ps1 -Capture torso_heavy_high
 Also save app screenshots of that scenario from both sides in one contact
 sheet (both sides need the app's --capture mode).
@@ -30,6 +39,10 @@ Remove the cached commit worktrees and their results.
 param(
     [string]$Ref = "HEAD",
     [switch]$Sweep,
+    [int]$Fights = 0,
+    [int]$Seed = 1,
+    [ValidateSet("game", "spam", "spam-lean")]
+    [string]$Mix = "game",
     [string]$Capture = "",
     [string]$Out = "",
     [switch]$Clean
@@ -110,6 +123,40 @@ if ($haveBase) {
     Set-Content -LiteralPath $baseDone -Value $sha
 }
 Invoke-Diagnostics -Tree $repoRoot -TargetDir (Join-Path $repoRoot "target") -Results $currentResults -Label "working tree" -WithSweep $Sweep
+
+# Random fights, the same presses on both sides, the commit's cached by what
+# was played. Its build in the shared target\compare\target may be another
+# commit's by now, so it is built again first (a moment when it is not).
+$fightsName = "fights-$Fights-$Seed-$Mix"
+$baseFights = Join-Path $baseResults $fightsName
+$currentFights = Join-Path $currentResults $fightsName
+$baseHasFights = (Test-SourceHas $baseTree "src\bin\strike_scenarios\main.rs" "--fights") -and
+    (($Mix -eq "game") -or (Test-SourceHas $baseTree "src\bin\strike_scenarios\main.rs" "--mix"))
+function Invoke-Fights([string]$Tree, [string]$TargetDir, [string]$Dir, [string]$Label) {
+    $cargo = Get-CargoPath
+    Invoke-Checked -Label "Build $Label's scenario tool (Release)" -Command {
+        Push-Location $Tree
+        try {
+            & $cargo build --release --bin strike_scenarios --target-dir $TargetDir
+        } finally {
+            Pop-Location
+        }
+    }
+    New-Item -ItemType Directory -Force $Dir | Out-Null
+    $arguments = @((Join-Path $Dir "strike_scenarios.csv"), "--fights", $Fights, "--seed", $Seed)
+    if ($Mix -ne "game") {
+        $arguments += @("--mix", $Mix)
+    }
+    Invoke-Checked -Label "$Fights random fights ($Label)" -Command {
+        & (Join-Path $TargetDir "release\strike_scenarios.exe") @arguments
+    }
+}
+if ($Fights -gt 0) {
+    if ($baseHasFights -and -not (Test-Path -LiteralPath (Join-Path $baseFights "random_fights.csv"))) {
+        Invoke-Fights -Tree $baseTree -TargetDir $baseTarget -Dir $baseFights -Label "$Ref ($short)"
+    }
+    Invoke-Fights -Tree $repoRoot -TargetDir (Join-Path $repoRoot "target") -Dir $currentFights -Label "working tree"
+}
 Copy-Item -Recurse -Force (Join-Path $baseResults "*") (New-Item -ItemType Directory -Force (Join-Path $Out "base"))
 
 $report = [System.Collections.Generic.List[string]]::new()
@@ -253,6 +300,20 @@ if ($Sweep) {
                 if ($bm -ne $cm) { "$metric $bm -> $cm" }
             }
             Add-Line ("  {0,-30} {1}/{2} -> {3}/{4}  {5}" -f $name, $bIn, $b.Count, $cIn, $c.Count, ($medians -join ", ")) -Headline
+        }
+    }
+}
+
+if ($Fights -gt 0) {
+    Add-Line "" -Headline
+    if (-not $baseHasFights) {
+        $missing = if ($Mix -eq "game") { "--fights" } else { "--fights --mix" }
+        Add-Line "Fights: $short has no strike_scenarios $missing; only the working tree's fights are in $currentFights" -Headline
+    } else {
+        $diff = & (Join-Path $repoRoot "target\release\strike_scenarios.exe") (Join-Path $Out "strike_scenarios.csv") --diff $baseFights $currentFights 2>&1
+        Add-Line "Random fights, fight against fight with how sure each difference is (fights_diff.txt):" -Headline
+        foreach ($line in $diff | Where-Object { $_ -notmatch "^wrote " }) {
+            Add-Line "  $line" -Headline
         }
     }
 }

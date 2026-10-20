@@ -89,7 +89,7 @@
 //!                                     and what the watchdogs flagged, each with
 //!                                     a play to replay (random_blows_report.txt,
 //!                                     random_blows.csv)
-//!   --fights N [--seed S]             instead, play N random fights as the
+//!   --fights N [--seed S] [--mix M]   instead, play N random fights as the
 //!                                     Fight page plays them: the left fighter
 //!                                     taps punch and lean back at random, the
 //!                                     right one punches every 1.5 to 3.5 s;
@@ -97,7 +97,10 @@
 //!                                     joints, broken bones, and torn skin, and
 //!                                     what the watchdogs flagged, each with a
 //!                                     fight to replay (random_fights_report.txt,
-//!                                     random_fights.csv)
+//!                                     random_fights.csv); --mix spam leaves the
+//!                                     leans and the right one's punches out,
+//!                                     spam-lean the right one's punches, with
+//!                                     the left one's punches on the same steps
 //!   --set NAME=VALUE[,NAME=VALUE...]  change any setting of `Materials` from its
 //!                                     default for every world played (gravity,
 //!                                     bone_joint_hertz, ...), to try a value
@@ -110,7 +113,13 @@
 //!                                     hold their strike_sweep_runs.csv): every
 //!                                     band, real-life check, watchdog, and main
 //!                                     number that moved, with how likely chance
-//!                                     is to move it as far (sweep_diff.txt)
+//!                                     is to move it as far (sweep_diff.txt);
+//!                                     and two sets of random fights (folders
+//!                                     that hold random_fights.csv): each
+//!                                     fighter's torn and slipped joints, joint
+//!                                     by joint, broken bones, torn skin, and
+//!                                     watchdogs, fight against fight when both
+//!                                     played the same fights (fights_diff.txt)
 //!   --grid NAME=V1,V2,...             instead, play the scenarios (or the custom
 //!                                     play) over every combination of the values
 //!                                     given, repeatable: NAME a setting, as
@@ -166,6 +175,7 @@ mod bodies;
 mod diff;
 mod dump;
 mod fights;
+mod fights_diff;
 mod grid;
 mod inspect;
 mod moved;
@@ -242,6 +252,8 @@ struct Options {
     random: Option<usize>,
     /// Random fights to play instead, from the same seed.
     fights: Option<usize>,
+    /// Which presses the random fights play; the game's if not given.
+    mix: Option<fights::Mix>,
     seed: u64,
     tools: Vec<rp::ToolMode>,
     /// Settings changed from the defaults for every world, `NAME=VALUE`.
@@ -288,9 +300,31 @@ fn main() {
         return;
     }
     if let Some((a, b)) = &options.diff {
-        if let Err(message) = diff::diff_sweeps(a, b, &output_dir) {
-            eprintln!("{message}");
+        // Whatever both hold alike is set side by side: sweeps, fights, or
+        // both, as a folder that holds a sweep's runs and fights does.
+        let sweeps = diff::holds_runs(a) && diff::holds_runs(b);
+        let fights = fights_diff::holds_fights(a) && fights_diff::holds_fights(b);
+        if !sweeps && !fights {
+            eprintln!(
+                "--diff sets two sweeps or two sets of random fights side by side: {} and {} must both hold {} or both hold {} (or be such files)",
+                a.display(),
+                b.display(),
+                diff::RUNS_FILE,
+                fights::FIGHTS_FILE
+            );
             process::exit(2);
+        }
+        if sweeps {
+            if let Err(message) = diff::diff_sweeps(a, b, &output_dir) {
+                eprintln!("{message}");
+                process::exit(2);
+            }
+        }
+        if fights {
+            if let Err(message) = fights_diff::diff_fights(a, b, &output_dir) {
+                eprintln!("{message}");
+                process::exit(2);
+            }
         }
         return;
     }
@@ -305,7 +339,12 @@ fn main() {
         return;
     }
     if let Some(count) = options.fights {
-        fights::random_fights(count, options.seed, &output_dir);
+        fights::random_fights(
+            count,
+            options.seed,
+            options.mix.unwrap_or(fights::Mix::Game),
+            &output_dir,
+        );
         return;
     }
 
@@ -454,6 +493,7 @@ fn parse_options() -> Result<Options, String> {
         twin_frame: None,
         random: None,
         fights: None,
+        mix: None,
         seed: 1,
         tools: vec![
             rp::ToolMode::Blunt,
@@ -602,6 +642,10 @@ fn parse_options() -> Result<Options, String> {
                         format!("--fights takes a number of fights, got `{count}`")
                     })?);
             }
+            "--mix" => {
+                let mix = args.next().ok_or("--mix needs game, spam, or spam-lean")?;
+                options.mix = Some(fights::Mix::parse(&mix)?);
+            }
             "--seed" => {
                 let seed = args.next().ok_or("--seed needs a number")?;
                 options.seed = seed
@@ -642,6 +686,9 @@ fn parse_options() -> Result<Options, String> {
             return Err("--fighters plays a --gesture on two fighters".to_string());
         };
         spec.push_str(&format!(":fighters={spacing}"));
+    }
+    if options.mix.is_some() && options.fights.is_none() {
+        return Err("--mix chooses the presses --fights plays".to_string());
     }
     rp::scenarios::use_settings(rp::parse_settings(&options.settings)?);
     if options.grid.is_empty() {

@@ -3,12 +3,17 @@
 //! buttons does, the right one punching now and then as the sparring partner
 //! does, each watched by the watchdogs. The fight scenarios try a punch or a
 //! few; this tries how players actually press. Every fight is written in the
-//! syntax `--gesture` reads, so any of them replays exactly.
+//! syntax `--gesture` reads, so any of them replays exactly. `--mix` leaves
+//! the leans or the partner's punches out, to tell which press does a harm,
+//! and `--diff` sets two sets of fights side by side (`fights_diff.rs`).
 
 use super::*;
 use random::Dice;
 use rp::inspect::{joint_name, Watchdog, Watchdogs};
 use rp::scenarios::{Fight, GestureStep};
+
+/// The file the fights are written to, one to a line, which `--diff` reads.
+pub(crate) const FIGHTS_FILE: &str = "random_fights.csv";
 
 /// How long the presses go on, in steps: five seconds, after which the
 /// fighters have a second to come to rest.
@@ -22,11 +27,67 @@ const PRESS_WAITS: [i32; 10] = [2, 3, 4, 5, 6, 8, 10, 12, 16, 24];
 /// punches, in steps: 1.5 to 3.5 s, as the game's `PUNCH_GAP` waits.
 const PARTNER_WAITS: (i32, i32) = (90, 210);
 
+/// Which presses the fights play (`--mix`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Mix {
+    /// As the Fight page is played: the player taps punch and lean back,
+    /// and the sparring partner punches back.
+    Game,
+    /// The player's punches alone, the other fighter standing in its guard.
+    Spam,
+    /// The player's punches and leans, the other fighter standing in its
+    /// guard.
+    SpamLean,
+}
+
+impl Mix {
+    pub(crate) fn parse(name: &str) -> Result<Mix, String> {
+        match name {
+            "game" => Ok(Mix::Game),
+            "spam" => Ok(Mix::Spam),
+            "spam-lean" => Ok(Mix::SpamLean),
+            other => Err(format!(
+                "unknown mix `{other}`; use game, spam, or spam-lean"
+            )),
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Mix::Game => "game",
+            Mix::Spam => "spam",
+            Mix::SpamLean => "spam-lean",
+        }
+    }
+
+    /// Whether the player leans back as well as punching.
+    fn leans(self) -> bool {
+        self != Mix::Spam
+    }
+
+    /// Whether the other fighter punches back.
+    fn partner_punches(self) -> bool {
+        self == Mix::Game
+    }
+
+    /// The presses in words, for the report.
+    fn describe(self) -> &'static str {
+        match self {
+            Mix::Game => "the left fighter taps punch and lean back at random, a press every 2 to 24 steps, for 5 s; the right one punches every 1.5 to 3.5 s",
+            Mix::Spam => "the left fighter taps punch at random, a press every 2 to 24 steps, for 5 s; the right one stands in its guard",
+            Mix::SpamLean => "the left fighter taps punch and lean back at random, a press every 2 to 24 steps, for 5 s; the right one stands in its guard",
+        }
+    }
+}
+
 /// One fight's presses: the left fighter (body 0) punches with the arm
 /// nearer the other or holds and lets go of a lean back, each press a random
 /// wait after the last, while the right fighter (body 1) punches once each
-/// of its own waits.
-fn random_fight(dice: &mut Dice) -> Vec<GestureStep> {
+/// of its own waits. A mix that leaves the leans or the right fighter's
+/// punches out draws the dice all the same, so the left fighter's punches
+/// land on the same steps in every mix, and the game mix plays the fights
+/// `--fights` played before there were mixes.
+fn random_fight(dice: &mut Dice, mix: Mix) -> Vec<GestureStep> {
     let mut steps = vec![
         GestureStep::Move {
             to: (-1.3, 0.95),
@@ -40,19 +101,21 @@ fn random_fight(dice: &mut Dice) -> Vec<GestureStep> {
         let roll = dice.range(0.0, 1.0);
         if roll < 0.55 {
             steps.push(GestureStep::Punch(0, rp::Limb::RightArm));
-        } else if roll < 0.75 {
+        } else if roll < 0.75 && mix.leans() {
             leaning = !leaning;
             steps.push(GestureStep::Lean(0, leaning));
         }
         let mut wait = dice.pick(&PRESS_WAITS);
         if frame + wait >= partner {
-            let first = partner - frame;
-            if first > 0 {
-                steps.push(GestureStep::Wait(first));
+            if mix.partner_punches() {
+                let first = partner - frame;
+                if first > 0 {
+                    steps.push(GestureStep::Wait(first));
+                }
+                steps.push(GestureStep::Punch(1, rp::Limb::LeftArm));
+                wait -= first.max(0);
+                frame = partner;
             }
-            steps.push(GestureStep::Punch(1, rp::Limb::LeftArm));
-            wait -= first.max(0);
-            frame = partner;
             partner += dice.whole(PARTNER_WAITS.0, PARTNER_WAITS.1);
         }
         if wait > 0 {
@@ -101,10 +164,10 @@ fn joints_hurt(world: &rp::World) -> ([Vec<String>; 2], [Vec<String>; 2]) {
     (torn, slipped)
 }
 
-/// Plays `count` random fights from `seed`, on all cores, and reports which
-/// fighter's joints tore or slipped, which bones broke and what the
-/// watchdogs flagged, with fights to replay.
-pub(crate) fn random_fights(count: usize, seed: u64, output_dir: &Path) {
+/// Plays `count` random fights of `mix` from `seed`, on all cores, and
+/// reports which fighter's joints tore or slipped, which bones broke and
+/// what the watchdogs flagged, with fights to replay.
+pub(crate) fn random_fights(count: usize, seed: u64, mix: Mix, output_dir: &Path) {
     let started = Instant::now();
     let mut dice = Dice(seed);
     let plays: Vec<Play> = (0..count)
@@ -112,7 +175,7 @@ pub(crate) fn random_fights(count: usize, seed: u64, output_dir: &Path) {
             Play::Gesture(rp::scenarios::Gesture {
                 tool: rp::ToolMode::Heavy,
                 power: rp::swing_power(rp::ToolMode::Heavy),
-                steps: Vec::leak(random_fight(&mut dice)),
+                steps: Vec::leak(random_fight(&mut dice, mix)),
                 fight: Some(Fight {
                     spacing: rp::FIGHTER_SPACING,
                     guard_down: false,
@@ -169,11 +232,22 @@ pub(crate) fn random_fights(count: usize, seed: u64, output_dir: &Path) {
     fought.sort_by_key(|(index, _)| *index);
     let fought: Vec<Fought> = fought.into_iter().map(|(_, fight)| fight).collect();
 
-    let csv_path = output_dir.join("random_fights.csv");
+    // What the fights were played with comes first, as a sweep's runs file
+    // says it, for `--diff` to name each side; the torn and slipped joints'
+    // names come last, after the columns fights were first written with.
+    let csv_path = output_dir.join(FIGHTS_FILE);
     let mut csv = BufWriter::new(File::create(&csv_path).expect("create fights CSV"));
     writeln!(
         csv,
-        "index,play,left_joints_torn,right_joints_torn,left_joints_slipped,right_joints_slipped,left_bones_broken,right_bones_broken,left_skin_torn,right_skin_torn,watchdogs"
+        "# settings: {}\n# trying: {}\n# seed: {seed}\n# mix: {}",
+        rp::scenarios::settings_used().join(" "),
+        env::var("RP_TRY").unwrap_or_default(),
+        mix.name()
+    )
+    .expect("write fights CSV");
+    writeln!(
+        csv,
+        "index,play,left_joints_torn,right_joints_torn,left_joints_slipped,right_joints_slipped,left_bones_broken,right_bones_broken,left_skin_torn,right_skin_torn,watchdogs,left_torn_joints,right_torn_joints,left_slipped_joints,right_slipped_joints"
     )
     .expect("write fights CSV");
     for (index, fight) in fought.iter().enumerate() {
@@ -184,7 +258,7 @@ pub(crate) fn random_fights(count: usize, seed: u64, output_dir: &Path) {
             .collect();
         writeln!(
             csv,
-            "{index},\"{}\",{},{},{},{},{},{},{},{},{}",
+            "{index},\"{}\",{},{},{},{},{},{},{},{},{},\"{}\",\"{}\",\"{}\",\"{}\"",
             fight.play,
             fight.torn[0].len(),
             fight.torn[1].len(),
@@ -194,15 +268,25 @@ pub(crate) fn random_fights(count: usize, seed: u64, output_dir: &Path) {
             fight.bones_broken[1],
             fight.skin_torn[0],
             fight.skin_torn[1],
-            watchdogs.join(";")
+            watchdogs.join(";"),
+            fight.torn[0].join(";"),
+            fight.torn[1].join(";"),
+            fight.slipped[0].join(";"),
+            fight.slipped[1].join(";")
         )
         .expect("write fights CSV");
     }
 
     let mut report = format!(
-        "Random fights: {} fights from seed {seed}, in {:.0} s: the left fighter taps punch and lean back at random, a press every 2 to 24 steps, for 5 s; the right one punches every 1.5 to 3.5 s\n",
+        "Random fights: {} fights from seed {seed}{}, in {:.0} s: {}\n",
         fought.len(),
-        started.elapsed().as_secs_f64()
+        if mix == Mix::Game {
+            String::new()
+        } else {
+            format!(", the {} mix", mix.name())
+        },
+        started.elapsed().as_secs_f64(),
+        mix.describe()
     );
     let fighters = ["the left fighter's", "the right fighter's"];
     let tally = |what: &str, count: &dyn Fn(&Fought, usize) -> usize| {
@@ -306,4 +390,54 @@ pub(crate) fn random_fights(count: usize, seed: u64, output_dir: &Path) {
     print!("{report}");
     println!("wrote {}", csv_path.display());
     println!("wrote {}", report_path.display());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The steps on which the left fighter punches in a fight, how many
+    /// times it leans or lets go, and how many punches the right one throws.
+    fn presses(steps: &[GestureStep]) -> (Vec<i32>, usize, usize) {
+        let (mut frame, mut punches, mut leans, mut partner) = (0, Vec::new(), 0, 0);
+        for step in steps {
+            match *step {
+                GestureStep::Wait(wait) => frame += wait,
+                GestureStep::Punch(0, _) => punches.push(frame),
+                GestureStep::Punch(_, _) => partner += 1,
+                GestureStep::Lean(..) => leans += 1,
+                _ => {}
+            }
+        }
+        (punches, leans, partner)
+    }
+
+    /// Every mix draws the same dice, so the left fighter punches on the
+    /// same steps in each, and a mix only leaves presses out.
+    #[test]
+    fn every_mix_punches_on_the_same_steps() {
+        let fights = |mix| {
+            let mut dice = Dice(7);
+            (0..20)
+                .map(|_| presses(&random_fight(&mut dice, mix)))
+                .collect::<Vec<_>>()
+        };
+        let (game, spam, spam_lean) = (fights(Mix::Game), fights(Mix::Spam), fights(Mix::SpamLean));
+        for ((game, spam), spam_lean) in game.iter().zip(&spam).zip(&spam_lean) {
+            assert_eq!(game.0, spam.0);
+            assert_eq!(game.0, spam_lean.0);
+            assert_eq!((spam.1, spam.2), (0, 0), "spam only punches");
+            assert_eq!(spam_lean.1, game.1, "spam-lean leans as the game does");
+            assert_eq!(spam_lean.2, 0, "spam-lean's partner stands");
+            assert!(game.2 > 0, "the game's partner punches back");
+        }
+    }
+
+    #[test]
+    fn mixes_read_by_name() {
+        for mix in [Mix::Game, Mix::Spam, Mix::SpamLean] {
+            assert_eq!(Mix::parse(mix.name()), Ok(mix));
+        }
+        assert!(Mix::parse("lean").is_err());
+    }
 }

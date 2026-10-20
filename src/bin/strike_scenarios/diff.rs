@@ -171,6 +171,26 @@ pub(crate) fn stars(p: f64) -> &'static str {
     }
 }
 
+/// The first line of the file at `path` that is not a comment: a CSV's
+/// header, which says what the file holds.
+pub(crate) fn header_line(path: &Path) -> Option<String> {
+    let file = File::open(path).ok()?;
+    std::io::BufRead::lines(std::io::BufReader::new(file))
+        .map_while(Result::ok)
+        .find(|line| !line.starts_with('#'))
+}
+
+/// Whether `path` holds a sweep's runs: a folder with a `RUNS_FILE`, or such
+/// a file under any name.
+pub(crate) fn holds_runs(path: &Path) -> bool {
+    let file = if path.is_dir() {
+        path.join(RUNS_FILE)
+    } else {
+        path.to_path_buf()
+    };
+    header_line(&file).is_some_and(|header| header.starts_with("scenario,along,"))
+}
+
 /// One sweep's runs as its file holds them.
 struct Runs {
     settings: String,

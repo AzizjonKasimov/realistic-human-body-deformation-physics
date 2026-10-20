@@ -24,9 +24,9 @@ Also check that the root realistic_physics.exe's sound reaches the speakers
 (tools\sound_check.ps1; it briefly opens the app window). Runs after -BuildApp.
 
 .PARAMETER Deep
-Also play 2000 random blows and run the moved-body tests (strike_scenarios
---random and --moved; about 4 more minutes), which find what the tuned
-scenarios do not try.
+Also play 2000 random blows, 100 random fights, and the moved-body tests
+(strike_scenarios --random, --fights, and --moved), which find what the
+tuned scenarios do not try.
 #>
 param(
     [switch]$SkipDiagnostics,
@@ -61,6 +61,7 @@ if (-not $SkipSweep) {
 
 if ($Deep) {
     Measure-Step "Random blows" { Invoke-Cargo -Arguments @("run", "--release", "--bin", "strike_scenarios", "--", "output\strike_scenarios.csv", "--random", "2000") -Label "Play 2000 random blows" }
+    Measure-Step "Random fights" { Invoke-Cargo -Arguments @("run", "--release", "--bin", "strike_scenarios", "--", "output\strike_scenarios.csv", "--fights", "100") -Label "Play 100 random fights" }
     Measure-Step "Moved-body tests" { Invoke-Cargo -Arguments @("run", "--release", "--bin", "strike_scenarios", "--", "output\strike_scenarios.csv", "--moved") -Label "Replay the sweeps with the body moved" }
 }
 
@@ -94,6 +95,7 @@ if (-not $SkipSweep) {
 }
 if ($Deep) {
     Write-Host "Random blows report: $repoRoot\output\random_blows_report.txt"
+    Write-Host "Random fights report: $repoRoot\output\random_fights_report.txt"
     Write-Host "Moved-body report: $repoRoot\output\strike_moved_report.txt"
 }
 if (-not $SkipDiagnostics) {
