@@ -28,6 +28,14 @@ make each difference (fights_diff.txt; both sides need strike_scenarios
 leans or the partner's punches out.
 
 .EXAMPLE
+.\tools\compare.ps1 -Ref main -Random 2000
+Also play 2000 random blows from each of seeds 1, 2, and 3 on both sides and
+set them blow against blow: the plays each watchdog tripped in and each rule
+every play follows was broken in, tool by tool, and the injuries, with how
+likely chance is to make each difference (random_diff.txt; both sides need
+strike_scenarios --random). -RandomSeeds picks other seeds.
+
+.EXAMPLE
 .\tools\compare.ps1 -Capture torso_heavy_high
 Also save app screenshots of that scenario from both sides in one contact
 sheet (both sides need the app's --capture mode).
@@ -43,6 +51,9 @@ param(
     [int]$Seed = 1,
     [ValidateSet("game", "spam", "spam-lean")]
     [string]$Mix = "game",
+    [int]$Random = 0,
+    # Comma separated, as a script run with pwsh -File takes a list.
+    [string]$RandomSeeds = "1,2,3",
     [string]$Capture = "",
     [string]$Out = "",
     [switch]$Clean
@@ -156,6 +167,45 @@ if ($Fights -gt 0) {
         Invoke-Fights -Tree $baseTree -TargetDir $baseTarget -Dir $baseFights -Label "$Ref ($short)"
     }
     Invoke-Fights -Tree $repoRoot -TargetDir (Join-Path $repoRoot "target") -Dir $currentFights -Label "working tree"
+}
+
+# Random blows, a folder for each seed, the same blows on both sides while the
+# body's skin is built alike; the commit's cached by what was played.
+$seeds = @($RandomSeeds -split "," | ForEach-Object { [int]$_.Trim() })
+$blowsName = "random-$Random"
+$baseBlows = Join-Path $baseResults $blowsName
+$currentBlows = Join-Path $currentResults $blowsName
+$baseHasBlows = Test-SourceHas $baseTree "src\bin\strike_scenarios\main.rs" "--random"
+function Invoke-Blows([string]$Tree, [string]$TargetDir, [string]$Dir, [string]$Label, [bool]$Cached) {
+    $cargo = Get-CargoPath
+    Invoke-Checked -Label "Build $Label's scenario tool (Release)" -Command {
+        Push-Location $Tree
+        try {
+            & $cargo build --release --bin strike_scenarios --target-dir $TargetDir
+        } finally {
+            Pop-Location
+        }
+    }
+    foreach ($seed in $seeds) {
+        $seedDir = Join-Path $Dir "seed-$seed"
+        if ($Cached -and (Test-Path -LiteralPath (Join-Path $seedDir "random_blows.csv"))) {
+            continue
+        }
+        New-Item -ItemType Directory -Force $seedDir | Out-Null
+        Invoke-Checked -Label "$Random random blows from seed $seed ($Label)" -Command {
+            & (Join-Path $TargetDir "release\strike_scenarios.exe") (Join-Path $seedDir "strike_scenarios.csv") --random $Random --seed $seed
+        }
+    }
+}
+if ($Random -gt 0) {
+    if ($baseHasBlows) {
+        Invoke-Blows -Tree $baseTree -TargetDir $baseTarget -Dir $baseBlows -Label "$Ref ($short)" -Cached $true
+    }
+    # Seeds played before and not asked for now would join the comparison.
+    if (Test-Path -LiteralPath $currentBlows) {
+        Remove-Item -LiteralPath $currentBlows -Recurse -Force
+    }
+    Invoke-Blows -Tree $repoRoot -TargetDir (Join-Path $repoRoot "target") -Dir $currentBlows -Label "working tree" -Cached $false
 }
 Copy-Item -Recurse -Force (Join-Path $baseResults "*") (New-Item -ItemType Directory -Force (Join-Path $Out "base"))
 
@@ -312,6 +362,28 @@ if ($Fights -gt 0) {
     } else {
         $diff = & (Join-Path $repoRoot "target\release\strike_scenarios.exe") (Join-Path $Out "strike_scenarios.csv") --diff $baseFights $currentFights 2>&1
         Add-Line "Random fights, fight against fight with how sure each difference is (fights_diff.txt):" -Headline
+        foreach ($line in $diff | Where-Object { $_ -notmatch "^wrote " }) {
+            Add-Line "  $line" -Headline
+        }
+    }
+}
+
+if ($Random -gt 0) {
+    Add-Line "" -Headline
+    if (-not $baseHasBlows) {
+        Add-Line "Random blows: $short has no strike_scenarios --random; only the working tree's blows are in $currentBlows" -Headline
+    } else {
+        # Only the seeds asked for now, though the commit's cache may hold more.
+        $baseSeeds = Join-Path $Out "base-blows"
+        if (Test-Path -LiteralPath $baseSeeds) {
+            Remove-Item -LiteralPath $baseSeeds -Recurse -Force
+        }
+        foreach ($seed in $seeds) {
+            $to = New-Item -ItemType Directory -Force (Join-Path $baseSeeds "seed-$seed")
+            Copy-Item -LiteralPath (Join-Path $baseBlows "seed-$seed\random_blows.csv") -Destination $to
+        }
+        $diff = & (Join-Path $repoRoot "target\release\strike_scenarios.exe") (Join-Path $Out "strike_scenarios.csv") --diff $baseSeeds $currentBlows 2>&1
+        Add-Line "Random blows over seeds $($seeds -join ', '), blow against blow with how sure each difference is (random_diff.txt):" -Headline
         foreach ($line in $diff | Where-Object { $_ -notmatch "^wrote " }) {
             Add-Line "  $line" -Headline
         }

@@ -10,10 +10,9 @@
 //! thing happened in.
 
 use super::*;
-use diff::{fisher, header_line, sign_test, stars};
+use diff::{header_line, write_findings, Change, Finding, Holds, Worse};
 use fights::FIGHTS_FILE;
 use rp::inspect::Watchdog;
-use std::cmp::Ordering as Order;
 use std::collections::BTreeSet;
 
 /// Each fighter as a fights file's columns name it.
@@ -70,7 +69,7 @@ pub(crate) fn holds_fights(path: &Path) -> bool {
 }
 
 /// A CSV line's fields, a quoted field taken whole, commas and all.
-fn csv_fields(line: &str) -> Vec<String> {
+pub(crate) fn csv_fields(line: &str) -> Vec<String> {
     let mut fields = vec![String::new()];
     let mut quoted = false;
     let mut chars = line.chars().peekable();
@@ -91,7 +90,7 @@ fn csv_fields(line: &str) -> Vec<String> {
 
 /// The watchdog a fights file names, by the name the code gives it
 /// (`JointApart`) or its short name (`joint_apart`).
-fn watchdog_named(name: &str) -> Option<Watchdog> {
+pub(crate) fn watchdog_named(name: &str) -> Option<Watchdog> {
     Watchdog::ALL
         .iter()
         .copied()
@@ -217,78 +216,6 @@ impl Fights {
     }
 }
 
-/// How one thing a fight can do, counted per fight, differs between A's
-/// fights and B's.
-struct Change {
-    /// The fights it happened in on each side, and how many times in all.
-    fights: (usize, usize),
-    total: (u64, u64),
-    /// The fights in which B had more of it than A, and fewer; only paired.
-    more: usize,
-    fewer: usize,
-    /// How likely chance is to make a difference as large.
-    p: f64,
-}
-
-impl Change {
-    fn of(
-        a: &[FightLine],
-        b: &[FightLine],
-        paired: bool,
-        count: &dyn Fn(&FightLine) -> u32,
-    ) -> Change {
-        let happened =
-            |fights: &[FightLine]| fights.iter().filter(|fight| count(fight) > 0).count();
-        let total = |fights: &[FightLine]| {
-            fights
-                .iter()
-                .map(|fight| u64::from(count(fight)))
-                .sum::<u64>()
-        };
-        let fights = (happened(a), happened(b));
-        let (mut more, mut fewer) = (0, 0);
-        let p = if paired {
-            for (x, y) in a.iter().zip(b) {
-                match count(y).cmp(&count(x)) {
-                    Order::Greater => more += 1,
-                    Order::Less => fewer += 1,
-                    Order::Equal => {}
-                }
-            }
-            sign_test(more, fewer)
-        } else {
-            fisher(fights.0, a.len(), fights.1, b.len())
-        };
-        Change {
-            fights,
-            total: (total(a), total(b)),
-            more,
-            fewer,
-            p,
-        }
-    }
-
-    /// The change as a report's line: how sure, what, and the counts A -> B.
-    fn line(&self, what: &str, paired: bool) -> String {
-        let mut line = format!(
-            "{} {what}: in {} -> {} fights",
-            stars(self.p),
-            self.fights.0,
-            self.fights.1
-        );
-        if self.total != (self.fights.0 as u64, self.fights.1 as u64) {
-            line.push_str(&format!(", {} -> {} in all", self.total.0, self.total.1));
-        }
-        if paired && self.more + self.fewer > 0 {
-            line.push_str(&format!(
-                " (B more in {} fights, fewer in {})",
-                self.more, self.fewer
-            ));
-        }
-        line
-    }
-}
-
 /// A joint's name without the fighter it belongs to, which the section it
 /// is listed in already says.
 fn short_name(name: &str) -> &str {
@@ -333,7 +260,7 @@ fn joint_lines(
             (
                 change.total.0 + change.total.1,
                 name,
-                change.line(short_name(name), paired),
+                change.line(short_name(name), paired, "fights"),
             )
         })
         .collect();
@@ -373,8 +300,11 @@ fn what_was_worse(worse: &FightLine, better: &FightLine, a_worse: bool) -> Strin
     parts.join("; ")
 }
 
-/// The report setting fights `b` beside fights `a`, each headed by `label`.
-fn fights_report(a: &Fights, a_label: &str, b: &Fights, b_label: &str) -> String {
+/// The report setting fights `b` beside fights `a`, each headed by `label`,
+/// and what it compared, as findings. Fights are reported, not held: the
+/// good-enough rule holds the sweep and the random blows.
+fn fights_report(a: &Fights, a_label: &str, b: &Fights, b_label: &str) -> (String, Vec<Finding>) {
+    let mut findings = Vec::new();
     let paired = !a.fights.is_empty()
         && a.fights.len() == b.fights.len()
         && a.fights
@@ -408,7 +338,14 @@ fn fights_report(a: &Fights, a_label: &str, b: &Fights, b_label: &str) -> String
             let change = Change::of(&a.fights, &b.fights, paired, &|fight| {
                 fight.counts[side][index]
             });
-            report.push_str(&format!("  {}\n", change.line(what, paired)));
+            report.push_str(&format!("  {}\n", change.line(what, paired, "fights")));
+            findings.push(change.finding(
+                &format!("the {fighter} fighter"),
+                &format!("the {fighter} fighter's {what}"),
+                paired,
+                Worse::Up,
+                Holds::Drift,
+            ));
             let joints: Option<fn(&FightLine, usize) -> &[String]> = match index {
                 0 => Some(torn),
                 1 => Some(slipped),
@@ -440,7 +377,8 @@ fn fights_report(a: &Fights, a_label: &str, b: &Fights, b_label: &str) -> String
             kind.describe(),
             if kind.known_gap() { " [known gap]" } else { "" }
         );
-        report.push_str(&format!("  {}\n", change.line(&what, paired)));
+        report.push_str(&format!("  {}\n", change.line(&what, paired, "fights")));
+        findings.push(change.finding("watchdog", kind.describe(), paired, Worse::Up, Holds::Drift));
     }
     if paired {
         // The fights one side came out of more hurt, the most first, to
@@ -484,14 +422,15 @@ fn fights_report(a: &Fights, a_label: &str, b: &Fights, b_label: &str) -> String
             }
         }
     }
-    report
+    (report, findings)
 }
 
 /// Sets the fights in `b` beside those in `a`, each a folder holding a
 /// fights file or the file itself, writes the report to `output`
-/// (`fights_diff.txt`), and prints it.
+/// (`fights_diff.txt`, and what it compared to `fights_diff.csv`), and
+/// prints it.
 pub(crate) fn diff_fights(a: &Path, b: &Path, output: &Path) -> Result<(), String> {
-    let report = fights_report(
+    let (report, findings) = fights_report(
         &Fights::read(a)?,
         &a.display().to_string(),
         &Fights::read(b)?,
@@ -500,6 +439,7 @@ pub(crate) fn diff_fights(a: &Path, b: &Path, output: &Path) -> Result<(), Strin
     let path = output.join("fights_diff.txt");
     fs::write(&path, &report)
         .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    write_findings(&output.join("fights_diff.csv"), &findings)?;
     print!("{report}");
     println!("wrote {}", path.display());
     Ok(())
@@ -589,7 +529,7 @@ mod tests {
             .map(|index| line(index, if index < 10 { &wrist[..] } else { &[] }, &[], ""))
             .collect();
         let b: Vec<String> = (0..20).map(|index| line(index, &[], &[], "")).collect();
-        let report = fights_report(&newer(&a, ""), "A", &newer(&b, ""), "B");
+        let (report, _) = fights_report(&newer(&a, ""), "A", &newer(&b, ""), "B");
         assert!(report.contains("Both sides played the same fights"));
         assert!(
             report.contains(
@@ -607,7 +547,7 @@ mod tests {
         let c: Vec<String> = (0..20)
             .map(|index| line(index, if index == 3 { &wrist[..] } else { &[] }, &[], ""))
             .collect();
-        let report = fights_report(&newer(&c, ""), "A", &newer(&b, ""), "B");
+        let (report, _) = fights_report(&newer(&c, ""), "A", &newer(&b, ""), "B");
         assert!(
             report.contains("   joints torn apart: in 1 -> 0 fights"),
             "{report}"
@@ -619,7 +559,7 @@ mod tests {
     #[test]
     fn different_fights_are_compared_as_two_samples() {
         let b: Vec<String> = (5..7).map(|index| line(index, &[], &[], "")).collect();
-        let report = fights_report(&Fights::parse(OLDER).unwrap(), "A", &newer(&b, ""), "B");
+        let (report, _) = fights_report(&Fights::parse(OLDER).unwrap(), "A", &newer(&b, ""), "B");
         assert!(report.contains("compared as two samples"), "{report}");
         assert!(report.contains("Fights A do not name their joints"));
         assert!(report.contains("flesh turned inside out: in 1 -> 0 fights"));

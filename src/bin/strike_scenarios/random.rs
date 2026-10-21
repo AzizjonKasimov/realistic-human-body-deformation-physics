@@ -485,8 +485,17 @@ pub(crate) fn random_blows(
     played.sort_by_key(|(index, _)| *index);
     let played: Vec<Played> = played.into_iter().map(|(_, played)| played).collect();
 
-    let csv_path = output_dir.join("random_blows.csv");
+    // What the blows were played with comes first, as a sweep's runs and
+    // random fights say it, for `--diff` to name each side.
+    let csv_path = output_dir.join(random_diff::BLOWS_FILE);
     let mut csv = BufWriter::new(File::create(&csv_path).expect("create random CSV"));
+    writeln!(
+        csv,
+        "# settings: {}\n# trying: {}\n# seed: {seed}",
+        rp::scenarios::settings_used().join(" "),
+        env::var("RP_TRY").unwrap_or_default(),
+    )
+    .expect("write random CSV");
     writeln!(
         csv,
         "index,play,tool,bones_broken,skin_torn,muscle_torn,arteries_cut,blood_lost_ml,rules_broken,watchdogs"

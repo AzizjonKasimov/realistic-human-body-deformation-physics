@@ -109,6 +109,24 @@ impl Watchdog {
         matches!(self, Watchdog::ClosedPieceOut)
     }
 
+    /// Whether a trip is the body breaking in a way no blow can do, which a
+    /// change must not make more common before it merges: a place that is
+    /// not a number, broken bone gone from the body, a whole bone outside
+    /// the skin, a whole joint pulled apart, and blood that does not add up.
+    /// The others flag what may drift a little as the engine changes, and
+    /// are reported rather than held (README, "Check A Change Before
+    /// Merging").
+    pub fn breaks_the_body(self) -> bool {
+        matches!(
+            self,
+            Watchdog::NotFinite
+                | Watchdog::BoneLeftBody
+                | Watchdog::WholeBoneOut
+                | Watchdog::JointApart
+                | Watchdog::BloodLedger
+        )
+    }
+
     /// A trip's measure in words, against its limit.
     pub fn measure(self, value: f64, limit: f64) -> String {
         match self {

@@ -119,7 +119,16 @@
 //!                                     fighter's torn and slipped joints, joint
 //!                                     by joint, broken bones, torn skin, and
 //!                                     watchdogs, fight against fight when both
-//!                                     played the same fights (fights_diff.txt)
+//!                                     played the same fights (fights_diff.txt);
+//!                                     and two sets of random blows (folders
+//!                                     that hold random_blows.csv, or folders
+//!                                     of them, a seed each): the plays each
+//!                                     watchdog and rule tripped in, tool by
+//!                                     tool, and the injuries, blow against
+//!                                     blow when both played the same blows
+//!                                     (random_diff.txt); each also writes
+//!                                     what it compared, for
+//!                                     tools\merge_check.ps1 (*_diff.csv)
 //!   --grid NAME=V1,V2,...             instead, play the scenarios (or the custom
 //!                                     play) over every combination of the values
 //!                                     given, repeatable: NAME a setting, as
@@ -180,6 +189,7 @@ mod grid;
 mod inspect;
 mod moved;
 mod random;
+mod random_diff;
 mod record;
 mod summary;
 mod sweep;
@@ -300,19 +310,28 @@ fn main() {
         return;
     }
     if let Some((a, b)) = &options.diff {
-        // Whatever both hold alike is set side by side: sweeps, fights, or
-        // both, as a folder that holds a sweep's runs and fights does.
+        // Whatever both hold alike is set side by side: sweeps, fights,
+        // random blows, or several, as a folder that holds a sweep's runs
+        // and fights does.
         let sweeps = diff::holds_runs(a) && diff::holds_runs(b);
         let fights = fights_diff::holds_fights(a) && fights_diff::holds_fights(b);
-        if !sweeps && !fights {
+        let blows = random_diff::holds_blows(a) && random_diff::holds_blows(b);
+        if !sweeps && !fights && !blows {
             eprintln!(
-                "--diff sets two sweeps or two sets of random fights side by side: {} and {} must both hold {} or both hold {} (or be such files)",
+                "--diff sets two sweeps, two sets of random fights, or two sets of random blows side by side: {} and {} must both hold {}, both hold {}, or both hold {} (or a folder of them, a seed each; or be such files)",
                 a.display(),
                 b.display(),
                 diff::RUNS_FILE,
-                fights::FIGHTS_FILE
+                fights::FIGHTS_FILE,
+                random_diff::BLOWS_FILE
             );
             process::exit(2);
+        }
+        if blows {
+            if let Err(message) = random_diff::diff_blows(a, b, &output_dir) {
+                eprintln!("{message}");
+                process::exit(2);
+            }
         }
         if sweeps {
             if let Err(message) = diff::diff_sweeps(a, b, &output_dir) {
