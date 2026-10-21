@@ -1940,6 +1940,14 @@ impl World {
 
     /// The points of flesh the tool and the figures' landed fists press on
     /// through this step's substeps.
+    /// The points the tool, not a fist, presses this step.
+    pub(super) fn tool_pressed_points(&self) -> impl Iterator<Item = usize> + '_ {
+        self.tool
+            .contact
+            .iter()
+            .flat_map(|contact| contact.candidates.iter().copied())
+    }
+
     pub(super) fn pressed_points(&self) -> impl Iterator<Item = usize> + '_ {
         self.tool
             .contact

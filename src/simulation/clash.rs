@@ -309,7 +309,6 @@ impl World {
             self.push_piece(&second.piece, second.lever, push, h);
         }
         self.clashes = clashes;
-        self.move_flesh_with_sides();
         self.debug.limb_clashes = self.clashes.len() as i32;
         let newtons = self.newtons();
         let mut blocked = Vec::new();

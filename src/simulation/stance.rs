@@ -124,6 +124,18 @@ pub struct HipHold {
     pub impulse: Vec2,
 }
 
+/// A leg standing on its foot, as its joints hold it (`World::standing_leg`):
+/// its knee and ankle joints, where each joint holds the bone beyond it as
+/// built, and where the foot's anchor stands now.
+struct StandingLeg {
+    knee: usize,
+    ankle: usize,
+    hip_built: Vec2,
+    knee_built: Vec2,
+    ankle_built: Vec2,
+    ankle_at: Vec2,
+}
+
 /// A foot standing on the floor, held where it stands as the friction under
 /// a foot bearing its share of the body's weight holds it. The body is held
 /// up at the hips (`HipHold`), which carry its weight, so its feet press the
@@ -145,18 +157,6 @@ pub struct FootHold {
     /// Whether each end has come up off the floor, so that it stands again
     /// wherever it comes down.
     pub lifted: [bool; 2],
-}
-
-/// Bones and the flesh held to them (`PostureBinding`, each point by its
-/// share), moved as one piece: its mass, its centre of mass, and how hard it
-/// is to turn about that centre, where the substep began.
-#[derive(Clone, Debug)]
-pub(super) struct BoundPiece {
-    pub(super) bones: Vec<usize>,
-    pub(super) flesh: Vec<(usize, f64)>,
-    pub(super) mass: f64,
-    pub(super) centre: Vec2,
-    pub(super) inertia: f64,
 }
 
 /// How much a dry floor's friction holds a foot sideways, as a share of the
@@ -274,81 +274,6 @@ pub(super) fn bone_frame(a: Vec2, b: Vec2, p: Vec2) -> (f64, f64) {
 }
 
 impl World {
-    /// `bones`, all of one body, and the flesh held to them as one piece,
-    /// where the substep began; none for a piece with no weight to turn.
-    pub(super) fn bound_piece(&self, bones: Vec<usize>) -> Option<BoundPiece> {
-        let body = self.bones.get(*bones.first()?)?.body;
-        let mut sums = (0.0, Vec2::default(), 0.0);
-        let mut add_to = |mass: f64, place: Vec2| {
-            sums.0 += mass;
-            sums.1 = add(sums.1, scale(place, mass));
-            sums.2 += mass * dot(place, place);
-        };
-        for &index in &bones {
-            let segment = self.bones[index];
-            add_to(segment.mass * 0.5, segment.previous_a);
-            add_to(segment.mass * 0.5, segment.previous_b);
-        }
-        let mut flesh = Vec::new();
-        for (index, (point, hold)) in self.points.iter().zip(&self.point_holds).enumerate() {
-            // Skin come away from its muscle is no bone's to carry
-            // (`World::loose_skin`).
-            if point.pinned
-                || point.is_ghost()
-                || point.body != body
-                || self.loose_skin.get(index) == Some(&true)
-            {
-                continue;
-            }
-            // Each point's share as the joints share it out (`sides.rs`).
-            let binding = hold.posture;
-            let share: f64 = (0..2)
-                .filter(|&slot| bones.contains(&binding.bones[slot]))
-                .map(|slot| super::sides::share_of(binding.weights[slot]))
-                .sum();
-            if share > 0.0 {
-                add_to(point.mass * share, point.previous);
-                flesh.push((index, share));
-            }
-        }
-        let (mass, moment, second) = sums;
-        if mass <= EPSILON {
-            return None;
-        }
-        let centre = scale(moment, 1.0 / mass);
-        let inertia = second - mass * dot(centre, centre);
-        (inertia > EPSILON).then_some(BoundPiece {
-            bones,
-            flesh,
-            mass,
-            centre,
-            inertia,
-        })
-    }
-
-    /// Gives `piece` the impulse `push` at `lever` from its centre of mass,
-    /// over a substep `h` long: it moves and turns as one, its bones and its
-    /// flesh, each point by its share, from where the substep began.
-    pub(super) fn push_bound_piece(&mut self, piece: &BoundPiece, lever: Vec2, push: Vec2, h: f64) {
-        let shift = scale(push, h / piece.mass);
-        let turn = cross(lever, push) * h / piece.inertia;
-        let moved = |at: Vec2| {
-            add(
-                shift,
-                scale(perpendicular(subtract(at, piece.centre)), turn),
-            )
-        };
-        for &index in &piece.bones {
-            let bone = &mut self.bones[index];
-            bone.a = add(bone.a, moved(bone.previous_a));
-            bone.b = add(bone.b, moved(bone.previous_b));
-        }
-        for &(index, share) in &piece.flesh {
-            let point = &mut self.points[index];
-            point.position = add(point.position, scale(moved(point.previous), share));
-        }
-    }
-
     /// One newton metre in the engine's units of torque (`KG_PER_MASS` and
     /// pixels).
     pub(super) fn newton_metres(&self) -> f64 {
@@ -566,13 +491,24 @@ impl World {
             if w <= 0.0 {
                 continue;
             }
-            let mass = 1.0 / w;
             let (place, previous) = if hold.end_b {
                 (bone.b, bone.previous_b)
             } else {
                 (bone.a, bone.previous_a)
             };
-            let softness = Softness::of_stiffness(stiffness, damping, mass, h);
+            // The pelvis moves with its flesh, as its joints hold it
+            // (`sides.rs`): held on the bone's end alone while the joints
+            // moved bone and flesh as one, the flesh round the hips shook at
+            // 500 px/s standing still.
+            let piece = self.bone_pieces.get(hold.bone).cloned().flatten();
+            let lever = piece.as_ref().map(|piece| subtract(previous, piece.centre));
+            let masses = match (&piece, lever) {
+                (Some(piece), Some(lever)) => (
+                    1.0 / (1.0 / piece.mass + lever.y * lever.y / piece.inertia),
+                    1.0 / (1.0 / piece.mass + lever.x * lever.x / piece.inertia),
+                ),
+                _ => (1.0 / w, 1.0 / w),
+            };
             // A punch carries the hips toward what it hits (`punch.rs`), a
             // lean away from it (`lean.rs`), and they sink as far as the leg
             // below needs to still reach its planted foot.
@@ -580,44 +516,172 @@ impl World {
             shift.y += self.lunge_drop(&hold, shift.x);
             let error = subtract(previous, add(add(hold.home, hold.aim), shift));
             let speed = scale(subtract(place, previous), 1.0 / h);
+            let (soft_x, soft_y) = (
+                Softness::of_stiffness(stiffness, damping, masses.0, h),
+                Softness::of_stiffness(stiffness, damping, masses.1, h),
+            );
             let impulse = Vec2 {
-                x: softness.impulse(mass, speed.x, error.x, hold.impulse.x),
-                y: softness.impulse(mass, speed.y, error.y, hold.impulse.y),
+                x: soft_x.impulse(masses.0, speed.x, error.x, hold.impulse.x),
+                y: soft_y.impulse(masses.1, speed.y, error.y, hold.impulse.y),
             };
             self.hip_holds[index].impulse = add(hold.impulse, impulse);
-            self.push_hip(hold, scale(impulse, w * h));
+            match (&piece, lever) {
+                (Some(piece), Some(lever)) => self.push_piece(piece, lever, impulse, h),
+                _ => self.push_hip(hold, scale(impulse, w * h)),
+            }
         }
     }
 
     /// How far the end of the pelvis `hold` holds must sink, the hips
     /// shifted `shift` pixels across, for the leg below it to still reach
     /// its foot planted on the floor: a leg is no longer than it was built,
-    /// as a person shifting their hips far to one side sinks into it. Held
-    /// up at their height, hips shifted a quarter metre across pulled the
-    /// far foot off the floor and tore its ankle.
+    /// hip to ankle as its joints hold it (`standing_leg`), as a person
+    /// shifting their hips far to one side sinks into it. Held up at their
+    /// height, hips shifted a quarter metre across pulled the far foot off
+    /// the floor and tore its ankle.
     fn lunge_drop(&self, hold: &HipHold, shift: f64) -> f64 {
         if shift == 0.0 {
             return 0.0;
         }
-        let body = self.bone_body(hold.bone);
-        let end = add(hold.home, hold.aim);
-        // The foot standing below this end of the pelvis: its leg's.
-        let foot = self
-            .foot_holds
-            .iter()
-            .filter(|foot| self.bone_body(foot.bone) == body)
-            .filter_map(|foot| {
-                let bone = self.standing_foot(foot)?;
-                Some((bone.home_a, foot.planted[0]))
+        let leg = (0..self.bone_joints.len())
+            .filter(|&index| {
+                let joint = &self.bone_joints[index];
+                joint.a == hold.bone && (joint.t_a > 0.5) == hold.end_b
             })
-            .min_by(|p, q| (p.0.x - end.x).abs().total_cmp(&(q.0.x - end.x).abs()));
-        let Some((ankle_built, ankle)) = foot else {
+            .find_map(|index| self.standing_leg(index));
+        let Some(leg) = leg else {
             return 0.0;
         };
-        let length = distance(end, ankle_built);
-        let across = (ankle.x - (end.x + shift)).abs().min(length);
-        let highest = ankle.y - (length * length - across * across).sqrt();
-        (highest - end.y).max(0.0)
+        let hip = add(leg.hip_built, hold.aim);
+        let length = distance(leg.hip_built, leg.ankle_built);
+        let across = (leg.ankle_at.x - (hip.x + shift)).abs().min(length);
+        let highest = leg.ankle_at.y - (length * length - across * across).sqrt();
+        (highest - hip.y).max(0.0)
+    }
+
+    /// The leg joint `hip` holds to the pelvis, where it stands on its foot
+    /// (`standing_foot`): its knee and ankle, where each of its joints
+    /// holds the bone beyond as built, and where the foot's holds its
+    /// anchor now. Each joint holds its second bone's anchor where it was
+    /// built on its first, so the thigh runs rigidly from its anchor at the
+    /// hip to the shin's at the knee, and the shin from there to the foot's
+    /// at the ankle; measured from the bones' own ends instead, a standing
+    /// leg came out 6 px longer than it is.
+    fn standing_leg(&self, hip: usize) -> Option<StandingLeg> {
+        let joined = |index: usize, a: BonePart, b: BonePart| {
+            let joint = &self.bone_joints[index];
+            matches!(
+                (self.bones.get(joint.a), self.bones.get(joint.b)),
+                (Some(x), Some(y)) if x.part == a && y.part == b
+            )
+        };
+        if !joined(hip, BonePart::Pelvis, BonePart::Thigh) {
+            return None;
+        }
+        let joint = self.bone_joints[hip];
+        let thigh = self.bones[joint.b];
+        let body = thigh.body as usize;
+        let find = |a: BonePart, b: BonePart| {
+            (0..self.bone_joints.len()).find(|&index| {
+                let other = &self.bone_joints[index];
+                other.drive.limb == thigh.limb
+                    && self.joint_body(other) == body
+                    && joined(index, a, b)
+            })
+        };
+        let knee = find(BonePart::Thigh, BonePart::Shin)?;
+        let ankle = find(BonePart::Shin, BonePart::Foot)?;
+        let hold = self.foot_holds.iter().find(|foot| {
+            self.bones
+                .get(foot.bone)
+                .is_some_and(|bone| bone.body == thigh.body && bone.limb == thigh.limb)
+        })?;
+        let foot = self.standing_foot(hold)?;
+        let (knee_joint, ankle_joint) = (self.bone_joints[knee], self.bone_joints[ankle]);
+        let shin = self.bones[knee_joint.b];
+        Some(StandingLeg {
+            knee,
+            ankle,
+            hip_built: lerp(thigh.home_a, thigh.home_b, joint.t_b),
+            knee_built: lerp(shin.home_a, shin.home_b, knee_joint.t_b),
+            ankle_built: lerp(foot.home_a, foot.home_b, ankle_joint.t_b),
+            ankle_at: lerp(hold.planted[0], hold.planted[1], ankle_joint.t_b),
+        })
+    }
+
+    /// While a punch or a lean carries the hips across, aims each standing
+    /// leg's hip, knee, and ankle so that the leg reaches from where its hip
+    /// is now to its foot planted on the floor, as a person's legs lean in
+    /// under hips shifted far to one side: the far leg straightens and the
+    /// near one bends, the thigh and shin solved as two sides of a triangle
+    /// whose third runs from hip to ankle (`standing_leg`), and the ankle
+    /// keeps the foot flat on the floor. Each angle is taken between two
+    /// directions, never from the window's axes, so two fighters standing as
+    /// mirror images aim their legs as mirror images to the last bit. Held
+    /// at the angles they stand at, the hips' and knees' muscles, turning
+    /// the legs with their flesh (`sides.rs`), swung each leg out with the
+    /// hips: leaned back 25 cm, the far foot rose 16 px off the floor and
+    /// slid 35 px.
+    pub(super) fn lean_legs_in(&mut self) {
+        let turn_between = |from: Vec2, to: Vec2| libm::atan2(cross(from, to), dot(from, to));
+        for hip in 0..self.bone_joints.len() {
+            let joint = self.bone_joints[hip];
+            let (Some(pelvis), Some(thigh)) = (self.bones.get(joint.a), self.bones.get(joint.b))
+            else {
+                continue;
+            };
+            if pelvis.part != BonePart::Pelvis || thigh.part != BonePart::Thigh {
+                continue;
+            }
+            let (pelvis, thigh) = (*pelvis, *thigh);
+            let shift = self
+                .bodies
+                .get(thigh.body as usize)
+                .map_or(Vec2::default(), |state| state.hip_shift);
+            let Some(leg) = self.standing_leg(hip) else {
+                continue;
+            };
+            let mut swings = [0.0; 3];
+            if shift != Vec2::default() {
+                let hip_at = lerp(thigh.a, thigh.b, joint.t_b);
+                let (t, s) = (
+                    distance(leg.hip_built, leg.knee_built),
+                    distance(leg.knee_built, leg.ankle_built),
+                );
+                let span =
+                    distance(hip_at, leg.ankle_at).clamp((t - s).abs() + 1.0e-6, t + s - 1.0e-6);
+                // The triangle's angle at the hip, between the thigh and the
+                // line to the ankle, and at the knee, between thigh and shin.
+                let at_hip =
+                    libm::acos(((t * t + span * span - s * s) / (2.0 * t * span)).clamp(-1.0, 1.0));
+                let at_knee =
+                    libm::acos(((t * t + s * s - span * span) / (2.0 * t * s)).clamp(-1.0, 1.0));
+                let thigh_built = subtract(leg.knee_built, leg.hip_built);
+                let shin_built = subtract(leg.ankle_built, leg.knee_built);
+                let side =
+                    turn_between(subtract(leg.ankle_built, leg.hip_built), thigh_built).signum();
+                let reach = subtract(leg.ankle_at, hip_at);
+                let (sin, cos) = (libm::sin(side * at_hip), libm::cos(side * at_hip));
+                let thigh_aim = Vec2 {
+                    x: reach.x * cos - reach.y * sin,
+                    y: reach.x * sin + reach.y * cos,
+                };
+                let bend_built = turn_between(thigh_built, shin_built);
+                let bend_aim = bend_built.signum() * (PI - at_knee);
+                let pelvis_tilt = turn_between(
+                    subtract(pelvis.home_b, pelvis.home_a),
+                    subtract(pelvis.b, pelvis.a),
+                );
+                let thigh_turn = turn_between(thigh_built, thigh_aim);
+                swings[0] = wrap_angle(thigh_turn - pelvis_tilt);
+                swings[1] = wrap_angle(bend_aim - bend_built);
+                // The foot stays as flat as it stood: the shin's turn undone.
+                swings[2] = -wrap_angle(thigh_turn + swings[1]);
+            }
+            for (index, swing) in [hip, leg.knee, leg.ankle].into_iter().zip(swings) {
+                self.bone_joints[index].drive.swing = swing;
+            }
+        }
     }
 
     /// Moves the end of the pelvis `hold` holds by `shift`.
@@ -705,7 +769,7 @@ impl World {
                 if pull.x.abs() > friction {
                     state.planted[end].x = previous.x;
                 }
-                self.push_bound_piece(piece, lever, subtract(total, given), h);
+                self.push_piece(piece, lever, subtract(total, given), h);
             }
         }
         self.foot_pieces = pieces;
@@ -713,7 +777,9 @@ impl World {
 
     /// Each standing foot's bone and the flesh held to it, as one piece, as
     /// this substep begins: the floor holds the sole, flesh and bone
-    /// together. Held by its bone alone, a foot struck by a bat kept its bone
+    /// together, as the piece its ankle holds it by (`sides.rs`), so that
+    /// the floor and the ankle move the same flesh with it, alike in both
+    /// fighters. Held by its bone alone, a foot struck by a bat kept its bone
     /// where it stood while the blow shoved its flesh away, leaving the bone
     /// outside its skin.
     ///
@@ -727,7 +793,7 @@ impl World {
         for index in 0..self.foot_holds.len() {
             let hold = self.foot_holds[index];
             let piece = if self.standing_foot(&hold).is_some() && !self.foot_struck(&hold) {
-                self.bound_piece(vec![hold.bone])
+                self.bone_pieces.get(hold.bone).cloned().flatten()
             } else {
                 None
             };
@@ -796,7 +862,7 @@ impl World {
                 } else {
                     bone.previous_b
                 };
-                self.push_bound_piece(
+                self.push_piece(
                     piece,
                     subtract(previous, piece.centre),
                     hold.impulse[end],
@@ -819,12 +885,24 @@ impl World {
     pub(super) fn warm_start_hip_hold(&mut self, h: f64) {
         for index in 0..self.hip_holds.len() {
             let hold = self.hip_holds[index];
-            let w = self
-                .bones
-                .get(hold.bone)
-                .map_or(0.0, BoneSegment::inverse_end_mass);
-            if w > 0.0 && hold.impulse != Vec2::default() {
-                self.push_hip(hold, scale(hold.impulse, w * h));
+            let Some(&bone) = self.bones.get(hold.bone) else {
+                continue;
+            };
+            let w = bone.inverse_end_mass();
+            if w <= 0.0 || hold.impulse == Vec2::default() {
+                continue;
+            }
+            match self.bone_pieces.get(hold.bone).cloned().flatten() {
+                Some(piece) => {
+                    let previous = if hold.end_b {
+                        bone.previous_b
+                    } else {
+                        bone.previous_a
+                    };
+                    let lever = subtract(previous, piece.centre);
+                    self.push_piece(&piece, lever, hold.impulse, h);
+                }
+                None => self.push_hip(hold, scale(hold.impulse, w * h)),
             }
         }
     }
@@ -960,7 +1038,6 @@ impl World {
             }
         }
         self.joint_sides = sides;
-        self.move_flesh_with_sides();
     }
 
     /// The most torque the muscles across `joint` give, in the engine's
@@ -1043,7 +1120,6 @@ impl World {
             }
         }
         self.joint_sides = sides;
-        self.move_flesh_with_sides();
     }
 
     /// Moves the skeleton's places for tissue and the hip hold off bone

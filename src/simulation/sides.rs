@@ -30,6 +30,11 @@
 //! is no longer the bone's to carry (`World::loose_skin`): swung with the
 //! arm as part of it, a flap a knife had cut loose was flung across the
 //! window, and random knife cuts flung flesh three times as often.
+//!
+//! Every joint holds its bones so, the trunk's and the legs' as well as the
+//! arms'. With the arms' joints alone holding their flesh, the trunk's still
+//! held only their light bones while the arms swung theirs, and the lower
+//! back tore in 72 of 300 random fights, twice as often as before.
 
 use super::soft::{perpendicular, JointHold, JointPin, Softness};
 use super::*;
@@ -57,16 +62,19 @@ pub(super) struct BonePiece {
 #[derive(Clone, Debug)]
 pub(super) struct JointSides {
     sides: [BonePiece; 2],
+    /// Where the joint holds its first bone, as the substep began.
+    anchor: Vec2,
 }
 
 impl JointSides {
     /// How hard the two pieces are to turn against each other, or, with
     /// the piece beyond the joint `planted` on the floor, the piece before
-    /// it alone.
+    /// it alone, about the joint (`World::turn_joint_sides_from`).
     pub(super) fn turning_mass(&self, planted: bool) -> f64 {
         let [inner, outer] = &self.sides;
         if planted {
-            inner.inertia
+            let off = subtract(inner.centre, self.anchor);
+            inner.inertia + inner.mass * dot(off, off)
         } else {
             1.0 / (1.0 / inner.inertia + 1.0 / outer.inertia)
         }
@@ -84,19 +92,48 @@ pub(super) fn share_of(weight: f64) -> f64 {
 
 impl World {
     /// Whether joint `index` holds its bones with their flesh this substep:
-    /// a joint of an arm, from the collarbone's hinge on the spine out to
-    /// the wrist, not torn or loosened by a break, slipped out of place or
-    /// not, between whole bones that move. Held on its light bones alone
-    /// once it had slipped, a wrist let the hand's flesh fly off and tore
-    /// apart.
+    /// any joint not torn or loosened by a break, slipped out of place or
+    /// not, between whole bones that move and that no tool presses
+    /// (`tool_pressed`). Held on its light bones alone once it had slipped,
+    /// a wrist let the hand's flesh fly off and tore apart.
     fn holds_sides(&self, index: usize) -> bool {
         let joint = &self.bone_joints[index];
-        matches!(joint.drive.limb, Limb::LeftArm | Limb::RightArm)
-            && self.joint_holds(joint)
+        self.joint_holds(joint)
             && [joint.a, joint.b].iter().all(|&bone| {
+                let pressed = self.tool_pressed.get(bone) == Some(&true);
                 let bone = &self.bones[bone];
-                !bone.pinned && !bone.splinter && !bone.fractured
+                !bone.pinned && !bone.splinter && !bone.fractured && !pressed
             })
+    }
+
+    /// Marks each hand and foot a tool, not a fist, presses this substep,
+    /// through the flesh held mostly to it: its joint holds it on its light
+    /// bone while it is pressed, as the tool shoves it out of its way by
+    /// where it is, whatever it weighs. Held with its flesh to a leg or an
+    /// arm as heavy as their flesh, a foot a bat swept along the floor
+    /// turned half round about its ankle and came out of its skin: 32 of 700
+    /// random bat blows left a whole bone outside the skin, 17 on light
+    /// bones. A longer bone keeps its flesh: held light while a hammer
+    /// pressed on the elbow, a broken arm fell 2 spacings into the chest. A
+    /// joint changing its hold so keeps what it carried in: started afresh,
+    /// the joints round a hammer pressed into a wound let go each time and
+    /// flung flesh in 6 of 45 runs.
+    fn measure_tool_pressed(&mut self) {
+        let mut pressed = vec![false; self.bones.len()];
+        for point in self.tool_pressed_points() {
+            let binding = self.point_holds[point].posture;
+            for slot in 0..2 {
+                let bone = binding.bones[slot];
+                let end = self
+                    .bones
+                    .get(bone)
+                    .is_some_and(|bone| matches!(bone.part, BonePart::Hand | BonePart::Foot));
+                if binding.weights[slot] >= 0.5 && end {
+                    pressed[bone] = true;
+                }
+            }
+        }
+        self.tool_pressed = pressed;
     }
 
     /// Measures, as this substep begins, each bone with its share of the
@@ -205,6 +242,7 @@ impl World {
     /// (`measure_bone_pieces`).
     pub(super) fn measure_joint_sides(&mut self) {
         self.joint_sides.clear();
+        self.measure_tool_pressed();
         let piece = |bone: usize| self.bone_pieces.get(bone)?.clone();
         let sides: Vec<Option<JointSides>> = (0..self.bone_joints.len())
             .map(|index| {
@@ -212,12 +250,42 @@ impl World {
                     return None;
                 }
                 let joint = self.bone_joints[index];
+                let a = self.bones[joint.a];
                 Some(JointSides {
                     sides: [piece(joint.a)?, piece(joint.b)?],
+                    anchor: lerp(a.previous_a, a.previous_b, joint.t_a),
                 })
             })
             .collect();
+        self.side_bones = vec![false; self.bones.len()];
+        for joint_sides in sides.iter().flatten() {
+            for piece in &joint_sides.sides {
+                self.side_bones[piece.bone] = true;
+            }
+        }
         self.joint_sides = sides;
+    }
+
+    /// The piece bone `bone` moves as this substep, where its muscle's ties
+    /// pull it with its flesh (`soft.rs`): a bone of the hips or a leg that
+    /// a joint holds with its flesh (`measure_joint_sides`), as the hold on
+    /// the hips and the feet's holds move them too. Pulled alone, a light
+    /// bone, the hips' muscles turned the pelvis against the hold on the
+    /// hips and the joints, which moved it with its flesh, and a leaning
+    /// fighter's far foot slid 13 px. The trunk's and the arms' ties pull
+    /// their bones alone: pulling the spine with the chest's flesh, they
+    /// tipped a trunk whose ribs a hammer had broken over the hips.
+    pub(super) fn side_piece(&self, bone: usize) -> Option<BonePiece> {
+        let below_back = self.bones.get(bone).is_some_and(|bone| {
+            matches!(
+                bone.part,
+                BonePart::Pelvis | BonePart::Thigh | BonePart::Shin | BonePart::Foot
+            )
+        });
+        if !below_back || self.side_bones.get(bone) != Some(&true) {
+            return None;
+        }
+        self.bone_pieces.get(bone).cloned().flatten()
     }
 
     /// Gives `piece` the impulse `push` at `lever` from its centre of mass,
@@ -281,10 +349,19 @@ impl World {
         h: f64,
     ) {
         let [inner, outer] = &sides.sides;
-        self.turn_piece(inner, -impulse, h);
-        if !planted {
-            self.turn_piece(outer, impulse, h);
+        if planted {
+            // The piece beyond stands on the floor, so the joint stays put
+            // and the piece before turns about it, as a trunk bends at the
+            // lower back over hips standing on their feet: turned about its
+            // own middle, the trunk swung the joint aside, which dragged the
+            // hips round with it.
+            let off = subtract(inner.centre, sides.anchor);
+            let turn = -impulse * h / (inner.inertia + inner.mass * dot(off, off));
+            self.move_piece(inner, scale(perpendicular(off), turn), turn);
+            return;
         }
+        self.turn_piece(inner, -impulse, h);
+        self.turn_piece(outer, impulse, h);
     }
 
     /// Gives the piece beyond a joint `push` at its anchor, `anchors.1`, and
@@ -443,11 +520,12 @@ impl World {
         self.push_joint_sides(&pin, sides, impulse, h);
     }
 
-    /// Moves the flesh as the joints moved the bones this phase
+    /// Moves the flesh as the bones were moved with it since it last moved
     /// (`push_piece`): each point by its share of each of its bones' motion,
-    /// only the flesh of the bones that moved (`side_flesh`). Every point of
-    /// both bodies gone through after each phase of joints and muscles, the
-    /// solver took a sixth longer a step.
+    /// only the flesh of the bones that moved (`side_flesh`), once after the
+    /// holds, the joints, and the muscles that move bones with their flesh
+    /// rather than after each. Every point of both bodies gone through after
+    /// each of them, the solver took a sixth longer a step.
     pub(super) fn move_flesh_with_sides(&mut self) {
         for bone in 0..self.side_motion.len() {
             let (shift, turn) = self.side_motion[bone];

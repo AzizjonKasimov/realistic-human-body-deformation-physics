@@ -693,14 +693,17 @@ impl Default for Materials {
             // as far as its lean in carries it, and the guard's fist stands
             // beside the chin, so a lean back must carry the head and the
             // guard further than a punch's lean in to make it fall short:
-            // 20 degrees at the lower back, well inside the 35 degrees a
-            // trunk bends sideways (docs/INJURY_REFERENCE.md, Leaning back),
-            // and the weight 25 cm over toward the back foot. As far as a
-            // punch leans in (0.21 rad, 15 cm), the fist still met the guard
-            // or grazed the head. It comes back as slowly as a punch's lean:
-            // brought back in half a second, the head swung 16 cm past
+            // 25 degrees at the lower back, inside the 35 degrees a trunk
+            // bends sideways (docs/INJURY_REFERENCE.md, Leaning back), and
+            // the weight 25 cm over toward the back foot. As far as a punch
+            // leans in (0.21 rad, 15 cm), the fist still met the guard or
+            // grazed the head. Aimed at 20 degrees, the trunk on its light
+            // bones swung on to 25; holding its bones with their flesh
+            // (`sides.rs`), it stops where it is aimed, and at 20 degrees the
+            // fist grazed the head. It comes back as slowly as a punch's
+            // lean: brought back in half a second, the head swung 16 cm past
             // upright toward the other fighter.
-            lean_back: 0.35,
+            lean_back: 0.44,
             lean_back_seconds: 0.25,
             lean_recover_seconds: 1.0,
             lean_hip_shift: 0.25,
@@ -2055,9 +2058,9 @@ pub struct World {
     /// Where two bodies' limbs press on each other this substep
     /// (`clash.rs`).
     clashes: Vec<clash::Clash>,
-    /// Each foot hold's foot, bone and flesh, as one piece this substep
-    /// (`stance.rs`).
-    foot_pieces: Vec<Option<stance::BoundPiece>>,
+    /// Each foot hold's foot, bone and flesh, as one piece this substep:
+    /// the piece its ankle holds it by (`sides.rs`).
+    foot_pieces: Vec<Option<sides::BonePiece>>,
     /// Each bone with its share of the flesh held to it, as one piece this
     /// substep (`sides.rs`).
     bone_pieces: Vec<Option<sides::BonePiece>>,
@@ -2074,6 +2077,12 @@ pub struct World {
     /// The flesh each bone carries in its piece this substep, each point
     /// with its share (`sides::share_of`).
     side_flesh: Vec<Vec<(usize, f64)>>,
+    /// Each bone a joint holds with its flesh this substep (`sides.rs`),
+    /// which its muscle's ties pull with that flesh.
+    side_bones: Vec<bool>,
+    /// Each bone a tool presses this substep, which its joints hold on its
+    /// light bone alone (`World::measure_tool_pressed`).
+    tool_pressed: Vec<bool>,
 }
 
 impl Default for World {
@@ -2149,6 +2158,8 @@ impl World {
             side_motion: Vec::new(),
             loose_skin: Vec::new(),
             side_flesh: Vec::new(),
+            side_bones: Vec::new(),
+            tool_pressed: Vec::new(),
         }
     }
 
@@ -2778,6 +2789,7 @@ impl World {
         }
         self.timed("punches", |world| world.drive_punches(dt));
         self.timed("leans", |world| world.drive_leans(dt));
+        self.timed("legs", Self::lean_legs_in);
         self.acting(Actor::Tool);
         self.timed("punches land", |world| world.land_punches(dt));
         self.acting(Actor::Tissue);
