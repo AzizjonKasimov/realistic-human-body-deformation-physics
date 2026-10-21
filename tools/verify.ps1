@@ -1,7 +1,9 @@
 <#
 .SYNOPSIS
 Checks formatting and tests, plays the strike scenarios and their offset
-sweep, and runs the anatomy and visual damage diagnostics.
+sweep, and runs the anatomy and visual damage diagnostics. It first gives
+every text file Unix line endings (line_endings.ps1), as a checkout made
+before .gitattributes kept them may lack.
 
 .PARAMETER SkipDiagnostics
 Skip the anatomy and visual damage diagnostics.
@@ -48,6 +50,9 @@ function Measure-Step([string]$Name, [scriptblock]$Step) {
     $timings.Add(("{0,-30} {1,6:N1} s" -f $Name, $watch.Elapsed.TotalSeconds))
 }
 
+# A checkout made before .gitattributes kept LF still holds CRLF files, which
+# rustfmt.toml's Unix line endings would fail the format check on.
+Measure-Step "Line endings" { & "$PSScriptRoot\line_endings.ps1" }
 Measure-Step "Formatting" { Invoke-Cargo -Arguments @("fmt", "--check") -Label "Check Rust formatting" }
 Measure-Step "Tests" { Invoke-Cargo -Arguments @("test") -Label "Run Rust simulation tests" }
 # The patched sound backend is a separate crate, so its mixer tests run on their own.

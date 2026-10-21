@@ -1,0 +1,6 @@
+# Every text file has Unix line endings (LF), in the repository and in every
+# checkout, whatever Git for Windows' core.autocrlf asks for, so the files on
+# disk agree with what cargo fmt, sed, scripts, and editors write into them.
+# tools/line_endings.ps1 switches a checkout made before this file.
+* text=auto eol=lf
+*.png binary

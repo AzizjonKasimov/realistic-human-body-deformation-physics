@@ -239,7 +239,7 @@ From the repository root in PowerShell:
 .\tools\verify.ps1
 ```
 
-The Rust verifier runs formatting checks, simulation tests, deterministic strike playback and its offset sweep, anatomy diagnostics, and visual damage diagnostics, then prints how long each step took (about half a minute in all). The scenario and diagnostic programs run as release builds, which give the same results as debug builds several times faster. Options:
+The Rust verifier gives every text file Unix line endings (see [Development Notes](#development-notes)), then runs formatting checks, simulation tests, deterministic strike playback and its offset sweep, anatomy diagnostics, and visual damage diagnostics, and prints how long each step took (about half a minute in all). The scenario and diagnostic programs run as release builds, which give the same results as debug builds several times faster. Options:
 
 - `-BuildApp` also rebuilds the root `realistic_physics.exe` (`-StopRunningApp` closes a running copy that blocks it).
 - `-Capture` also saves real app screenshots of the body at rest at 1280x720, 800x600, and 390x844 (see [Screenshots](#screenshots)).
@@ -499,6 +499,7 @@ The visual diagnostic exits nonzero if what is drawn stops matching what the sim
 - `tools/build_web.ps1` builds the browser version into `target\web`, with `-Fight PATH` the Fight page from a checkout of the game's repository too (see [Fight](#fight)); `tools/serve_web.ps1` serves it locally with the content types browsers require (`application/wasm`, and JSON for the manifest), which `Get-WebContentTypes` in `tools/common.ps1` lists for every local server.
 - `tools/bench.ps1` times the simulation against a commit (see [Measure Speed](#measure-speed)).
 - `.cargo/config.toml` lets the wasm linker leave miniquad's WebGL functions as imports for `gl.js` to provide; recent Rust versions no longer do that by default.
+- Every text file has Unix line endings (LF), in the repository and in every checkout: `.gitattributes` says so whatever Git for Windows' `core.autocrlf` asks for, and `rustfmt.toml` has `cargo fmt` write them. With Windows line endings (CRLF) on disk, the tools that write files (`cargo fmt`, `sed -i`, scripts) put LF into them and mixed the two. A checkout made before `.gitattributes` still holds CRLF files: `.\tools\line_endings.ps1` switches them without changing what git sees in them, uncommitted changes included (`-Check` only lists them, `-Path` switches another checkout), and `verify.ps1` runs it first.
 - `src/bin/anatomy_diagnostics.rs` writes a deterministic SVG anatomy snapshot and reports geometry validation metrics.
 - `src/bin/strike_scenarios.rs` writes deterministic strike telemetry and tuning summaries, sweeps scenarios over small swing offsets, plays custom swings, and times the phases of a step.
 - `src/bin/visual_damage_diagnostics.rs` writes deterministic SVG damage captures and visual primitive metrics.

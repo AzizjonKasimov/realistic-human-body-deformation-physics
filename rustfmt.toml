@@ -1,0 +1,4 @@
+# Unix line endings in every file cargo fmt writes, as .gitattributes keeps
+# them in every checkout. Left to itself, rustfmt on Windows wrote each file it
+# reformatted with LF and left the rest of a Windows (CRLF) checkout as it was.
+newline_style = "Unix"
