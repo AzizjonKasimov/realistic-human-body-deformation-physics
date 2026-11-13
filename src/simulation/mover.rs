@@ -886,22 +886,29 @@ impl World {
     /// fighters do (`NEAREST_STAND`), counting the steps both are in the
     /// middle of as taken; without limit if no fighter stands in front.
     fn room_ahead(&self, body: usize) -> f64 {
-        let stands = |body: usize| {
-            let frame = self.fighter_frame(body)?;
-            let mover = self.bodies[body].mover.as_ref()?;
-            let ahead = mover.place + mover.step.map_or(0.0, |step| step.by);
-            Some((frame, frame.stand.x + frame.facing * ahead * frame.height))
-        };
-        let Some((frame, own)) = stands(body) else {
+        let (Some(frame), Some(own)) = (self.fighter_frame(body), self.fighter_stands(body)) else {
             return 0.0;
         };
         (0..self.bodies.len())
             .filter(|&other| other != body)
-            .filter_map(stands)
-            .map(|(_, other)| frame.facing * (other - own) / frame.height)
+            .filter_map(|other| self.fighter_stands(other))
+            .map(|other| frame.facing * (other - own) / frame.height)
             .filter(|&gap| gap > 0.0)
             .map(|gap| gap - NEAREST_STAND)
             .fold(f64::INFINITY, f64::min)
+    }
+
+    /// Where side-view fighter `body` stands across the world, in pixels:
+    /// where its steps have carried its hips from where it was built, the
+    /// step it is in the middle of counted as taken. A lean, a duck, or a
+    /// blow moves its hips about that place without moving the place. For a
+    /// game's own rules about where fighters may stand, such as a ring's
+    /// edge, and for how far apart two fighters stand.
+    pub fn fighter_stands(&self, body: usize) -> Option<f64> {
+        let frame = self.fighter_frame(body)?;
+        let mover = self.bodies.get(body)?.mover.as_ref()?;
+        let ahead = mover.place + mover.step.map_or(0.0, |step| step.by);
+        Some(frame.stand.x + frame.facing * ahead * frame.height)
     }
 
     /// Whether side-view fighter `body` would take a step if told to: it is
