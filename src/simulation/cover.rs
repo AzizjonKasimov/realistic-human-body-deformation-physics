@@ -271,6 +271,112 @@ pub(super) fn measure_bone_covers(world: &mut World, frame: BodyFrame, field: &S
     }
 }
 
+/// What lies over each part of the skeleton on a real person seen from the
+/// side, in millimetres, on each face a side view can strike: the front
+/// (`outer`), the back (`inner`), from above, and from below. The limbs'
+/// figures are `real_faces`' turned to the side; the trunk's are estimates
+/// from the same sources: the spine's back lies under about 15 mm of skin
+/// and muscle and its front behind the whole belly, the ribs' front under
+/// the chest's muscle, and the shin's front, its bare inner face, under skin
+/// and fat alone, with the calf behind it.
+fn side_faces(part: BonePart) -> Faces {
+    match part {
+        BonePart::UpperArm => Faces {
+            outer: 25.0,
+            inner: 25.0,
+            top: 25.0,
+            bottom: 10.0,
+        },
+        BonePart::Forearm => Faces {
+            outer: 8.0,
+            inner: 8.0,
+            top: 8.0,
+            bottom: 6.0,
+        },
+        BonePart::Thigh => Faces {
+            outer: 45.0,
+            inner: 60.0,
+            top: 35.0,
+            bottom: 15.0,
+        },
+        BonePart::Shin => Faces {
+            outer: 9.0,
+            inner: 60.0,
+            top: 15.0,
+            bottom: 6.0,
+        },
+        BonePart::Rib => Faces {
+            outer: 20.0,
+            inner: 30.0,
+            top: 30.0,
+            bottom: 30.0,
+        },
+        BonePart::Spine => Faces {
+            outer: 60.0,
+            inner: 15.0,
+            top: 30.0,
+            bottom: 30.0,
+        },
+        BonePart::Pelvis => Faces {
+            outer: 35.0,
+            inner: 40.0,
+            top: 25.0,
+            bottom: 35.0,
+        },
+        other => real_faces(other),
+    }
+}
+
+/// Measures the flesh over every bone of a side-view fighter built at
+/// `frame` (`fighter.rs`): the figure's, out to the outline of the bone's own
+/// sheet of flesh or to another bone of that sheet, and a real person's seen
+/// from the side. `sheet_of` names each bone's sheet and `fields` holds each
+/// sheet's figure. The fighter faces the right of the window as built.
+pub(super) fn measure_side_bone_covers(
+    world: &mut World,
+    frame: BodyFrame,
+    sheet_of: &[usize],
+    fields: &[SilhouetteField],
+) {
+    let reach = world.materials.point_spacing * MAX_FIGURE_COVER;
+    let bones = world.bones.clone();
+    for (index, bone) in bones.iter().enumerate() {
+        let Some(field) = sheet_of.get(index).and_then(|&sheet| fields.get(sheet)) else {
+            continue;
+        };
+        let direction = normalized(subtract(bone.b, bone.a), Vec2 { x: 0.0, y: 1.0 });
+        let near: Vec<&BoneSegment> = bones
+            .iter()
+            .enumerate()
+            .filter(|&(other, near)| {
+                other != index
+                    && sheet_of.get(other) == sheet_of.get(index)
+                    && closest_segment_points(bone.a, bone.b, near.a, near.b).distance
+                        <= bone.radius + reach + near.radius
+            })
+            .map(|(_, near)| near)
+            .collect();
+        let faces = side_faces(bone.part);
+        let mut cover = BoneCover {
+            figure: [[0.0; COVER_DIRECTIONS]; COVER_STATIONS],
+            real: [[0.0; COVER_DIRECTIONS]; COVER_STATIONS],
+        };
+        for station in 0..COVER_STATIONS {
+            let t = station as f64 / (COVER_STATIONS - 1) as f64;
+            let center = lerp(bone.a, bone.b, t);
+            for turn in 0..COVER_DIRECTIONS {
+                let toward = turned(direction, turn);
+                let surface = add(center, scale(toward, bone.radius));
+                cover.figure[station][turn] =
+                    figure_cover(frame, field, &near, surface, toward, reach);
+                cover.real[station][turn] = faces.toward(toward, 1.0);
+            }
+        }
+        world.bones[index].cover = world.bone_covers.len();
+        world.bone_covers.push(cover);
+    }
+}
+
 /// How far the figure's flesh runs from `surface` toward `toward` before its
 /// outline or another bone, or 0 if it runs past `reach`.
 fn figure_cover(

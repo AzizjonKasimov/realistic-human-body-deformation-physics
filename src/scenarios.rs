@@ -10,7 +10,8 @@ use std::sync::OnceLock;
 
 use crate::{
     body_frame, create_layered_body, fighters_from, swing_power, BodyFrame, BonePart, BoneSegment,
-    InputState, Limb, Materials, TissueLayer, ToolMode, Vec2, World, BONE_PARTS, FIGHTER_SPACING,
+    InputState, Limb, Materials, Move, TissueLayer, ToolMode, Vec2, World, BONE_PARTS,
+    FIGHTER_SPACING,
 };
 
 /// The settings the tools were given (`--set NAME=VALUE`), applied to every
@@ -111,6 +112,7 @@ impl Strike {
             tool: self.tool,
             punches: [None; 4],
             leans: [None; 2],
+            moves: [None; 4],
         }
     }
 
@@ -224,6 +226,9 @@ pub enum GestureStep {
     /// Body `0` or `1` starts holding a lean back (`true`) or lets it go on
     /// the next step, as its key or button does in the game.
     Lean(usize, bool),
+    /// Body `0` or `1`, a side-view fighter, is told to make a move on the
+    /// next step (`World::command`).
+    Act(usize, Move),
 }
 
 /// A tool used the way a person plays the app: the tool is in hand from the
@@ -262,7 +267,10 @@ impl Gesture {
             .iter()
             .map(|step| match *step {
                 GestureStep::Move { frames, .. } | GestureStep::Wait(frames) => frames.max(0),
-                GestureStep::Press(_) | GestureStep::Punch(..) | GestureStep::Lean(..) => 0,
+                GestureStep::Press(_)
+                | GestureStep::Punch(..)
+                | GestureStep::Lean(..)
+                | GestureStep::Act(..) => 0,
             })
             .sum()
     }
@@ -279,7 +287,7 @@ impl Gesture {
         for step in self.steps {
             match *step {
                 GestureStep::Press(state) => down = state,
-                GestureStep::Punch(..) | GestureStep::Lean(..) => {}
+                GestureStep::Punch(..) | GestureStep::Lean(..) | GestureStep::Act(..) => {}
                 GestureStep::Wait(frames) => {
                     if frame < elapsed + frames {
                         return (position, down);
@@ -344,6 +352,20 @@ impl Gesture {
         leans
     }
 
+    /// The moves side-view fighters are told to make on `frame`, by body, in
+    /// the order written.
+    pub fn moves(&self, frame: i32) -> [Option<(usize, Move)>; 4] {
+        let mut moves = [None; 4];
+        let made = self.firing(frame).filter_map(|step| match step {
+            GestureStep::Act(body, made) => Some((body, made)),
+            _ => None,
+        });
+        for (slot, made) in moves.iter_mut().zip(made) {
+            *slot = Some(made);
+        }
+        moves
+    }
+
     /// Pointer input on `frame` against a body placed at `body`. The tool is
     /// in play on every frame, as it is in the app.
     pub fn input(&self, frame: i32, body: BodyFrame) -> InputState {
@@ -360,6 +382,7 @@ impl Gesture {
             tool: self.tool,
             punches: self.punches(frame),
             leans: self.leans(frame),
+            moves: self.moves(frame),
         }
     }
 
@@ -447,6 +470,10 @@ impl Gesture {
     /// `punch=left` or `punch=right` throws a punch with the arm on that
     /// side of the window, and `lean=on` and `lean=off` start and stop
     /// holding a lean back (`punch2=` and `lean2=` for the second fighter).
+    /// Side-view fighters (`World::command`) are told `jab`, `cross`,
+    /// `step=in`, `step=out`, `back=on` and `back=off` (leaning back), and
+    /// `duck=on` and `duck=off`, the second fighter with a 2 after the word
+    /// (`jab2`, `step2=out`, `duck2=on`).
     /// `power=P` tries a strength other than the tool's swing power. For example
     /// `bat:-0.3,0.4:wait=10:down:0.05,0.4/12:wait=40:up:wait=30` hovers,
     /// presses, swings into the chest, leans there, and lets go.
@@ -493,7 +520,9 @@ impl Gesture {
                 "fighters" => spacing = Some(FIGHTER_SPACING),
                 "guard=down" => guard_down = true,
                 _ => {
-                    if let Some(frames) = part.strip_prefix("wait=") {
+                    if let Some(act) = fighter_move(part) {
+                        steps.push(act);
+                    } else if let Some(frames) = part.strip_prefix("wait=") {
                         steps.push(GestureStep::Wait(steps_of(frames)?));
                     } else if let Some(value) = part.strip_prefix("power=") {
                         power = number(value)?;
@@ -546,6 +575,35 @@ impl Gesture {
     }
 }
 
+/// The move `part` of a gesture tells a side-view fighter to make, if it is
+/// one: `jab`, `cross`, `step=in`, `step=out`, `back=on`, `back=off`,
+/// `duck=on`, or `duck=off`, the second fighter's with a 2 after the word.
+fn fighter_move(part: &str) -> Option<GestureStep> {
+    let (word, value) = match part.split_once('=') {
+        Some((word, value)) => (word, Some(value)),
+        None => (part, None),
+    };
+    let (word, body) = match word.strip_suffix('2') {
+        Some(word) => (word, 1),
+        None => (word, 0),
+    };
+    let held = |value: Option<&str>| match value {
+        Some("on") => Some(true),
+        Some("off") => Some(false),
+        _ => None,
+    };
+    let made = match (word, value) {
+        ("jab", None) => Move::Jab,
+        ("cross", None) => Move::Cross,
+        ("step", Some("in")) => Move::StepIn,
+        ("step", Some("out")) => Move::StepOut,
+        ("back", value) => Move::LeanBack(held(value)?),
+        ("duck", value) => Move::Duck(held(value)?),
+        _ => return None,
+    };
+    Some(GestureStep::Act(body, made))
+}
+
 /// Writes the gesture in the syntax [`Gesture::parse`] reads.
 impl fmt::Display for Gesture {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -583,6 +641,22 @@ impl fmt::Display for Gesture {
                     },
                     if held { "on" } else { "off" }
                 )?,
+                GestureStep::Act(body, made) => {
+                    let who = if body == 0 {
+                        "".to_string()
+                    } else {
+                        (body + 1).to_string()
+                    };
+                    let on = |held: bool| if held { "on" } else { "off" };
+                    match made {
+                        Move::Jab => write!(f, ":jab{who}")?,
+                        Move::Cross => write!(f, ":cross{who}")?,
+                        Move::StepIn => write!(f, ":step{who}=in")?,
+                        Move::StepOut => write!(f, ":step{who}=out")?,
+                        Move::LeanBack(held) => write!(f, ":back{who}={}", on(held))?,
+                        Move::Duck(held) => write!(f, ":duck{who}={}", on(held))?,
+                    }
+                }
             }
         }
         write!(f, ":power={}", self.power)?;

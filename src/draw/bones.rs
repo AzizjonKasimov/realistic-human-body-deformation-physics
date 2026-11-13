@@ -2,8 +2,11 @@
 
 use super::*;
 
-pub(super) fn draw_major_vessels(ctx: &Scene) {
+pub(super) fn draw_major_vessels(ctx: &Scene, only: Only) {
     for vessel in ctx.world.vessels() {
+        if !only.anchor(ctx.world, vessel.anchor_a) {
+            continue;
+        }
         if ctx.anatomy {
             let opacity = if vessel.lacerated { 0.82 } else { 0.34 };
             draw_vessel_run(ctx, vessel.a, vessel.b, vessel.radius, opacity);
@@ -74,8 +77,11 @@ pub(super) enum BonePass {
     Buried,
 }
 
-pub(super) fn draw_bones(ctx: &Scene, pass: BonePass) {
+pub(super) fn draw_bones(ctx: &Scene, pass: BonePass, only: Only) {
     for bone in ctx.world.bones() {
+        if !only.bone(bone) {
+            continue;
+        }
         match pass {
             BonePass::Anatomy => draw_bone(ctx, bone, 1.0, true),
             BonePass::Buried => {
@@ -201,12 +207,13 @@ pub(super) fn draw_fracture_cap(ctx: &Scene, bone: &rp::BoneSegment, at_start: b
     );
 }
 
-pub(super) fn draw_bone_attachments(ctx: &Scene) {
+pub(super) fn draw_bone_attachments(ctx: &Scene, only: Only) {
     let world = ctx.world;
     for attachment in world.bone_attachments() {
         if attachment.broken
             || attachment.bone >= world.bones().len()
             || attachment.point >= world.points().len()
+            || !only.anchor(world, attachment.point)
         {
             continue;
         }

@@ -42,6 +42,11 @@ pub struct BodyState {
     /// How many of its skin's fibers have torn or been cut; `Stats` counts
     /// every body's together.
     pub skin_tears: i32,
+    /// Its bones and joints by name, if it is a side-view fighter
+    /// (`fighter.rs`); `None` for the front-view body.
+    pub(super) fighter: Option<super::fighter::Rig>,
+    /// What moves a side-view fighter (`mover.rs`).
+    pub(super) mover: Option<super::mover::Mover>,
 }
 
 impl BodyState {
@@ -56,6 +61,8 @@ impl BodyState {
             mirrored: false,
             fractures: [0; BONE_PARTS],
             skin_tears: 0,
+            fighter: None,
+            mover: None,
         }
     }
 }
@@ -123,6 +130,15 @@ impl World {
     /// Where body `body`'s midline lies across the world: where its spine
     /// was built.
     pub(super) fn midline_of(&self, body: usize) -> Option<f64> {
+        // A side-view fighter moves about: where its hips are now.
+        if let Some(rig) = self
+            .bodies
+            .get(body)
+            .and_then(|state| state.fighter.as_ref())
+        {
+            let pelvis = self.bones.get(rig.pelvis)?;
+            return Some((pelvis.a.x + pelvis.b.x) * 0.5);
+        }
         self.bones
             .iter()
             .find(|bone| bone.kind == BoneKind::Spine && bone.body as usize == body)
@@ -164,6 +180,7 @@ impl World {
         let triangles = self.triangles.len();
         let bones = self.bones.len();
         let covers = self.bone_covers.len();
+        let joints = self.bone_joints.len();
         let point = |index: usize| moved(index, points, MISSING_POINT);
         let spring = |index: usize| moved(index, springs, MISSING_SPRING);
         let bone = |index: usize| moved(index, bones, MISSING_BONE);
@@ -258,7 +275,12 @@ impl World {
         self.open_skin
             .extend(other.open_skin.into_iter().map(spring));
         self.flesh.extend(other.flesh);
-        self.bodies.extend(other.bodies);
+        for mut state in other.bodies {
+            if let Some(rig) = &mut state.fighter {
+                rig.move_indices(bones, joints);
+            }
+            self.bodies.push(state);
+        }
         self.topology_version += 1;
         first
     }
@@ -284,6 +306,9 @@ impl World {
         }
         for state in &mut world.bodies {
             state.mirrored = !state.mirrored;
+            if let Some(rig) = &mut state.fighter {
+                rig.mirror(middle);
+            }
         }
         // What is measured across a bone, a quarter turn counterclockwise
         // from it, turns the other way in the mirror; so do angles and turns.
@@ -321,6 +346,8 @@ impl World {
             tie.impulse = motion(tie.impulse);
         }
         for joint in &mut world.bone_joints {
+            joint.seat.y = -joint.seat.y;
+            joint.seat_speed.y = -joint.seat_speed.y;
             joint.hold.y = -joint.hold.y;
             joint.rest_angle = -joint.rest_angle;
             (joint.min_angle, joint.max_angle) = (-joint.max_angle, -joint.min_angle);
@@ -329,6 +356,7 @@ impl World {
             joint.angular_impulse = -joint.angular_impulse;
             joint.drive.aim = -joint.drive.aim;
             joint.drive.swing = -joint.drive.swing;
+            joint.drive.swing_speed = -joint.drive.swing_speed;
             joint.drive_impulse = -joint.drive_impulse;
         }
         for tendon in &mut world.tendons {
@@ -353,6 +381,10 @@ impl World {
             hold.home = place(hold.home);
             hold.aim = motion(hold.aim);
             hold.impulse = motion(hold.impulse);
+            if let Some(carry) = &mut hold.carry {
+                carry.offset = motion(carry.offset);
+                carry.speed = motion(carry.speed);
+            }
         }
         for hold in &mut world.foot_holds {
             hold.planted = hold.planted.map(place);

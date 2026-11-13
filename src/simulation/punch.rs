@@ -311,12 +311,12 @@ impl Punch {
 /// How fast a fist must be going, in metres a second, for what it meets to
 /// stop it and turn its punch back: a fist barely moving that touches the
 /// other fighter's guard beside it, as a punch begins, has not landed.
-const LANDING_SPEED: f64 = 2.0;
+pub(super) const LANDING_SPEED: f64 = 2.0;
 
 /// How far ahead of the end of the hand's bone the front of the fist lies,
 /// in body heights: the fist's flesh round the knuckles
 /// (`silhouette::FIST_TOP`).
-const FIST_FRONT: f64 = 0.023;
+pub(super) const FIST_FRONT: f64 = 0.023;
 
 /// Which slot of [`World::punches`] an arm's punch takes, the viewer's left
 /// arm first.
@@ -744,6 +744,21 @@ impl World {
     ) {
         let segment = self.bones[bone];
         let (body, limb) = (segment.body as usize, segment.limb);
+        if self.striking(body, limb) {
+            // A side-view fighter's punch turns back from where it got
+            // (`mover.rs`).
+            self.turn_strike_back(body, limb);
+            self.note(
+                EventKind::PunchTurnedBack,
+                Subject::Bone(bone),
+                lerp(segment.a, segment.b, 0.5),
+                Some(Actor::Bone(by)),
+                measure,
+                value,
+                limit,
+            );
+            return;
+        }
         let (Some(arm), Some(toward)) = (
             arm_slot(limb),
             self.punch(body, limb)
@@ -802,6 +817,19 @@ impl World {
         let contacts = std::mem::take(&mut self.fist_contacts);
         for fist in &contacts {
             if hypot(fist.shift.x, fist.shift.y) <= EPSILON {
+                continue;
+            }
+            if self.is_fighter(fist.body) {
+                // A side-view fighter's arm takes it as one piece too
+                // (`mover.rs`).
+                let at = lerp(
+                    fist.contact.shape.axis_start,
+                    fist.contact.shape.axis_end,
+                    0.5,
+                );
+                let impulse = scale(fist.shift, fist.contact.inertia / dt.max(EPSILON));
+                let side = crate::profile::Side::BOTH[fist.arm.min(1)];
+                self.push_fighter_arm(fist.body, side, impulse, at, dt);
                 continue;
             }
             let Some(punch) = self.bodies[fist.body].punches[fist.arm].take() else {
@@ -923,7 +951,7 @@ impl World {
     /// hand as hard: it bends the hand's bone as far as it presses across
     /// it, and breaks it past its strength, as a punch on a skull can break
     /// a bare-knuckle fighter's hand.
-    fn load_puncher_hand(&mut self, hand: usize, blow: f64, toward: Vec2) {
+    pub(super) fn load_puncher_hand(&mut self, hand: usize, blow: f64, toward: Vec2) {
         let back = scale(toward, -1.0);
         let (share, at) = self.break_share(hand, 0.8, 1.0, back);
         let load = blow * share;

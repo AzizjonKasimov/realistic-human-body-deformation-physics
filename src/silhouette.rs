@@ -25,7 +25,7 @@ use std::sync::OnceLock;
 pub(crate) type Landmark = (f64, f64);
 
 /// A circle in body coordinates: center and radius.
-type Circle = (Landmark, f64);
+pub(crate) type Circle = (Landmark, f64);
 
 // Joints of the viewer's right limbs; the left limbs mirror them. In the
 // guard the upper arm runs out from the shoulder 50 degrees from hanging
@@ -117,15 +117,51 @@ pub(crate) struct SilhouetteField {
     /// `u` of the first column. One column lies on the midline, so the samples
     /// mirror exactly.
     left: f64,
+    /// `v` of the first row.
+    top: f64,
     /// Signed distance to the outline in body heights, negative inside.
     sdf: Vec<f64>,
 }
 
 impl SilhouetteField {
+    /// The field of `distance`, a signed distance in body heights (negative
+    /// inside), sampled over `u_range` and `v_range`: any figure's, such as a
+    /// sheet of a side-view fighter (`crate::profile`).
+    pub(crate) fn sampled(
+        u_range: (f64, f64),
+        v_range: (f64, f64),
+        distance: impl Fn(Landmark) -> f64,
+    ) -> Self {
+        let cell = 1.0 / FIELD_RESOLUTION;
+        let cols = ((u_range.1 - u_range.0) / cell).ceil() as usize + 1;
+        let rows = ((v_range.1 - v_range.0) / cell).ceil() as usize + 1;
+        let mut sdf = Vec::with_capacity(cols * rows);
+        for row in 0..rows {
+            let v = v_range.0 + row as f64 * cell;
+            sdf.extend((0..cols).map(|col| distance((u_range.0 + col as f64 * cell, v))));
+        }
+        Self {
+            cols,
+            rows,
+            cell,
+            left: u_range.0,
+            top: v_range.0,
+            sdf,
+        }
+    }
+
+    /// The `u` and `v` the field's samples span.
+    pub(crate) fn bounds(&self) -> ((f64, f64), (f64, f64)) {
+        (
+            (self.left, self.left + (self.cols - 1) as f64 * self.cell),
+            (self.top, self.top + (self.rows - 1) as f64 * self.cell),
+        )
+    }
+
     /// Signed distance to the outline at (u, v) in body heights; negative inside.
     pub(crate) fn distance(&self, u: f64, v: f64) -> f64 {
         let gx = (u - self.left) / self.cell;
-        let gy = (v - FIELD_V_RANGE.0) / self.cell;
+        let gy = (v - self.top) / self.cell;
         let max_x = (self.cols - 1) as f64;
         let max_y = (self.rows - 1) as f64;
         let cx = gx.clamp(0.0, max_x);
@@ -224,7 +260,7 @@ impl SilhouetteField {
             };
             let gx = x as f64 + (x1 as f64 - x as f64) * t;
             let gy = y as f64 + (y1 as f64 - y as f64) * t;
-            (self.left + gx * self.cell, FIELD_V_RANGE.0 + gy * self.cell)
+            (self.left + gx * self.cell, self.top + gy * self.cell)
         };
 
         let mut keys: Vec<usize> = links.keys().copied().collect();
@@ -337,6 +373,7 @@ fn build_field(crease_half_width: f64) -> SilhouetteField {
         rows,
         cell,
         left: -(half_cols as f64) * cell,
+        top: FIELD_V_RANGE.0,
         sdf,
     }
 }
@@ -488,7 +525,7 @@ fn foot(p: Landmark) -> f64 {
 
 /// Distance to the tapered capsule wrapped around two circles (Inigo Quilez's
 /// uneven capsule).
-fn capsule(p: Landmark, (a, radius_a): Circle, (b, radius_b): Circle) -> f64 {
+pub(crate) fn capsule(p: Landmark, (a, radius_a): Circle, (b, radius_b): Circle) -> f64 {
     let (px, py) = (p.0 - a.0, p.1 - a.1);
     let (bx, by) = (b.0 - a.0, b.1 - a.1);
     let h = bx * bx + by * by;
@@ -508,7 +545,7 @@ fn capsule(p: Landmark, (a, radius_a): Circle, (b, radius_b): Circle) -> f64 {
 }
 
 /// Union of two distances that rounds the crease where they meet over about `width`.
-fn smooth_union(a: f64, b: f64, width: f64) -> f64 {
+pub(crate) fn smooth_union(a: f64, b: f64, width: f64) -> f64 {
     let h = (width - (a - b).abs()).max(0.0) / width;
     a.min(b) - h * h * width * 0.25
 }

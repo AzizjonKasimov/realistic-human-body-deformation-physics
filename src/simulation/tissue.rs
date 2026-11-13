@@ -57,19 +57,42 @@ pub enum SpringKind {
 }
 
 impl World {
-    /// Weighs every point, bone, and spring of the body as built in `frame`
-    /// from what real tissue measures.
+    /// Weighs every point, bone, and spring of the front-view body as built
+    /// in `frame` from what real tissue measures.
     pub(super) fn give_tissue_physical_properties(&mut self, frame: BodyFrame) {
-        let thickness = self.tissue_thickness(frame);
+        // How deep the body is for its width as seen from the front.
+        let depth_ratio = |point: &Point| {
+            let (u, v) = frame.body_coords(point.home);
+            if v < 0.13 {
+                HEAD_DEPTH_RATIO
+            } else if u.abs() < 0.105 && v < 0.53 {
+                TRUNK_DEPTH_RATIO
+            } else {
+                LIMB_DEPTH_RATIO
+            }
+        };
+        self.give_tissue_properties(&[body::fiber_guides(frame)], &depth_ratio);
+    }
+
+    /// Weighs every point, bone, and spring of a body from what real tissue
+    /// measures: `guides` are the bones' lines that steer each sheet's
+    /// fibers, by `Point::sheet`, and `depth_ratio` says how deep the body is
+    /// at a point of muscle for the width the figure shows there.
+    pub(super) fn give_tissue_properties(
+        &mut self,
+        guides: &[Vec<(Vec2, Vec2)>],
+        depth_ratio: &dyn Fn(&Point) -> f64,
+    ) {
+        let thickness = self.tissue_thickness(depth_ratio);
         self.weigh_tissue(&thickness);
         self.stiffen_tissue(&thickness);
         self.weigh_bones();
-        self.prestretch_skin(frame);
+        self.prestretch_skin(guides);
     }
 
     /// How thick each point's sheet is, in metres: the skin sheet the dermis
     /// all round, and the muscle sheet as deep as the body is there.
-    fn tissue_thickness(&self, frame: BodyFrame) -> Vec<f64> {
+    fn tissue_thickness(&self, depth_ratio: &dyn Fn(&Point) -> f64) -> Vec<f64> {
         let m_per_px = self.mm_per_px() * 0.001;
         let muscle: Vec<usize> = (0..self.points.len())
             .filter(|&index| self.points[index].layer == TissueLayer::Muscle)
@@ -87,20 +110,17 @@ impl World {
                     let mut radius = depth;
                     for &other in &muscle {
                         let held = &self.points[other];
-                        if held.surface_depth > radius
+                        // Another sheet lying over this one, as a side-view
+                        // fighter's arm lies over its chest, is not this
+                        // sheet's flesh.
+                        if held.sheet == point.sheet
+                            && held.surface_depth > radius
                             && distance(held.home, point.home) <= held.surface_depth
                         {
                             radius = held.surface_depth;
                         }
                     }
-                    let (u, v) = frame.body_coords(point.home);
-                    let ratio = if v < 0.13 {
-                        HEAD_DEPTH_RATIO
-                    } else if u.abs() < 0.105 && v < 0.53 {
-                        TRUNK_DEPTH_RATIO
-                    } else {
-                        LIMB_DEPTH_RATIO
-                    };
+                    let ratio = depth_ratio(point);
                     let half_chord = (2.0 * radius * depth - depth * depth).max(0.0).sqrt();
                     // Under the skin and the fat that move with it.
                     let body = 2.0 * ratio * half_chord.max(radius * 0.35) * m_per_px;
@@ -243,20 +263,22 @@ impl World {
     /// along those lines and `skin_prestretch_across` across them, and the
     /// skin pulls a cut's lips apart. The outline's springs stand for skin
     /// that runs on round the back, which holds the stretch.
-    fn prestretch_skin(&mut self, frame: BodyFrame) {
+    fn prestretch_skin(&mut self, guides: &[Vec<(Vec2, Vec2)>]) {
         let along = self.materials.skin_prestretch_along;
         let across = self.materials.skin_prestretch_across;
         if along <= 1.0 && across <= 1.0 {
             return;
         }
-        let guides = body::fiber_guides(frame);
         for (spring, wear) in self.springs.iter_mut().zip(&mut self.spring_wear) {
             if spring.kind != SpringKind::Skin {
                 continue;
             }
             let (a, b) = (self.points[spring.a].home, self.points[spring.b].home);
             let direction = normalized(subtract(b, a), Vec2 { x: 1.0, y: 0.0 });
-            let axis = body::fiber_direction(midpoint(a, b), &guides);
+            let Some(guides) = guides.get(self.points[spring.a].sheet as usize) else {
+                continue;
+            };
+            let axis = body::fiber_direction(midpoint(a, b), guides);
             let cos = dot(direction, axis);
             let stretch = (along * cos * cos + across * (1.0 - cos * cos)).max(1.0);
             spring.rest /= stretch;

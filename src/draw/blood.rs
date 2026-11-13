@@ -89,10 +89,13 @@ pub(super) fn draw_blood_stains(ctx: &Scene) {
 
 /// Blood on the skin: the trails it left running down, then the drops still
 /// on it, all carried by the skin, each as wide as its blood wets the skin.
-pub(super) fn draw_skin_blood(ctx: &Scene) {
+pub(super) fn draw_skin_blood(ctx: &Scene, only: Only) {
     let world = ctx.world;
     let mut stretches = Vec::new();
     for trail in world.blood_trails() {
+        if !only.spot(world, trail.from) {
+            continue;
+        }
         let Some((from, to)) = world.blood_trail_ends(trail) else {
             continue;
         };
@@ -113,7 +116,7 @@ pub(super) fn draw_skin_blood(ctx: &Scene) {
         let Some(spot) = fluid.on_skin else {
             continue;
         };
-        if fluid.life <= 0.0 {
+        if fluid.life <= 0.0 || !only.spot(world, spot) {
             continue;
         }
         let Some(center) = world.skin_spot_position(spot) else {

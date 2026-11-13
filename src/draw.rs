@@ -152,6 +152,92 @@ pub struct Scene<'a> {
     pub pressing: bool,
 }
 
+/// Which flesh a pass over the world draws: all of it, or one sheet of one
+/// body. The sandbox's front-view body is one sheet, drawn in one pass. A
+/// side-view fighter's parts are sheets lying over one another
+/// (`rp::Point::sheet`), and each is drawn whole, inside out, before the
+/// next nearer one, so an arm in front of the chest covers the chest and
+/// its wounds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Only {
+    All,
+    Sheet { body: u8, sheet: u8 },
+}
+
+impl Only {
+    fn holds(self, body: u8, sheet: u8) -> bool {
+        match self {
+            Only::All => true,
+            Only::Sheet {
+                body: only_body,
+                sheet: only_sheet,
+            } => body == only_body && sheet == only_sheet,
+        }
+    }
+
+    pub(crate) fn point(self, point: &rp::Point) -> bool {
+        self.holds(point.body, point.sheet)
+    }
+
+    pub(crate) fn triangle(self, world: &rp::World, triangle: &rp::Triangle) -> bool {
+        self == Only::All || self.point(&world.points()[triangle.a])
+    }
+
+    pub(crate) fn spring(self, world: &rp::World, spring: &rp::Spring) -> bool {
+        self == Only::All || self.point(&world.points()[spring.a])
+    }
+
+    pub(crate) fn bone(self, bone: &rp::BoneSegment) -> bool {
+        self.holds(bone.body, bone.sheet)
+    }
+
+    pub(crate) fn cut(self, cut: &rp::OpenedCut) -> bool {
+        self.holds(cut.sheet.0, cut.sheet.1)
+    }
+
+    /// A place on the skin, by the skin triangle it lies on.
+    pub(crate) fn spot(self, world: &rp::World, spot: rp::SkinSpot) -> bool {
+        self == Only::All
+            || world
+                .triangles()
+                .get(spot.triangle)
+                .is_some_and(|triangle| self.triangle(world, triangle))
+    }
+
+    /// Something held at a point of flesh, or at none.
+    pub(crate) fn anchor(self, world: &rp::World, anchor: usize) -> bool {
+        self == Only::All
+            || world
+                .points()
+                .get(anchor)
+                .is_some_and(|point| self.point(point))
+    }
+}
+
+/// The passes that draw `world`'s flesh, in order: one for everything where
+/// every body is one sheet, or else each sheet of each body, body by body
+/// and each body's sheets from the farthest to the nearest. Two fighters
+/// stand in the same plane, so neither is in front: the one throwing a
+/// punch is drawn last, its fist over what it reaches for, and otherwise
+/// the first.
+pub(crate) fn passes(world: &rp::World, rim: &SkinRim) -> Vec<Only> {
+    if rim.sheets.iter().all(|&(_, sheet)| sheet == 0) {
+        return vec![Only::All];
+    }
+    let on_top = world.striking_body().unwrap_or(0) as u8;
+    let mut sheets = rim.sheets.clone();
+    sheets.sort_by(|a, b| {
+        (a.0 == on_top)
+            .cmp(&(b.0 == on_top))
+            .then(b.0.cmp(&a.0))
+            .then(a.1.cmp(&b.1))
+    });
+    sheets
+        .into_iter()
+        .map(|(body, sheet)| Only::Sheet { body, sheet })
+        .collect()
+}
+
 /// Draws world positions where the app's view puts them on the screen: the
 /// screen's own projection, which macroquad's default camera uses, after the
 /// view's scale and offset.

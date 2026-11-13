@@ -41,6 +41,9 @@
 //!                            (gestures throw the second fighter's punches
 //!                            with `punch2=`)
 //! --spacing S                with --fighters, stand them S body heights apart
+//! --side                     play on two side-view fighters facing each other
+//!                            (`rp::create_side_fighters`) rather than the
+//!                            sandbox's front-view bodies
 //! --sound FILE               write the game's own sound for the steps played,
 //!                            as a WAV mixed step by step the way the app plays
 //!                            it (`sound::Mixdown`), each step's sounds starting
@@ -82,6 +85,8 @@ pub struct CaptureRequest {
     /// Play on two fighters rather than a lone body.
     fighters: bool,
     spacing: Option<f64>,
+    /// Play on two side-view fighters facing each other.
+    side: bool,
 }
 
 /// The window size asked for with `--size`, when capturing.
@@ -123,6 +128,7 @@ pub fn request() -> Option<CaptureRequest> {
         variant: None,
         fighters: false,
         spacing: None,
+        side: false,
     };
     while let Some(arg) = args.next() {
         let mut value = |name: &str| {
@@ -162,6 +168,7 @@ pub fn request() -> Option<CaptureRequest> {
             "--no-ui" => request.hide_ui = true,
             "--no-tool" => request.hide_tool = true,
             "--fighters" => request.fighters = true,
+            "--side" => request.side = true,
             "--spacing" => {
                 let text = value("--spacing");
                 request.spacing = Some(
@@ -227,10 +234,12 @@ pub async fn run(request: CaptureRequest) {
     let fight = request.play.and_then(|play| play.fight());
     if let Some(spacing) = request.spacing.or(fight.map(|fight| fight.spacing)) {
         app.spacing = spacing;
+    } else if request.side {
+        app.spacing = rp::SIDE_FIGHTER_SPACING;
     }
     // A lone body's play is drawn as the app draws one body alone; a fight,
     // two fighters asked for, or the app left at rest, as it draws two.
-    if request.play.is_some() && fight.is_none() && !request.fighters {
+    if request.play.is_some() && fight.is_none() && !request.fighters && !request.side {
         app.bodies = Bodies::One;
     }
     app.view_for = None;
@@ -241,7 +250,9 @@ pub async fn run(request: CaptureRequest) {
     let materials = request
         .play
         .map_or_else(rp::Materials::default, |play| play.materials());
-    let world = if let (Some(play), Some(_)) = (request.play, fight) {
+    let world = if request.side {
+        Some(rp::create_side_fighters_at(materials, app.spacing))
+    } else if let (Some(play), Some(_)) = (request.play, fight) {
         // A fight scenario's two fighters, as the scenarios play it.
         Some(play.ready(rp::create_layered_body_in(world_frame, materials)))
     } else if request.fighters {

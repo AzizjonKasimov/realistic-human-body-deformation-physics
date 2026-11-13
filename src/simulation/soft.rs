@@ -213,6 +213,12 @@ impl World {
             self.timed("outline hold", |world| world.pull_outline_round(h));
             self.timed("ghosts", Self::carry_ghosts_with_their_flesh);
             self.timed("integrate", |world| world.integrate_bones(h, substeps));
+            // A joint's seat sliding over its bone moves on (`BoneJoint::seat`).
+            for joint in &mut self.bone_joints {
+                if joint.seat_speed != Vec2::default() {
+                    joint.seat = add(joint.seat, scale(joint.seat_speed, h));
+                }
+            }
             // What tears this substep tears before the rest are warm started:
             // a tie that let go gives none of the pull it carried, which
             // nothing would take back.
@@ -581,7 +587,7 @@ impl World {
                     Some(pieces) => {
                         let push = scale(link.normal, joint.impulse);
                         let (a, b) = (self.bones[joint.a], self.bones[joint.b]);
-                        let inner_at = lerp(a.previous_a, a.previous_b, joint.t_a);
+                        let inner_at = joint_seat(&joint, &a, a.previous_a, a.previous_b);
                         let outer_at = lerp(b.previous_a, b.previous_b, joint.t_b);
                         self.push_link_sides(pieces, (inner_at, outer_at), push, h);
                     }
@@ -673,6 +679,14 @@ impl World {
         }
     }
 
+    /// Where joint `joint` sits on its first bone (`BoneJoint::seat`), and
+    /// where its second bone's anchor is.
+    pub fn joint_anchors(&self, joint: usize) -> Option<(Vec2, Vec2)> {
+        let joint = self.bone_joints.get(joint)?;
+        let (a, b) = (self.bones.get(joint.a)?, self.bones.get(joint.b)?);
+        Some((joint_seat(joint, a, a.a, a.b), lerp(b.a, b.b, joint.t_b)))
+    }
+
     /// How far whole joint `joint` has let its second bone's anchor move
     /// from where it was built on the first bone, in pixels: what the settle
     /// learns to hold at nothing under the body's weight, and a blow can
@@ -686,6 +700,18 @@ impl World {
             return None;
         }
         let (a, b) = (&self.bones[joint.a], &self.bones[joint.b]);
+        if joint.seat != Vec2::default() {
+            // A joint seated off its bone's line, which may slide: against
+            // where it holds the anchor now.
+            let length = a.rest_length.max(EPSILON);
+            let tau = joint.t_a + (joint.seat.x + joint.hold.x * hold.reach()) / length;
+            let sigma = (joint.seat.y + joint.hold.y * hold.reach()) / length;
+            let held = add(
+                lerp(a.a, a.b, tau),
+                scale(perpendicular(subtract(a.b, a.a)), sigma),
+            );
+            return Some(distance(lerp(b.a, b.b, joint.t_b), held));
+        }
         let built = |bone: &BoneSegment| BoneSegment {
             a: bone.home_a,
             b: bone.home_b,
@@ -920,6 +946,30 @@ impl World {
     /// anchors together.
     fn apply_joint_link(&mut self, joint: &BoneJoint, link: &JointLink, impulse: f64, h: f64) {
         let push = scale(link.normal, impulse);
+        if link.sigma != 0.0 {
+            // A joint seated off its first bone's line turns that bone too:
+            // the bone's ends take the push back through the seat's place,
+            // as a pin's first bone does (`apply_joint_pin`).
+            let w = self.bones[joint.a].inverse_end_mass();
+            let turned = perpendicular(push);
+            let change_a = scale(
+                add(scale(push, 1.0 - link.tau), scale(turned, link.sigma)),
+                -w,
+            );
+            let change_b = scale(
+                subtract(scale(push, link.tau), scale(turned, link.sigma)),
+                -w,
+            );
+            speed_up_bone(&mut self.bones[joint.a], change_a, change_b, h);
+            let w = self.bones[joint.b].inverse_end_mass();
+            speed_up_bone(
+                &mut self.bones[joint.b],
+                scale(push, w * (1.0 - joint.t_b)),
+                scale(push, w * joint.t_b),
+                h,
+            );
+            return;
+        }
         for (bone, t, sign) in [(joint.a, joint.t_a, -1.0), (joint.b, joint.t_b, 1.0)] {
             let w = self.bones[bone].inverse_end_mass() * sign;
             speed_up_bone(
@@ -1335,6 +1385,9 @@ pub(super) struct JointPin {
     b: usize,
     tau: f64,
     sigma: f64,
+    /// How fast the seat slides along its bone and across it, as shares of
+    /// the bone's length a second (`BoneJoint::seat_speed`).
+    slide: Vec2,
     t_b: f64,
     inverse_mass: f64,
 }
@@ -1345,8 +1398,20 @@ impl JointPin {
     pub(super) fn of(joint: &BoneJoint, bones: &[BoneSegment], reach: f64) -> Self {
         let (a, b) = (&bones[joint.a], &bones[joint.b]);
         let length = a.rest_length.max(EPSILON);
-        let tau = joint.t_a + joint.hold.x * reach / length;
-        let sigma = joint.hold.y * reach / length;
+        // From the joint's seat on the first bone (`BoneJoint::seat`), if it
+        // sits off the bone's line.
+        let seated = joint.seat != Vec2::default();
+        let (tau, sigma) = if seated {
+            (
+                joint.t_a + (joint.seat.x + joint.hold.x * reach) / length,
+                (joint.seat.y + joint.hold.y * reach) / length,
+            )
+        } else {
+            (
+                joint.t_a + joint.hold.x * reach / length,
+                joint.hold.y * reach / length,
+            )
+        };
         let (a0, a1) = bone_place(a);
         let (b0, b1) = bone_place(b);
         let held = add(
@@ -1360,6 +1425,7 @@ impl JointPin {
             b: joint.b,
             tau,
             sigma,
+            slide: scale(joint.seat_speed, 1.0 / length),
             t_b: joint.t_b,
             inverse_mass: a.inverse_end_mass() * (share(tau) + 2.0 * sigma * sigma)
                 + b.inverse_end_mass() * share(joint.t_b),
@@ -1391,7 +1457,20 @@ impl JointPin {
             subtract(b.b, b.previous_b),
             self.t_b,
         );
-        scale(subtract(anchor, held), 1.0 / h)
+        let speed = scale(subtract(anchor, held), 1.0 / h);
+        if self.slide == Vec2::default() {
+            return speed;
+        }
+        // The seat itself slides over the first bone: the second bone's
+        // anchor is held to it as it goes.
+        let along = subtract(a.previous_b, a.previous_a);
+        subtract(
+            speed,
+            add(
+                scale(along, self.slide.x),
+                scale(perpendicular(along), self.slide.y),
+            ),
+        )
     }
 }
 
@@ -1403,7 +1482,11 @@ struct JointLink {
     normal: Vec2,
     a: usize,
     b: usize,
-    t_a: f64,
+    /// Where the joint sits on its first bone: `tau` along it and `sigma`
+    /// of its length across it (`BoneJoint::seat`), `t_a` and nothing for a
+    /// joint on the bone's line.
+    tau: f64,
+    sigma: f64,
     t_b: f64,
     inverse_mass: f64,
 }
@@ -1413,7 +1496,7 @@ impl JointLink {
         let (a, b) = (&bones[joint.a], &bones[joint.b]);
         let (a0, a1) = bone_place(a);
         let (b0, b1) = bone_place(b);
-        let along = subtract(lerp(b0, b1, joint.t_b), lerp(a0, a1, joint.t_a));
+        let along = subtract(lerp(b0, b1, joint.t_b), joint_seat(joint, a, a0, a1));
         let length = hypot(along.x, along.y);
         let normal = if length > EPSILON {
             scale(along, 1.0 / length)
@@ -1421,14 +1504,24 @@ impl JointLink {
             Vec2 { x: 1.0, y: 0.0 }
         };
         let reach = |t: f64| (1.0 - t) * (1.0 - t) + t * t;
+        let (tau, sigma) = if joint.seat == Vec2::default() {
+            (joint.t_a, 0.0)
+        } else {
+            let bone_length = a.rest_length.max(EPSILON);
+            (
+                joint.t_a + joint.seat.x / bone_length,
+                joint.seat.y / bone_length,
+            )
+        };
         Self {
             length,
             normal,
             a: joint.a,
             b: joint.b,
-            t_a: joint.t_a,
+            tau,
+            sigma,
             t_b: joint.t_b,
-            inverse_mass: a.inverse_end_mass() * reach(joint.t_a)
+            inverse_mass: a.inverse_end_mass() * (reach(tau) + 2.0 * sigma * sigma)
                 + b.inverse_end_mass() * reach(joint.t_b),
         }
     }
@@ -1445,12 +1538,15 @@ impl JointLink {
                 1.0 / h,
             )
         };
+        let mut seat = anchor_velocity(&bones[self.a], self.tau);
+        if self.sigma != 0.0 {
+            let a = &bones[self.a];
+            let spread = subtract(subtract(a.b, a.previous_b), subtract(a.a, a.previous_a));
+            seat = add(seat, scale(perpendicular(spread), self.sigma / h));
+        }
         dot(
             self.normal,
-            subtract(
-                anchor_velocity(&bones[self.b], self.t_b),
-                anchor_velocity(&bones[self.a], self.t_a),
-            ),
+            subtract(anchor_velocity(&bones[self.b], self.t_b), seat),
         )
     }
 }

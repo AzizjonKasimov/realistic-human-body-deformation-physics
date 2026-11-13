@@ -140,9 +140,10 @@ impl World {
     fn punching_fist(&self, index: usize) -> bool {
         self.bones.get(index).is_some_and(|bone| {
             bone.part == BonePart::Hand
-                && self
+                && (self
                     .punch(bone.body as usize, bone.limb)
                     .is_some_and(|punch| punch.going_out(&self.materials))
+                    || self.striking_out(bone.body as usize, bone.limb))
         })
     }
 
@@ -228,9 +229,10 @@ impl World {
                 bone.part,
                 BonePart::UpperArm | BonePart::Forearm | BonePart::Hand
             )
-            && self
+            && (self
                 .punch(bone.body as usize, bone.limb)
                 .is_some_and(Punch::drives_arm)
+                || self.striking_out(bone.body as usize, bone.limb))
     }
 
     /// Whether bone `index` is of a limb hanging limp (`World::let_limb_go`),

@@ -253,7 +253,7 @@ impl World {
                 let a = self.bones[joint.a];
                 Some(JointSides {
                     sides: [piece(joint.a)?, piece(joint.b)?],
-                    anchor: lerp(a.previous_a, a.previous_b, joint.t_a),
+                    anchor: joint_seat(&joint, &a, a.previous_a, a.previous_b),
                 })
             })
             .collect();
@@ -419,7 +419,7 @@ impl World {
     ) {
         let joint = self.bone_joints[index];
         let (a, b) = (self.bones[joint.a], self.bones[joint.b]);
-        let inner_at = lerp(a.previous_a, a.previous_b, joint.t_a);
+        let inner_at = joint_seat(&joint, &a, a.previous_a, a.previous_b);
         let outer_at = lerp(b.previous_a, b.previous_b, joint.t_b);
         let along = subtract(outer_at, inner_at);
         let apart = hypot(along.x, along.y);
@@ -454,10 +454,20 @@ impl World {
                 t,
             )
         };
-        let speed = dot(
-            subtract(velocity(&b, joint.t_b), velocity(&a, joint.t_a)),
-            normal,
-        );
+        // How fast the joint's seat on the first bone moves: on the bone's
+        // line, or off it, turning with the bone (`BoneJoint::seat`).
+        let seat_velocity = if joint.seat == Vec2::default() {
+            velocity(&a, joint.t_a)
+        } else {
+            let moved = |at: Vec2, was: Vec2| scale(subtract(at, was), 1.0 / h);
+            joint_seat(
+                &joint,
+                &a,
+                moved(a.a, a.previous_a),
+                moved(a.b, a.previous_b),
+            )
+        };
+        let speed = dot(subtract(velocity(&b, joint.t_b), seat_velocity), normal);
         // A slack hold only pulls its bones together.
         let total = (given + softness.impulse(1.0 / inverse, speed, error, given)).min(0.0);
         self.bone_joints[index].impulse = total;

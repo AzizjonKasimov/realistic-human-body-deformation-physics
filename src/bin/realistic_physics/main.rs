@@ -482,6 +482,7 @@ fn step_simulation(app: &mut AppState, frame_dt: f64, audio: &mut rp::sound::Pla
             tool: app.tool,
             punches: pending_punches(app),
             leans: [None; 2],
+            moves: [None; 4],
         };
         app.world.capture_motion(&mut app.earlier);
         step_world(app, &input);

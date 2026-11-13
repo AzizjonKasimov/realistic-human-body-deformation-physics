@@ -60,6 +60,12 @@ pub struct JointDrive {
     /// How much further the muscles aim the joint for now, in radians: out
     /// toward a punch's pose while the arm throws one (`punch.rs`), else 0.
     pub swing: f64,
+    /// How fast that aim is turning, in radians a second: a side-view
+    /// fighter's moves turn its joints' aims all the time (`mover.rs`), and
+    /// the muscles' damping holds the joint to the aim's speed rather than
+    /// to rest, so the joint follows the aim instead of trailing it. 0 for a
+    /// joint aimed at one angle.
+    pub swing_speed: f64,
 }
 
 /// How much of its braced damping a joint keeps in a limb hanging limp: a
@@ -122,6 +128,30 @@ pub struct HipHold {
     pub aim: Vec2,
     /// The impulse it gave last substep, which warm starts the next.
     pub impulse: Vec2,
+    /// How a side-view fighter's moves carry this end of its hips
+    /// (`mover.rs`); `None` for hips held where they stood.
+    pub carry: Option<Carry>,
+}
+
+/// How a side-view fighter's moves carry one end of its hips: the legs
+/// under a fighter put its hips where its moves want them, as far as a
+/// standing person's can. The hold stands in for them, since the body does
+/// not keep its own balance yet: it follows where the move puts the hips,
+/// pushes sideways no harder than the feet's grip on the floor lets a
+/// person push, holds up no more than legs can bear, and never pulls down,
+/// so the hips sink no faster than they fall. A blow that pushes harder
+/// than that moves the fighter.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Carry {
+    /// Where the move puts this end of the hips, from where it was built,
+    /// and how fast that place is moving, in pixels and pixels a second.
+    pub offset: Vec2,
+    pub speed: Vec2,
+    /// How firmly the hips are held across and upward, in hertz on the
+    /// body's weight.
+    pub hertz: Vec2,
+    /// The hardest the hold pushes across and upward, in newtons.
+    pub limit: Vec2,
 }
 
 /// A leg standing on its foot, as its joints hold it (`World::standing_leg`):
@@ -157,6 +187,9 @@ pub struct FootHold {
     /// Whether each end has come up off the floor, so that it stands again
     /// wherever it comes down.
     pub lifted: [bool; 2],
+    /// A side-view fighter's step is carrying the foot through the air
+    /// (`mover.rs`): the floor holds none of it until the step sets it down.
+    pub swinging: bool,
 }
 
 /// How much a dry floor's friction holds a foot sideways, as a share of the
@@ -514,16 +547,39 @@ impl World {
             // below needs to still reach its planted foot.
             let mut shift = self.bodies[self.bone_body(hold.bone)].hip_shift;
             shift.y += self.lunge_drop(&hold, shift.x);
-            let error = subtract(previous, add(add(hold.home, hold.aim), shift));
-            let speed = scale(subtract(place, previous), 1.0 / h);
+            let mut target = add(add(hold.home, hold.aim), shift);
+            let mut speed = scale(subtract(place, previous), 1.0 / h);
+            let mut springs = [(stiffness, damping); 2];
+            if let Some(carry) = hold.carry {
+                // A fighter's moves carry its hips: toward where the move
+                // puts them, at the speed it moves them.
+                target = add(target, carry.offset);
+                speed = subtract(speed, carry.speed);
+                springs = self.carry_springs(&carry);
+            }
+            let error = subtract(previous, target);
             let (soft_x, soft_y) = (
-                Softness::of_stiffness(stiffness, damping, masses.0, h),
-                Softness::of_stiffness(stiffness, damping, masses.1, h),
+                Softness::of_stiffness(springs[0].0, springs[0].1, masses.0, h),
+                Softness::of_stiffness(springs[1].0, springs[1].1, masses.1, h),
             );
-            let impulse = Vec2 {
+            let mut impulse = Vec2 {
                 x: soft_x.impulse(masses.0, speed.x, error.x, hold.impulse.x),
                 y: soft_y.impulse(masses.1, speed.y, error.y, hold.impulse.y),
             };
+            if let Some(carry) = hold.carry {
+                // No harder across than the feet grip the floor, no harder
+                // up than legs bear, and never down (the window's y runs
+                // down, so holding up is negative).
+                let newtons = self.newtons() * h;
+                let total = add(hold.impulse, impulse);
+                let held = Vec2 {
+                    x: total
+                        .x
+                        .clamp(-carry.limit.x * newtons, carry.limit.x * newtons),
+                    y: total.y.clamp(-carry.limit.y * newtons, 0.0),
+                };
+                impulse = subtract(held, hold.impulse);
+            }
             self.hip_holds[index].impulse = add(hold.impulse, impulse);
             match (&piece, lever) {
                 (Some(piece), Some(lever)) => self.push_piece(piece, lever, impulse, h),
@@ -633,6 +689,14 @@ impl World {
             if pelvis.part != BonePart::Pelvis || thigh.part != BonePart::Thigh {
                 continue;
             }
+            // A side-view fighter's legs are aimed by its moves (`mover.rs`).
+            if self
+                .bodies
+                .get(thigh.body as usize)
+                .is_some_and(|state| state.fighter.is_some())
+            {
+                continue;
+            }
             let (pelvis, thigh) = (*pelvis, *thigh);
             let shift = self
                 .bodies
@@ -723,6 +787,10 @@ impl World {
             else {
                 continue;
             };
+            if hold.swinging {
+                self.foot_holds[index].impulse = [Vec2::default(); 2];
+                continue;
+            }
             for end in 0..2 {
                 let bone = self.bones[hold.bone];
                 let (place, previous) = if end == 0 {
@@ -853,6 +921,9 @@ impl World {
             let (Some(bone), Some(piece)) = (self.standing_foot(&hold), piece.as_ref()) else {
                 continue;
             };
+            if hold.swinging {
+                continue;
+            }
             for end in 0..2 {
                 if hold.impulse[end] == Vec2::default() {
                     continue;
@@ -936,13 +1007,30 @@ impl World {
                 b: bone.home_b,
                 ..bone
             };
-            let off = joint_hold_offset(&a, joint.t_a, bone_point(b, joint.t_b), 0.0);
-            let meant = joint_hold_offset(
-                &built(a),
-                joint.t_a,
-                bone_point(built(b), joint.t_b),
-                joint.rest,
-            );
+            let (off, meant) = if joint.seat == Vec2::default() {
+                (
+                    joint_hold_offset(&a, joint.t_a, bone_point(b, joint.t_b), 0.0),
+                    joint_hold_offset(
+                        &built(a),
+                        joint.t_a,
+                        bone_point(built(b), joint.t_b),
+                        joint.rest,
+                    ),
+                )
+            } else {
+                // From the joint's seat off its first bone's line, as the
+                // seat lies now and as it was built there.
+                let from_seat = |bone: &BoneSegment, anchor: Vec2| {
+                    subtract(joint_hold_offset(bone, joint.t_a, anchor, 0.0), joint.seat)
+                };
+                let meant = from_seat(&built(a), bone_point(built(b), joint.t_b));
+                let gap = hypot(meant.x, meant.y);
+                let stretch = if gap > EPSILON { joint.rest / gap } else { 0.0 };
+                (
+                    from_seat(&a, bone_point(b, joint.t_b)),
+                    scale(meant, stretch),
+                )
+            };
             self.bone_joints[index].hold =
                 subtract(joint.hold, scale(subtract(off, meant), LEARN_WEIGHT_RATE));
             if joint.drive.stiffness <= 0.0 {
@@ -971,6 +1059,20 @@ impl World {
         for hold in &mut self.hip_holds {
             hold.aim = subtract(hold.aim, scale(sunk, LEARN_WEIGHT_RATE));
         }
+    }
+
+    /// The stiffness and damping, across and upward, of one end of a
+    /// fighter's hips carried as `carry` says, in the engine's units: half
+    /// the body's weight on each of the pelvis's two ends.
+    fn carry_springs(&self, carry: &Carry) -> [(f64, f64); 2] {
+        let half = tissue::BODY_MASS_KG / KG_PER_MASS * 0.5;
+        [carry.hertz.x, carry.hertz.y].map(|hertz| {
+            let omega = 2.0 * PI * hertz;
+            (
+                half * omega * omega,
+                2.0 * self.materials.hip_hold_damping_ratio * half * omega,
+            )
+        })
     }
 
     /// The hold's stiffness and damping at each end of the pelvis, in the
@@ -1028,7 +1130,7 @@ impl World {
             let softness = Softness::of_stiffness(stiffness, damping, mass, h);
             let angle =
                 wrap_angle(turn.angle - joint.rest_angle - joint.drive.aim - joint.drive.swing);
-            let speed = turn.speed(&self.bones, h);
+            let speed = turn.speed(&self.bones, h) - joint.drive.swing_speed;
             let given = joint.drive_impulse.clamp(-limit, limit);
             let total = (given + softness.impulse(mass, speed, angle, given)).clamp(-limit, limit);
             self.bone_joints[index].drive_impulse = total;

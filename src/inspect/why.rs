@@ -181,14 +181,7 @@ fn follow(scenario: &Scenario, why: Why, idle: bool) -> Option<Followed> {
 /// Where joint `index` holds each of its two bones: the anchor on its first
 /// bone and on its second.
 fn joint_anchors(world: &World, index: usize) -> Option<(Vec2, Vec2)> {
-    let joint = world.bone_joints().get(index)?;
-    let anchor = |bone: usize, t: f64| {
-        world.bones().get(bone).map(|bone| Vec2 {
-            x: bone.a.x + (bone.b.x - bone.a.x) * t,
-            y: bone.a.y + (bone.b.y - bone.a.y) * t,
-        })
-    };
-    Some((anchor(joint.a, joint.t_a)?, anchor(joint.b, joint.t_b)?))
+    world.joint_anchors(index)
 }
 
 /// What moved the place `lever` from a bone's middle, given what moved the

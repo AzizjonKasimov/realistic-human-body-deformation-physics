@@ -24,7 +24,7 @@ const LATTICE_EDGE_SCALE: f64 = 1.12;
 /// Interior points stay this many lattice edges inside their layer outline.
 const LATTICE_CLEARANCE_SCALE: f64 = 0.55;
 /// The muscle sheet's outline sits this many point spacings inside the skin outline.
-const MUSCLE_INSET_SCALE: f64 = 0.35;
+pub(super) const MUSCLE_INSET_SCALE: f64 = 0.35;
 /// Muscle edges within this angle of the local bone direction act as fibers.
 const FIBER_ALIGNMENT: f64 = 0.80;
 /// Muscle edges further than this from the bone direction act as cross fibers.
@@ -635,7 +635,7 @@ pub(super) const FOREARM_STRENGTH: f64 = 0.72;
 /// forearm is set 30% stronger than its share, within the spread of the
 /// forearm studies, so a 10 J bat swing rarely breaks it. How hard a blow
 /// presses on a bone is in `cover.rs`.
-fn bone_strength(part: BonePart) -> f64 {
+pub(super) fn bone_strength(part: BonePart) -> f64 {
     const FOREARM: f64 = FOREARM_STRENGTH;
     match part {
         BonePart::Forearm => FOREARM * 1.3,
@@ -675,7 +675,7 @@ enum Joint {
 /// How long, in seconds, the muscles' damping is for each newton metre per
 /// radian of their stiffness: 0.03-0.09 s at the arm (Gomi and Osu 1998),
 /// and taken the same where it was not measured.
-const DRIVE_DAMPING_TIME: f64 = 0.05;
+pub(super) const DRIVE_DAMPING_TIME: f64 = 0.05;
 
 /// The muscles across `joint` in the guard, braced for a blow, holding it
 /// in the frontal plane: how stiffly, in newton metres per radian, and how
@@ -726,6 +726,7 @@ fn joint_drive(joint: Joint) -> JointDrive {
         limb: Limb::None,
         aim: 0.0,
         swing: 0.0,
+        swing_speed: 0.0,
     }
 }
 
@@ -1033,21 +1034,46 @@ fn add_skeleton(world: &mut World, frame: BodyFrame, materials: Materials) -> Sk
     }
 }
 
-struct LayerMesh {
-    points: Vec<usize>,
-    triangles: Vec<[usize; 3]>,
+pub(super) struct LayerMesh {
+    pub(super) points: Vec<usize>,
+    pub(super) triangles: Vec<[usize; 3]>,
     /// The sheet's outline loops, as world point indices in order.
-    outlines: Vec<Vec<usize>>,
+    pub(super) outlines: Vec<Vec<usize>>,
 }
 
-/// Meshes one tissue sheet: evenly spaced points along its outline plus a
-/// hexagonal interior lattice, Delaunay-triangulated and trimmed to the shape.
+/// Meshes one tissue sheet of the front-view figure: its lattice spans the
+/// figure's field, and its outline follows the elbows' creases.
 fn build_layer_mesh(
     world: &mut World,
     frame: BodyFrame,
     field: &SilhouetteField,
     layer: TissueLayer,
     inset: f64,
+) -> LayerMesh {
+    build_sheet_mesh(
+        world,
+        frame,
+        field,
+        layer,
+        inset,
+        ((-FIELD_HALF_WIDTH, FIELD_HALF_WIDTH), (-0.01, 1.01)),
+        true,
+    )
+}
+
+/// Meshes one tissue sheet: evenly spaced points along its outline plus a
+/// hexagonal interior lattice, Delaunay-triangulated and trimmed to the shape.
+/// The lattice is laid over `lattice`, the body coordinates (`u`, then `v`)
+/// the sheet lies within; `creased` sheets hold the front-view figure's inner
+/// elbows, whose narrow creases the outline's points follow more closely.
+pub(super) fn build_sheet_mesh(
+    world: &mut World,
+    frame: BodyFrame,
+    field: &SilhouetteField,
+    layer: TissueLayer,
+    inset: f64,
+    lattice: ((f64, f64), (f64, f64)),
+    creased: bool,
 ) -> LayerMesh {
     let spacing = world.materials.point_spacing;
     let lattice_edge = spacing * LATTICE_EDGE_SCALE;
@@ -1075,7 +1101,7 @@ fn build_layer_mesh(
         // than its width, so the mesh follows the slit.
         let on_crease = |p: P2| {
             let (u, v) = frame.body_coords(Vec2 { x: p.0, y: p.1 });
-            on_elbow_crease(u, v, -inset / frame.height)
+            creased && on_elbow_crease(u, v, -inset / frame.height)
         };
         let crease_spacing = CREASE_POINT_SPACING * frame.height;
         let resampled =
@@ -1095,8 +1121,9 @@ fn build_layer_mesh(
         (a < next_on_outline.len() && next_on_outline[a] == b)
             || (b < next_on_outline.len() && next_on_outline[b] == a)
     };
-    let min = frame.point(-FIELD_HALF_WIDTH, -0.01);
-    let max = frame.point(FIELD_HALF_WIDTH, 1.01);
+    let ((u_min, u_max), (v_min, v_max)) = lattice;
+    let min = frame.point(u_min, v_min);
+    let max = frame.point(u_max, v_max);
     candidates.extend(
         hex_lattice((min.x, min.y), (max.x, max.y), lattice_edge)
             .into_iter()
@@ -1215,7 +1242,7 @@ fn push_spring(
 
 /// One spring per triangle edge. Muscle edges are fibers, cross fibers, or
 /// between, by their angle to the nearest bone.
-fn add_layer_springs(
+pub(super) fn add_layer_springs(
     world: &mut World,
     mesh: &LayerMesh,
     layer: TissueLayer,
@@ -1268,7 +1295,7 @@ fn add_layer_springs(
 
 /// Softer two-edge springs along the fiber direction, giving muscle the same
 /// lengthwise bending resistance the old grid's skip-one fibers provided.
-fn add_long_fiber_springs(
+pub(super) fn add_long_fiber_springs(
     world: &mut World,
     mesh: &LayerMesh,
     edges: &HashMap<(usize, usize), usize>,
@@ -1379,7 +1406,7 @@ fn add_long_fiber(
     }
 }
 
-fn add_layer_triangles(
+pub(super) fn add_layer_triangles(
     world: &mut World,
     mesh: &LayerMesh,
     edges: &HashMap<(usize, usize), usize>,
@@ -1419,7 +1446,7 @@ fn add_layer_triangles(
 }
 
 /// Ties each skin point to its nearest muscle points underneath.
-fn attach_skin_to_muscle(
+pub(super) fn attach_skin_to_muscle(
     world: &mut World,
     skin_points: &[usize],
     muscle_points: &[usize],
@@ -1470,7 +1497,12 @@ fn attach_skin_to_muscle(
 /// Whether the straight way from `from` to `to` runs through the body's
 /// flesh, within a pixel of its outline: flesh is tied to a bone or to other
 /// flesh through flesh, not across a gap such as the inner elbow's crease.
-fn reaches_through_flesh(field: &SilhouetteField, frame: BodyFrame, from: Vec2, to: Vec2) -> bool {
+pub(super) fn reaches_through_flesh(
+    field: &SilhouetteField,
+    frame: BodyFrame,
+    from: Vec2,
+    to: Vec2,
+) -> bool {
     let steps = (distance(from, to) / 2.0).ceil().max(1.0) as usize;
     (1..steps).all(|step| {
         let (u, v) = frame.body_coords(lerp(from, to, step as f64 / steps as f64));

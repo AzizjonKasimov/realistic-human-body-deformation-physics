@@ -444,19 +444,13 @@ impl Watchdogs {
     /// Whole joints hold together.
     fn check_joints(&mut self, frame: i32, world: &World) {
         let spacing = world.materials().point_spacing;
-        let bones = world.bones();
         for (index, joint) in world.bone_joints().iter().enumerate() {
             if joint.broken || joint.post_fracture_limited || joint.subluxated {
                 continue;
             }
-            let (Some(a), Some(b)) = (bones.get(joint.a), bones.get(joint.b)) else {
+            let Some((from, to)) = world.joint_anchors(index) else {
                 continue;
             };
-            let along = |bone: &crate::simulation::BoneSegment, t: f64| Vec2 {
-                x: bone.a.x + (bone.b.x - bone.a.x) * t,
-                y: bone.a.y + (bone.b.y - bone.a.y) * t,
-            };
-            let (from, to) = (along(a, joint.t_a), along(b, joint.t_b));
             // How far the second bone's end has moved from where it was built
             // on the first, any way: a joint held as a hinge can be pushed
             // off its place sideways as well as pulled open.

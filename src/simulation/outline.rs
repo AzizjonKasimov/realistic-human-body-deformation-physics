@@ -173,9 +173,12 @@ impl World {
         self.outline_wrap_stale = false;
     }
 
-    /// Which skin points the body's skin still holds: the largest piece of
-    /// skin its intact springs join together. A flap cut free is a piece of
-    /// its own.
+    /// Which skin points their body's skin still holds: the largest piece of
+    /// skin the intact springs of each sheet of each body join together
+    /// (a side-view fighter's limbs are sheets of their own, `fighter.rs`).
+    /// A flap cut free is a piece of its own. Taking the largest piece in
+    /// the whole world, a second fighter's skin counted as cut free of the
+    /// first's.
     fn skin_joined_to_body(&self) -> Vec<bool> {
         let mut neighbours: Vec<Vec<usize>> = vec![Vec::new(); self.points.len()];
         for spring in &self.springs {
@@ -190,7 +193,8 @@ impl World {
         }
         // Each skin point's piece, numbered in the order the pieces are met.
         let mut piece = vec![usize::MAX; self.points.len()];
-        let mut sizes = Vec::new();
+        // Each piece's size and the body and sheet it is of.
+        let mut sizes: Vec<(usize, (u8, u8))> = Vec::new();
         for start in 0..self.points.len() {
             if piece[start] != usize::MAX || self.points[start].layer != TissueLayer::Skin {
                 continue;
@@ -208,15 +212,23 @@ impl World {
                     }
                 }
             }
-            sizes.push(size);
+            sizes.push((size, (self.points[start].body, self.points[start].sheet)));
         }
-        // The first of the largest pieces, so the choice is the same in
-        // every build.
-        let body = (0..sizes.len()).fold(None, |best: Option<usize>, number| match best {
-            Some(best) if sizes[best] >= sizes[number] => Some(best),
-            _ => Some(number),
-        });
-        piece.iter().map(|&number| Some(number) == body).collect()
+        // The first of the largest pieces of each sheet, so the choice is
+        // the same in every build.
+        let mut whole = vec![false; sizes.len()];
+        for number in 0..sizes.len() {
+            let (size, sheet) = sizes[number];
+            let largest = (0..sizes.len()).all(|other| {
+                let (other_size, other_sheet) = sizes[other];
+                other_sheet != sheet || other_size < size || (other_size == size && other >= number)
+            });
+            whole[number] = largest;
+        }
+        piece
+            .iter()
+            .map(|&number| whole.get(number).copied().unwrap_or(false))
+            .collect()
     }
 
     /// The net pull the skin's springs and triangles that still hold real

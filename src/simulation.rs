@@ -9,10 +9,12 @@ mod bruises;
 mod clash;
 mod cover;
 mod cuts;
+mod fighter;
 mod grid;
 mod journal;
 mod lean;
 mod motion;
+mod mover;
 mod outline;
 mod phases;
 #[cfg(test)]
@@ -33,11 +35,16 @@ pub use body::{
 };
 pub use cover::Cover;
 pub use cuts::{OpenedCut, Piece, TriangleCut};
+pub use fighter::{
+    create_side_fighter_in, create_side_fighters, create_side_fighters_at, side_fighter_frames_at,
+    side_fighters_from, Rig, SIDE_FIGHTER_SPACING,
+};
 pub use journal::{Actor, Event, EventKind, Journal, Measure, StepNote, Subject};
 pub use motion::MotionSnapshot;
+pub use mover::{Move, Mover};
 pub use phases::{PhaseClock, PhaseTime, PhaseTimes, Traced, TracedStage};
 pub use punch::Punch;
-pub use stance::{FootHold, HipHold, JointDrive, Limb, PostureBinding};
+pub use stance::{Carry, FootHold, HipHold, JointDrive, Limb, PostureBinding};
 pub use tendons::{Muscle, Tendon, TendonEnd};
 pub use tissue::SpringKind;
 pub use tools::{swing_power, tool_geometry, tool_pose, ToolGeometry, ToolPose, ToolReach};
@@ -252,6 +259,10 @@ pub struct InputState {
     /// this step (`lean.rs`, `World::hold_lean`), as their keys or buttons
     /// do.
     pub leans: [Option<(usize, bool)>; 2],
+    /// The moves side-view fighters are told to make on this step
+    /// (`mover.rs`, `World::command`), each by a body, as players' keys or
+    /// buttons tell them.
+    pub moves: [Option<(usize, Move)>; 4],
 }
 
 impl Default for InputState {
@@ -267,6 +278,7 @@ impl Default for InputState {
             tool: ToolMode::Blunt,
             punches: [None; 4],
             leans: [None; 2],
+            moves: [None; 4],
         }
     }
 }
@@ -908,6 +920,11 @@ pub struct Point {
     pub ghost_of: usize,
     /// Which body in the world it belongs to (`bodies.rs`).
     pub body: u8,
+    /// Which of its body's sheets of flesh it belongs to: a side-view
+    /// fighter's trunk and each part of its limbs are sheets of their own,
+    /// lying over one another, the farthest from the viewer numbered first
+    /// (`fighter.rs`); the front-view figure is one sheet, 0.
+    pub sheet: u8,
 }
 
 impl Point {
@@ -936,6 +953,7 @@ impl Default for Point {
             on_cut: false,
             ghost_of: MISSING_POINT,
             body: 0,
+            sheet: 0,
         }
     }
 }
@@ -1227,6 +1245,9 @@ pub struct BoneSegment {
     /// (`clash.rs`). None round a broken piece, or a bone no skin keeps its
     /// place on.
     pub flesh: f64,
+    /// Which of its body's sheets of flesh it lies in (`Point::sheet`); its
+    /// pieces keep it.
+    pub sheet: u8,
 }
 
 impl Default for BoneSegment {
@@ -1267,6 +1288,7 @@ impl Default for BoneSegment {
             limb: Limb::None,
             body: 0,
             flesh: 0.0,
+            sheet: 0,
         }
     }
 }
@@ -1302,6 +1324,20 @@ pub struct BoneJoint {
     pub b: usize,
     pub t_a: f64,
     pub t_b: f64,
+    /// Where the joint sits off its first bone's line, from `t_a` along it:
+    /// along the bone and across it (a quarter turn counterclockwise from its
+    /// `a` to its `b`), in pixels at the bone's rest length. A side-view
+    /// fighter's shoulder sits on its chest this way, beside the spine, and
+    /// slides forward and back across it as the trunk turns (`fighter.rs`,
+    /// `mover.rs`); every other joint sits on its bone's line, at zero.
+    pub seat: Vec2,
+    /// How fast the seat is sliding over its bone, in pixels a second, the
+    /// same way round: the seat moves on by it each substep, and the joint
+    /// holds its second bone to the moving seat, so a shoulder carried
+    /// across the chest is not a shoulder pulled out of place. Set all at
+    /// once to where a punch's turn puts it, a step's worth away, the
+    /// shoulder read as slipped and its muscles let go.
+    pub seat_speed: Vec2,
     pub rest: f64,
     /// Where a whole joint holds its second bone's anchor from its first's,
     /// `rest` from it: along the first bone and across it (a quarter turn
@@ -1345,6 +1381,8 @@ impl Default for BoneJoint {
             b: 0,
             t_a: 0.0,
             t_b: 0.0,
+            seat: Vec2::default(),
+            seat_speed: Vec2::default(),
             rest: 0.0,
             hold: Vec2::default(),
             rest_angle: 0.0,
@@ -2182,6 +2220,11 @@ impl World {
     /// across`).
     pub fn move_across(&mut self, dx: f64) {
         let moved = |at: &mut Vec2| at.x += dx;
+        for state in &mut self.bodies {
+            if let Some(rig) = &mut state.fighter {
+                moved(&mut rig.stand);
+            }
+        }
         for point in &mut self.points {
             moved(&mut point.position);
             moved(&mut point.previous);
@@ -2264,6 +2307,7 @@ impl World {
             home: if end_b { segment.b } else { segment.a },
             aim: Vec2::default(),
             impulse: Vec2::default(),
+            carry: None,
         });
     }
 
@@ -2283,6 +2327,7 @@ impl World {
             planted: [segment.a, segment.b],
             impulse: [Vec2::default(); 2],
             lifted: [false; 2],
+            swinging: false,
         });
     }
 
@@ -2787,11 +2832,16 @@ impl World {
         for (body, held) in input.leans.into_iter().flatten() {
             self.hold_lean(body, held);
         }
+        for (body, made) in input.moves.into_iter().flatten() {
+            self.command(body, made);
+        }
         self.timed("punches", |world| world.drive_punches(dt));
         self.timed("leans", |world| world.drive_leans(dt));
         self.timed("legs", Self::lean_legs_in);
+        self.timed("moves", |world| world.drive_movers(dt));
         self.acting(Actor::Tool);
         self.timed("punches land", |world| world.land_punches(dt));
+        self.timed("strikes land", |world| world.land_strikes(dt));
         self.acting(Actor::Tissue);
         self.solve_motion(dt, width, floor_y);
         self.debug.punch_speed = self.punch_speed(&fists, dt);
@@ -5711,7 +5761,7 @@ impl World {
             }
             let a = self.bones[joint.a];
             let b = self.bones[joint.b];
-            let anchor_a = bone_point(a, joint.t_a);
+            let anchor_a = joint_seat(&joint, &a, a.a, a.b);
             let anchor_b = bone_point(b, joint.t_b);
             let delta = subtract(anchor_b, anchor_a);
             let len = hypot(delta.x, delta.y);
@@ -9014,6 +9064,7 @@ mod tests {
                 tool: ToolMode::Sharp,
                 punches: [None; 4],
                 leans: [None; 2],
+                moves: [None; 4],
             },
         );
 
@@ -9057,6 +9108,7 @@ mod tests {
                 tool: ToolMode::Blunt,
                 punches: [None; 4],
                 leans: [None; 2],
+                moves: [None; 4],
             },
         );
 
@@ -9933,6 +9985,7 @@ mod tests {
                 tool: ToolMode::Blunt,
                 punches: [None; 4],
                 leans: [None; 2],
+                moves: [None; 4],
             },
         );
 
@@ -10026,6 +10079,7 @@ mod tests {
                 tool,
                 punches: [None; 4],
                 leans: [None; 2],
+                moves: [None; 4],
             };
             world.step(dt, &input, 640.0);
             contacts += world.debug.tissue_contacts;
@@ -10092,6 +10146,7 @@ mod tests {
                 tool: ToolMode::Blunt,
                 punches: [None; 4],
                 leans: [None; 2],
+                moves: [None; 4],
             },
         );
 
@@ -10357,6 +10412,7 @@ mod tests {
                 tool: ToolMode::Sharp,
                 punches: [None; 4],
                 leans: [None; 2],
+                moves: [None; 4],
             },
         );
 
@@ -10401,6 +10457,7 @@ mod tests {
                 tool: ToolMode::Blunt,
                 punches: [None; 4],
                 leans: [None; 2],
+                moves: [None; 4],
             },
         );
 
@@ -11412,6 +11469,27 @@ fn joint_hold_offset(bone: &BoneSegment, t: f64, anchor: Vec2, reach: f64) -> Ve
         x: along * stretch,
         y: across * stretch,
     }
+}
+
+/// Where joint `joint` sits on its first bone, `bone`, whose ends lie at
+/// `a` and `b`: `t_a` along its line, and off it by the joint's seat
+/// (`BoneJoint::seat`), which turns and slides with the bone.
+pub(crate) fn joint_seat(joint: &BoneJoint, bone: &BoneSegment, a: Vec2, b: Vec2) -> Vec2 {
+    if joint.seat == Vec2::default() {
+        return lerp(a, b, joint.t_a);
+    }
+    let length = bone.rest_length.max(EPSILON);
+    let along = subtract(b, a);
+    add(
+        lerp(a, b, joint.t_a + joint.seat.x / length),
+        scale(
+            Vec2 {
+                x: -along.y,
+                y: along.x,
+            },
+            joint.seat.y / length,
+        ),
+    )
 }
 
 /// A break kicks its pieces by moving their ends and where they were, as a

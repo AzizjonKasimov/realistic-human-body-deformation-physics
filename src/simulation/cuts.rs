@@ -194,6 +194,8 @@ pub struct OpenedCut {
     pub layer: TissueLayer,
     pub lips: [(Vec2, Vec2); 2],
     pub rest_lips: [(Vec2, Vec2); 2],
+    /// The body and the sheet of its flesh the cut is in (`Point::sheet`).
+    pub sheet: (u8, u8),
 }
 
 impl World {
@@ -237,10 +239,12 @@ impl World {
                     self.piece_position(piece, to, rest),
                 )
             };
+            let corner = &self.points[triangle.a];
             opened.push(OpenedCut {
                 layer: triangle.layer,
                 lips: [lip(triangle, false), lip(partner, false)],
                 rest_lips: [lip(triangle, true), lip(partner, true)],
+                sheet: (corner.body, corner.sheet),
             });
         }
         for (index, (lip, wear)) in self.springs.iter().zip(&self.spring_wear).enumerate() {
@@ -259,6 +263,7 @@ impl World {
                     (points[lip.a].home, points[lip.b].home),
                     (points[twin.a].home, points[twin.b].home),
                 ],
+                sheet: (points[lip.a].body, points[lip.a].sheet),
             });
         }
         opened
@@ -1424,6 +1429,7 @@ mod tests {
                 tool: ToolMode::Sharp,
                 punches: [None; 4],
                 leans: [None; 2],
+                moves: [None; 4],
             };
             world.step(dt, &input, 640.0);
         }

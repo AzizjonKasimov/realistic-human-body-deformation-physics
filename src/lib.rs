@@ -1,6 +1,7 @@
 pub mod draw;
 pub mod inspect;
 mod mesh;
+mod profile;
 pub mod scenarios;
 mod silhouette;
 pub mod simulation;

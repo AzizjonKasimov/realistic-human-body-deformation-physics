@@ -7,32 +7,37 @@ use super::*;
 pub fn draw_body_layers(ctx: &Scene) {
     let world = ctx.world;
 
-    if ctx.anatomy {
-        draw_muscle_layer(ctx);
-        draw_crushed_flesh(ctx);
-        draw_cut_insides(ctx);
-        draw_major_vessels(ctx);
-        draw_skin_layer(ctx);
-        draw_bone_attachments(ctx);
-        draw_bones(ctx, BonePass::Anatomy);
-    } else {
-        // Inside out: crushed flesh where the sheets are torn away, the
-        // bones, the muscle, then the skin. Bone shows only through openings
-        // in the flesh, or where a broken end sticks out of the body.
-        draw_crushed_flesh(ctx);
-        draw_cut_insides(ctx);
-        draw_bones(ctx, BonePass::Buried);
-        draw_muscle_layer(ctx);
-        draw_cut_lips(ctx, rp::TissueLayer::Muscle);
-        draw_skin_layer(ctx);
-        draw_closed_cut_skin(ctx);
-    }
-    draw_cut_lips(ctx, rp::TissueLayer::Skin);
+    // One pass for a world of front-view bodies; a side-view fighter's
+    // sheets each in a pass of their own, the farthest first (`passes`).
+    for only in passes(world, ctx.rim) {
+        if ctx.anatomy {
+            draw_muscle_layer(ctx, only);
+            draw_crushed_flesh(ctx, only);
+            draw_cut_insides(ctx, only);
+            draw_major_vessels(ctx, only);
+            draw_skin_layer(ctx, only);
+            draw_bone_attachments(ctx, only);
+            draw_bones(ctx, BonePass::Anatomy, only);
+        } else {
+            // Inside out: crushed flesh where the sheets are torn away, the
+            // bones, the muscle, then the skin. Bone shows only through
+            // openings in the flesh, or where a broken end sticks out of the
+            // body.
+            draw_crushed_flesh(ctx, only);
+            draw_cut_insides(ctx, only);
+            draw_bones(ctx, BonePass::Buried, only);
+            draw_muscle_layer(ctx, only);
+            draw_cut_lips(ctx, rp::TissueLayer::Muscle, only);
+            draw_skin_layer(ctx, only);
+            draw_closed_cut_skin(ctx, only);
+        }
+        draw_cut_lips(ctx, rp::TissueLayer::Skin, only);
 
-    draw_skin_wounds(ctx);
-    draw_skin_blood(ctx);
-    if !ctx.anatomy {
-        draw_major_vessels(ctx);
+        draw_skin_wounds(ctx, only);
+        draw_skin_blood(ctx, only);
+        if !ctx.anatomy {
+            draw_major_vessels(ctx, only);
+        }
     }
     // Where each wound bleeds from is the simulation's bookkeeping, not
     // something an onlooker sees: its blood shows only once it is out.
@@ -59,14 +64,17 @@ pub fn draw_body_layers(ctx: &Scene) {
     }
 }
 
-pub(super) fn draw_muscle_layer(ctx: &Scene) {
+pub(super) fn draw_muscle_layer(ctx: &Scene, only: Only) {
     if !ctx.anatomy {
-        draw_muscle_flesh(ctx);
+        draw_muscle_flesh(ctx, only);
         return;
     }
     let world = ctx.world;
     for triangle in world.triangles() {
-        if triangle.layer != rp::TissueLayer::Muscle || !world.triangle_alive(triangle) {
+        if triangle.layer != rp::TissueLayer::Muscle
+            || !world.triangle_alive(triangle)
+            || !only.triangle(world, triangle)
+        {
             continue;
         }
 
@@ -110,7 +118,7 @@ pub(super) fn draw_muscle_layer(ctx: &Scene) {
 
 /// Muscle as solid flesh in one mesh. The skin covers it, so it shows only
 /// through openings in the skin, as red flesh rather than a faint wash.
-pub(super) fn draw_muscle_flesh(ctx: &Scene) {
+pub(super) fn draw_muscle_flesh(ctx: &Scene, only: Only) {
     let world = ctx.world;
     let points = world.points();
     let color_of = |index: usize| {
@@ -132,7 +140,10 @@ pub(super) fn draw_muscle_flesh(ctx: &Scene) {
         texture: None,
     };
     for triangle in world.triangles() {
-        if triangle.layer != rp::TissueLayer::Muscle || !world.triangle_alive(triangle) {
+        if triangle.layer != rp::TissueLayer::Muscle
+            || !world.triangle_alive(triangle)
+            || !only.triangle(world, triangle)
+        {
             continue;
         }
         if triangle.cut.is_some() {
@@ -162,13 +173,13 @@ pub(super) fn draw_muscle_flesh(ctx: &Scene) {
 /// The inside of a cut through muscle: the gap between its two lips, as deep
 /// raw flesh. It lies beneath the bones and muscle, so it shows only where
 /// the cut has opened.
-pub(super) fn draw_cut_insides(ctx: &Scene) {
+pub(super) fn draw_cut_insides(ctx: &Scene, only: Only) {
     let color = with_alpha(
         mix(ctx.palette.wound_core, ctx.palette.wound_edge, 0.32),
         0.96,
     );
     for cut in ctx.world.opened_cuts() {
-        if cut.layer != rp::TissueLayer::Muscle {
+        if cut.layer != rp::TissueLayer::Muscle || !only.cut(&cut) {
             continue;
         }
         // The two lips' ends correspond in order.
@@ -180,7 +191,7 @@ pub(super) fn draw_cut_insides(ctx: &Scene) {
 }
 
 /// A thin dark line along each lip of the open cuts through `layer`.
-pub(super) fn draw_cut_lips(ctx: &Scene, layer: rp::TissueLayer) {
+pub(super) fn draw_cut_lips(ctx: &Scene, layer: rp::TissueLayer, only: Only) {
     let (width, color) = match layer {
         rp::TissueLayer::Skin => (
             1.3,
@@ -192,7 +203,7 @@ pub(super) fn draw_cut_lips(ctx: &Scene, layer: rp::TissueLayer) {
         rp::TissueLayer::Muscle => (1.0, with_alpha(ctx.palette.wound_shadow, 0.55)),
     };
     for cut in ctx.world.opened_cuts() {
-        if cut.layer != layer {
+        if cut.layer != layer || !only.cut(&cut) {
             continue;
         }
         for (a, b) in cut.lips {
@@ -215,7 +226,7 @@ pub(super) const PULP_FADE_TO: f32 = 5.0;
 /// lies beneath the bones and the living muscle and skin, so it shows only
 /// where they have gone, and it fades where tissue is pulled far apart, as
 /// across a flap torn loose, where no flesh is left between.
-pub(super) fn draw_crushed_flesh(ctx: &Scene) {
+pub(super) fn draw_crushed_flesh(ctx: &Scene, only: Only) {
     let world = ctx.world;
     let points = world.points();
     let springs = world.springs();
@@ -225,7 +236,10 @@ pub(super) fn draw_crushed_flesh(ctx: &Scene) {
         texture: None,
     };
     for triangle in world.triangles() {
-        if world.triangle_alive(triangle) || mesh.vertices.len() + 4 > u16::MAX as usize {
+        if world.triangle_alive(triangle)
+            || mesh.vertices.len() + 4 > u16::MAX as usize
+            || !only.triangle(world, triangle)
+        {
             continue;
         }
         let corners = [triangle.a, triangle.b, triangle.c];
@@ -263,15 +277,18 @@ pub(super) fn draw_crushed_flesh(ctx: &Scene) {
     draw_mesh(&mesh);
 }
 
-pub(super) fn draw_skin_layer(ctx: &Scene) {
+pub(super) fn draw_skin_layer(ctx: &Scene, only: Only) {
     if !ctx.anatomy {
-        draw_shaded_skin(ctx);
+        draw_shaded_skin(ctx, only);
         return;
     }
     // Anatomy view: a faint skin veil with its wireframe over the exposed layers.
     let world = ctx.world;
     for triangle in world.triangles() {
-        if triangle.layer != rp::TissueLayer::Skin || !world.triangle_alive(triangle) {
+        if triangle.layer != rp::TissueLayer::Skin
+            || !world.triangle_alive(triangle)
+            || !only.triangle(world, triangle)
+        {
             continue;
         }
         let (load, _) = triangle_point_metrics(world, triangle);
@@ -293,7 +310,7 @@ pub(super) fn draw_skin_layer(ctx: &Scene) {
 /// Intact skin as one mesh with per-point colors, so shading blends smoothly
 /// across triangles instead of showing the mesh: darker toward the outline for
 /// a rounded look, warmer under load, bruised where contused.
-pub(super) fn draw_shaded_skin(ctx: &Scene) {
+pub(super) fn draw_shaded_skin(ctx: &Scene, only: Only) {
     let world = ctx.world;
     let points = world.points();
     let mut vertex_of = vec![u16::MAX; points.len()];
@@ -303,7 +320,10 @@ pub(super) fn draw_shaded_skin(ctx: &Scene) {
         texture: None,
     };
     for triangle in world.triangles() {
-        if triangle.layer != rp::TissueLayer::Skin || !world.triangle_alive(triangle) {
+        if triangle.layer != rp::TissueLayer::Skin
+            || !world.triangle_alive(triangle)
+            || !only.triangle(world, triangle)
+        {
             continue;
         }
         if triangle.cut.is_some() {
@@ -329,7 +349,7 @@ pub(super) fn draw_shaded_skin(ctx: &Scene) {
         }
     }
     draw_mesh(&mesh);
-    draw_skin_rim(ctx);
+    draw_skin_rim(ctx, only);
 }
 
 /// How far a broken skin spring's ends have pulled apart, relative to its rest
@@ -362,7 +382,7 @@ pub(super) fn skin_opening(world: &rp::World, triangle: &rp::Triangle) -> f32 {
 /// cannot split inside a triangle, so without this a thin knife cut would show
 /// as a whole row of missing skin; instead the skin stays closed over the cut
 /// and fades away only as the edges separate.
-pub(super) fn draw_closed_cut_skin(ctx: &Scene) {
+pub(super) fn draw_closed_cut_skin(ctx: &Scene, only: Only) {
     let world = ctx.world;
     let points = world.points();
     let mut mesh = Mesh {
@@ -374,6 +394,7 @@ pub(super) fn draw_closed_cut_skin(ctx: &Scene) {
         if triangle.layer != rp::TissueLayer::Skin
             || triangle.failed
             || world.triangle_alive(triangle)
+            || !only.triangle(world, triangle)
         {
             continue;
         }
@@ -395,7 +416,7 @@ pub(super) fn draw_closed_cut_skin(ctx: &Scene) {
 /// Soft shading strips just inside the silhouette plus a thin outline. Kept
 /// separate from the mesh colors because thin wrists and ankles are meshed only
 /// from outline points, so per-point shading alone would leave them dark.
-pub(super) fn draw_skin_rim(ctx: &Scene) {
+pub(super) fn draw_skin_rim(ctx: &Scene, only: Only) {
     let world = ctx.world;
     let points = world.points();
     let springs = world.springs();
@@ -403,7 +424,7 @@ pub(super) fn draw_skin_rim(ctx: &Scene) {
     let mut inward = vec![rp::Vec2 { x: 0.0, y: 0.0 }; points.len()];
     for edge in &rim.edges {
         let spring = springs[edge.spring];
-        if spring.broken {
+        if spring.broken || !only.spring(world, &spring) {
             continue;
         }
         let normal = inward_normal(points, spring, edge.inner_point, |p| p.position);
@@ -420,7 +441,7 @@ pub(super) fn draw_skin_rim(ctx: &Scene) {
         };
         for edge in &rim.edges {
             let spring = springs[edge.spring];
-            if spring.broken {
+            if spring.broken || !only.spring(world, &spring) {
                 continue;
             }
             let base = mesh.vertices.len() as u16;
@@ -461,7 +482,7 @@ pub(super) fn draw_skin_rim(ctx: &Scene) {
     let outline = with_alpha(ctx.palette.skin_outline, 0.78);
     for edge in &rim.edges {
         let spring = springs[edge.spring];
-        if !spring.broken {
+        if !spring.broken && only.spring(world, &spring) {
             draw_line_vec(
                 points[spring.a].position,
                 points[spring.b].position,
@@ -503,7 +524,7 @@ pub(super) fn skin_point_color(ctx: &Scene, point: &rp::Point) -> Color {
 /// torn spring's line fades as the tear pulls open; a blade cut that opened
 /// gapes between its lips instead (`draw_cut_lips`). Where skin has torn
 /// open, a thin dark rim marks the edge of the intact skin around it.
-pub(super) fn draw_skin_wounds(ctx: &Scene) {
+pub(super) fn draw_skin_wounds(ctx: &Scene, only: Only) {
     let world = ctx.world;
     let points = world.points();
     let springs = world.springs();
@@ -525,6 +546,7 @@ pub(super) fn draw_skin_wounds(ctx: &Scene) {
         if triangle.layer != rp::TissueLayer::Skin
             || opening[index] >= 0.98
             || triangle.cut.is_some()
+            || !only.triangle(world, triangle)
         {
             continue;
         }
@@ -582,6 +604,9 @@ pub(super) fn draw_skin_wounds(ctx: &Scene) {
             continue;
         }
         let spring = springs[spring_index];
+        if !only.spring(world, &spring) {
+            continue;
+        }
         draw_line_vec(
             points[spring.a].position,
             points[spring.b].position,

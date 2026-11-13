@@ -24,6 +24,9 @@ pub struct SkinRim {
     /// Per spring: the skin triangles on either side, `NO_TRIANGLE` where there
     /// is none, so wounds can find where intact skin meets an opening.
     pub(super) edge_triangles: Vec<[usize; 2]>,
+    /// Each sheet of flesh in the world, by its body and its number in that
+    /// body (`rp::Point::sheet`), in order.
+    pub(super) sheets: Vec<(u8, u8)>,
 }
 
 impl SkinRim {
@@ -121,6 +124,12 @@ fn skin_rim(world: &rp::World) -> SkinRim {
                 if other_spring.a == index || other_spring.b == index {
                     continue;
                 }
+                // Another sheet lying over this one is not across this
+                // body part.
+                let across = &points[other_spring.a];
+                if across.sheet != points[index].sheet || across.body != points[index].body {
+                    continue;
+                }
                 if let Some(t) = ray_hits_segment(
                     origin,
                     normal,
@@ -133,11 +142,18 @@ fn skin_rim(world: &rp::World) -> SkinRim {
             reach[index] = reach[index].max(nearest as f32);
         }
     }
+    let mut sheets: Vec<(u8, u8)> = points
+        .iter()
+        .map(|point| (point.body, point.sheet))
+        .collect();
+    sheets.sort_unstable();
+    sheets.dedup();
     SkinRim {
         version: world.topology_version(),
         edges,
         reach,
         edge_triangles,
+        sheets,
     }
 }
 
