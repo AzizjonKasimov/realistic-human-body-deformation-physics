@@ -2,7 +2,7 @@
 //! the tool was doing and what each injury rule did, alike events grouped,
 //! and the minor ones (bruising, tiring, setting) only counted.
 
-use super::names::{actor_name, measure_text, place_name, subject_name};
+use super::names::{actor_name, measure_text, place_name_on, subject_name, subject_part};
 use crate::simulation::{Event, EventKind, Journal, Subject, World};
 
 /// Events of one kind at one place by one actor on one frame.
@@ -114,7 +114,7 @@ fn groups<'a>(world: &World, journal: &Journal, events: &[&'a Event]) -> Vec<Gro
         let place = if told_alone(event.subject) {
             subject_name(world, event.subject)
         } else {
-            place_name(world, event.at)
+            place_name_on(world, event.at, subject_part(world, event.subject))
         };
         let actor = actor_name(world, event.by, tool);
         match groups

@@ -12,6 +12,7 @@
 //! stiffness, damping, and strength come from measurements of people
 //! (`body.rs`, `docs/INJURY_REFERENCE.md`).
 
+use super::sides::BonePiece;
 use super::soft::{JointTurn, Softness, KG_PER_MASS};
 use super::*;
 
@@ -66,6 +67,13 @@ pub struct JointDrive {
     /// to rest, so the joint follows the aim instead of trailing it. 0 for a
     /// joint aimed at one angle.
     pub swing_speed: f64,
+    /// How long the muscles take to change how hard they pull by their
+    /// whole strength, in seconds; 0 for muscles that pull as hard as their
+    /// stiffness and damping ask at once. A muscle builds force over tens
+    /// of milliseconds, and a blow is over sooner: a neck braced by muscles
+    /// that answered within a substep stopped a struck head as no neck can
+    /// (`fighter.rs`).
+    pub rise: f64,
 }
 
 /// How much of its braced damping a joint keeps in a limb hanging limp: a
@@ -141,6 +149,16 @@ pub struct HipHold {
 /// person push, holds up no more than legs can bear, and never pulls down,
 /// so the hips sink no faster than they fall. A blow that pushes harder
 /// than that moves the fighter.
+///
+/// The legs keep the hips tilted as the move has them, too, with no more
+/// than the strength of both hips' muscles (`World::solve_hip_tilts`). The
+/// two ends' holds push the pelvis but hardly turn it, a hand's breadth
+/// apart as they are, and what kept it from turning was the feet on the
+/// floor; a foot a step swings is held by nothing, and a fighter ducking,
+/// its weight forward of its hips, that stepped back twice pulled its other
+/// foot off the floor and tipped over about its hips, its head a metre from
+/// where its moves put it, and hung there: in every random fight both
+/// fighters ended so, throwing their punches at the floor.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Carry {
     /// Where the move puts this end of the hips, from where it was built,
@@ -152,6 +170,16 @@ pub struct Carry {
     pub hertz: Vec2,
     /// The hardest the hold pushes across and upward, in newtons.
     pub limit: Vec2,
+    /// How firmly the hips are kept tilted as the move has them, in hertz
+    /// on the whole body's turning about its hips; how hard the body is to
+    /// turn about them, in the engine's units of mass times pixels squared;
+    /// and the hardest the legs turn the hips, in newton metres.
+    pub tilt_hertz: f64,
+    pub tilt_inertia: f64,
+    pub tilt_limit: f64,
+    /// The turning impulse the hold gave the pelvis last substep, which
+    /// warm starts the next: the hold on the pelvis's `b` end keeps it.
+    pub tilt_impulse: f64,
 }
 
 /// A leg standing on its foot, as its joints hold it (`World::standing_leg`):
@@ -586,6 +614,73 @@ impl World {
                 _ => self.push_hip(hold, scale(impulse, w * h)),
             }
         }
+        self.solve_hip_tilts(h);
+    }
+
+    /// The pelvis `hold` carries by its `b` end with its flesh, as the
+    /// substep began; how far it is turned past where its fighter's move
+    /// has it, in radians; and how fast it is turning past it.
+    fn hip_tilt(&self, hold: &HipHold, h: f64) -> Option<(BonePiece, f64, f64)> {
+        let carry = hold
+            .carry
+            .filter(|carry| hold.end_b && carry.tilt_limit > 0.0)?;
+        let other = self
+            .hip_holds
+            .iter()
+            .find(|other| other.bone == hold.bone && !other.end_b)?;
+        let other_carry = other.carry?;
+        let bone = self.bones.get(hold.bone)?;
+        let piece = self.bone_pieces.get(hold.bone).cloned().flatten()?;
+        // From the pelvis's `a` end to its `b` end: as the move has it, and
+        // as it lies.
+        let aimed = subtract(
+            add(add(hold.home, hold.aim), carry.offset),
+            add(add(other.home, other.aim), other_carry.offset),
+        );
+        let lies = subtract(bone.previous_b, bone.previous_a);
+        let (aimed_sq, lies_sq) = (dot(aimed, aimed), dot(lies, lies));
+        if aimed_sq <= EPSILON || lies_sq <= EPSILON {
+            return None;
+        }
+        let error = libm::atan2(cross(aimed, lies), dot(aimed, lies));
+        let moving = scale(
+            subtract(
+                subtract(bone.b, bone.previous_b),
+                subtract(bone.a, bone.previous_a),
+            ),
+            1.0 / h,
+        );
+        let turning = cross(lies, moving) / lies_sq;
+        let aim_turning = cross(aimed, subtract(carry.speed, other_carry.speed)) / aimed_sq;
+        Some((piece, error, turning - aim_turning))
+    }
+
+    /// The legs under each side-view fighter keep its hips tilted as its
+    /// moves have them (`Carry`): a spring on how far the pelvis is turned
+    /// from where the move has it, as firm on the whole body's turning about
+    /// its hips as `Carry::tilt_hertz`, turning the pelvis with its flesh no
+    /// harder than `Carry::tilt_limit`.
+    fn solve_hip_tilts(&mut self, h: f64) {
+        let newton_metres = self.newton_metres();
+        for index in 0..self.hip_holds.len() {
+            let hold = self.hip_holds[index];
+            let (Some(carry), Some((piece, error, speed))) = (hold.carry, self.hip_tilt(&hold, h))
+            else {
+                continue;
+            };
+            let omega = 2.0 * PI * carry.tilt_hertz;
+            let stiffness = carry.tilt_inertia * omega * omega;
+            let damping = 2.0 * self.materials.hip_hold_damping_ratio * carry.tilt_inertia * omega;
+            let soft = Softness::of_stiffness(stiffness, damping, piece.inertia, h);
+            let limit = carry.tilt_limit * newton_metres * h;
+            let given = carry.tilt_impulse.clamp(-limit, limit);
+            let total =
+                (given + soft.impulse(piece.inertia, speed, error, given)).clamp(-limit, limit);
+            if let Some(carry) = &mut self.hip_holds[index].carry {
+                carry.tilt_impulse = total;
+            }
+            self.turn_piece(&piece, total - given, h);
+        }
     }
 
     /// How far the end of the pelvis `hold` holds must sink, the hips
@@ -976,6 +1071,20 @@ impl World {
                 None => self.push_hip(hold, scale(hold.impulse, w * h)),
             }
         }
+        // And the turn that kept a fighter's hips tilted as its move has
+        // them.
+        for index in 0..self.hip_holds.len() {
+            let hold = self.hip_holds[index];
+            let Some(carry) = hold
+                .carry
+                .filter(|carry| hold.end_b && carry.tilt_impulse != 0.0)
+            else {
+                continue;
+            };
+            if let Some(piece) = self.bone_pieces.get(hold.bone).cloned().flatten() {
+                self.turn_piece(&piece, carry.tilt_impulse, h);
+            }
+        }
     }
 
     /// The muscles learn the guard's weight as a new body settles: on each
@@ -1132,7 +1241,15 @@ impl World {
                 wrap_angle(turn.angle - joint.rest_angle - joint.drive.aim - joint.drive.swing);
             let speed = turn.speed(&self.bones, h) - joint.drive.swing_speed;
             let given = joint.drive_impulse.clamp(-limit, limit);
-            let total = (given + softness.impulse(mass, speed, angle, given)).clamp(-limit, limit);
+            let mut total =
+                (given + softness.impulse(mass, speed, angle, given)).clamp(-limit, limit);
+            if joint.drive.rise > 0.0 {
+                // No faster than its muscles build force, over the passes
+                // of this substep.
+                let passes = self.materials.contact_passes.max(1) as f64;
+                let change = limit * h / (joint.drive.rise * passes);
+                total = total.clamp(given - change, given + change);
+            }
             self.bone_joints[index].drive_impulse = total;
             match pieces {
                 Some(pieces) => self.turn_joint_sides(pieces, total - given, h),

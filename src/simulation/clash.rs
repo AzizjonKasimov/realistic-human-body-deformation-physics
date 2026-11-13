@@ -14,6 +14,22 @@
 //! piece, in the same pass as the muscles that drive the limbs, so a driven
 //! arm is stopped or turned aside by the other instead of passing through. A
 //! punching arm pressed hard gives way (`World::block_punch`).
+//!
+//! All the pairs are pushed apart at once, each from where things stood as
+//! the pass began, so that neither of two fighters is solved first. A piece
+//! pressed at several places at once is then pushed at each as if that were
+//! the only one, and all of them together push it too hard. Two fighters
+//! seen from the front seldom meet at more than a place or two, and there it
+//! is left so. Seen from the side, a block's two arms stand in one plane
+//! with whatever comes at them, and each moves as one braced piece: two
+//! fighters blocking toe to toe pressed one arm on another at seven places,
+//! pushed seven times too hard, back and forth harder each pass, and within
+//! one step the arms flew apart at three kilometres a second. So a side-view
+//! fighter's piece shares its weight among the places it is pressed, each
+//! place pushing only its share, as a solver that takes its contacts all at
+//! once splits a body's mass among them (Tonge, Benevolenski and Voroshilov,
+//! "Mass Splitting for Jitter-Free Parallel Rigid Body Simulation",
+//! SIGGRAPH 2012).
 
 use super::sides::BonePiece;
 use super::soft::Softness;
@@ -49,8 +65,9 @@ pub(super) struct Clash {
     normal: Vec2,
     /// The flesh both carry, axis to axis: how near the bones may come.
     reach: f64,
-    /// One over how hard the two pieces are to move apart along `normal`.
-    normal_mass: f64,
+    /// How readily each side's piece moves along `normal` where the bones
+    /// come closest, pushed there alone: one over its mass there.
+    gives: [f64; 2],
     /// The impulse it has given this substep, pushing them apart.
     impulse: f64,
 }
@@ -63,10 +80,20 @@ struct ClashSide {
     /// Where along the bone, from its `a` end, the two bones come closest.
     along: f64,
     /// The bone met with its share of the flesh, the piece the joints hold
-    /// it by (`World::measure_bone_pieces`).
+    /// it by (`World::measure_bone_pieces`); for a bone of a side-view
+    /// fighter's arm closed in a block, the whole arm as one piece, its
+    /// mass, its middle, and how hard it is to turn.
     piece: BonePiece,
     /// From the piece's centre of mass to where the bones come closest.
     lever: Vec2,
+    /// The pieces of such a braced arm, which move together
+    /// (`World::struck_pieces`); empty for a bone met on its own.
+    braced: Vec<BonePiece>,
+    /// For a side-view fighter's bone, the bone that names the piece it
+    /// moves, the bone itself or the first of its braced arm: that piece
+    /// shares its weight among the places it is pressed. `None` for a body
+    /// seen from the front, whose pieces are pushed at each place alone.
+    shares: Option<usize>,
 }
 
 /// Where along two segments, from `a0` and `b0`, they come closest, and the
@@ -143,7 +170,7 @@ impl World {
                 && (self
                     .punch(bone.body as usize, bone.limb)
                     .is_some_and(|punch| punch.going_out(&self.materials))
-                    || self.striking_out(bone.body as usize, bone.limb))
+                    || self.fist_in_flight(bone.body as usize, bone.limb))
         })
     }
 
@@ -161,10 +188,16 @@ impl World {
         for (slot, &first) in candidates.iter().enumerate() {
             for &second in &candidates[slot + 1..] {
                 let (a, b) = (self.bones[first], self.bones[second]);
-                if a.body == b.body {
+                if a.body == b.body && !self.guard_meets_own_head(&a, &b) {
                     continue;
                 }
                 if self.punching_fist(first) != self.punching_fist(second) {
+                    continue;
+                }
+                // A side-view fighter's arm held beside it is out of the
+                // other's way, and two punching arms pass each other
+                // (`World::parts_meet`).
+                if !self.parts_meet((a.body, a.sheet), (b.body, b.sheet)) {
                     continue;
                 }
                 let (t_a, t_b, p_a, p_b) =
@@ -206,16 +239,62 @@ impl World {
                     let arm = side.lever.x * normal.y - side.lever.y * normal.x;
                     1.0 / side.piece.mass + arm * arm / side.piece.inertia
                 };
-                let normal_mass = 1.0 / (turning(&side_a) + turning(&side_b));
+                let gives = [turning(&side_a), turning(&side_b)];
                 self.clashes.push(Clash {
                     sides: [side_a, side_b],
                     normal,
                     reach,
-                    normal_mass,
+                    gives,
                     impulse: 0.0,
                 });
             }
         }
+    }
+
+    /// A line for each pair of limbs pressing on each other as a substep
+    /// `h` long ends: the two bones, how many pieces each moved as one, and
+    /// how hard they pressed, in newtons. For the tools that look for what
+    /// flung a bone (`World::traced_clashes`).
+    pub(super) fn clash_lines(&self, h: f64) -> Vec<String> {
+        let newtons = self.newtons();
+        self.clashes
+            .iter()
+            .map(|clash| {
+                let name = |side: &ClashSide| {
+                    let bone = self.bones[side.bone];
+                    format!(
+                        "bone {} ({} of body {}, {:?}, {} piece{})",
+                        side.bone,
+                        bone.part.name(),
+                        bone.body,
+                        bone.limb,
+                        side.braced.len().max(1),
+                        if side.braced.len() > 1 { "s" } else { "" },
+                    )
+                };
+                format!(
+                    "{} on {}: {:.0} N",
+                    name(&clash.sides[0]),
+                    name(&clash.sides[1]),
+                    clash.impulse / h / newtons
+                )
+            })
+            .collect()
+    }
+
+    /// Whether `a` and `b` are the forearm or the hand of a fighter's arm
+    /// closed in a block and that fighter's own skull. A body's own parts
+    /// pass over each other, but a block stands right in front of the face
+    /// it covers: knocked back by a punch, the forearm meets the head and
+    /// pushes it, and the head holds the forearm up. Left to pass, a blocked
+    /// punch drove the light forearm back through its own face.
+    fn guard_meets_own_head(&self, a: &BoneSegment, b: &BoneSegment) -> bool {
+        let meets = |arm: &BoneSegment, head: &BoneSegment| {
+            head.part == BonePart::Skull
+                && matches!(arm.part, BonePart::Forearm | BonePart::Hand)
+                && self.stands(arm.body, arm.sheet) == super::mover::Stands::Guarding
+        };
+        meets(a, b) || meets(b, a)
     }
 
     /// Whether bone `bone` is part of an arm its punch still drives, met by
@@ -253,22 +332,58 @@ impl World {
     /// on its own, its hand left behind, pulled the wrist apart, and the
     /// bones out to the hand were pushed with it.
     fn clash_side(&self, index: usize, along: f64, at: Vec2) -> Option<ClashSide> {
-        let piece = self.bone_pieces.get(index)?.clone()?;
+        let mut piece = self.bone_pieces.get(index)?.clone()?;
+        // A fighter's blocking arm is braced and meets a limb as one piece
+        // (`World::struck_pieces`): pressed on its hand alone, a piece of
+        // half a kilogram, the hand was knocked off the forearm and the
+        // wrist slipped.
+        let mut braced = self.struck_pieces(index);
+        if braced.len() > 1 {
+            let (mass, centre, inertia) = Self::pieces_together(&braced)?;
+            piece = BonePiece {
+                bone: index,
+                mass,
+                centre,
+                inertia,
+            };
+        } else {
+            braced.clear();
+        }
         let lever = subtract(at, piece.centre);
+        let fighter = self
+            .bodies
+            .get(self.bones[index].body as usize)
+            .is_some_and(|state| state.fighter.is_some());
+        let shares = fighter.then(|| braced.first().map_or(index, |piece| piece.bone));
         Some(ClashSide {
             bone: index,
             along,
             piece,
             lever,
+            braced,
+            shares,
         })
+    }
+
+    /// Gives one side of a clash the momentum `push` where the bones come
+    /// closest: its piece, or its braced arm's pieces together.
+    fn push_clash_side(&mut self, side: &ClashSide, push: Vec2, h: f64) {
+        if side.braced.is_empty() {
+            self.push_piece(&side.piece, side.lever, push, h);
+        } else {
+            let at = add(side.piece.centre, side.lever);
+            self.push_together(&side.braced, at, push, h);
+        }
     }
 
     /// Pushes apart every pair of limbs whose flesh overlaps, as Box2D's
     /// soft contact does, each pair by how fast and how far it presses from
     /// where things stand as this pass reaches it, all at once (Jacobi), so
     /// that two fighters pressing on each other are solved alike, neither
-    /// first. An arm its punch drives, pressed harder than
-    /// `CLASH_BLOCK_FORCE`, gives way (`World::block_punch`).
+    /// first; a side-view fighter's piece shares its weight among the pairs
+    /// pressing on it (the module's own words say why). An arm its punch
+    /// drives, pressed harder than `CLASH_BLOCK_FORCE`, gives way
+    /// (`World::block_punch`).
     pub(super) fn solve_clashes(&mut self, h: f64) {
         if self.clashes.is_empty() {
             return;
@@ -276,27 +391,52 @@ impl World {
         let hertz = CLASH_HERTZ.min(0.25 / h);
         let softness = Softness::new(2.0 * PI * hertz, CLASH_DAMPING_RATIO, h);
         let max_push = CLASH_PUSH_SPEED * 1000.0 / self.mm_per_px();
+        // How far apart and how fast each pair stands as the pass begins,
+        // and how many pressing pairs each sharing piece is in: a pair
+        // presses if it has pushed already this substep, or would now.
+        let mut pressed = vec![0.0_f64; self.bones.len()];
+        let measured: Vec<(f64, f64)> = self
+            .clashes
+            .iter()
+            .map(|clash| {
+                let [first, second] = &clash.sides;
+                let (a, b) = (self.bones[first.bone], self.bones[second.bone]);
+                let gap = dot(
+                    subtract(lerp(b.a, b.b, second.along), lerp(a.a, a.b, first.along)),
+                    clash.normal,
+                ) - clash.reach;
+                let velocity = |bone: &BoneSegment, t: f64| {
+                    lerp(
+                        scale(subtract(bone.a, bone.previous_a), 1.0 / h),
+                        scale(subtract(bone.b, bone.previous_b), 1.0 / h),
+                        t,
+                    )
+                };
+                let speed = dot(
+                    subtract(velocity(&b, second.along), velocity(&a, first.along)),
+                    clash.normal,
+                );
+                let presses = clash.impulse > 0.0
+                    || softness.contact_impulse(1.0, speed, gap, 0.0, max_push, h) > 0.0;
+                if presses {
+                    for whole in clash.sides.iter().filter_map(|side| side.shares) {
+                        pressed[whole] += 1.0;
+                    }
+                }
+                (gap, speed)
+            })
+            .collect();
         let mut pushes = Vec::with_capacity(self.clashes.len());
         for (index, clash) in self.clashes.iter_mut().enumerate() {
-            let [first, second] = &clash.sides;
-            let (a, b) = (self.bones[first.bone], self.bones[second.bone]);
-            let gap = dot(
-                subtract(lerp(b.a, b.b, second.along), lerp(a.a, a.b, first.along)),
-                clash.normal,
-            ) - clash.reach;
-            let velocity = |bone: &BoneSegment, t: f64| {
-                lerp(
-                    scale(subtract(bone.a, bone.previous_a), 1.0 / h),
-                    scale(subtract(bone.b, bone.previous_b), 1.0 / h),
-                    t,
-                )
-            };
-            let speed = dot(
-                subtract(velocity(&b, second.along), velocity(&a, first.along)),
-                clash.normal,
-            );
+            let (gap, speed) = measured[index];
+            // Each side as heavy as its share of its piece.
+            let shared =
+                |side: &ClashSide| side.shares.map_or(1.0, |whole| pressed[whole].max(1.0));
+            let normal_mass = 1.0
+                / (shared(&clash.sides[0]) * clash.gives[0]
+                    + shared(&clash.sides[1]) * clash.gives[1]);
             let impulse =
-                softness.contact_impulse(clash.normal_mass, speed, gap, clash.impulse, max_push, h);
+                softness.contact_impulse(normal_mass, speed, gap, clash.impulse, max_push, h);
             let total = (clash.impulse + impulse).max(0.0);
             let applied = total - clash.impulse;
             clash.impulse = total;
@@ -307,23 +447,50 @@ impl World {
         let clashes = std::mem::take(&mut self.clashes);
         for (index, push) in pushes {
             let [first, second] = &clashes[index].sides;
-            self.push_piece(&first.piece, first.lever, scale(push, -1.0), h);
-            self.push_piece(&second.piece, second.lever, push, h);
+            self.push_clash_side(first, scale(push, -1.0), h);
+            self.push_clash_side(second, push, h);
         }
         self.clashes = clashes;
         self.debug.limb_clashes = self.clashes.len() as i32;
         let newtons = self.newtons();
         let mut blocked = Vec::new();
+        // A fighter's punching arm that shares its weight among the pairs
+        // pressing on it is pressed by all of them together: each arm with
+        // how hard in all, and the pair that pressed it hardest.
+        let mut arms: Vec<((u8, Limb), f64, (usize, usize, f64))> = Vec::new();
         for clash in &self.clashes {
             let force = clash.impulse / h / newtons;
             self.debug.max_clash_force = self.debug.max_clash_force.max(force);
-            if force > CLASH_BLOCK_FORCE {
-                let [first, second] = &clash.sides;
-                for (bone, other) in [(first.bone, second.bone), (second.bone, first.bone)] {
-                    if self.punching_arm(bone, other) && !self.hangs_limp(other) {
+            let [first, second] = &clash.sides;
+            for (side, other) in [(first, second.bone), (second, first.bone)] {
+                let bone = side.bone;
+                if side.shares.is_none() {
+                    if force > CLASH_BLOCK_FORCE
+                        && self.punching_arm(bone, other)
+                        && !self.hangs_limp(other)
+                    {
                         blocked.push((bone, other, force));
                     }
+                    continue;
                 }
+                if force <= 0.0 || !self.punching_arm(bone, other) || self.hangs_limp(other) {
+                    continue;
+                }
+                let arm = (self.bones[bone].body, self.bones[bone].limb);
+                match arms.iter_mut().find(|(known, ..)| *known == arm) {
+                    Some((_, total, hardest)) => {
+                        *total += force;
+                        if force > hardest.2 {
+                            *hardest = (bone, other, force);
+                        }
+                    }
+                    None => arms.push((arm, force, (bone, other, force))),
+                }
+            }
+        }
+        for (_, total, (bone, other, _)) in arms {
+            if total > CLASH_BLOCK_FORCE {
+                blocked.push((bone, other, total));
             }
         }
         for (bone, other, force) in blocked {

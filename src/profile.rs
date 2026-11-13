@@ -466,11 +466,21 @@ pub(crate) fn stance() -> Pose {
     pose
 }
 
-/// Where the guard holds the fists' knuckles for a head at `head`: the lead
-/// fist out in front of the face at the height of the cheek, the rear fist
-/// at the chin.
+/// Where the stance holds the fists' knuckles for a head at `head`: the lead
+/// fist out in front at the height of the chin, the rear fist under the
+/// chin, both below the face and, in a real stance, one each side of the
+/// line a straight punch comes down.
 pub(crate) fn guard_fists(head: Place) -> [Place; 2] {
-    [plus(head, (0.172, -0.030)), plus(head, (0.088, -0.052))]
+    [plus(head, (0.168, -0.060)), plus(head, (0.090, -0.080))]
+}
+
+/// Where a block holds the fists' knuckles for a head at `head`: both at
+/// the brow, each straight above its elbow, so the forearms stand upright
+/// between the face and a punch. Held closer in, the forearms leaned back
+/// from elbows out in front, and a fist that met them slid up and over
+/// them.
+pub(crate) fn block_fists(head: Place) -> [Place; 2] {
+    [plus(head, (0.155, 0.010)), plus(head, (0.095, 0.004))]
 }
 
 /// A part of the figure with flesh of its own.

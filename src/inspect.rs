@@ -16,8 +16,8 @@ mod why;
 pub use blame::{blame, blame_by_step, Blame, BlameTarget, PhasePush};
 pub use digest::digest;
 pub use names::{
-    actor_name, bone_name, joint_name, measure_text, nearest_bone, place_name, subject_name,
-    subject_spec, tool_name,
+    actor_name, bone_name, joint_name, measure_text, nearest_bone, place_name, place_name_on,
+    subject_name, subject_part, subject_spec, tool_name,
 };
 pub use story::{story, totals};
 pub use watchdogs::{watchdog_lines, Trip, Watchdog, Watchdogs};

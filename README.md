@@ -216,6 +216,25 @@ The site builds the game from its repository at the version [`web/fight.version`
 
 builds the sandbox with the Fight page in it and serves both at <http://localhost:8080> (the Fight page at <http://localhost:8080/fight/>). Without `-Fight` the build leaves the Fight button out. `.\tools\touch_check.ps1 -Fight` then plays the Fight page's buttons with real fingers on a phone in headless Edge (`-Size 844x390` sideways): PUNCH, LEAN BACK held, and two fingers playing both fighters at once.
 
+## Side-View Fighters
+
+The fighting game's next fighters are seen from the side, facing each other, and are being built in the engine beside the sandbox's front-facing body (`src/profile.rs`, `src/simulation/fighter.rs`, `src/simulation/mover.rs`; `create_side_fighters`). They are not in the app or on the Fight page yet: they are played by tests and filmed. Each is eleven sheets of flesh, an arm or a leg on its own layer so it passes in front of the trunk or behind it, with the sandbox's skin, fat, muscle, bone, and injury rules. A move is a pose the body is asked to take, which its muscles follow (`World::command`, `InputState::moves`): `Jab`, `Cross`, `StepIn`, `StepOut`, and, held and let go, `LeanBack`, `Duck`, and `Block`. Punches are a trained boxer's, a cross landing at about 9 m/s; a punch goes through the other fighter's open hands and lands on the head, and a block takes it on the forearms. How they work and what they are measured against is in [`docs/INJURY_REFERENCE.md`](docs/INJURY_REFERENCE.md) (Punches).
+
+To film them, the app's capture mode takes `--side` and a gesture whose steps are moves: `jab`, `cross`, `step=in`, `step=out`, `back=on`, `duck=on`, `block=on` (and `=off`), the second fighter's with a 2 after the word (`cross2`, `block2=on`), with `wait=N` frames between them:
+
+```powershell
+.\target\release\realistic_physics.exe --capture output\side\frame.png --side --view normal --size 1280x720 --no-ui --no-tool --no-label --every 1 --gesture "hammer:-1.6,0.95:wait=40:step=in:wait=40:jab:wait=40:cross:wait=60:block2=on:wait=20:cross:wait=60"
+```
+
+Tools that print what they do (each an ignored test, run with `cargo test --release --lib NAME -- --ignored --nocapture`; the switches are environment variables):
+
+- `print_fighter_punches`: a jab and a cross from 46 distances, into open hands and into a block: how often each lands and how fast, what it reddens, how far it moves the head, and whether anything tears. `RP_ONLY=cross` or `jab` and `RP_BLOCK=0` or `1` play only those, `RP_DETAIL=1` prints each punch, `RP_STORY=1` what its journal kept.
+- `print_random_fights`: six fights of 20 seconds with both fighters making a move about four times a second: what tore, how near the fighters stood when it did, how far each head got from where its moves put it, and the fastest a bone moved. `RP_FIGHTS=24` plays more, `RP_SEED=3` one fight with its story and the moves before the first thing torn, `RP_WHY=8` follows the bones it happened at through the eight frames before, phase by phase, with the limbs pressing on them, `RP_FLUNG=25` stops at the first bone moved faster than 25 m/s and traces it, and `RP_POSTURE=10` prints every tenth frame how far each head is from its pose and what each fighter is doing.
+- `print_fighter_move`: how one fighter's joints follow a move (`RP_MOVE=jab`, `cross`, `step`, `duck`, `back`; `RP_BLOCK=1` makes it out of a block; `RP_STEPS=400` plays longer and prints where the pose puts the head and where it is). `RP_MOVES="0:duck=on,60:step=out,90:step=out"` plays a script of moves, each on its step, and prints the trunk's and the legs' joints.
+- `print_fighter_rest`: how a new fighter rests.
+
+`cargo test` checks that a punch goes through open hands and a block stops it, that fighters step no nearer than they stand and stay mirror images stepping in together, that a ducking fighter stepping back keeps its pose, and that two fighters ducking toward each other sit back; `random_fights_leave_the_fighters_whole` (ignored; `verify.ps1 -Deep` runs it) plays the six random fights and fails on a torn joint, a broken bone, a bone flung, or a fighter out of its pose.
+
 ## Controls
 
 - Left-drag to swing the selected tool into either fighter. The tool moves with your pointer like a tool held firmly in hand: swing from outside the body for a hard hit, or hold the tool against the body and keep dragging past it to press harder. The ring marks where your hand is. Damage comes from the tool's shape and weight, its speed when it lands, and how hard you press; it grows steeply with speed, so slow moves only bruise.
@@ -245,7 +264,7 @@ The Rust verifier gives every text file Unix line endings (see [Development Note
 - `-Capture` also saves real app screenshots of the body at rest at 1280x720, 800x600, and 390x844 (see [Screenshots](#screenshots)).
 - `-SoundCheck` also runs `.\tools\sound_check.ps1` on the root `realistic_physics.exe`, which checks that its sound reaches the speakers (see [Sound](#sound)).
 - `-SkipSweep` and `-SkipDiagnostics` leave out the sweep and the two diagnostics.
-- `-Deep` also plays 2000 random blows and 100 random fights and runs the moved-body tests (about 10 more minutes; see [Look Into A Run](#look-into-a-run)), which find what the tuned scenarios do not try.
+- `-Deep` also plays 2000 random blows and 100 random fights and runs the moved-body tests (about 10 more minutes; see [Look Into A Run](#look-into-a-run)), which find what the tuned scenarios do not try, and six random fights between the side-view fighters (see [Side-View Fighters](#side-view-fighters)).
 
 The tests include the patched quad-snd's own mixer tests (`vendor\quad-snd`).
 

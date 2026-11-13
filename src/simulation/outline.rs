@@ -416,8 +416,13 @@ impl World {
                 continue;
             };
             for other in &self.outlines {
+                // Only parts in each other's way: a side-view fighter's arm
+                // held beside it meets nothing of the other fighter
+                // (`World::parts_meet`).
                 if !first(other).is_some_and(|point| {
-                    point.layer == TissueLayer::Skin && point.body != this.body
+                    point.layer == TissueLayer::Skin
+                        && point.body != this.body
+                        && self.parts_meet((this.body, this.sheet), (point.body, point.sheet))
                 }) {
                     continue;
                 }

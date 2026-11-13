@@ -206,7 +206,7 @@ pub fn swing_power(tool: ToolMode) -> f64 {
 /// arm and body behind it: Olympic boxers' gloved punches (Walilko, Viano,
 /// and Bir 2005) and untrained men's bare ones (Adamec et al. 2021, 2.93 +/-
 /// 0.81 kg) alike.
-fn tool_mass_kg(tool: ToolMode) -> f64 {
+pub(super) fn tool_mass_kg(tool: ToolMode) -> f64 {
     match tool {
         ToolMode::Sharp => 0.2,
         ToolMode::Blunt => 0.6,
@@ -445,9 +445,51 @@ struct ToolStrike {
     /// The mass that carries momentum into the body: the tool and the arm
     /// swinging it.
     inertia: f64,
-    /// A body the strike leaves alone: the puncher's own, for a fist a
-    /// figure throws (`land_fist`).
-    spares: Option<u8>,
+    /// What the strike leaves alone ([`Spared`]): nothing, for a tool in the
+    /// hand.
+    spares: Spared,
+}
+
+/// What a fist a figure throws leaves alone as it lands (`land_fist`): the
+/// puncher's own body, and the parts of other bodies that stand out of its
+/// way, as a side-view fighter's arms do while they are held beside it
+/// rather than closed in front of it (`World::stands`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Spared {
+    /// The body throwing the fist.
+    puncher: Option<u8>,
+    /// For each of the world's first bodies, a bit for each of its sheets of
+    /// flesh the fist passes (`Point::sheet`).
+    sheets: [u32; 4],
+}
+
+impl Spared {
+    /// The puncher's own body, and nothing else.
+    pub(super) fn body(puncher: u8) -> Self {
+        Self {
+            puncher: Some(puncher),
+            sheets: [0; 4],
+        }
+    }
+
+    /// And sheet `sheet` of body `body` as well.
+    pub(super) fn and_sheet(mut self, body: u8, sheet: u8) -> Self {
+        if let Some(mask) = self.sheets.get_mut(body as usize) {
+            if sheet < 32 {
+                *mask |= 1 << sheet;
+            }
+        }
+        self
+    }
+
+    /// Whether the strike leaves sheet `sheet` of body `body` alone.
+    pub(super) fn holds(&self, body: u8, sheet: u8) -> bool {
+        self.puncher == Some(body)
+            || self
+                .sheets
+                .get(body as usize)
+                .is_some_and(|mask| sheet < 32 && mask & (1 << sheet) != 0)
+    }
 }
 
 /// What a fist a figure threw did as it landed this step (`land_fist`).
@@ -811,7 +853,7 @@ impl World {
             mass,
             mass_kg: tool_mass_kg(input.tool) * input.power / swing_power(input.tool),
             inertia: mass * self.materials.tool_inertia_scale.max(EPSILON),
-            spares: None,
+            spares: Spared::default(),
         };
         // A hand carries and swings any tool closely, but presses one into the
         // body no harder than an arm can push, whatever the tool weighs.
@@ -1493,7 +1535,7 @@ impl World {
             self.bruise_around_blow(&shape, peak_blow, strike);
         }
         if strike.profile.crush_tear_scale > 0.0 && peak_blow > 0.0 {
-            self.crush_tear_under_tool(strike.profile, &shape, peak_blow, None);
+            self.crush_tear_under_tool(strike.profile, &shape, peak_blow, Spared::default());
         }
 
         let reach = shape.influence + self.materials.point_spacing;
@@ -1564,11 +1606,19 @@ impl World {
     /// way this step, as the bare fist does (`move_blunt`): the centre of
     /// its knuckles' face goes from `from` to `to`, the face across
     /// `heading`, with the bare fist's weight, face, and give, and bruises,
-    /// shoves, and breaks what it meets by the same rules. It leaves the body
-    /// of `puncher` alone, whose own fist it is.
+    /// shoves, and breaks what it meets by the same rules. It leaves alone
+    /// what `spares` names: the body whose own fist it is, and whatever of
+    /// the others stands out of its way. `weight` is how much of the bare
+    /// fist's weight is behind it: all of it behind a punch thrown with the
+    /// body, less behind a jab. `sink` is how far, in pixels, its knuckles
+    /// go on into what they meet before they stop: a tool in the hand is
+    /// carried through its whole step, but a fist only as deep as the flesh
+    /// over bone gives.
     pub(super) fn land_fist(
         &mut self,
-        puncher: u8,
+        spares: Spared,
+        weight: f64,
+        sink: f64,
         from: Vec2,
         to: Vec2,
         heading: Vec2,
@@ -1577,15 +1627,15 @@ impl World {
         let tool = ToolMode::Fist;
         let profile = tool_profile(tool);
         let power = swing_power(tool);
-        let mass = self.materials.striker_mass * power * profile.mass_scale;
+        let mass = self.materials.striker_mass * power * profile.mass_scale * weight;
         let strike = ToolStrike {
             tool,
             profile,
             power,
             mass,
-            mass_kg: tool_mass_kg(tool),
+            mass_kg: tool_mass_kg(tool) * weight,
             inertia: mass * self.materials.tool_inertia_scale.max(EPSILON),
-            spares: Some(puncher),
+            spares,
         };
         let side = perpendicular(heading);
         let travel = distance(from, to);
@@ -1598,6 +1648,7 @@ impl World {
         let mut hits: Vec<Option<PointHit>> = vec![None; self.points.len()];
         let mut landing = FistLanding::default();
         let mut peak_blow: f64 = 0.0;
+        let mut sunk = 0.0;
         let mut shape = contact_shape(&tool_pose(tool, center, heading, side));
         for _ in 0..steps {
             center = add(center, scale(velocity, sub_dt));
@@ -1624,12 +1675,20 @@ impl World {
             if dot(velocity, initial_velocity) <= 0.0 {
                 break;
             }
+            // Once it has met something, the fist goes only as far in as
+            // the flesh gives.
+            if peak_blow > 0.0 {
+                sunk += speed * sub_dt;
+                if sunk >= sink {
+                    break;
+                }
+            }
         }
         self.take_blunt_hits(hits, strike);
         if peak_blow > 0.0 {
             self.bruise_around_blow(&shape, peak_blow, strike);
             if strike.profile.crush_tear_scale > 0.0 {
-                self.crush_tear_under_tool(strike.profile, &shape, peak_blow, Some(puncher));
+                self.crush_tear_under_tool(strike.profile, &shape, peak_blow, spares);
             }
         }
         let start = contact_shape(&tool_pose(tool, from, heading, side));
@@ -1640,7 +1699,7 @@ impl World {
             .enumerate()
             .filter(|&(index, point)| {
                 !point.pinned
-                    && point.body != puncher
+                    && !spares.holds(point.body, point.sheet)
                     && is_flesh(&self.flesh, index)
                     && (sample_point_contact(point.position, &shape).distance <= reach
                         || sample_point_contact(point.previous, &start).distance <= reach)
@@ -1664,7 +1723,10 @@ impl World {
         let reach = shape.influence * BRUISE_HALO;
         let load = blow * 0.58 * strike.profile.tissue_push_scale * BRUISE_HALO_SHARE;
         for (index, point) in self.points.iter_mut().enumerate() {
-            if point.pinned || !is_flesh(&self.flesh, index) || strike.spares == Some(point.body) {
+            if point.pinned
+                || !is_flesh(&self.flesh, index)
+                || strike.spares.holds(point.body, point.sheet)
+            {
                 continue;
             }
             // The face itself bruised what it touched; this is the ring
@@ -1718,7 +1780,10 @@ impl World {
         let bruising_share = hypot(velocity.x, velocity.y) / FIRM_SWING_SPEED;
         let base_strength = 0.58 * strike.profile.tissue_push_scale * (0.85 + strike.power * 0.15);
         for (index, point) in self.points.iter_mut().enumerate() {
-            if point.pinned || !is_flesh(&self.flesh, index) || strike.spares == Some(point.body) {
+            if point.pinned
+                || !is_flesh(&self.flesh, index)
+                || strike.spares.holds(point.body, point.sheet)
+            {
                 continue;
             }
             let point_contact = sample_point_contact(point.position, shape);
@@ -1773,7 +1838,7 @@ impl World {
             let mut bone = self.bones[i];
             // The spine lies behind the trunk, out of reach of a blow to the
             // front of the body, and is never drawn.
-            if bone.kind == BoneKind::Spine || strike.spares == Some(bone.body) {
+            if bone.kind == BoneKind::Spine || strike.spares.holds(bone.body, bone.sheet) {
                 continue;
             }
             let pair = closest_segment_points(shape.axis_start, shape.axis_end, bone.a, bone.b);
@@ -2040,7 +2105,7 @@ impl World {
         profile: ToolProfile,
         shape: &ToolContactShape,
         blow: f64,
-        spares: Option<u8>,
+        spares: Spared,
     ) {
         let influence = shape.influence;
         let mut events = Vec::new();
@@ -2048,7 +2113,7 @@ impl World {
             let spring = self.springs[spring_index];
             if spring.broken
                 || !self.spring_in_flesh(spring)
-                || spares == Some(self.points[spring.a].body)
+                || spares.holds(self.points[spring.a].body, self.points[spring.a].sheet)
             {
                 continue;
             }

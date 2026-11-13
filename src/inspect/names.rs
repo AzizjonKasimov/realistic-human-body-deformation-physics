@@ -1,6 +1,7 @@
 //! Names for what the inspection tools talk about, in words a person reads:
 //! where on the body, which bone or joint, and what did it. Left and right
-//! are as seen on screen.
+//! are as seen on screen; a side-view fighter's arms and legs are its lead
+//! ones, nearer the other fighter, and its rear ones.
 
 use crate::simulation::{
     Actor, BonePart, BoneSegment, Limb, Measure, OrganKind, Subject, TissueLayer, ToolMode, Vec2,
@@ -48,13 +49,19 @@ fn whose(world: &World, body: u8) -> &'static str {
 }
 
 /// Whose a bone is and the side it lies on, by where it was built: a limb
-/// swung across the body is still on its own side.
+/// swung across the body is still on its own side. A side-view fighter's
+/// limbs are its lead and rear ones, and its trunk has no sides.
 fn bone_side(world: &World, bone: &BoneSegment) -> String {
-    format!(
-        "{}{}",
-        whose(world, bone.body),
+    let side = if world.is_fighter(bone.body as usize) {
+        match bone.limb {
+            Limb::LeftArm | Limb::LeftLeg => "lead ",
+            Limb::RightArm | Limb::RightLeg => "rear ",
+            Limb::None => "",
+        }
+    } else {
         side(world, bone.body, (bone.home_a.x + bone.home_b.x) * 0.5)
-    )
+    };
+    format!("{}{side}", whose(world, bone.body))
 }
 
 fn distance_to_segment(at: Vec2, a: Vec2, b: Vec2) -> f64 {
@@ -70,13 +77,57 @@ fn distance_to_segment(at: Vec2, a: Vec2, b: Vec2) -> f64 {
 
 /// The bone nearest `at`, whole or broken, by index.
 pub fn nearest_bone(world: &World, at: Vec2) -> Option<usize> {
-    world
-        .bones()
-        .iter()
-        .enumerate()
-        .map(|(index, bone)| (distance_to_segment(at, bone.a, bone.b), index))
-        .min_by(|p, q| p.0.total_cmp(&q.0))
-        .map(|(_, index)| index)
+    nearest_bone_of(world, at, None)
+}
+
+/// The bone nearest `at` among those of the flesh `part`, a body and a sheet
+/// of its flesh, or among them all with `None` or where that flesh has no
+/// bone.
+fn nearest_bone_of(world: &World, at: Vec2, part: Option<(u8, u8)>) -> Option<usize> {
+    let nearest = |part: Option<(u8, u8)>| {
+        world
+            .bones()
+            .iter()
+            .enumerate()
+            .filter(|(_, bone)| part.is_none_or(|part| (bone.body, bone.sheet) == part))
+            .map(|(index, bone)| (distance_to_segment(at, bone.a, bone.b), index))
+            .min_by(|p, q| p.0.total_cmp(&q.0))
+            .map(|(_, index)| index)
+    };
+    nearest(part).or_else(|| nearest(None))
+}
+
+/// The flesh an event's subject is of: its body, and, of a side-view
+/// fighter, the sheet of its flesh (`Point::sheet`); `None` for a subject
+/// that is of no one piece of flesh.
+pub fn subject_part(world: &World, subject: Subject) -> Option<(u8, u8)> {
+    let of_point = |index: usize| {
+        world
+            .points()
+            .get(index)
+            .map(|point| (point.body, point.sheet))
+    };
+    match subject {
+        Subject::Point(index) => of_point(index),
+        Subject::Spring(index) => world
+            .springs()
+            .get(index)
+            .and_then(|spring| of_point(spring.a)),
+        Subject::SkinTie(index) => world
+            .attachments()
+            .get(index)
+            .and_then(|tie| of_point(tie.skin_point)),
+        Subject::BoneTie(index) => world
+            .bone_attachments()
+            .get(index)
+            .and_then(|tie| of_point(tie.point)),
+        Subject::Triangle(index) => world
+            .triangles()
+            .get(index)
+            .and_then(|triangle| of_point(triangle.a)),
+        Subject::Bone(index) => world.bones().get(index).map(|bone| (bone.body, bone.sheet)),
+        _ => None,
+    }
 }
 
 /// The part of the body a bone of `part` runs through, as a place.
@@ -99,7 +150,16 @@ fn region(part: BonePart) -> &'static str {
 /// Where `at` is on the body, by the bone it lies over: "the left forearm",
 /// "the chest".
 pub fn place_name(world: &World, at: Vec2) -> String {
-    let Some(index) = nearest_bone(world, at) else {
+    place_name_on(world, at, None)
+}
+
+/// Where `at` is on the flesh `part`, a body and a sheet of its flesh
+/// ([`subject_part`]), by the bone of that flesh it lies over; anywhere on
+/// any body with `None`. Two side-view fighters' arms and trunks lie across
+/// each other on the screen, and named by the nearest bone of them all, a
+/// split in one fighter's chest read as one in the other's forearm.
+pub fn place_name_on(world: &World, at: Vec2, part: Option<(u8, u8)>) -> String {
+    let Some(index) = nearest_bone_of(world, at, part) else {
         return "the body".to_string();
     };
     let bone = &world.bones()[index];
@@ -184,11 +244,12 @@ fn layer_name(layer: TissueLayer) -> &'static str {
 
 /// What an event happened to, by name.
 pub fn subject_name(world: &World, subject: Subject) -> String {
+    let part = subject_part(world, subject);
     let point_place = |index: usize| {
         world
             .points()
             .get(index)
-            .map(|point| place_name(world, point.position))
+            .map(|point| place_name_on(world, point.position, part))
     };
     match subject {
         Subject::Nothing => String::new(),
@@ -196,7 +257,7 @@ pub fn subject_name(world: &World, subject: Subject) -> String {
             Some(point) => format!(
                 "{} at {}",
                 layer_name(point.layer),
-                place_name(world, point.position)
+                place_name_on(world, point.position, part)
             ),
             None => format!("point {index}"),
         },
@@ -211,7 +272,7 @@ pub fn subject_name(world: &World, subject: Subject) -> String {
                 format!(
                     "a {} fiber at {}",
                     layer_name(spring.layer),
-                    place_name(world, middle)
+                    place_name_on(world, middle, part)
                 )
             }
             None => format!("fiber {index}"),

@@ -300,7 +300,7 @@ impl World {
 
     /// Turns `piece` about its centre by the angular impulse `impulse` over
     /// a substep `h` long, its flesh following as `push_piece`'s does.
-    fn turn_piece(&mut self, piece: &BonePiece, impulse: f64, h: f64) {
+    pub(super) fn turn_piece(&mut self, piece: &BonePiece, impulse: f64, h: f64) {
         let turn = impulse * h / piece.inertia;
         self.move_piece(piece, Vec2::default(), turn);
     }
@@ -311,7 +311,7 @@ impl World {
     /// the centre rather than the window's origin, so two fighters standing
     /// as mirror images move alike to the last bit: turned about the origin,
     /// a punch's two fighters stood half a pixel off mirror images.
-    fn move_piece(&mut self, piece: &BonePiece, shift: Vec2, turn: f64) {
+    pub(super) fn move_piece(&mut self, piece: &BonePiece, shift: Vec2, turn: f64) {
         let motion = &mut self.side_motion[piece.bone];
         motion.0 = add(motion.0, shift);
         motion.1 += turn;

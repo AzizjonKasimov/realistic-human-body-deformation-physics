@@ -216,6 +216,7 @@ impl World {
             part: old.part,
             limb: old.limb,
             body: old.body,
+            sheet: old.sheet,
             a: subtract(center, along),
             b: add(center, along),
             previous_a: subtract(previous_center, along),

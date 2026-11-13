@@ -176,12 +176,33 @@ impl World {
     pub fn trace(&mut self, traced: &[Traced]) {
         self.traced = traced.to_vec();
         self.traced_stages.clear();
+        self.traced_clashes.clear();
     }
 
     /// What each phase of the last step did to what [`World::trace`]
     /// follows, the phases that left a thing alone left out.
     pub fn traced_stages(&self) -> &[TracedStage] {
         &self.traced_stages
+    }
+
+    /// While something is traced, which limbs of two bodies pressed on each
+    /// other in each substep of the last step, and how hard: a line each.
+    pub fn traced_clashes(&self) -> &[String] {
+        &self.traced_clashes
+    }
+
+    /// Keeps, while something is traced, which limbs pressed on each other
+    /// in substep `substep`, `h` long, before they are forgotten.
+    pub(super) fn record_traced_clashes(&mut self, substep: usize, h: f64) {
+        if self.traced.is_empty() {
+            return;
+        }
+        let lines = self.clash_lines(h);
+        self.traced_clashes.extend(
+            lines
+                .into_iter()
+                .map(|line| format!("substep {}: {line}", substep + 1)),
+        );
     }
 
     fn traced_place(&self, traced: Traced) -> Option<TracedPlace> {
@@ -269,6 +290,7 @@ impl World {
     /// Runs a whole step, timing it when a clock is set.
     pub(super) fn timed_step(&mut self, step: impl FnOnce(&mut Self)) {
         self.traced_stages.clear();
+        self.traced_clashes.clear();
         self.trace_time = 0.0;
         self.trace_call = 0;
         let Some(clock) = self.phase_clock else {

@@ -471,9 +471,9 @@ impl Gesture {
     /// side of the window, and `lean=on` and `lean=off` start and stop
     /// holding a lean back (`punch2=` and `lean2=` for the second fighter).
     /// Side-view fighters (`World::command`) are told `jab`, `cross`,
-    /// `step=in`, `step=out`, `back=on` and `back=off` (leaning back), and
-    /// `duck=on` and `duck=off`, the second fighter with a 2 after the word
-    /// (`jab2`, `step2=out`, `duck2=on`).
+    /// `step=in`, `step=out`, `back=on` and `back=off` (leaning back),
+    /// `duck=on` and `duck=off`, and `block=on` and `block=off`, the second
+    /// fighter with a 2 after the word (`jab2`, `step2=out`, `block2=on`).
     /// `power=P` tries a strength other than the tool's swing power. For example
     /// `bat:-0.3,0.4:wait=10:down:0.05,0.4/12:wait=40:up:wait=30` hovers,
     /// presses, swings into the chest, leans there, and lets go.
@@ -576,9 +576,9 @@ impl Gesture {
 }
 
 /// The move `part` of a gesture tells a side-view fighter to make, if it is
-/// one: `jab`, `cross`, `step=in`, `step=out`, `back=on`, `back=off`,
-/// `duck=on`, or `duck=off`, the second fighter's with a 2 after the word.
-fn fighter_move(part: &str) -> Option<GestureStep> {
+/// one: `jab`, `cross`, `step=in`, `step=out`, and `back=`, `duck=`, and
+/// `block=` with `on` or `off`, the second fighter's with a 2 after the word.
+pub(crate) fn fighter_move(part: &str) -> Option<GestureStep> {
     let (word, value) = match part.split_once('=') {
         Some((word, value)) => (word, Some(value)),
         None => (part, None),
@@ -599,6 +599,7 @@ fn fighter_move(part: &str) -> Option<GestureStep> {
         ("step", Some("out")) => Move::StepOut,
         ("back", value) => Move::LeanBack(held(value)?),
         ("duck", value) => Move::Duck(held(value)?),
+        ("block", value) => Move::Block(held(value)?),
         _ => return None,
     };
     Some(GestureStep::Act(body, made))
@@ -655,6 +656,7 @@ impl fmt::Display for Gesture {
                         Move::StepOut => write!(f, ":step{who}=out")?,
                         Move::LeanBack(held) => write!(f, ":back{who}={}", on(held))?,
                         Move::Duck(held) => write!(f, ":duck{who}={}", on(held))?,
+                        Move::Block(held) => write!(f, ":block{who}={}", on(held))?,
                     }
                 }
             }

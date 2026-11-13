@@ -28,7 +28,8 @@ Also check that the root realistic_physics.exe's sound reaches the speakers
 .PARAMETER Deep
 Also play 2000 random blows, 100 random fights, and the moved-body tests
 (strike_scenarios --random, --fights, and --moved), which find what the
-tuned scenarios do not try.
+tuned scenarios do not try, and six random fights between the side-view
+fighters (the test random_fights_leave_the_fighters_whole).
 #>
 param(
     [switch]$SkipDiagnostics,
@@ -68,6 +69,7 @@ if ($Deep) {
     Measure-Step "Random blows" { Invoke-Cargo -Arguments @("run", "--release", "--bin", "strike_scenarios", "--", "output\strike_scenarios.csv", "--random", "2000") -Label "Play 2000 random blows" }
     Measure-Step "Random fights" { Invoke-Cargo -Arguments @("run", "--release", "--bin", "strike_scenarios", "--", "output\strike_scenarios.csv", "--fights", "100") -Label "Play 100 random fights" }
     Measure-Step "Moved-body tests" { Invoke-Cargo -Arguments @("run", "--release", "--bin", "strike_scenarios", "--", "output\strike_scenarios.csv", "--moved") -Label "Replay the sweeps with the body moved" }
+    Measure-Step "Random side-on fights" { Invoke-Cargo -Arguments @("test", "--release", "--lib", "random_fights_leave_the_fighters_whole", "--", "--ignored") -Label "Play six random fights between the side-view fighters" }
 }
 
 if (-not $SkipDiagnostics) {

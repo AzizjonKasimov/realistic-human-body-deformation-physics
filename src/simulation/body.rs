@@ -727,6 +727,7 @@ fn joint_drive(joint: Joint) -> JointDrive {
         aim: 0.0,
         swing: 0.0,
         swing_speed: 0.0,
+        rise: 0.0,
     }
 }
 

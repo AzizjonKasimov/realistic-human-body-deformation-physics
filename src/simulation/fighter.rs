@@ -99,7 +99,7 @@ fn hinge_drive(hinge: Hinge) -> (f64, f64) {
         Hinge::Shoulder(_) => 90.0,
         Hinge::Elbow(_) => 65.0,
         Hinge::Wrist(_) => 14.0,
-        Hinge::Hip(_) => 200.0,
+        Hinge::Hip(_) => HIP_STRENGTH,
         Hinge::Knee(_) => 200.0,
         Hinge::Ankle(_) => 110.0,
     };
@@ -115,6 +115,20 @@ fn hinge_drive(hinge: Hinge) -> (f64, f64) {
     };
     (stiffness, strength)
 }
+
+/// How strongly the muscles across one hip turn it at most, in newton metres
+/// (`hinge_drive`): both hips' together are what keeps a fighter's pelvis
+/// tilted as its moves have it (`mover.rs`, `CARRY_TILT_LIMIT`).
+pub(super) const HIP_STRENGTH: f64 = 200.0;
+
+/// How long a fighter's neck muscles take to change how hard they pull by
+/// their whole strength, in seconds (`JointDrive::rise`): struck, a head
+/// moves off before the neck's muscles answer, whose activity peaked 78 to
+/// 114 ms after the head's acceleration did in rear-impact tests
+/// (`docs/INJURY_REFERENCE.md`, Punches). Answering at once, they stopped a
+/// head a cross had struck within a step: it moved off at 1.2 m/s where the
+/// blow's momentum gives it about 3.5.
+const NECK_RISE_SECONDS: f64 = 0.08;
 
 /// How far from its aim a fighter's joint is when its muscles pull their
 /// hardest, in radians (`hinge_drive`; `Materials::punch_full_pull` is the
@@ -200,6 +214,26 @@ impl Rig {
         }
         self.shoulder_slide.y = -self.shoulder_slide.y;
     }
+}
+
+/// How many sheets of flesh a fighter is made of.
+pub(super) const SHEETS: usize = Part::FAR_TO_NEAR.len();
+
+/// The side whose arm sheet `sheet` of a fighter's flesh is part of, if it
+/// is part of an arm.
+pub(super) fn arm_of_sheet(sheet: u8) -> Option<Side> {
+    match Part::FAR_TO_NEAR.get(sheet as usize)? {
+        Part::UpperArm(side) | Part::Forearm(side) => Some(*side),
+        _ => None,
+    }
+}
+
+/// The sheet of a fighter's flesh that is the forearm and hand on `side`.
+pub(super) fn forearm_sheet(side: Side) -> u8 {
+    Part::FAR_TO_NEAR
+        .iter()
+        .position(|part| *part == Part::Forearm(side))
+        .unwrap_or(0) as u8
 }
 
 /// The limb a side's arm or leg is: the lead side's are the body's left.
@@ -640,6 +674,10 @@ fn add_side_skeleton(
             aim: 0.0,
             swing: 0.0,
             swing_speed: 0.0,
+            rise: match hinge {
+                Hinge::Neck | Hinge::Head => NECK_RISE_SECONDS,
+                _ => 0.0,
+            },
         }
     };
     let join = |world: &mut World,
@@ -711,6 +749,7 @@ fn add_side_skeleton(
                     aim: 0.0,
                     swing: 0.0,
                     swing_speed: 0.0,
+                    rise: 0.0,
                 },
             );
         }
@@ -885,7 +924,7 @@ pub fn side_fighter_frames_at(spacing: f64) -> [BodyFrame; 2] {
 /// How far apart two side-view fighters' hips stand at the start, in body
 /// heights: out of reach of each other's fists, a step away from landing
 /// one.
-pub const SIDE_FIGHTER_SPACING: f64 = 0.88;
+pub const SIDE_FIGHTER_SPACING: f64 = 0.78;
 
 /// Two side-view fighters facing each other, the viewer's left one first:
 /// one fighter built where the scenarios stand a body and moved to its
@@ -1032,12 +1071,81 @@ mod tests {
 
     /// Prints how the joints of a fighter's arm follow their aims through a
     /// move (`RP_MOVE=cross cargo test --release --lib print_fighter_move --
-    /// --ignored --nocapture`).
+    /// --ignored --nocapture`); with `RP_BLOCK=1` it closes its block first
+    /// and makes the move out of it.
     #[test]
     #[ignore]
     fn print_fighter_move() {
         let mut world = create_side_fighters(Materials::default());
         let dt = world.materials.fixed_dt;
+        // `RP_MOVES=0:duck=on,60:step=out,90:step=out` makes those moves on
+        // those steps instead, each written as a gesture writes it
+        // (`scenarios.rs`), and prints how the trunk and the legs follow.
+        if let Ok(script) = std::env::var("RP_MOVES") {
+            let moves: Vec<(usize, usize, Move)> = script
+                .split(',')
+                .filter_map(|part| {
+                    let (step, word) = part.split_once(':')?;
+                    match crate::scenarios::fighter_move(word)? {
+                        crate::scenarios::GestureStep::Act(body, made) => {
+                            Some((step.parse().ok()?, body, made))
+                        }
+                        _ => None,
+                    }
+                })
+                .collect();
+            let steps = std::env::var("RP_STEPS")
+                .ok()
+                .and_then(|steps| steps.parse().ok())
+                .unwrap_or_else(|| moves.iter().map(|made| made.0).max().unwrap_or(0) + 120);
+            let rig = world.bodies[0].fighter.clone().unwrap();
+            let watched = [
+                ("back", Hinge::Back),
+                ("mid", Hinge::Mid),
+                ("neck", Hinge::Neck),
+                ("hip", Hinge::Hip(Side::Lead)),
+                ("hip'", Hinge::Hip(Side::Rear)),
+                ("knee", Hinge::Knee(Side::Lead)),
+                ("knee'", Hinge::Knee(Side::Rear)),
+                ("ankle", Hinge::Ankle(Side::Lead)),
+                ("ankle'", Hinge::Ankle(Side::Rear)),
+            ];
+            for step in 0..steps {
+                let mut input = InputState::default();
+                for (slot, (_, body, made)) in
+                    moves.iter().filter(|made| made.0 == step).enumerate()
+                {
+                    input.moves[slot] = Some((*body, *made));
+                }
+                world.step(dt, &input, crate::scenarios::SCENARIO_WIDTH);
+                if step % 5 != 0 {
+                    continue;
+                }
+                let pelvis = world.bones[rig.pelvis];
+                let mut line = format!(
+                    "step {step:3}: head {:3.0} cm off its pose, pelvis at {:+4.0} deg",
+                    world.head_off_pose(0).unwrap_or(0.0) * 100.0,
+                    libm::atan2(pelvis.b.y - pelvis.a.y, pelvis.b.x - pelvis.a.x).to_degrees(),
+                );
+                for (name, hinge) in watched {
+                    let index = rig.hinge(hinge);
+                    let joint = world.bone_joints[index];
+                    line.push_str(&format!(
+                        "  {name} {:+.2}/{:+.2} ({:+.0}{})",
+                        joint.drive.swing,
+                        world.joint_turn(index).unwrap_or(0.0),
+                        world.joint_torque(index),
+                        if joint.subluxated { ", out" } else { "" },
+                    ));
+                }
+                println!("{line}");
+            }
+            println!(
+                "each joint: aim/turn in radians (torque in N m); torn joints {}, slipped {}",
+                world.stats.broken_bone_joints, world.stats.bone_joint_subluxations
+            );
+            return;
+        }
         let made = match std::env::var("RP_MOVE").as_deref() {
             Ok("jab") => Move::Jab,
             Ok("step") => Move::StepIn,
@@ -1054,15 +1162,41 @@ mod tests {
         let watched = [
             ("shoulder", rig.hinge(Hinge::Shoulder(side))),
             ("elbow", rig.hinge(Hinge::Elbow(side))),
+            ("wrist", rig.hinge(Hinge::Wrist(side))),
             ("back", rig.hinge(Hinge::Back)),
             ("knee", rig.hinge(Hinge::Knee(Side::Lead))),
         ];
-        for step in 0..90 {
+        let from_block = std::env::var("RP_BLOCK").is_ok();
+        let moves_at = if from_block { 40 } else { 5 };
+        // `RP_STEPS=600` plays that many steps and prints every tenth, with
+        // where the pose puts the head and where it is.
+        let long: Option<usize> = std::env::var("RP_STEPS")
+            .ok()
+            .and_then(|steps| steps.parse().ok());
+        for step in 0..long.unwrap_or(moves_at + 85) {
             let mut input = InputState::default();
-            if step == 5 {
+            if step == 0 && from_block {
+                input.moves[1] = Some((0, Move::Block(true)));
+            }
+            if step == moves_at {
                 input.moves[0] = Some((0, made));
             }
             world.step(dt, &input, crate::scenarios::SCENARIO_WIDTH);
+            if long.is_some() {
+                if step % 10 == 0 {
+                    let (skull, pelvis) = (world.bones[rig.skull], world.bones[rig.pelvis]);
+                    let head = lerp(skull.a, skull.b, 0.5);
+                    println!(
+                        "step {step:3}: head ({:.0}, {:.0}), hips ({:.0}, {:.0}); {}",
+                        head.x,
+                        head.y,
+                        pelvis.b.x,
+                        pelvis.b.y,
+                        world.mover_line(0)
+                    );
+                }
+                continue;
+            }
             let mut line = format!("step {step:3}:");
             for (name, index) in watched {
                 let joint = world.bone_joints[index];
@@ -1088,11 +1222,494 @@ mod tests {
         );
     }
 
-    /// Two fighters making moves at random for `seconds`, as players
-    /// hammering the keys would, from `seed`.
-    fn random_fight(seed: u64, seconds: f64) -> World {
-        let mut world = create_side_fighters(Materials::default());
+    /// Prints what a jab and a cross do at several distances, into an open
+    /// guard and into a block: how fast the fist lands, where it bruises,
+    /// how hard it presses the skull, how far it knocks the head and the
+    /// hips (`cargo test --release --lib print_fighter_punches -- --ignored
+    /// --nocapture`; `RP_STORY=1` adds what the journal kept).
+    #[test]
+    #[ignore]
+    fn print_fighter_punches() {
+        let story = std::env::var("RP_STORY").is_ok();
+        let one = fighter();
+        let mm = one.mm_per_px();
+        // What each bone weighs with the flesh held to it (`sides.rs`).
+        let rig = one.bodies[0].fighter.clone().unwrap();
+        for (name, bone) in [
+            ("head", rig.skull),
+            ("neck", rig.cervical),
+            ("chest", rig.thoracic),
+        ] {
+            let flesh: f64 = one
+                .points
+                .iter()
+                .zip(&one.point_holds)
+                .map(|(point, hold)| {
+                    (0..2)
+                        .filter(|&slot| hold.posture.bones[slot] == bone)
+                        .map(|slot| point.mass * sides::share_of(hold.posture.weights[slot]))
+                        .sum::<f64>()
+                })
+                .sum();
+            println!(
+                "the {name}'s bone with its flesh weighs {:.1} kg",
+                (flesh + one.bones[bone].mass) * KG_PER_MASS
+            );
+        }
+        let detail = std::env::var("RP_DETAIL").is_ok();
+        let mut tally: std::collections::BTreeMap<String, [f64; 13]> = Default::default();
+        for spacing in (0..46).map(|step| 0.50 + step as f64 * 0.005) {
+            let pair = side_fighters_from(&one, spacing);
+            for (made, blocked) in [
+                (Move::Jab, false),
+                (Move::Cross, false),
+                (Move::Jab, true),
+                (Move::Cross, true),
+            ] {
+                // `RP_ONLY=cross` or `jab`, and `RP_BLOCK=0` or `1`, play
+                // only those.
+                let only = std::env::var("RP_ONLY").unwrap_or_default();
+                let block = std::env::var("RP_BLOCK").unwrap_or_default();
+                if (only == "cross" && made != Move::Cross)
+                    || (only == "jab" && made != Move::Jab)
+                    || (block == "0" && blocked)
+                    || (block == "1" && !blocked)
+                {
+                    continue;
+                }
+                let mut world = pair.clone();
+                world.keep_journal();
+                let dt = world.materials.fixed_dt;
+                let rig = world.bodies[1].fighter.clone().unwrap();
+                let own = world.bodies[0].fighter.clone().unwrap();
+                let side = if made == Move::Jab {
+                    Side::Lead
+                } else {
+                    Side::Rear
+                };
+                let skull = world.bones[rig.skull];
+                let turn =
+                    |bone: &BoneSegment| libm::atan2(bone.b.y - bone.a.y, bone.b.x - bone.a.x);
+                let (head_then, hips_then) = (turn(&skull), world.bones[rig.pelvis].b.x);
+                let (mut fastest, mut pressed, mut turned, mut shoved): (f64, f64, f64, f64) =
+                    (0.0, 0.0, 0.0, 0.0);
+                let (mut head_speed, mut head_moved): (f64, f64) = (0.0, 0.0);
+                let middle = |bone: &BoneSegment| lerp(bone.a, bone.b, 0.5);
+                let head_from_hips =
+                    |world: &World| middle(&world.bones[rig.skull]).x - world.bones[rig.pelvis].b.x;
+                let stood = head_from_hips(&world);
+                for step in 0..70 {
+                    let mut input = InputState::default();
+                    if step == 0 && blocked {
+                        input.moves[0] = Some((1, Move::Block(true)));
+                    }
+                    if step == 20 {
+                        input.moves[1] = Some((0, made));
+                    }
+                    let hand = world.bones[own.hands[side.index()]];
+                    let head = middle(&world.bones[rig.skull]);
+                    world.step(dt, &input, crate::scenarios::SCENARIO_WIDTH);
+                    let now = world.bones[own.hands[side.index()]];
+                    fastest = fastest.max(distance(hand.b, now.b) / dt * mm * 0.001);
+                    if step > 20 {
+                        let speed = distance(head, middle(&world.bones[rig.skull])) / dt;
+                        head_speed = head_speed.max(speed * mm * 0.001);
+                        head_moved = head_moved.max((head_from_hips(&world) - stood).abs());
+                    }
+                    let skull = world.bones[rig.skull];
+                    pressed = pressed.max(skull.break_load / skull.fracture_impulse);
+                    turned = turned.max(wrap_angle(turn(&skull) - head_then).abs());
+                    shoved = shoved.max((world.bones[rig.pelvis].b.x - hips_then).abs());
+                }
+                let landed: Vec<f64> = world
+                    .journal()
+                    .map(|journal| {
+                        journal
+                            .events
+                            .iter()
+                            .filter(|event| {
+                                event.kind == EventKind::PunchTurnedBack
+                                    && event.measure == Measure::Speed
+                            })
+                            .map(|event| event.value)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let mut reddened = [0usize; 2];
+                for point in world.points.iter().filter(|point| point.body == 1) {
+                    if point.flush > 0.01 || point.contusion > 0.01 {
+                        reddened[usize::from(arm_of_sheet(point.sheet).is_some())] += 1;
+                    }
+                }
+                let landed_speed = landed.first().copied().unwrap_or(0.0);
+                let key = format!("{made:?}{}", if blocked { " into a block" } else { "" });
+                let sums = tally.entry(key).or_default();
+                sums[0] += 1.0;
+                sums[1] += f64::from(!landed.is_empty());
+                sums[2] += landed_speed;
+                sums[3] += head_speed;
+                sums[4] += f64::from(world.stats.broken_skin > 0);
+                sums[5] += f64::from(world.stats.broken_bone_joints > 0);
+                sums[6] += f64::from(world.stats.bone_joint_subluxations > 0);
+                sums[7] += f64::from(world.stats.fractured_bones > 0);
+                if !landed.is_empty() {
+                    sums[8] += f64::from(reddened[0] > 0);
+                    sums[9] += f64::from(reddened[1] > 0);
+                    sums[10] += head_moved * mm * 0.1;
+                    sums[11] = sums[11].max(pressed);
+                    sums[12] += turned.to_degrees();
+                }
+                if !detail && !story {
+                    continue;
+                }
+                println!(
+                    "{spacing:.3} apart, {made:?}{}: fist up to {fastest:.1} m/s, landed at {landed:.1?} m/s; reddened points head and trunk {}, arms {}; skull pressed {pressed:.2} of its strength, head up to {head_speed:.1} m/s and {:.1} cm off its hips, turned {:.0} deg, hips shoved {:.1} cm; torn joints {}, skin {}, muscle {}, broken bones {}",
+                    if blocked { " into a block" } else { "" },
+                    reddened[0],
+                    reddened[1],
+                    head_moved * mm * 0.1,
+                    turned.to_degrees(),
+                    shoved * mm * 0.1,
+                    world.stats.broken_bone_joints,
+                    world.stats.broken_skin,
+                    world.stats.broken_muscle,
+                    world.stats.fractured_bones,
+                );
+                if story {
+                    if let Some(journal) = world.journal() {
+                        for line in crate::inspect::story(&world, journal) {
+                            println!("    {line}");
+                        }
+                    }
+                }
+            }
+        }
+        for (key, sums) in tally {
+            let landed = sums[1].max(1.0);
+            println!(
+                "{key}: landed in {:.0} of {:.0} runs, at {:.1} m/s on average; of those it reddened the head or trunk in {:.0} and the arms in {:.0}, moved the head {:.1} cm off its hips and turned it {:.0} deg on average (up to {:.1} m/s), pressed the skull with at most {:.2} of its strength; runs with skin torn {:.0}, a joint torn {:.0}, a joint slipped {:.0}, a bone broken {:.0}",
+                sums[1],
+                sums[0],
+                sums[2] / landed,
+                sums[8],
+                sums[9],
+                sums[10] / landed,
+                sums[12] / landed,
+                sums[3] / sums[0],
+                sums[11],
+                sums[4],
+                sums[5],
+                sums[6],
+                sums[7],
+            );
+        }
+    }
+
+    /// Two fighters `spacing` body heights apart, a journal kept.
+    fn pair(spacing: f64) -> World {
+        let mut world = side_fighters_from(&fighter(), spacing);
+        world.keep_journal();
+        world
+    }
+
+    /// Plays the steps `steps` of `world`, the fighters making the moves
+    /// `moves` gives them: each a step, a fighter, and its move. Returns the
+    /// fastest an end of any bone moved in a step, in metres a second.
+    fn play(
+        world: &mut World,
+        steps: std::ops::Range<usize>,
+        moves: &[(usize, usize, Move)],
+    ) -> f64 {
         let dt = world.materials.fixed_dt;
+        let mut fastest = 0.0_f64;
+        for step in steps {
+            let mut input = InputState::default();
+            for (slot, &(_, body, made)) in moves.iter().filter(|made| made.0 == step).enumerate() {
+                input.moves[slot] = Some((body, made));
+            }
+            world.step(dt, &input, crate::scenarios::SCENARIO_WIDTH);
+            fastest = fastest.max(fastest_bone(world, dt));
+        }
+        fastest
+    }
+
+    /// How many points of body `body` a blow has reddened or bruised: of its
+    /// head and trunk, and of its arms.
+    fn reddened(world: &World, body: u8) -> [usize; 2] {
+        let mut reddened = [0; 2];
+        for point in world.points.iter().filter(|point| point.body == body) {
+            if point.flush > 0.01 || point.contusion > 0.01 {
+                reddened[usize::from(arm_of_sheet(point.sheet).is_some())] += 1;
+            }
+        }
+        reddened
+    }
+
+    /// How fast each fist that landed met what it hit, in metres a second.
+    fn landed(world: &World) -> Vec<f64> {
+        world.journal().map_or(Vec::new(), |journal| {
+            journal
+                .events
+                .iter()
+                .filter(|event| {
+                    event.kind == EventKind::PunchTurnedBack && event.measure == Measure::Speed
+                })
+                .map(|event| event.value)
+                .collect()
+        })
+    }
+
+    /// Everything a fight has torn, put out of joint, or broken.
+    fn hurt(world: &World) -> i32 {
+        torn_so_far(world) + world.stats.fractured_bones
+    }
+
+    /// A cross goes through the other fighter's open hands and lands on its
+    /// head, as fast as a trained boxer's; with the other blocking, it lands
+    /// on the forearms, and the head behind them is untouched. Neither tears
+    /// anything.
+    #[test]
+    fn a_punch_goes_through_open_hands_and_a_block_stops_it() {
+        let both = pair(0.65);
+        let mut open = both.clone();
+        play(&mut open, 0..45, &[(5, 0, Move::Cross)]);
+        let [head, arms] = reddened(&open, 1);
+        assert!(
+            head > 0 && arms == 0,
+            "a cross into open hands reddened {head} points of the head and trunk and {arms} of the arms"
+        );
+        let speeds = landed(&open);
+        assert!(
+            speeds
+                .first()
+                .is_some_and(|speed| (7.0..11.5).contains(speed)),
+            "a cross into open hands landed at {speeds:.1?} m/s"
+        );
+        assert_eq!(hurt(&open), 0, "a cross into open hands tore something");
+
+        let mut blocked = both;
+        play(
+            &mut blocked,
+            0..60,
+            &[(0, 1, Move::Block(true)), (20, 0, Move::Cross)],
+        );
+        let [head, arms] = reddened(&blocked, 1);
+        assert!(
+            arms > 0 && head == 0,
+            "a blocked cross reddened {head} points of the head and trunk and {arms} of the arms"
+        );
+        assert_eq!(hurt(&blocked), 0, "a blocked cross tore something");
+    }
+
+    /// Fighters step no nearer each other than the nearest two fighters
+    /// stand, and two that step in on the same step share the room left
+    /// between them, so that neither is favoured: they stay each other's
+    /// mirror images.
+    #[test]
+    fn fighters_step_no_nearer_than_they_stand() {
+        let mut world = pair(0.60);
+        let height = world.bodies[0].fighter.as_ref().unwrap().height * world.mm_per_px() * 0.001;
+        let stood = hips_apart(&world);
+        let both = |step: usize| [(step, 0, Move::StepIn), (step, 1, Move::StepIn)];
+        play(&mut world, 0..62, &[both(0), both(30)].concat());
+        let apart = hips_apart(&world);
+        assert!(
+            apart < stood - 0.05 * height && (apart - 0.50 * height).abs() < 0.02 * height,
+            "stepping in from {stood:.2} m apart, the fighters' hips ended {apart:.2} m apart, where the nearest they stand is {:.2}",
+            0.50 * height
+        );
+        let middle = crate::scenarios::SCENARIO_WIDTH * 0.5;
+        let half = world.points.len() / 2;
+        let uneven = (0..half)
+            .map(|index| {
+                let (a, b) = (
+                    world.points[index].position,
+                    world.points[half + index].position,
+                );
+                (a.x + b.x - 2.0 * middle).abs().max((a.y - b.y).abs())
+            })
+            .fold(0.0, f64::max);
+        assert!(
+            uneven < 1.0e-3,
+            "stepping in together, the fighters stood {uneven:.2e} px off mirror images"
+        );
+    }
+
+    /// A fighter that ducks and steps back twice stays in the pose its
+    /// moves put it in. Its legs keep its hips tilted as its moves have them
+    /// (`Carry`): held by its feet alone, one of them in the air, it tipped
+    /// forward about its hips until its head hung a metre from where its
+    /// moves put it.
+    #[test]
+    fn a_ducking_fighter_stepping_back_keeps_its_pose() {
+        let mut world = pair(SIDE_FIGHTER_SPACING);
+        let moves = [
+            (0, 0, Move::Duck(true)),
+            (25, 0, Move::StepOut),
+            (51, 0, Move::StepOut),
+        ];
+        let mut farthest = 0.0_f64;
+        for step in 0..85 {
+            play(&mut world, step..step + 1, &moves);
+            if step >= 25 {
+                farthest = farthest.max(world.head_off_pose(0).unwrap_or(0.0));
+            }
+        }
+        assert!(
+            farthest < 0.20,
+            "ducking and stepping back, its head got {:.0} cm from where its moves put it",
+            farthest * 100.0
+        );
+        assert_eq!(hurt(&world), 0, "ducking and stepping back tore something");
+    }
+
+    /// Two fighters blocking and ducking toward each other at the nearest
+    /// they stand sit back on their hips rather than lean into each other
+    /// (`Mover::crowded`), so each still reaches the pose its moves put it
+    /// in, and nothing is flung or torn. Leaning in regardless, their blocks
+    /// met and held them 20 cm short of their poses, their muscles pressing
+    /// arm on arm.
+    #[test]
+    fn fighters_ducking_toward_each_other_sit_back() {
+        let mut world = pair(0.50);
+        let stood = hips_apart(&world);
+        let both = |made: Move| [(0, 0, made), (0, 1, made)];
+        let fastest = play(
+            &mut world,
+            0..50,
+            &[both(Move::Block(true)), both(Move::Duck(true))].concat(),
+        );
+        let sat_back = hips_apart(&world) - stood;
+        assert!(
+            sat_back > 0.15,
+            "ducking toward each other, the fighters' hips ended {:.0} cm further apart",
+            sat_back * 100.0
+        );
+        for body in 0..2 {
+            let off = world.head_off_pose(body).unwrap_or(0.0);
+            assert!(
+                off < 0.12,
+                "ducking toward the other, fighter {body}'s head ended {:.0} cm from where its moves put it",
+                off * 100.0
+            );
+        }
+        assert!(
+            fastest < 6.0,
+            "ducking toward each other, a bone moved at {fastest:.1} m/s"
+        );
+        assert_eq!(hurt(&world), 0, "ducking toward each other tore something");
+    }
+
+    /// Random fights leave the fighters whole and in their poses: six
+    /// fights of twenty seconds, both fighters making a move four times a
+    /// second (`cargo test --release --lib random_fights_leave -- --ignored`;
+    /// `verify.ps1 -Deep` runs it). `print_random_fights` prints what each
+    /// did.
+    #[test]
+    #[ignore]
+    fn random_fights_leave_the_fighters_whole() {
+        let mut fibres = 0;
+        for seed in 1..=6 {
+            let seen = random_fight_watched(seed, 20.0, None, None);
+            let stats = seen.world.stats;
+            assert_eq!(
+                (
+                    stats.broken_bone_joints,
+                    stats.bone_joint_subluxations,
+                    stats.fractured_bones
+                ),
+                (0, 0, 0),
+                "fight {seed} tore or put out a joint, or broke a bone"
+            );
+            assert!(
+                seen.fastest < 20.0,
+                "fight {seed} moved a bone at {:.1} m/s",
+                seen.fastest
+            );
+            for (body, (farthest, _)) in seen.head_off.iter().enumerate() {
+                assert!(
+                    *farthest < 0.60,
+                    "in fight {seed}, fighter {body}'s head got {:.0} cm from where its moves put it",
+                    farthest * 100.0
+                );
+            }
+            fibres += stats.broken_skin + stats.broken_muscle;
+        }
+        assert!(
+            fibres <= 3,
+            "six random fights tore {fibres} fibres of skin and muscle"
+        );
+    }
+
+    /// A random fight played, and what was seen of it.
+    struct FightSeen {
+        world: World,
+        /// How far apart the fighters' hips were, in metres, on each step
+        /// that tore something or put a joint out, and how many things it
+        /// tore; the first entry is the nearest they came, and tore nothing.
+        tears: Vec<(f64, i32)>,
+        /// Each move made: the frame, the fighter, and the move.
+        moves: Vec<(usize, usize, Move)>,
+        /// For each fighter, the farthest its head got from where its pose
+        /// put it, in metres, and the first frame it was more than 25 cm
+        /// off.
+        head_off: [(f64, Option<usize>); 2],
+        /// The fastest an end of any bone moved in a step, in metres a
+        /// second.
+        fastest: f64,
+    }
+
+    /// How fast the fastest end of any bone moved over the last step `dt`
+    /// long, in metres a second.
+    fn fastest_bone(world: &World, dt: f64) -> f64 {
+        world
+            .bones
+            .iter()
+            .map(|bone| distance(bone.a, bone.previous_a).max(distance(bone.b, bone.previous_b)))
+            .fold(0.0, f64::max)
+            / dt
+            * world.mm_per_px()
+            * 0.001
+    }
+
+    /// How far apart two fighters' hips are, in metres.
+    fn hips_apart(world: &World) -> f64 {
+        let hips = |body: usize| {
+            let rig = world.bodies[body].fighter.as_ref().unwrap();
+            let pelvis = world.bones[rig.pelvis];
+            (pelvis.a.x + pelvis.b.x) * 0.5
+        };
+        (hips(1) - hips(0)).abs() * world.mm_per_px() * 0.001
+    }
+
+    /// Everything a fight has torn or put out of joint so far.
+    fn torn_so_far(world: &World) -> i32 {
+        world.stats.broken_skin
+            + world.stats.broken_muscle
+            + world.stats.broken_bone_joints
+            + world.stats.bone_joint_subluxations
+    }
+
+    /// A random fight as [`random_fight`] plays it, with what was seen of
+    /// it. With `flung`, a speed in metres a second, it stops at the first
+    /// step that moves a bone's end faster than that, plays that step again
+    /// from where it began with that bone traced, and prints what each phase
+    /// of the step did to it. With `followed`, some frames and some bones,
+    /// it prints what each phase of each of those frames did to each of
+    /// those bones, and which limbs pressed on them.
+    fn random_fight_watched(
+        seed: u64,
+        seconds: f64,
+        flung: Option<f64>,
+        followed: Option<(std::ops::RangeInclusive<usize>, Vec<usize>)>,
+    ) -> FightSeen {
+        let mut world = create_side_fighters(Materials::default());
+        world.keep_journal();
+        let dt = world.materials.fixed_dt;
+        let mut tears = vec![(hips_apart(&world), 0)];
+        let mut moves = Vec::new();
+        let mut head_off = [(0.0_f64, None); 2];
+        let mut fastest = 0.0_f64;
         let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
         let mut next = move || {
             state ^= state << 13;
@@ -1100,16 +1717,16 @@ mod tests {
             state ^= state << 17;
             state
         };
-        let mut held = [[false; 2]; 2];
+        let mut held = [[false; 3]; 2];
         let steps = (seconds / dt) as usize;
-        for _ in 0..steps {
+        for frame in 0..steps {
             let mut input = InputState::default();
             for body in 0..2 {
                 // A move about four times a second.
                 if next() % 15 != 0 {
                     continue;
                 }
-                let made = match next() % 8 {
+                let made = match next() % 10 {
                     0 | 1 => Move::Jab,
                     2 | 3 => Move::Cross,
                     4 => Move::StepIn,
@@ -1118,16 +1735,159 @@ mod tests {
                         held[body][0] = !held[body][0];
                         Move::LeanBack(held[body][0])
                     }
-                    _ => {
+                    7 => {
                         held[body][1] = !held[body][1];
                         Move::Duck(held[body][1])
                     }
+                    _ => {
+                        held[body][2] = !held[body][2];
+                        Move::Block(held[body][2])
+                    }
                 };
                 input.moves[body] = Some((body, made));
+                moves.push((frame + 1, body, made));
+            }
+            let before = flung.map(|_| world.clone());
+            let torn = torn_so_far(&world);
+            let follows = followed
+                .as_ref()
+                .filter(|(frames, _)| frames.contains(&(frame + 1)));
+            if let Some((_, bones)) = follows {
+                let traced: Vec<Traced> = bones.iter().map(|&bone| Traced::Bone(bone)).collect();
+                world.trace(&traced);
             }
             world.step(dt, &input, crate::scenarios::SCENARIO_WIDTH);
+            if let Some((_, bones)) = follows {
+                println!("    frame {}: moves {:?}", frame + 1, &input.moves[..2]);
+                // Where each fighter's head and hips are, and what it is
+                // doing.
+                for body in 0..2 {
+                    let rig = world.bodies[body].fighter.as_ref().unwrap();
+                    let (skull, pelvis) = (world.bones[rig.skull], world.bones[rig.pelvis]);
+                    let head = lerp(skull.a, skull.b, 0.5);
+                    println!(
+                        "      fighter {body}: head ({:.0}, {:.0}), hips ({:.0}, {:.0}); {}",
+                        head.x,
+                        head.y,
+                        pelvis.b.x,
+                        pelvis.b.y,
+                        world.mover_line(body),
+                    );
+                }
+                for (target, &bone) in bones.iter().enumerate() {
+                    let segment = world.bones[bone];
+                    println!(
+                        "      bone {bone} ({} of body {}, {:?}), {:?}, from ({:.0}, {:.0}) to ({:.0}, {:.0})",
+                        segment.part.name(),
+                        segment.body,
+                        segment.limb,
+                        world.stands(segment.body, segment.sheet),
+                        segment.a.x,
+                        segment.a.y,
+                        segment.b.x,
+                        segment.b.y,
+                    );
+                    for stage in world.traced_stages() {
+                        let moved = hypot(stage.moved.x, stage.moved.y);
+                        if stage.target == target && (moved > 1.0 || stage.turned.abs() > 0.02) {
+                            println!(
+                                "        {:>20} at {:.2}: moved it ({:+.1}, {:+.1}) px, turned it {:+.3} rad",
+                                stage.phase, stage.time, stage.moved.x, stage.moved.y, stage.turned
+                            );
+                        }
+                    }
+                    let named = format!("bone {bone} (");
+                    for line in world.traced_clashes() {
+                        if line.contains(&named) && !line.ends_with(": 0 N") {
+                            println!("        {line}");
+                        }
+                    }
+                }
+                world.trace(&[]);
+            }
+            fastest = fastest.max(fastest_bone(&world, dt));
+            for (body, off) in head_off.iter_mut().enumerate() {
+                let now = world.head_off_pose(body).unwrap_or(0.0);
+                off.0 = off.0.max(now);
+                if now > 0.25 && off.1.is_none() {
+                    off.1 = Some(frame + 1);
+                }
+            }
+            // `RP_POSTURE=10` prints, every tenth frame, how far each head
+            // is from where its pose puts it, and what each fighter is
+            // doing.
+            let every: Option<usize> = std::env::var("RP_POSTURE")
+                .ok()
+                .and_then(|frames| frames.parse().ok());
+            if every.is_some_and(|every| (frame + 1) % every.max(1) == 0) && followed.is_none() {
+                println!(
+                    "    frame {}: heads {:.0} and {:.0} cm off their poses
+      {}
+      {}",
+                    frame + 1,
+                    world.head_off_pose(0).unwrap_or(0.0) * 100.0,
+                    world.head_off_pose(1).unwrap_or(0.0) * 100.0,
+                    world.mover_line(0),
+                    world.mover_line(1),
+                );
+            }
+            // The first entry keeps the nearest the fighters came.
+            let apart = hips_apart(&world);
+            tears[0].0 = tears[0].0.min(apart);
+            if torn_so_far(&world) > torn {
+                tears.push((apart, torn_so_far(&world) - torn));
+            }
+            let (Some(limit), Some(mut before)) = (flung, before) else {
+                continue;
+            };
+            let metres = world.mm_per_px() * 0.001;
+            let fastest = (0..world.bones.len())
+                .map(|index| {
+                    let (now, then) = (world.bones[index], before.bones[index]);
+                    (
+                        distance(now.a, then.a).max(distance(now.b, then.b)) / dt * metres,
+                        index,
+                    )
+                })
+                .max_by(|p, q| p.0.total_cmp(&q.0))
+                .unwrap();
+            if fastest.0 > limit {
+                let bone = world.bones[fastest.1];
+                println!(
+                    "frame {}: bone {} ({} of body {}, {:?}) moved at {:.1} m/s; moves this step {:?}",
+                    world.journal().map_or(0, |journal| journal.steps.len()),
+                    fastest.1,
+                    bone.part.name(),
+                    bone.body,
+                    bone.limb,
+                    fastest.0,
+                    input.moves
+                );
+                before.trace(&[Traced::Bone(fastest.1)]);
+                before.step(dt, &input, crate::scenarios::SCENARIO_WIDTH);
+                // Which limbs pressed on each other in each substep.
+                for line in before.traced_clashes() {
+                    println!("    {line}");
+                }
+                for stage in before.traced_stages() {
+                    let moved = hypot(stage.moved.x, stage.moved.y);
+                    if moved > 2.0 {
+                        println!(
+                            "    {:>24}: moved it ({:+.1}, {:+.1}) px, turned it {:+.2} rad",
+                            stage.phase, stage.moved.x, stage.moved.y, stage.turned
+                        );
+                    }
+                }
+                break;
+            }
         }
-        world
+        FightSeen {
+            world,
+            tears,
+            moves,
+            head_off,
+            fastest,
+        }
     }
 
     /// Prints what random fights do to the fighters, and how long a step
@@ -1136,10 +1896,71 @@ mod tests {
     #[test]
     #[ignore]
     fn print_random_fights() {
-        for seed in 1..=6 {
+        // `RP_SEED=3` plays that fight alone and prints everything its
+        // journal kept up to the first joint that tore.
+        let only: Option<u64> = std::env::var("RP_SEED")
+            .ok()
+            .and_then(|seed| seed.parse().ok());
+        // `RP_FIGHTS=24` plays that many fights instead of six.
+        let fights: u64 = std::env::var("RP_FIGHTS")
+            .ok()
+            .and_then(|fights| fights.parse().ok())
+            .unwrap_or(6);
+        for seed in 1..=fights {
+            if only.is_some_and(|only| only != seed) {
+                continue;
+            }
             let started = std::time::Instant::now();
             let seconds = 20.0;
-            let world = random_fight(seed, seconds);
+            // `RP_FLUNG=30` stops at the first bone moved faster than 30 m/s
+            // and prints which phase moved it.
+            let flung = std::env::var("RP_FLUNG")
+                .ok()
+                .and_then(|speed| speed.parse().ok());
+            let FightSeen {
+                world,
+                tears,
+                moves,
+                head_off,
+                fastest,
+            } = random_fight_watched(seed, seconds, flung, None);
+            // `RP_WHY=8` with `RP_SEED` plays the fight again and follows,
+            // through the eight frames up to the first thing torn or put
+            // out, the bones it happened at: a joint's two bones, or the
+            // bones a torn fibre's two ends are held to.
+            let why: Option<usize> = std::env::var("RP_WHY")
+                .ok()
+                .and_then(|frames| frames.parse().ok());
+            let first_hurt = world.journal().and_then(|journal| {
+                journal.events.iter().find_map(|event| {
+                    let bones = match (event.kind, event.subject) {
+                        (EventKind::JointSlipped | EventKind::JointTorn, Subject::Joint(joint)) => {
+                            let joint = world.bone_joints.get(joint)?;
+                            vec![joint.a, joint.b]
+                        }
+                        (EventKind::SkinTorn | EventKind::MuscleTorn, Subject::Spring(spring)) => {
+                            let spring = world.springs.get(spring)?;
+                            let mut bones: Vec<usize> = [spring.a, spring.b]
+                                .iter()
+                                .map(|&point| world.point_holds[point].posture.bones[0])
+                                .collect();
+                            bones.dedup();
+                            bones
+                        }
+                        _ => return None,
+                    };
+                    Some((event.step as usize + 1, bones))
+                })
+            });
+            if let (Some(frames), Some((hurt, bones)), true) = (why, first_hurt, only.is_some()) {
+                println!("  why the first thing tore, at frame {hurt}:");
+                random_fight_watched(
+                    seed,
+                    hurt as f64 * world.materials.fixed_dt,
+                    None,
+                    Some((hurt.saturating_sub(frames)..=hurt, bones)),
+                );
+            }
             let steps = seconds / world.materials.fixed_dt;
             println!(
                 "seed {seed}: joints torn {}, slipped {}, bones broken {}, skin torn {}, muscle torn {}, bruises {}, {:.2} ms a step",
@@ -1151,6 +1972,106 @@ mod tests {
                 world.stats.contusion_events,
                 started.elapsed().as_secs_f64() * 1000.0 / steps,
             );
+            println!("    the fastest a bone moved was {fastest:.1} m/s");
+            // How well each body followed its moves.
+            for (body, (farthest, first)) in head_off.iter().enumerate() {
+                println!(
+                    "    fighter {body}'s head got {:.0} cm from where its pose put it{}",
+                    farthest * 100.0,
+                    first.map_or(String::new(), |frame| format!(
+                        ", more than 25 cm from frame {frame}"
+                    )),
+                );
+                // With `RP_SEED`, every move either fighter made up to then.
+                if let (Some(first), true) = (first, only.is_some()) {
+                    for (frame, mover, made) in &moves {
+                        if frame <= first {
+                            println!("      frame {frame}: fighter {mover} {made:?}");
+                        }
+                    }
+                }
+            }
+            // How near the fighters stood when things tore: they begin
+            // `SIDE_FIGHTER_SPACING` apart.
+            let within = |from: f64, to: f64| -> i32 {
+                tears[1..]
+                    .iter()
+                    .filter(|(apart, _)| (from..to).contains(apart))
+                    .map(|(_, torn)| torn)
+                    .sum()
+            };
+            println!(
+                "    hips {:.2} m apart to begin with, nearest {:.2} m; torn with the hips under 0.6 m apart {}, to 0.9 m {}, to 1.2 m {}, farther {}",
+                hips_apart(&create_side_fighters(Materials::default())),
+                tears[0].0,
+                within(0.0, 0.6),
+                within(0.6, 0.9),
+                within(0.9, 1.2),
+                within(1.2, f64::INFINITY),
+            );
+            // What tore, slipped, or broke, from the journal.
+            if let Some(journal) = world.journal() {
+                let story = crate::inspect::story(&world, journal);
+                if only.is_some() {
+                    let until = story
+                        .iter()
+                        .position(|line| {
+                            ["joint torn", "skin torn", "muscle torn"]
+                                .iter()
+                                .any(|word| line.contains(word))
+                        })
+                        .map_or(story.len(), |at| at + 4);
+                    for line in &story[until.saturating_sub(40)..until.min(story.len())] {
+                        println!("    {line}");
+                    }
+                    // The moves made in the second and a half before the
+                    // first joint was put out or torn.
+                    let hurt = journal
+                        .events
+                        .iter()
+                        .find(|event| {
+                            matches!(
+                                event.kind,
+                                EventKind::JointSlipped
+                                    | EventKind::JointTorn
+                                    | EventKind::SkinTorn
+                                    | EventKind::MuscleTorn
+                            )
+                        })
+                        .map_or(usize::MAX, |event| event.step as usize + 1);
+                    let lately = hurt.saturating_sub(90)..=hurt;
+                    for (frame, body, made) in &moves {
+                        if lately.contains(frame) {
+                            println!("    frame {frame}: fighter {body} {made:?}");
+                        }
+                    }
+                    // And the punches that landed or gave way in it.
+                    for event in &journal.events {
+                        if event.kind == EventKind::PunchTurnedBack
+                            && lately.contains(&(event.step as usize + 1))
+                        {
+                            println!(
+                                "    frame {}: punch turned back, {:?} by {:?}, {:?} {:.1} (limit {:.1})",
+                                event.step + 1,
+                                event.subject,
+                                event.by,
+                                event.measure,
+                                event.value,
+                                event.limit
+                            );
+                        }
+                    }
+                    continue;
+                }
+                for line in story {
+                    if ["torn", "slipped", "broke", "came loose"]
+                        .iter()
+                        .any(|word| line.contains(word))
+                    {
+                        println!("    {}", line.trim());
+                    }
+                }
+            }
         }
     }
 

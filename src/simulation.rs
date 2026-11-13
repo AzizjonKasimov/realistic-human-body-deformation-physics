@@ -2044,6 +2044,13 @@ pub struct World {
     /// The fists figures threw pressing on another body this step
     /// (`punch.rs`, `tools.rs`).
     fist_contacts: Vec<tools::FistContact>,
+    /// The fists side-view fighters landed this step, each waiting to share
+    /// its momentum with the piece it landed on (`mover.rs`).
+    fist_blows: Vec<mover::FistBlow>,
+    /// The parts of two side-view fighters that are passing each other, each
+    /// a body and a sheet of its flesh, the lower body's first
+    /// (`World::note_passing_parts`).
+    passing_parts: Vec<[(u8, u8); 2]>,
     /// Which points belonged to flesh at the start of this step (see
     /// [`World::flesh_points`]); flesh torn away is not there to touch.
     flesh: Vec<bool>,
@@ -2068,6 +2075,9 @@ pub struct World {
     /// through the step the phase being run is (`phases.rs`).
     traced: Vec<Traced>,
     traced_stages: Vec<TracedStage>,
+    /// While something is traced, which limbs of two bodies pressed on each
+    /// other in each substep of the last step, a line each (`clash.rs`).
+    traced_clashes: Vec<String>,
     trace_time: f64,
     trace_call: usize,
     /// What has happened to the body, when a journal is kept
@@ -2169,6 +2179,8 @@ impl World {
             flesh_ties: Vec::new(),
             blunt_knock: Vec::new(),
             fist_contacts: Vec::new(),
+            fist_blows: Vec::new(),
+            passing_parts: Vec::new(),
             flesh: Vec::new(),
             body_height: blood::STANDARD_BODY_HEIGHT,
             pending_cuts: Vec::new(),
@@ -2178,6 +2190,7 @@ impl World {
             phase_times: PhaseTimes::default(),
             traced: Vec::new(),
             traced_stages: Vec::new(),
+            traced_clashes: Vec::new(),
             trace_time: 0.0,
             trace_call: 0,
             journal: None,
@@ -2832,8 +2845,11 @@ impl World {
         for (body, held) in input.leans.into_iter().flatten() {
             self.hold_lean(body, held);
         }
-        for (body, made) in input.moves.into_iter().flatten() {
-            self.command(body, made);
+        // Before any fighter's move changes what its arms are doing.
+        self.note_passing_parts();
+        let moves: Vec<(usize, Move)> = input.moves.into_iter().flatten().collect();
+        if !moves.is_empty() {
+            self.command_all(&moves);
         }
         self.timed("punches", |world| world.drive_punches(dt));
         self.timed("leans", |world| world.drive_leans(dt));
@@ -6006,6 +6022,11 @@ impl World {
                 &mut candidate_points,
             );
             for &point_index in &candidate_points {
+                // A broken piece lies in its own flesh
+                // (`BoneSegment::lies_in_flesh_of`).
+                if !bone.lies_in_flesh_of(&self.points[point_index]) {
+                    continue;
+                }
                 if !self.consume_fragment_tissue_check() {
                     continue;
                 }
@@ -6216,7 +6237,7 @@ impl World {
                     continue;
                 }
                 let support = self.bones[bone_index];
-                if free_bone_fragment(support) {
+                if free_bone_fragment(support) || !fragment.lies_with(&support) {
                     continue;
                 }
                 // The spine lies behind the trunk, behind whatever a blow to
@@ -6453,7 +6474,7 @@ impl World {
                     continue;
                 }
                 let pair = if i < j { (i, j) } else { (j, i) };
-                if !seen_pairs.insert(pair) {
+                if !a.lies_with(&self.bones[j]) || !seen_pairs.insert(pair) {
                     continue;
                 }
                 if !self.consume_fragment_pair_check() {
@@ -6609,13 +6630,14 @@ impl World {
         }
     }
 
-    /// How far the flesh within `radius` of `at` moved this step, on average,
-    /// or `None` with none there.
-    fn flesh_travel_near(&self, at: Vec2, radius: f64) -> Option<Vec2> {
+    /// How far the flesh `bone` lies in moved this step within `radius` of
+    /// `at`, on average, or `None` with none there.
+    fn flesh_travel_near(&self, bone: &BoneSegment, at: Vec2, radius: f64) -> Option<Vec2> {
         let mut total = Vec2::default();
         let mut count = 0.0;
         for (index, point) in self.points.iter().enumerate() {
             if point.pinned
+                || !bone.lies_in_flesh_of(point)
                 || !is_flesh(&self.flesh, index)
                 || distance(point.position, at) > radius
             {
@@ -6651,7 +6673,7 @@ impl World {
         // bone it left behind, which cuts nothing.
         let travel = subtract(tip, previous_tip);
         let through = self
-            .flesh_travel_near(tip, radius)
+            .flesh_travel_near(&bone, tip, radius)
             .map_or(travel, |flesh| subtract(travel, flesh));
         let speed = hypot(travel.x, travel.y).min(hypot(through.x, through.y))
             / self.materials.fixed_dt.max(EPSILON);
@@ -6679,7 +6701,7 @@ impl World {
         let mut emissions = Vec::new();
 
         for (index, point) in self.points.iter_mut().enumerate() {
-            if point.pinned || !is_flesh(&self.flesh, index) {
+            if point.pinned || !bone.lies_in_flesh_of(point) || !is_flesh(&self.flesh, index) {
                 continue;
             }
             let delta = subtract(point.position, tip);
@@ -6750,7 +6772,7 @@ impl World {
             let b = self.points[spring.b];
             let mid = midpoint(a.position, b.position);
             let d = distance(mid, tip);
-            if d > radius * 1.18 {
+            if d > radius * 1.18 || !bone.lies_in_flesh_of(&a) {
                 continue;
             }
             let contact = 1.0 - d / (radius * 1.18);
@@ -6847,7 +6869,10 @@ impl World {
             }
             let point = self.points[attachment.point];
             let d = distance(point.position, tip);
-            if d > radius * 1.12 || impulse < self.materials.bone_attachment_break_impulse * 0.38 {
+            if d > radius * 1.12
+                || !bone.lies_in_flesh_of(&point)
+                || impulse < self.materials.bone_attachment_break_impulse * 0.38
+            {
                 continue;
             }
             self.bone_attachments[i].broken = true;
@@ -6886,7 +6911,7 @@ impl World {
                     / 3.0,
             };
             let d = distance(centroid, tip);
-            if d > radius * 1.28 {
+            if d > radius * 1.28 || !bone.lies_in_flesh_of(&self.points[triangle.a]) {
                 continue;
             }
             let contact = 1.0 - d / (radius * 1.28);
@@ -7345,6 +7370,7 @@ impl World {
             pinned: old.pinned,
             limb: old.limb,
             body: old.body,
+            sheet: old.sheet,
             cover: old.cover,
             cover_from: cover_break,
             cover_to: old.cover_to,
@@ -7547,7 +7573,7 @@ impl World {
             ..old
         };
         if !open {
-            self.bruise_tissue_around_fracture(crack, old.radius, load);
+            self.bruise_tissue_around_fracture(&old, crack, old.radius, load);
             self.count_fracture(old.body as usize, old.part, old.kind, load);
             if butterfly {
                 self.chip_butterfly(&old, crack, previous_crack, home_crack, dir, normal);
@@ -7583,7 +7609,7 @@ impl World {
         );
         // Scaled to the bone, so an open break in a thin shin or forearm tears
         // out around the bone instead of through the whole limb.
-        self.damage_tissue_around_fracture(crack, old.radius * 1.6 + overload * 3.0, load);
+        self.damage_tissue_around_fracture(&old, crack, old.radius * 1.6 + overload * 3.0, load);
         self.count_fracture(old.body as usize, old.part, old.kind, load);
         self.chip_splinter(
             &old,
@@ -7621,6 +7647,7 @@ impl World {
             part: old.part,
             limb: old.limb,
             body: old.body,
+            sheet: old.sheet,
             a: Vec2 {
                 x: crack.x - dir.x * chip_length * 0.45 + normal.x * snap * 0.35,
                 y: crack.y - dir.y * chip_length * 0.45 + normal.y * snap * 0.35,
@@ -7814,15 +7841,26 @@ impl World {
         self.debug.last_fracture_impulse = self.debug.last_fracture_impulse.max(load);
     }
 
-    /// A closed fracture: the bone ends tear the muscle right at the break and
-    /// bruise the flesh around it, while the skin and the bleeding stay inside.
-    fn bruise_tissue_around_fracture(&mut self, center: Vec2, bone_radius: f64, load: f64) {
+    /// A closed fracture of `bone`: the bone ends tear the muscle right at
+    /// the break and bruise the flesh around it, the flesh the bone lies in
+    /// (`BoneSegment::lies_in_flesh_of`), while the skin and the bleeding
+    /// stay inside.
+    fn bruise_tissue_around_fracture(
+        &mut self,
+        bone: &BoneSegment,
+        center: Vec2,
+        bone_radius: f64,
+        load: f64,
+    ) {
         let tear_radius = bone_radius * 1.5;
         let bruise_radius = (bone_radius * 3.8).max(24.0);
         let bruise_load = self.materials.contusion_load_threshold * 1.6;
         for i in 0..self.springs.len() {
             let spring = self.springs[i];
-            if spring.broken || spring.layer != TissueLayer::Muscle {
+            if spring.broken
+                || spring.layer != TissueLayer::Muscle
+                || !bone.lies_in_flesh_of(&self.points[spring.a])
+            {
                 continue;
             }
             let a = self.points[spring.a].position;
@@ -7850,7 +7888,7 @@ impl World {
         let severity = (load / self.materials.bone_fracture_impulse.max(1.0)).clamp(0.5, 2.0);
         for (index, point) in self.points.iter_mut().enumerate() {
             let d = distance(point.position, center);
-            if d > bruise_radius {
+            if d > bruise_radius || !bone.lies_in_flesh_of(point) {
                 continue;
             }
             let falloff = 1.0 - d / bruise_radius;
@@ -7878,13 +7916,21 @@ impl World {
         }
     }
 
-    fn damage_tissue_around_fracture(&mut self, center: Vec2, radius: f64, impulse: f64) {
+    /// An open fracture of `bone` tears the flesh the bone lies in
+    /// (`BoneSegment::lies_in_flesh_of`) round the break.
+    fn damage_tissue_around_fracture(
+        &mut self,
+        bone: &BoneSegment,
+        center: Vec2,
+        radius: f64,
+        impulse: f64,
+    ) {
         let radius_sq = radius * radius;
         let skin_radius = radius * 0.62;
         let mut events = Vec::new();
         for i in 0..self.springs.len() {
             let spring = self.springs[i];
-            if spring.broken {
+            if spring.broken || !bone.lies_in_flesh_of(&self.points[spring.a]) {
                 continue;
             }
             let a = self.points[spring.a];
@@ -7966,7 +8012,7 @@ impl World {
             let muscle = self.points[attachment.muscle_point];
             let skin_d = distance_sq(skin.position, center);
             let muscle_d = distance_sq(muscle.position, center);
-            if skin_d.min(muscle_d) <= radius_sq {
+            if skin_d.min(muscle_d) <= radius_sq && bone.lies_in_flesh_of(&skin) {
                 let mid = midpoint(skin.position, muscle.position);
                 self.note(
                     EventKind::SkinLoosened,
@@ -8013,7 +8059,9 @@ impl World {
                     + self.points[triangle.c].position.y)
                     / 3.0,
             };
-            if distance_sq(centroid, center) <= radius_sq {
+            if distance_sq(centroid, center) <= radius_sq
+                && bone.lies_in_flesh_of(&self.points[triangle.a])
+            {
                 self.triangles[i].damage = self.triangles[i].damage.max(1.08);
                 self.triangles[i].failed = true;
                 self.note(

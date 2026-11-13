@@ -11,7 +11,7 @@
 //! across in front of the body. Each arm punches to its own side.
 
 use super::soft::{perpendicular, JointTurn, Softness};
-use super::tools::{FistContact, FistLanding};
+use super::tools::{FistContact, FistLanding, Spared};
 use super::*;
 
 /// One joint a punch drives, and the two pieces of the arm's chain it joins
@@ -679,7 +679,15 @@ impl World {
         let landings: Vec<FistLanding> = sweeps
             .iter()
             .map(|(body, _, sweep)| {
-                self.land_fist(*body as u8, sweep.from, sweep.to, sweep.heading, dt)
+                self.land_fist(
+                    Spared::body(*body as u8),
+                    1.0,
+                    f64::INFINITY,
+                    sweep.from,
+                    sweep.to,
+                    sweep.heading,
+                    dt,
+                )
             })
             .collect();
         for ((body, arm, sweep), landing) in sweeps.into_iter().zip(landings) {

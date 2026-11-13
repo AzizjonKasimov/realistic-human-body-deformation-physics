@@ -188,6 +188,25 @@ impl BoneSegment {
             2.0 / self.mass.max(EPSILON)
         }
     }
+
+    /// Whether `point` is of the flesh this bone lies in: its own body's,
+    /// and, of a side-view fighter, the sheet of its flesh the bone lies in
+    /// (`Point::sheet`). A break and its pieces harm only that flesh. Seen
+    /// from the side, an arm lies across the chest on the screen, a
+    /// fighter's own held beside it or the other fighter's as its fist
+    /// lands, and it is not round the chest's ribs: judged by where things
+    /// are on the screen alone, a rib a cross broke tore the muscle of the
+    /// fist that broke it, thirteen fibres in the step it broke and 267 by
+    /// the end of that fight.
+    pub(super) fn lies_in_flesh_of(&self, point: &Point) -> bool {
+        point.body == self.body && point.sheet == self.sheet
+    }
+
+    /// Whether `other` lies in the same flesh as this bone
+    /// (`lies_in_flesh_of`).
+    pub(super) fn lies_with(&self, other: &BoneSegment) -> bool {
+        other.body == self.body && other.sheet == self.sheet
+    }
 }
 
 impl World {
@@ -229,6 +248,7 @@ impl World {
             self.timed("punch sides", Self::measure_punches);
             self.timed("lean sides", Self::measure_leans);
             self.timed("bone pieces", Self::measure_bone_pieces);
+            self.timed("blows land", |world| world.land_fist_blows(h));
             self.timed("limbs meet", |world| world.measure_clashes(h));
             self.timed("foot pieces", Self::measure_feet);
             self.timed("joint sides", Self::measure_joint_sides);
@@ -285,6 +305,7 @@ impl World {
                     .all(|(point, &weighed)| point.inverse_mass().to_bits() == weighed.to_bits()),
                 "a point's weight changed during a substep"
             );
+            self.record_traced_clashes(substep, h);
         }
         self.join_substeps(substeps);
         self.clashes.clear();
@@ -633,6 +654,9 @@ impl World {
         }
         for hold in &mut self.hip_holds {
             hold.impulse = Vec2::default();
+            if let Some(carry) = &mut hold.carry {
+                carry.tilt_impulse = 0.0;
+            }
         }
         for hold in &mut self.foot_holds {
             hold.impulse = [Vec2::default(); 2];
