@@ -1088,6 +1088,72 @@ mod tests {
         );
     }
 
+    /// Two fighters making moves at random for `seconds`, as players
+    /// hammering the keys would, from `seed`.
+    fn random_fight(seed: u64, seconds: f64) -> World {
+        let mut world = create_side_fighters(Materials::default());
+        let dt = world.materials.fixed_dt;
+        let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut held = [[false; 2]; 2];
+        let steps = (seconds / dt) as usize;
+        for _ in 0..steps {
+            let mut input = InputState::default();
+            for body in 0..2 {
+                // A move about four times a second.
+                if next() % 15 != 0 {
+                    continue;
+                }
+                let made = match next() % 8 {
+                    0 | 1 => Move::Jab,
+                    2 | 3 => Move::Cross,
+                    4 => Move::StepIn,
+                    5 => Move::StepOut,
+                    6 => {
+                        held[body][0] = !held[body][0];
+                        Move::LeanBack(held[body][0])
+                    }
+                    _ => {
+                        held[body][1] = !held[body][1];
+                        Move::Duck(held[body][1])
+                    }
+                };
+                input.moves[body] = Some((body, made));
+            }
+            world.step(dt, &input, crate::scenarios::SCENARIO_WIDTH);
+        }
+        world
+    }
+
+    /// Prints what random fights do to the fighters, and how long a step
+    /// takes (`cargo test --release --lib print_random_fights -- --ignored
+    /// --nocapture`).
+    #[test]
+    #[ignore]
+    fn print_random_fights() {
+        for seed in 1..=6 {
+            let started = std::time::Instant::now();
+            let seconds = 20.0;
+            let world = random_fight(seed, seconds);
+            let steps = seconds / world.materials.fixed_dt;
+            println!(
+                "seed {seed}: joints torn {}, slipped {}, bones broken {}, skin torn {}, muscle torn {}, bruises {}, {:.2} ms a step",
+                world.stats.broken_bone_joints,
+                world.stats.bone_joint_subluxations,
+                world.stats.fractured_bones,
+                world.stats.broken_skin,
+                world.stats.broken_muscle,
+                world.stats.contusion_events,
+                started.elapsed().as_secs_f64() * 1000.0 / steps,
+            );
+        }
+    }
+
     /// Two fighters stand as mirror images of each other.
     #[test]
     fn two_fighters_face_each_other_as_mirror_images() {
