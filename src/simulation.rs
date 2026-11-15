@@ -333,6 +333,10 @@ pub struct Materials {
     /// body does not keep its own balance yet.
     pub hip_hold_hertz: f64,
     pub hip_hold_damping_ratio: f64,
+    /// How much of its full strength the hold that carries a side-view
+    /// fighter's hips may use (`Carry`), across, up, and in tilt: 1 as
+    /// built, 0 leaves the fighter to stand on its own legs.
+    pub carry_strength: f64,
     /// The dermis's shear modulus at small strain, in pascals, and its
     /// thickness, in metres; it stiffens `skin_stiffening_ratio` times once
     /// stretched past `skin_stiffening_stretch` of its length (`tissue.rs`).
@@ -625,6 +629,7 @@ impl Default for Materials {
             muscle_posture_hertz: 1.65,
             posture_damping_ratio: 0.2,
             hip_hold_hertz: 6.0,
+            carry_strength: 1.0,
             hip_hold_damping_ratio: 1.0,
             // Living skin's Young's modulus is about 0.5-0.6 MPa at small
             // strain (Lakhani et al. 2021), and tissue that keeps its volume

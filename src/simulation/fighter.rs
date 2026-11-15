@@ -1222,6 +1222,129 @@ mod tests {
         );
     }
 
+    /// Prints how much of each side-view fighter's weight the hold that
+    /// carries its hips bears (`Carry`), how hard it pushes them across and
+    /// turns the pelvis, how far the hips move, and how high the head stands,
+    /// through a script of moves (`cargo test --release --lib
+    /// print_fighter_support -- --ignored --nocapture`). `RP_MOVES` writes
+    /// the script as `print_fighter_move` reads it (the default steps the
+    /// left fighter in, takes a cross from the right one, jabs, ducks, and
+    /// leans back), `RP_EVERY=10` prints every tenth step, and
+    /// `RP_SET=carry_strength=0` changes settings as `--set` does: with no
+    /// hold, the fighters must stand on their own legs.
+    #[test]
+    #[ignore]
+    fn print_fighter_support() {
+        let mut materials = Materials::default();
+        if let Ok(settings) = std::env::var("RP_SET") {
+            for setting in settings.split(',').filter(|setting| !setting.is_empty()) {
+                let (name, value) = setting.split_once('=').expect("RP_SET takes name=value");
+                materials.set(name, value).unwrap();
+            }
+        }
+        let mut world = create_side_fighters(materials);
+        let dt = world.materials.fixed_dt;
+        let h = dt / world.materials.substeps as f64;
+        let script = std::env::var("RP_MOVES").unwrap_or_else(|_| {
+            "60:step=in,120:cross2,200:jab,260:duck=on,330:duck=off,380:back=on,440:back=off"
+                .to_string()
+        });
+        let moves: Vec<(usize, usize, Move)> = script
+            .split(',')
+            .filter_map(|part| {
+                let (step, word) = part.split_once(':')?;
+                match crate::scenarios::fighter_move(word)? {
+                    crate::scenarios::GestureStep::Act(body, made) => {
+                        Some((step.parse().ok()?, body, made))
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+        let steps = std::env::var("RP_STEPS")
+            .ok()
+            .and_then(|steps| steps.parse().ok())
+            .unwrap_or_else(|| moves.iter().map(|made| made.0).max().unwrap_or(0) + 120);
+        let every: usize = std::env::var("RP_EVERY")
+            .ok()
+            .and_then(|every| every.parse().ok())
+            .unwrap_or(5)
+            .max(1);
+        let weight = tissue::BODY_MASS_KG * world.materials.gravity;
+        let (newtons, newton_metres, cm) = (
+            world.newtons(),
+            world.newton_metres(),
+            world.mm_per_px() * 0.1,
+        );
+        let rigs: Vec<Rig> = world
+            .bodies
+            .iter()
+            .filter_map(|state| state.fighter.clone())
+            .collect();
+        let hips_at_start: Vec<f64> = rigs.iter().map(|rig| world.bones[rig.pelvis].b.x).collect();
+        // For each fighter: the shares of its weight held up summed, the
+        // most held up, the hardest pushed across, and the hardest turned.
+        let mut held = vec![(0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64); rigs.len()];
+        for step in 0..steps {
+            let mut input = InputState::default();
+            for (slot, (_, body, made)) in moves.iter().filter(|made| made.0 == step).enumerate() {
+                input.moves[slot] = Some((*body, *made));
+            }
+            world.step(dt, &input, crate::scenarios::SCENARIO_WIDTH);
+            let mut line = format!("step {step:3}:");
+            for (body, rig) in rigs.iter().enumerate() {
+                let (mut up, mut across, mut tilt) = (0.0, 0.0, 0.0);
+                for hold in world
+                    .hip_holds
+                    .iter()
+                    .filter(|hold| hold.bone == rig.pelvis)
+                {
+                    // The window's y runs down, so holding up is negative.
+                    up -= hold.impulse.y / h / newtons;
+                    across += hold.impulse.x / h / newtons;
+                    if let Some(carry) = hold.carry {
+                        tilt += carry.tilt_impulse / h / newton_metres;
+                    }
+                }
+                let share = up / weight;
+                let most = &mut held[body];
+                most.0 += share;
+                most.1 = most.1.max(share);
+                most.2 = most.2.max(across.abs());
+                most.3 = most.3.max(tilt.abs());
+                let skull = world.bones[rig.skull];
+                let head_height = (world.floor_y() - lerp(skull.a, skull.b, 0.5).y) * cm;
+                line.push_str(&format!(
+                    "  [{body}] held up {:3.0}%, across {:+5.0} N, tilt {:+4.0} N m, hips {:+5.1} cm, head {:3.0} cm up {:3.0} cm off pose",
+                    share * 100.0,
+                    across,
+                    tilt,
+                    (world.bones[rig.pelvis].b.x - hips_at_start[body]) * cm,
+                    head_height,
+                    world.head_off_pose(body).unwrap_or(0.0) * 100.0,
+                ));
+            }
+            if step % every == 0 {
+                println!("{line}");
+            }
+        }
+        for (body, most) in held.iter().enumerate() {
+            println!(
+                "fighter {body}: the hips' hold held up {:.0}% of its weight on average and {:.0}% at most, pushed across with up to {:.0} N, and turned the pelvis with up to {:.0} N m (its cap {:.0})",
+                most.0 / steps.max(1) as f64 * 100.0,
+                most.1 * 100.0,
+                most.2,
+                most.3,
+                // As `mover.rs` caps it: both hips' strength.
+                2.0 * HIP_STRENGTH * world.materials.carry_strength,
+            );
+        }
+        println!(
+            "torn joints {}, torn skin {}, bones broken {}",
+            world.stats.broken_bone_joints, world.stats.broken_skin, world.stats.fractured_bones
+        );
+    }
+
     /// Prints what a jab and a cross do at several distances, into an open
     /// guard and into a block: how fast the fist lands, where it bruises,
     /// how hard it presses the skull, how far it knocks the head and the

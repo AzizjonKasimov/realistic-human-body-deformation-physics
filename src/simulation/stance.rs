@@ -598,7 +598,7 @@ impl World {
                 // No harder across than the feet grip the floor, no harder
                 // up than legs bear, and never down (the window's y runs
                 // down, so holding up is negative).
-                let newtons = self.newtons() * h;
+                let newtons = self.newtons() * h * self.materials.carry_strength;
                 let total = add(hold.impulse, impulse);
                 let held = Vec2 {
                     x: total
@@ -672,7 +672,7 @@ impl World {
             let stiffness = carry.tilt_inertia * omega * omega;
             let damping = 2.0 * self.materials.hip_hold_damping_ratio * carry.tilt_inertia * omega;
             let soft = Softness::of_stiffness(stiffness, damping, piece.inertia, h);
-            let limit = carry.tilt_limit * newton_metres * h;
+            let limit = carry.tilt_limit * newton_metres * h * self.materials.carry_strength;
             let given = carry.tilt_impulse.clamp(-limit, limit);
             let total =
                 (given + soft.impulse(piece.inertia, speed, error, given)).clamp(-limit, limit);

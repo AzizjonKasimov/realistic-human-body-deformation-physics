@@ -61,6 +61,7 @@ named_settings!(
     posture_damping_ratio,
     hip_hold_hertz,
     hip_hold_damping_ratio,
+    carry_strength,
     skin_shear_modulus,
     skin_thickness,
     skin_stiffening_stretch,
