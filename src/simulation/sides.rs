@@ -67,6 +67,11 @@ pub(super) struct JointSides {
 }
 
 impl JointSides {
+    /// Where the joint holds its first bone, as the substep began.
+    pub(super) fn anchor(&self) -> Vec2 {
+        self.anchor
+    }
+
     /// How hard the two pieces are to turn against each other, or, with
     /// the piece beyond the joint `planted` on the floor, the piece before
     /// it alone, about the joint (`World::turn_joint_sides_from`).

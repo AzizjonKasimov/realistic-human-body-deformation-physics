@@ -398,9 +398,13 @@ impl Mover {
             }
             pose.hips.0 += step.by * hips;
         }
-        // Leaning back: the weight goes over the back leg and the trunk
-        // away from the punch, the chin tucked.
+        // Leaning back: the weight goes over the back leg, whose heel comes
+        // down to bear it, and the trunk away from the punch, the chin
+        // tucked. On the ball of the rear foot alone, its heel still raised
+        // as the stance has it, the weight had only that ball's width behind
+        // it, and a fighter carried by its own legs tipped over backward.
         let lean = self.lean.amount;
+        pose.feet[1].pitch *= 1.0 - lean;
         pose.hips.0 -= 0.070 * lean;
         pose.hips.1 -= 0.010 * lean;
         pose.pelvis -= 0.10 * lean;
@@ -446,6 +450,9 @@ impl Mover {
                 }
             }
         }
+        // The weight stays where the move puts the hips, however it bends
+        // the trunk.
+        profile::keep_the_weight(&mut pose);
         // The fists stand by the head, wherever the trunk has taken it, and
         // close in front of the face in a block.
         let joints = Joints::of(&pose);
@@ -616,11 +623,22 @@ impl World {
             .filter(|bone| bone.body as usize == body)
             .map(|bone| bone.mass * 0.5 * (about_hips(bone.a) + about_hips(bone.b)))
             .sum();
+        // Where the stance as built puts each end of the hips from the
+        // ankles, which legs that carry the hips hold them over as it
+        // settles, before any move does.
+        let from_ankles = self.fighter_frame(body).map(|frame| {
+            let joints = Joints::of(&profile::stance());
+            let ends = self.pelvis_ends(&frame, &joints);
+            let ankles = joints.ankle.map(|ankle| frame.world(ankle));
+            ends.map(|end| ankles.map(|ankle| subtract(end, ankle)))
+        });
         for hold in &mut self.hip_holds {
             if hold.bone == rig.pelvis {
                 hold.carry = Some(Carry {
                     offset: Vec2::default(),
                     speed: Vec2::default(),
+                    from_ankles: from_ankles
+                        .map_or([Vec2::default(); 2], |from| from[usize::from(hold.end_b)]),
                     hertz: CARRY_HERTZ,
                     limit: scale(CARRY_LIMIT, tissue::BODY_MASS_KG * STANDARD_GRAVITY),
                     tilt_hertz: CARRY_TILT_HERTZ,
@@ -1178,12 +1196,8 @@ impl World {
         joints: &Joints,
         dt: f64,
     ) {
-        let gap = self.materials.point_spacing * 0.70;
-        let (hips, sacrum) = (frame.world(joints.hips), frame.world(joints.sacrum));
-        // The pelvis's bone runs from a joint's rest gap short of the foot
-        // of the spine down to the hips (`fighter.rs`).
-        let up = normalized(subtract(sacrum, hips), Vec2 { x: 0.0, y: -1.0 });
-        let ends = [subtract(sacrum, scale(up, gap)), hips];
+        let ends = self.pelvis_ends(frame, joints);
+        let ankles = joints.ankle.map(|ankle| frame.world(ankle));
         let was = mover.last_hips.unwrap_or(ends);
         for hold in &mut self.hip_holds {
             if hold.bone != rig.pelvis {
@@ -1193,9 +1207,20 @@ impl World {
             if let Some(carry) = &mut hold.carry {
                 carry.offset = subtract(ends[end], hold.home);
                 carry.speed = scale(subtract(ends[end], was[end]), 1.0 / dt.max(EPSILON));
+                carry.from_ankles = ankles.map(|ankle| subtract(ends[end], ankle));
             }
         }
         mover.last_hips = Some(ends);
+    }
+
+    /// Where `joints` puts each end of a fighter's pelvis standing in
+    /// `frame`, its `a` end first: the pelvis's bone runs from a joint's rest
+    /// gap short of the foot of the spine down to the hips (`fighter.rs`).
+    fn pelvis_ends(&self, frame: &Frame, joints: &Joints) -> [Vec2; 2] {
+        let gap = self.materials.point_spacing * 0.70;
+        let (hips, sacrum) = (frame.world(joints.hips), frame.world(joints.sacrum));
+        let up = normalized(subtract(sacrum, hips), Vec2 { x: 0.0, y: -1.0 });
+        [subtract(sacrum, scale(up, gap)), hips]
     }
 
     /// Stands each of the fighter's feet where `joints` puts it: a foot a

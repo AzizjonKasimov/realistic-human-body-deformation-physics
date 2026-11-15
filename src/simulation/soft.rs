@@ -252,6 +252,10 @@ impl World {
             self.timed("limbs meet", |world| world.measure_clashes(h));
             self.timed("foot pieces", Self::measure_feet);
             self.timed("joint sides", Self::measure_joint_sides);
+            // Where each side-view fighter's feet stand, which its legs push
+            // its hips from (`balance.rs`), before the hold on the hips warm
+            // starts and pushes back on them.
+            self.timed("stance", Self::measure_stances);
             if self.materials.warm_starting {
                 self.warm_start_soft(h);
             } else {

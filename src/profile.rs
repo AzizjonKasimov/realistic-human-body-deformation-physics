@@ -466,6 +466,81 @@ pub(crate) fn stance() -> Pose {
     pose
 }
 
+/// How high off the floor a heel or a ball may be, in body heights, and
+/// still bear weight on it.
+const FOOT_ON_FLOOR: f64 = 0.01;
+
+/// How far inside the stretch of floor the feet touch a move keeps the
+/// weight, as a share of its length.
+const WEIGHT_MARGIN: f64 = 0.15;
+
+/// Where the body's centre of mass lies standing as `joints` place it, in
+/// body heights: each part's share of a man's mass (de Leva 1996) at the
+/// middle of its segment, the trunk in its lower, middle, and upper parts,
+/// and each arm, light and close to the shoulder in a guard, at the
+/// shoulder.
+pub(crate) fn centre_of_mass(joints: &Joints) -> Place {
+    let middle = |a: Place, b: Place| ((a.0 + b.0) * 0.5, (a.1 + b.1) * 0.5);
+    let mut parts = vec![
+        (0.0694, middle(joints.skull_base, joints.skull_top)),
+        (0.1117, middle(joints.hips, joints.sacrum)),
+        (0.1633, middle(joints.sacrum, joints.waist)),
+        (0.1596, middle(joints.waist, joints.neck)),
+    ];
+    for side in 0..2 {
+        parts.push((0.0271 + 0.0223, joints.shoulder[side]));
+        parts.push((0.1416, middle(joints.hip[side], joints.knee[side])));
+        parts.push((0.0433, middle(joints.knee[side], joints.ankle[side])));
+        parts.push((0.0137, middle(joints.heel[side], joints.ball[side])));
+    }
+    let mass: f64 = parts.iter().map(|part| part.0).sum();
+    let (x, y) = parts.iter().fold((0.0, 0.0), |sum, &(share, at)| {
+        (sum.0 + share * at.0, sum.1 + share * at.1)
+    });
+    (x / mass, y / mass)
+}
+
+/// Moves `pose`'s hips across so that its centre of mass lies where the
+/// stance's would with its hips where `pose` had them: a move sets where
+/// the hips go, and so where the weight goes, and the body keeps the weight
+/// there however the move bends the trunk, as a person ducking sits back
+/// on their heels. Carried by a hold from nowhere, the duck folded the
+/// trunk forward over hips that stayed put; standing on its own legs, its
+/// centre of mass ran past the front foot's toes and the fighter fell on
+/// its face.
+pub(crate) fn keep_the_weight(pose: &mut Pose) {
+    let stance = stance();
+    let built = Joints::of(&stance);
+    let mut wanted = centre_of_mass(&built).0 + (pose.hips.0 - stance.hips.0);
+    // No move puts the weight where the feet cannot hold it: over the
+    // stretch of floor the feet touch, from the back of the rearmost to the
+    // front of the foremost, inside its ends by a margin. A lean back that
+    // took the hips as far back as it asked put the weight 2.6 cm in front
+    // of the rear foot's ball, all the floor that foot touched with its heel
+    // raised, and the fighter tipped over backward.
+    let joints = Joints::of(pose);
+    let touching: Vec<f64> = (0..2)
+        .flat_map(|side| [joints.heel[side], joints.ball[side]])
+        .filter(|place| place.1 < FOOT_ON_FLOOR)
+        .map(|place| place.0)
+        .collect();
+    if let (Some(back), Some(front)) = (
+        touching.iter().copied().reduce(f64::min),
+        touching.iter().copied().reduce(f64::max),
+    ) {
+        let margin = (front - back) * WEIGHT_MARGIN;
+        if front - back > 2.0 * margin && front > back {
+            wanted = wanted.clamp(back + margin, front - margin);
+        }
+    }
+    // Shifting the hips shifts the trunk with them and the legs part of the
+    // way, about four fifths of the body's mass; a few turns settle it.
+    for _ in 0..3 {
+        let centre = centre_of_mass(&Joints::of(pose)).0;
+        pose.hips.0 += (wanted - centre) / 0.8;
+    }
+}
+
 /// Where the stance holds the fists' knuckles for a head at `head`: the lead
 /// fist out in front at the height of the chin, the rear fist under the
 /// chin, both below the face and, in a real stance, one each side of the

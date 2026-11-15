@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
 
+mod balance;
 mod bending;
 mod blood;
 mod bodies;
@@ -337,6 +338,20 @@ pub struct Materials {
     /// fighter's hips may use (`Carry`), across, up, and in tilt: 1 as
     /// built, 0 leaves the fighter to stand on its own legs.
     pub carry_strength: f64,
+    /// Whether a side-view fighter's legs make that hold's push, giving it
+    /// back on the feet standing on the floor (`balance.rs`), rather than it
+    /// pushing the hips from nowhere.
+    pub legs_carry: bool,
+    /// How firmly legs that carry a fighter's hips push them across toward
+    /// where its pose puts them over its feet, and keep its pelvis tilted
+    /// as the pose has it, in hertz on the body's weight and on its turning
+    /// about its hips (`balance.rs`).
+    pub legs_across_hertz: f64,
+    pub legs_tilt_hertz: f64,
+    /// How firmly those legs hold the hips up at the height the pose puts
+    /// them over the feet, on top of the weight they bear, in hertz on the
+    /// body's weight; 0 bears the weight alone.
+    pub legs_up_hertz: f64,
     /// The dermis's shear modulus at small strain, in pascals, and its
     /// thickness, in metres; it stiffens `skin_stiffening_ratio` times once
     /// stretched past `skin_stiffening_stretch` of its length (`tissue.rs`).
@@ -630,6 +645,10 @@ impl Default for Materials {
             posture_damping_ratio: 0.2,
             hip_hold_hertz: 6.0,
             carry_strength: 1.0,
+            legs_carry: true,
+            legs_across_hertz: 2.0,
+            legs_tilt_hertz: 3.0,
+            legs_up_hertz: 4.0,
             hip_hold_damping_ratio: 1.0,
             // Living skin's Young's modulus is about 0.5-0.6 MPa at small
             // strain (Lakhani et al. 2021), and tissue that keeps its volume
@@ -2133,6 +2152,17 @@ pub struct World {
     /// Each bone a joint holds with its flesh this substep (`sides.rs`),
     /// which its muscle's ties pull with that flesh.
     side_bones: Vec<bool>,
+    /// Each side-view fighter's feet standing on the floor this substep,
+    /// which its legs push its hips from (`balance.rs`); empty while its
+    /// legs do not carry its hips (`Materials::legs_carry`).
+    stances: Vec<Option<balance::Stance>>,
+    /// How hard the legs pushed each foot hold's foot this substep, as an
+    /// impulse (`balance.rs`): the weight it bears, which its grip on the
+    /// floor follows (`solve_foot_holds`).
+    foot_bearing: Vec<Vec2>,
+    /// What each body's legs pushed with, and its feet bore, over the last
+    /// substep, for the tools that print it (`balance.rs`).
+    balance_reports: Vec<balance::BalanceReport>,
     /// Each bone a tool presses this substep, which its joints hold on its
     /// light bone alone (`World::measure_tool_pressed`).
     tool_pressed: Vec<bool>,
@@ -2215,6 +2245,9 @@ impl World {
             loose_skin: Vec::new(),
             side_flesh: Vec::new(),
             side_bones: Vec::new(),
+            stances: Vec::new(),
+            foot_bearing: Vec::new(),
+            balance_reports: Vec::new(),
             tool_pressed: Vec::new(),
         }
     }

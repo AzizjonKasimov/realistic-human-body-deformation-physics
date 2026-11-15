@@ -384,6 +384,7 @@ impl World {
             if let Some(carry) = &mut hold.carry {
                 carry.offset = motion(carry.offset);
                 carry.speed = motion(carry.speed);
+                carry.from_ankles = carry.from_ankles.map(motion);
                 // A mirror image turns the other way.
                 carry.tilt_impulse = -carry.tilt_impulse;
             }

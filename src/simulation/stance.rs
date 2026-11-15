@@ -165,6 +165,10 @@ pub struct Carry {
     /// and how fast that place is moving, in pixels and pixels a second.
     pub offset: Vec2,
     pub speed: Vec2,
+    /// Where the move puts this end of the hips from each foot's ankle, the
+    /// lead foot's first, in pixels: where legs that carry the hips put them
+    /// over the feet standing where they are (`balance.rs`).
+    pub from_ankles: [Vec2; 2],
     /// How firmly the hips are held across and upward, in hertz on the
     /// body's weight.
     pub hertz: Vec2,
@@ -224,7 +228,7 @@ pub struct FootHold {
 /// weight on it: OSHA's guideline asks a walking surface for a static
 /// coefficient of friction of at least 0.5 against a shoe, which a dry floor
 /// gives or betters.
-const FOOT_FRICTION: f64 = 0.6;
+pub(super) const FOOT_FRICTION: f64 = 0.6;
 
 /// How firmly a planted foot is held, in hertz on the leg's weight, damped
 /// critically: as firmly as the hips are held, a foot standing on the floor
@@ -239,7 +243,7 @@ const LEG_MASS_KG: f64 = 0.199 * tissue::BODY_MASS_KG;
 /// How far above where it stands a foot may rise, in pixels, and still
 /// stand on the floor: past that, it has come off it and nothing holds it
 /// until it comes down again.
-const FOOT_LIFT_MARGIN: f64 = 3.0;
+pub(super) const FOOT_LIFT_MARGIN: f64 = 3.0;
 
 /// How much of a joint's turn off its guard, and of the hips' sinking, the
 /// muscles take up on each step of a new body's settling: a twelfth, so the
@@ -552,6 +556,17 @@ impl World {
             if w <= 0.0 {
                 continue;
             }
+            // Legs that carry a fighter's hips push them only from a foot on
+            // the floor (`balance.rs`).
+            let legs = if hold.carry.is_some() {
+                self.legs_carry(self.bone_body(hold.bone))
+            } else {
+                None
+            };
+            if legs == Some(false) {
+                self.hip_holds[index].impulse = Vec2::default();
+                continue;
+            }
             let (place, previous) = if hold.end_b {
                 (bone.b, bone.previous_b)
             } else {
@@ -575,15 +590,48 @@ impl World {
             // below needs to still reach its planted foot.
             let mut shift = self.bodies[self.bone_body(hold.bone)].hip_shift;
             shift.y += self.lunge_drop(&hold, shift.x);
-            let mut target = add(add(hold.home, hold.aim), shift);
+            // Legs carrying the hips set them where the pose's legs reach,
+            // not where the settling learned to hold them up (`aim`).
+            let learned = if legs == Some(true) {
+                Vec2::default()
+            } else {
+                hold.aim
+            };
+            let mut target = add(add(hold.home, learned), shift);
             let mut speed = scale(subtract(place, previous), 1.0 / h);
             let mut springs = [(stiffness, damping); 2];
             if let Some(carry) = hold.carry {
                 // A fighter's moves carry its hips: toward where the move
-                // puts them, at the speed it moves them.
+                // puts them, at the speed it moves them; legs that carry
+                // them, over the feet where they stand (`balance.rs`).
                 target = add(target, carry.offset);
+                if legs == Some(true) {
+                    let body = self.bone_body(hold.bone);
+                    if let Some(over_feet) = self.hips_over_the_feet(body, carry.from_ankles) {
+                        target = over_feet;
+                    }
+                    let posed = target.x;
+                    target.x += self.shift_over_the_feet(body);
+                    if hold.end_b {
+                        let cm = self.mm_per_px() * 0.1;
+                        if let Some(report) = self.balance_reports.get_mut(body) {
+                            report.aim_off_cm = (previous.x - target.x) * cm;
+                            report.pose_off_cm = (previous.x - posed) * cm;
+                        }
+                    }
+                }
                 speed = subtract(speed, carry.speed);
-                springs = self.carry_springs(&carry);
+                springs = if legs == Some(true) {
+                    self.carry_springs(&Carry {
+                        hertz: Vec2 {
+                            x: self.materials.legs_across_hertz,
+                            y: carry.hertz.y,
+                        },
+                        ..carry
+                    })
+                } else {
+                    self.carry_springs(&carry)
+                };
             }
             let error = subtract(previous, target);
             let (soft_x, soft_y) = (
@@ -594,16 +642,54 @@ impl World {
                 x: soft_x.impulse(masses.0, speed.x, error.x, hold.impulse.x),
                 y: soft_y.impulse(masses.1, speed.y, error.y, hold.impulse.y),
             };
+            if legs == Some(true) {
+                // Legs push the hips up with the weight above them, at the
+                // hips, and their joints, holding the pose, keep the hips'
+                // height: held up to a height of its own as well, the hold
+                // pushed the hips up with two and a half body weights while
+                // the legs' joints, bent as the pose has them, pulled them
+                // back down.
+                let up = if hold.end_b {
+                    -self.weight_on_the_legs(self.bone_body(hold.bone), h)
+                } else {
+                    0.0
+                };
+                // On top of the weight, a spring toward the height the pose
+                // puts the hips over the feet, if any (`legs_up_hertz`).
+                let hertz = self.materials.legs_up_hertz;
+                impulse.y = if hertz > 0.0 && hold.end_b {
+                    let omega = 2.0 * PI * hertz;
+                    let body = tissue::BODY_MASS_KG / KG_PER_MASS;
+                    let soft = Softness::of_stiffness(
+                        body * omega * omega,
+                        2.0 * self.materials.hip_hold_damping_ratio * body * omega,
+                        masses.1,
+                        h,
+                    );
+                    let sprung = hold.impulse.y - up;
+                    soft.impulse(masses.1, speed.y, error.y, sprung)
+                } else {
+                    up - hold.impulse.y
+                };
+            }
             if let Some(carry) = hold.carry {
                 // No harder across than the feet grip the floor, no harder
                 // up than legs bear, and never down (the window's y runs
                 // down, so holding up is negative).
                 let newtons = self.newtons() * h * self.materials.carry_strength;
                 let total = add(hold.impulse, impulse);
+                // Legs push the hips across no harder than the feet's grip
+                // on the weight they bear, half at each end of the pelvis.
+                let across = if legs == Some(true) {
+                    FOOT_FRICTION
+                        * self.weight_on_the_legs(self.bone_body(hold.bone), h)
+                        * 0.5
+                        * self.materials.carry_strength
+                } else {
+                    carry.limit.x * newtons
+                };
                 let held = Vec2 {
-                    x: total
-                        .x
-                        .clamp(-carry.limit.x * newtons, carry.limit.x * newtons),
+                    x: total.x.clamp(-across, across),
                     y: total.y.clamp(-carry.limit.y * newtons, 0.0),
                 };
                 impulse = subtract(held, hold.impulse);
@@ -613,6 +699,9 @@ impl World {
                 (Some(piece), Some(lever)) => self.push_piece(piece, lever, impulse, h),
                 _ => self.push_hip(hold, scale(impulse, w * h)),
             }
+            if legs == Some(true) {
+                self.push_back_on_the_feet(self.bone_body(hold.bone), previous, impulse, 0.0, h);
+            }
         }
         self.solve_hip_tilts(h);
     }
@@ -620,7 +709,7 @@ impl World {
     /// The pelvis `hold` carries by its `b` end with its flesh, as the
     /// substep began; how far it is turned past where its fighter's move
     /// has it, in radians; and how fast it is turning past it.
-    fn hip_tilt(&self, hold: &HipHold, h: f64) -> Option<(BonePiece, f64, f64)> {
+    pub(super) fn hip_tilt(&self, hold: &HipHold, h: f64) -> Option<(BonePiece, f64, f64)> {
         let carry = hold
             .carry
             .filter(|carry| hold.end_b && carry.tilt_limit > 0.0)?;
@@ -668,7 +757,22 @@ impl World {
             else {
                 continue;
             };
-            let omega = 2.0 * PI * carry.tilt_hertz;
+            // Legs that carry the hips turn them only from a foot on the
+            // floor, and the feet take the turn back (`balance.rs`).
+            let body = self.bone_body(hold.bone);
+            let legs = self.legs_carry(body);
+            if legs == Some(false) {
+                if let Some(carry) = &mut self.hip_holds[index].carry {
+                    carry.tilt_impulse = 0.0;
+                }
+                continue;
+            }
+            let hertz = if legs == Some(true) {
+                self.materials.legs_tilt_hertz
+            } else {
+                carry.tilt_hertz
+            };
+            let omega = 2.0 * PI * hertz;
             let stiffness = carry.tilt_inertia * omega * omega;
             let damping = 2.0 * self.materials.hip_hold_damping_ratio * carry.tilt_inertia * omega;
             let soft = Softness::of_stiffness(stiffness, damping, piece.inertia, h);
@@ -680,6 +784,9 @@ impl World {
                 carry.tilt_impulse = total;
             }
             self.turn_piece(&piece, total - given, h);
+            if legs == Some(true) {
+                self.push_back_on_the_feet(body, piece.centre, Vec2::default(), total - given, h);
+            }
         }
     }
 
@@ -690,7 +797,7 @@ impl World {
     /// shifting their hips far to one side sinks into it. Held up at their
     /// height, hips shifted a quarter metre across pulled the far foot off
     /// the floor and tore its ankle.
-    fn lunge_drop(&self, hold: &HipHold, shift: f64) -> f64 {
+    pub(super) fn lunge_drop(&self, hold: &HipHold, shift: f64) -> f64 {
         if shift == 0.0 {
             return 0.0;
         }
@@ -886,7 +993,33 @@ impl World {
                 self.foot_holds[index].impulse = [Vec2::default(); 2];
                 continue;
             }
+            // A fighter's foot its legs push on (`balance.rs`) grips by the
+            // weight really on it, the legs' push and its own leg's weight,
+            // shared by the ends of it that touch the floor, and is not held
+            // down at all: the floor only pushes. Shared half and half, a rear
+            // foot standing on its ball, its heel raised, gripped with half
+            // its weight and slid, while its heel held on to the air.
+            let foot_bone = self.bones[hold.bone];
+            let floor = self.floor_y - foot_bone.radius.max(1.0) - FOOT_LIFT_MARGIN;
+            let touching = [
+                foot_bone.previous_a.y >= floor,
+                foot_bone.previous_b.y >= floor,
+            ];
+            let bears = self.legs_carry(foot_bone.body as usize).map(|_| {
+                let pushed = self
+                    .foot_bearing
+                    .get(index)
+                    .map_or(0.0, |push| push.y.max(0.0));
+                let leg = LEG_MASS_KG * self.materials.gravity * self.newtons() * h;
+                let ends = touching.iter().filter(|&&touches| touches).count().max(1) as f64;
+                (pushed + leg) / ends
+            });
             for end in 0..2 {
+                let (weight, friction) = match bears {
+                    Some(bears) if touching[end] => (0.0, FOOT_FRICTION * bears),
+                    Some(_) => (0.0, 0.0),
+                    None => (weight, friction),
+                };
                 let bone = self.bones[hold.bone];
                 let (place, previous) = if end == 0 {
                     (bone.a, bone.previous_a)
@@ -1058,17 +1191,32 @@ impl World {
             if w <= 0.0 || hold.impulse == Vec2::default() {
                 continue;
             }
+            // Legs that carry a fighter's hips push them only from a foot on
+            // the floor, and the feet take the push back (`balance.rs`).
+            let body = self.bone_body(hold.bone);
+            let legs = if hold.carry.is_some() {
+                self.legs_carry(body)
+            } else {
+                None
+            };
+            if legs == Some(false) {
+                self.hip_holds[index].impulse = Vec2::default();
+                continue;
+            }
+            let previous = if hold.end_b {
+                bone.previous_b
+            } else {
+                bone.previous_a
+            };
             match self.bone_pieces.get(hold.bone).cloned().flatten() {
                 Some(piece) => {
-                    let previous = if hold.end_b {
-                        bone.previous_b
-                    } else {
-                        bone.previous_a
-                    };
                     let lever = subtract(previous, piece.centre);
                     self.push_piece(&piece, lever, hold.impulse, h);
                 }
                 None => self.push_hip(hold, scale(hold.impulse, w * h)),
+            }
+            if legs == Some(true) {
+                self.push_back_on_the_feet(body, previous, hold.impulse, 0.0, h);
             }
         }
         // And the turn that kept a fighter's hips tilted as its move has
@@ -1081,8 +1229,25 @@ impl World {
             else {
                 continue;
             };
+            let body = self.bone_body(hold.bone);
+            let legs = self.legs_carry(body);
+            if legs == Some(false) {
+                if let Some(carry) = &mut self.hip_holds[index].carry {
+                    carry.tilt_impulse = 0.0;
+                }
+                continue;
+            }
             if let Some(piece) = self.bone_pieces.get(hold.bone).cloned().flatten() {
                 self.turn_piece(&piece, carry.tilt_impulse, h);
+                if legs == Some(true) {
+                    self.push_back_on_the_feet(
+                        body,
+                        piece.centre,
+                        Vec2::default(),
+                        carry.tilt_impulse,
+                        h,
+                    );
+                }
             }
         }
     }

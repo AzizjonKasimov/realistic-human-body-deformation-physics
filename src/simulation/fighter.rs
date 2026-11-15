@@ -293,6 +293,14 @@ fn guide_lines(part: Part, joints: &Joints) -> Vec<(Place, Place)> {
 /// stance where `frame` puts it: `frame.origin.x` under its hips, the floor
 /// one body height below `frame.origin.y`.
 pub fn create_side_fighter_in(frame: BodyFrame, materials: Materials) -> World {
+    let mut world = unsettled_side_fighter_in(frame, materials);
+    settle_side_fighter(&mut world, frame, |_, _| {});
+    world
+}
+
+/// A side-view fighter as [`create_side_fighter_in`] builds it, standing on
+/// the floor at its soles, before it has settled under its weight.
+fn unsettled_side_fighter_in(frame: BodyFrame, materials: Materials) -> World {
     let joints = Joints::of(&profile::stance());
     let at = |place: Place| frame.point(place.0, 1.0 - place.1);
     let spacing = materials.point_spacing;
@@ -426,8 +434,7 @@ pub fn create_side_fighter_in(frame: BodyFrame, materials: Materials) -> World {
     world.bodies[0].fighter = Some(rig.clone());
 
     // It stands on the floor at its soles, its hips held up and its feet
-    // where they stand, and settles under its weight as its muscles learn
-    // to carry it, so that it rests in its stance as built.
+    // where they stand.
     world.set_floor_y(frame.point(0.0, 1.0).y);
     world.hold_hip(rig.pelvis, false);
     world.hold_hip(rig.pelvis, true);
@@ -435,6 +442,14 @@ pub fn create_side_fighter_in(frame: BodyFrame, materials: Materials) -> World {
         world.plant_foot(foot);
     }
     world.carry_fighter_hips(0);
+    world
+}
+
+/// Settles a fighter [`unsettled_side_fighter_in`] built in `frame` under
+/// its weight as its muscles learn to carry it, so that it rests in its
+/// stance as built, and gives it what moves it; `watch` sees the world after
+/// each step of the settling, for the tools that print it.
+fn settle_side_fighter(world: &mut World, frame: BodyFrame, mut watch: impl FnMut(&World, usize)) {
     let dt = world.materials.fixed_dt;
     let width = frame.origin.x * 2.0 + frame.height;
     let gravity = world.materials.gravity;
@@ -443,10 +458,10 @@ pub fn create_side_fighter_in(frame: BodyFrame, materials: Materials) -> World {
         world.materials.gravity = gravity * share * share * (3.0 - 2.0 * share);
         world.step(dt, &InputState::default(), width);
         world.learn_the_guards_weight();
+        watch(world, step);
     }
     world.materials.gravity = gravity;
     world.give_mover(0);
-    world
 }
 
 /// How many steps a new fighter settles under its own weight, its muscles
@@ -1222,6 +1237,50 @@ mod tests {
         );
     }
 
+    /// Prints what each fighter's legs pushed with over the last substep
+    /// (`balance.rs`): the push on the hips and the turn on the pelvis, and
+    /// how hard they pushed each foot standing on the floor, down and across.
+    fn print_balance_reports(world: &World) {
+        for (body, report) in world.balance_reports.iter().enumerate() {
+            let mut legs = format!(
+                "    [{body}] centre of mass {:3.0}% over the feet, capture point {:3.0}% over the planted ones, hips shifted {:+.1} cm, {:+.1} cm off the aim and {:+.1} cm off the move's place; legs push the hips ({:+5.0}, {:+5.0}) N and turn the pelvis {:+4.0} N m;",
+                report.over_feet * 100.0,
+                report.capture_over_feet * 100.0,
+                report.shift_cm,
+                report.aim_off_cm,
+                report.pose_off_cm,
+                report.push.x,
+                report.push.y,
+                report.turn
+            );
+            for (side, name) in ["lead", "rear"].iter().enumerate() {
+                if report.planted[side] {
+                    legs.push_str(&format!(
+                        " {name} foot pressed {:4.0} N down, {:+4.0} N across;",
+                        report.feet[side].y, report.feet[side].x
+                    ));
+                } else {
+                    legs.push_str(&format!(" {name} foot off the floor;"));
+                }
+            }
+            // Where each foot stands: how high its heel and ball are and
+            // how far it has slid from where it was built.
+            if let Some(rig) = world.bodies[body].fighter.as_ref() {
+                let cm = world.mm_per_px() * 0.1;
+                for (name, &foot) in ["lead", "rear"].iter().zip(&rig.feet) {
+                    let bone = world.bones[foot];
+                    legs.push_str(&format!(
+                        " {name} heel {:.1} ball {:.1} cm up, slid {:+.1} cm;",
+                        (world.floor_y() - bone.a.y) * cm,
+                        (world.floor_y() - bone.b.y) * cm,
+                        (bone.b.x - bone.home_b.x) * cm,
+                    ));
+                }
+            }
+            println!("{legs}");
+        }
+    }
+
     /// Prints how much of each side-view fighter's weight the hold that
     /// carries its hips bears (`Carry`), how hard it pushes them across and
     /// turns the pelvis, how far the hips move, and how high the head stands,
@@ -1242,7 +1301,61 @@ mod tests {
                 materials.set(name, value).unwrap();
             }
         }
+        let every: usize = std::env::var("RP_EVERY")
+            .ok()
+            .and_then(|every| every.parse().ok())
+            .unwrap_or(5)
+            .max(1);
+        // `RP_SETTLE=1` prints how one fighter settles as it is built
+        // instead, every `RP_EVERY` steps.
+        if std::env::var("RP_SETTLE").is_ok() {
+            let frame = crate::world_frame();
+            let mut world = unsettled_side_fighter_in(frame, materials);
+            let cm = world.mm_per_px() * 0.1;
+            settle_side_fighter(&mut world, frame, |world, step| {
+                if step % every != 0 {
+                    return;
+                }
+                let Some(rig) = world.bodies[0].fighter.as_ref() else {
+                    return;
+                };
+                let skull = world.bones[rig.skull];
+                let pelvis = world.bones[rig.pelvis];
+                let mut feet = String::new();
+                for (name, &foot) in ["lead", "rear"].iter().zip(&rig.feet) {
+                    let bone = world.bones[foot];
+                    let Some(hold) = world.foot_holds.iter().find(|hold| hold.bone == foot) else {
+                        continue;
+                    };
+                    feet.push_str(&format!(
+                        "; {name} heel {:+.1} ball {:+.1} cm up{}{}, slid {:+.1} cm",
+                        (world.floor_y() - bone.a.y) * cm,
+                        (world.floor_y() - bone.b.y) * cm,
+                        if hold.lifted[0] { " heel off" } else { "" },
+                        if hold.lifted[1] { " ball off" } else { "" },
+                        (bone.b.x - bone.home_b.x) * cm,
+                    ));
+                }
+                println!(
+                    "settle step {step:3}: hips {:+5.1} cm across {:+5.1} cm down, head {:3.0} cm up{feet}",
+                    (pelvis.b.x - pelvis.home_b.x) * cm,
+                    (pelvis.b.y - pelvis.home_b.y) * cm,
+                    (world.floor_y() - lerp(skull.a, skull.b, 0.5).y) * cm,
+                );
+                print_balance_reports(world);
+            });
+            return;
+        }
         let mut world = create_side_fighters(materials);
+        // `RP_SET_AFTER` changes settings once the fighters have settled.
+        if let Ok(settings) = std::env::var("RP_SET_AFTER") {
+            for setting in settings.split(',').filter(|setting| !setting.is_empty()) {
+                let (name, value) = setting
+                    .split_once('=')
+                    .expect("RP_SET_AFTER takes name=value");
+                world.materials.set(name, value).unwrap();
+            }
+        }
         let dt = world.materials.fixed_dt;
         let h = dt / world.materials.substeps as f64;
         let script = std::env::var("RP_MOVES").unwrap_or_else(|_| {
@@ -1265,11 +1378,6 @@ mod tests {
             .ok()
             .and_then(|steps| steps.parse().ok())
             .unwrap_or_else(|| moves.iter().map(|made| made.0).max().unwrap_or(0) + 120);
-        let every: usize = std::env::var("RP_EVERY")
-            .ok()
-            .and_then(|every| every.parse().ok())
-            .unwrap_or(5)
-            .max(1);
         let weight = tissue::BODY_MASS_KG * world.materials.gravity;
         let (newtons, newton_metres, cm) = (
             world.newtons(),
@@ -1326,6 +1434,7 @@ mod tests {
             }
             if step % every == 0 {
                 println!("{line}");
+                print_balance_reports(&world);
             }
         }
         for (body, most) in held.iter().enumerate() {
