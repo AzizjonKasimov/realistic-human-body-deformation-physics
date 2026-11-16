@@ -1336,8 +1336,10 @@ impl World {
     }
 
     /// Whether side-view fighter `body` has fallen, its weight run past where
-    /// any step could catch it (`Mover::fallen`).
-    pub(super) fn fighter_fallen(&self, body: usize) -> bool {
+    /// any step could catch it, or knocked out ([`World::knocked_out`]) and
+    /// gone down (`Mover::fallen`). A fallen fighter makes no more moves and
+    /// stays down, for a game's own rules about how a fight ends.
+    pub fn fighter_fallen(&self, body: usize) -> bool {
         self.bodies
             .get(body)
             .and_then(|state| state.mover.as_ref())

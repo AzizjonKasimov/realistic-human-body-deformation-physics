@@ -36,12 +36,12 @@ Builds the web version and plays the touches on a 390x844 phone.
 
 .PARAMETER Fight
 Play the site's Fight page (fight/) instead, as built with build_web.ps1 -Fight
-(so it implies -SkipBuild): tap Start, then with real fingers press PUNCH,
-hold LEAN BACK, and press the right fighter's PUNCH while still holding LEAN
-BACK, as two players sharing a phone do. It checks that the page counted the
-punch, the lean, and the second player (fight-punch, fight-lean,
-fight-two-players), and that it logged no errors. The game tells the page
-where its buttons are (window.__fightButtons).
+(so it implies -SkipBuild): tap Start, then with real fingers tap STEP IN,
+hold BLOCK and tap JAB with a second finger while it is held, tap CROSS, then
+hold DUCK and LEAN BACK in turn. It checks that the page counted each kind of move
+(fight-step, fight-punch, fight-block, fight-duck, fight-lean), and that it
+logged no errors, and prints the frame cost the page measured (?stats). The
+game tells the page where its buttons are (window.__fightButtons).
 
 .EXAMPLE
 .\tools\touch_check.ps1 -Size 844x390 -SkipBuild
@@ -79,6 +79,8 @@ if (-not (Test-Path -LiteralPath (Join-Path $siteDir "index.html"))) {
 
 $problems = [System.Collections.Generic.List[string]]::new()
 $errors = [System.Collections.Generic.List[string]]::new()
+# The Fight page's frame cost, as its ?stats measured it.
+$frameCost = $null
 
 # Fingers on the screen after a change: each @{ x; y; id }, in CSS pixels.
 # A touchStart with one more finger than before puts it down, and a touchEnd
@@ -151,7 +153,8 @@ try {
         width = $width; height = $height; deviceScaleFactor = 3; mobile = $true
     } | Out-Null
     Invoke-Cdp $page "Emulation.setTouchEmulationEnabled" @{ enabled = $true; maxTouchPoints = 5 } | Out-Null
-    $pageUrl = if ($Fight) { $url + "fight/" } else { $url }
+    # The Fight page measures its own frames with ?stats (window.__perf).
+    $pageUrl = if ($Fight) { $url + "fight/?stats" } else { $url }
     if ($Fight -and -not (Test-Path -LiteralPath (Join-Path $siteDir "fight\index.html"))) {
         throw "No Fight page in $siteDir; build it with .\tools\build_web.ps1 -Fight <the game's checkout>."
     }
@@ -207,36 +210,60 @@ return await new Promise(done => {
         foreach ($button in @(Invoke-PageScript $page "return window.__fightButtons || [];")) {
             $buttons[$button.name] = @{ x = $button.x + $button.w / 2; y = $button.y + $button.h / 2 }
         }
-        foreach ($name in @("lean1", "punch1", "punch2", "lean2")) {
+        foreach ($name in @("in1", "out1", "jab1", "cross1", "block1", "duck1", "lean1")) {
             if (-not $buttons.ContainsKey($name)) {
                 throw "The game told the page of no $name button (window.__fightButtons)."
             }
         }
-        # A tap on PUNCH.
-        Send-Fingers "touchStart" @(@{ x = $buttons.punch1.x; y = $buttons.punch1.y; id = 1 })
-        Wait-Page 0.15
-        Send-Fingers "touchEnd" @()
-        Wait-Page 1.5
-        Save-Screenshot "fight-punch.png"
-        # LEAN BACK held, and while it is, a second player's finger on the
-        # right fighter's PUNCH.
-        $lean = @{ x = $buttons.lean1.x; y = $buttons.lean1.y; id = 1 }
-        Send-Fingers "touchStart" @($lean)
-        Wait-Page 0.6
-        Send-Fingers "touchStart" @($lean, @{ x = $buttons.punch2.x; y = $buttons.punch2.y; id = 2 })
-        Wait-Page 0.15
-        Send-Fingers "touchEnd" @($lean)
-        Wait-Page 0.3
-        Save-Screenshot "fight-lean.png"
+        # A finger on one of the player's buttons, as a finger has it.
+        function Get-Finger([string]$Name, [int]$Id) {
+            return @{ x = $buttons[$Name].x; y = $buttons[$Name].y; id = $Id }
+        }
+        # A tap on a button, then the fight goes on for a while.
+        function Send-Tap([string]$Name, [double]$Then) {
+            Send-Fingers "touchStart" @(Get-Finger $Name 1)
+            Wait-Page 0.15
+            Send-Fingers "touchEnd" @()
+            Wait-Page $Then
+        }
+        # A step in, into reach.
+        Send-Tap "in1" 1.0
+        # BLOCK held, and while it is, a second finger taps JAB: the first
+        # punch, so its count says the second finger was read while the
+        # first held its button. Both fingers lift together: which finger a
+        # touchEnd lifts differs between browsers' DevTools.
+        $block = Get-Finger "block1" 1
+        Send-Fingers "touchStart" @($block)
         Wait-Page 0.5
+        Send-Fingers "touchStart" @($block, (Get-Finger "jab1" 2))
+        Wait-Page 0.15
+        Save-Screenshot "fight-block.png"
         Send-Fingers "touchEnd" @()
-        Wait-Page 1.0
+        Wait-Page 0.6
+        Send-Tap "cross1" 0.8
+        Save-Screenshot "fight-cross.png"
+        # DUCK held, then LEAN BACK held.
+        foreach ($name in @("duck1", "lean1")) {
+            Send-Fingers "touchStart" @(Get-Finger $name 1)
+            Wait-Page 0.6
+            Save-Screenshot "fight-$($name.TrimEnd('1')).png"
+            Send-Fingers "touchEnd" @()
+            Wait-Page 0.8
+        }
         Save-Screenshot "fight-after.png"
         $counted = Get-Counted
-        foreach ($name in @("fight-start", "fight-loaded", "fight-punch", "fight-lean", "fight-two-players")) {
+        foreach ($name in @("fight-start", "fight-loaded", "fight-step", "fight-punch", "fight-block", "fight-duck", "fight-lean")) {
             if ($counted -notcontains $name) {
                 $problems.Add("The page did not count $name (it counted: $($counted -join ', ')).")
             }
+        }
+        # What the page measured each second (?stats): the frame rate, and
+        # how long the game took over a frame, a simulation step and drawing.
+        $perf = @(Invoke-PageScript $page "return (window.__perfHistory || []).slice(1);")
+        if ($perf.Count -gt 0) {
+            $frameMs = ($perf | Measure-Object -Property avgMs -Average).Average
+            $p95Ms = ($perf | Measure-Object -Property p95Ms -Maximum).Maximum
+            $frameCost = "frame {0:N1} ms on average, at most {1:N1} ms in 19 of 20" -f $frameMs, $p95Ms
         }
     }
 
@@ -289,9 +316,9 @@ foreach ($line in $errors) {
     $problems.Add("The page logged $line")
 }
 Write-Host ""
-Write-Host "Touch on a $Size phone, $fps fps$(if ($Fight) { ', the Fight page' }):"
+Write-Host "Touch on a $Size phone, $fps fps$(if ($Fight) { ", the Fight page$(if ($frameCost) { ", $frameCost" })" }):"
 if ($problems.Count -eq 0 -and $Fight) {
-    Write-Host "  PUNCH punched, LEAN BACK leaned while held, two fingers played both fighters, and the console stayed clean."
+    Write-Host "  STEP IN stepped, JAB punched with BLOCK held by another finger, CROSS punched, DUCK and LEAN BACK held, and the console stayed clean."
 } elseif ($problems.Count -eq 0) {
     Write-Host "  the first touch took the hammer up without striking, the swipe struck the body, and the console stayed clean."
 } else {

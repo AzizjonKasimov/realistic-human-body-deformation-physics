@@ -11,7 +11,7 @@ use std::sync::OnceLock;
 use crate::{
     body_frame, create_layered_body, fighters_from, swing_power, BodyFrame, BonePart, BoneSegment,
     InputState, Limb, Materials, Move, TissueLayer, ToolMode, Vec2, World, BONE_PARTS,
-    FIGHTER_SPACING,
+    FIGHTER_SPACING, MOVES_A_STEP,
 };
 
 /// The settings the tools were given (`--set NAME=VALUE`), applied to every
@@ -112,7 +112,7 @@ impl Strike {
             tool: self.tool,
             punches: [None; 4],
             leans: [None; 2],
-            moves: [None; 4],
+            moves: [None; MOVES_A_STEP],
         }
     }
 
@@ -354,8 +354,8 @@ impl Gesture {
 
     /// The moves side-view fighters are told to make on `frame`, by body, in
     /// the order written.
-    pub fn moves(&self, frame: i32) -> [Option<(usize, Move)>; 4] {
-        let mut moves = [None; 4];
+    pub fn moves(&self, frame: i32) -> [Option<(usize, Move)>; MOVES_A_STEP] {
+        let mut moves = [None; MOVES_A_STEP];
         let made = self.firing(frame).filter_map(|step| match step {
             GestureStep::Act(body, made) => Some((body, made)),
             _ => None,

@@ -263,9 +263,19 @@ pub struct InputState {
     pub leans: [Option<(usize, bool)>; 2],
     /// The moves side-view fighters are told to make on this step
     /// (`mover.rs`, `World::command`), each by a body, as players' keys or
-    /// buttons tell them.
-    pub moves: [Option<(usize, Move)>; 4],
+    /// buttons tell them. A game passes every move here, the holds' starts
+    /// and ends too, rather than calling `World::command` between steps: the
+    /// step notes which arms already lie across the other fighter before any
+    /// move changes what they do (`World::note_passing_parts`).
+    pub moves: [Option<(usize, Move)>; MOVES_A_STEP],
 }
+
+/// How many moves side-view fighters can be told on one step
+/// ([`InputState::moves`]): each of two fighters a step, a punch, and a
+/// block, a duck, and a lean back each started or let go, as a player
+/// pressing several keys at once, or letting go of one and pressing
+/// another, can tell its fighter.
+pub const MOVES_A_STEP: usize = 10;
 
 impl Default for InputState {
     fn default() -> Self {
@@ -280,7 +290,7 @@ impl Default for InputState {
             tool: ToolMode::Blunt,
             punches: [None; 4],
             leans: [None; 2],
-            moves: [None; 4],
+            moves: [None; MOVES_A_STEP],
         }
     }
 }
@@ -9169,7 +9179,7 @@ mod tests {
                 tool: ToolMode::Sharp,
                 punches: [None; 4],
                 leans: [None; 2],
-                moves: [None; 4],
+                moves: [None; MOVES_A_STEP],
             },
         );
 
@@ -9213,7 +9223,7 @@ mod tests {
                 tool: ToolMode::Blunt,
                 punches: [None; 4],
                 leans: [None; 2],
-                moves: [None; 4],
+                moves: [None; MOVES_A_STEP],
             },
         );
 
@@ -10090,7 +10100,7 @@ mod tests {
                 tool: ToolMode::Blunt,
                 punches: [None; 4],
                 leans: [None; 2],
-                moves: [None; 4],
+                moves: [None; MOVES_A_STEP],
             },
         );
 
@@ -10184,7 +10194,7 @@ mod tests {
                 tool,
                 punches: [None; 4],
                 leans: [None; 2],
-                moves: [None; 4],
+                moves: [None; MOVES_A_STEP],
             };
             world.step(dt, &input, 640.0);
             contacts += world.debug.tissue_contacts;
@@ -10251,7 +10261,7 @@ mod tests {
                 tool: ToolMode::Blunt,
                 punches: [None; 4],
                 leans: [None; 2],
-                moves: [None; 4],
+                moves: [None; MOVES_A_STEP],
             },
         );
 
@@ -10517,7 +10527,7 @@ mod tests {
                 tool: ToolMode::Sharp,
                 punches: [None; 4],
                 leans: [None; 2],
-                moves: [None; 4],
+                moves: [None; MOVES_A_STEP],
             },
         );
 
@@ -10562,7 +10572,7 @@ mod tests {
                 tool: ToolMode::Blunt,
                 punches: [None; 4],
                 leans: [None; 2],
-                moves: [None; 4],
+                moves: [None; MOVES_A_STEP],
             },
         );
 

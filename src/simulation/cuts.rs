@@ -1429,7 +1429,7 @@ mod tests {
                 tool: ToolMode::Sharp,
                 punches: [None; 4],
                 leans: [None; 2],
-                moves: [None; 4],
+                moves: [None; MOVES_A_STEP],
             };
             world.step(dt, &input, 640.0);
         }

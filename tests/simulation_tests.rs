@@ -946,7 +946,7 @@ fn strike_single_spring(tool: rp::ToolMode, a: rp::Vec2, b: rp::Vec2) -> rp::Wor
         tool,
         punches: [None; 4],
         leans: [None; 2],
-        moves: [None; 4],
+        moves: [None; rp::MOVES_A_STEP],
     };
     world.step(world.materials().fixed_dt, &input, 640.0);
     world
@@ -999,7 +999,7 @@ fn knife_stroke_down_abdomen(first_vx: f64, first_vy: f64) -> i32 {
         tool: rp::ToolMode::Sharp,
         punches: [None; 4],
         leans: [None; 2],
-        moves: [None; 4],
+        moves: [None; rp::MOVES_A_STEP],
     };
     world.step(dt, &input, width);
     for step in 1..=20 {
@@ -1067,7 +1067,7 @@ fn direct_bone_strike_fractures_and_emits_fluid() {
         tool: rp::ToolMode::Blunt,
         punches: [None; 4],
         leans: [None; 2],
-        moves: [None; 4],
+        moves: [None; rp::MOVES_A_STEP],
     };
     world.step(world.materials().fixed_dt, &input, 1280.0);
     if world.stats().fractured_bones <= 0 || world.bones().len() <= initial_bones {
@@ -1112,7 +1112,7 @@ fn press_knife_on_fiber(world: &mut rp::World, lead: f64, ease: f64, frames: i32
             tool: rp::ToolMode::Sharp,
             punches: [None; 4],
             leans: [None; 2],
-            moves: [None; 4],
+            moves: [None; rp::MOVES_A_STEP],
         };
         world.step(dt, &input, 640.0);
         if let Some(pose) = world.current_tool_pose() {
@@ -1140,7 +1140,7 @@ fn knife_rests_against_skin_until_pressed_hard_enough_to_cut() {
         tool: rp::ToolMode::Sharp,
         punches: [None; 4],
         leans: [None; 2],
-        moves: [None; 4],
+        moves: [None; rp::MOVES_A_STEP],
     };
     world.step(world.materials().fixed_dt, &start, 640.0);
 
@@ -1191,7 +1191,7 @@ fn knife_stops_at_bone_without_breaking_it() {
             tool: rp::ToolMode::Sharp,
             punches: [None; 4],
             leans: [None; 2],
-            moves: [None; 4],
+            moves: [None; rp::MOVES_A_STEP],
         };
         world.step(dt, &input, 640.0);
         if let Some(pose) = world.current_tool_pose() {
@@ -1233,7 +1233,7 @@ fn bat_swing_stops_in_a_leg_and_bruises_without_tearing() {
             tool: rp::ToolMode::Blunt,
             punches: [None; 4],
             leans: [None; 2],
-            moves: [None; 4],
+            moves: [None; rp::MOVES_A_STEP],
         };
         world.step(dt, &input, width);
         furthest = furthest.max(world.tool_position().x);
