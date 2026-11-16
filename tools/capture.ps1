@@ -60,8 +60,9 @@ param(
     [switch]$NoTool,
     # Leave out the name and step label, for images to publish.
     [switch]$NoLabel,
-    # Play on two fighters side by side, as the app shows them, rather than a
-    # lone body; gestures throw the second fighter's punches with punch2=.
+    # Play on two fighters side by side, as the fight scenarios stand them,
+    # rather than a lone body; gestures throw the second fighter's punches
+    # with punch2=.
     [switch]$Fighters,
     # With -Fighters, how far apart they stand, in body heights.
     [double]$Spacing = 0,

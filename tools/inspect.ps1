@@ -49,7 +49,7 @@ param(
     [string]$Gesture = "",
     # One run of the strike sweep, ALONG,ACROSS,STRENGTH (strike_scenarios --variant).
     [string]$Variant = "",
-    # Play the gesture on two fighters, as the app stands them; punch2= is the right one's.
+    # Play the gesture on two fighters, as the fight scenarios stand them; punch2= is the right one's.
     [switch]$Fighters,
     # With -Fighters, how far apart they stand, in body heights.
     [double]$Spacing = 0,

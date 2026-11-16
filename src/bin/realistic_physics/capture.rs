@@ -37,9 +37,9 @@
 //!                            `strike_scenarios --set` does, to see what a
 //!                            change looks like before making it the default
 //! --fighters                 play on two fighters standing side by side, as
-//!                            the app shows them, rather than a lone body
-//!                            (gestures throw the second fighter's punches
-//!                            with `punch2=`)
+//!                            the fight scenarios stand them, rather than a
+//!                            lone body (gestures throw the second fighter's
+//!                            punches with `punch2=`)
 //! --spacing S                with --fighters, stand them S body heights apart
 //! --side                     play on two side-view fighters facing each other
 //!                            (`rp::create_side_fighters`) rather than the
@@ -237,10 +237,10 @@ pub async fn run(request: CaptureRequest) {
     } else if request.side {
         app.spacing = rp::SIDE_FIGHTER_SPACING;
     }
-    // A lone body's play is drawn as the app draws one body alone; a fight,
-    // two fighters asked for, or the app left at rest, as it draws two.
-    if request.play.is_some() && fight.is_none() && !request.fighters && !request.side {
-        app.bodies = Bodies::One;
+    // A lone body's play, or the app left at rest, is drawn as the app draws
+    // its one body; a fight, or two fighters asked for, side by side.
+    if fight.is_some() || request.fighters || request.side {
+        app.bodies = Bodies::Two;
     }
     app.view_for = None;
     app.fit_view(width as f32, height as f32);

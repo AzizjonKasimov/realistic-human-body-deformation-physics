@@ -247,7 +247,7 @@ pub struct Gesture {
 }
 
 /// Two fighters standing side by side for a play, the second built as the
-/// first's mirror image, as the app stands them (`World::mirrored`): the
+/// first's mirror image, as `create_fighters_at` stands them (`World::mirrored`): the
 /// play's punches are thrown by one at the other, the one struck.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Fight {
@@ -2948,7 +2948,7 @@ pub fn scenarios() -> Vec<Scenario> {
             fight: None,
         })
     };
-    // Two fighters as the app stands them, the left punching the right.
+    // Two fighters side by side, the left punching the right.
     let fight = |guard_down, aim| {
         Play::Gesture(Gesture {
             tool: ToolMode::Heavy,
@@ -2961,7 +2961,7 @@ pub fn scenarios() -> Vec<Scenario> {
             }),
         })
     };
-    // Two fighters as the app stands them, the left throwing what `steps`
+    // Two fighters side by side, the left throwing what `steps`
     // throws at the right's raised guard.
     let fight_with = |steps| {
         Play::Gesture(Gesture {

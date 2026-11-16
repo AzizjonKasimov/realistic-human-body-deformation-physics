@@ -12,7 +12,8 @@
 //!                                 what to play (by default bat_hard_forearm)
 //! --variant ALONG,ACROSS,STRENGTH one run of the sweep
 //! --fighters [--spacing S]        play the gesture on two fighters, S body
-//!                                 heights apart (0.52), as the app stands them
+//!                                 heights apart (0.52), as the fight scenarios
+//!                                 stand them
 //! --frame N                       start on frame N
 //! --overlays LIST                 start with these drawn: stretch, muscle,
 //!                                 bruise, speed, events, bones
@@ -305,9 +306,11 @@ impl Viewer {
     fn record(scenario: Scenario) -> Self {
         let mut app = AppState::new(screen_width() as f64, screen_height() as f64);
         app.hide_ui = true;
-        // A lone body is drawn as the app draws one body alone.
-        if scenario.fight().is_none() {
-            app.bodies = Bodies::One;
+        // A lone body is drawn as the app draws its one body; a fight's two
+        // fighters side by side, as far apart as the fight stands them.
+        if let Some(fight) = scenario.fight() {
+            app.bodies = Bodies::Two;
+            app.spacing = fight.spacing;
             app.view_for = None;
             app.fit_view(screen_width(), screen_height());
         }

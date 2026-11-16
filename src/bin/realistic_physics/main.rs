@@ -20,23 +20,24 @@ enum ViewMode {
     Anatomy,
 }
 
-/// App commands shared by keyboard shortcuts and the on-screen control buttons.
-/// Who stands in the world: two fighters side by side, or one body alone, to
-/// strike and punch as a punching bag.
+/// Who stands in the world. Players get one body alone, to strike and punch
+/// as a punching bag; two fighters box on the Fight page, seen from the side.
+/// Capture mode and the viewer can also stand two of these front-view bodies
+/// side by side, as the fight scenarios play them, for checks and films.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Bodies {
-    Two,
     One,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    Two,
 }
 
+/// App commands shared by keyboard shortcuts and the on-screen control buttons.
 #[derive(Clone, Copy)]
 enum ControlAction {
     Tool(rp::ToolMode),
     /// The punch key or button on that side, 0 the left and 1 the right
     /// (`punch_for`, `rp::World::throw_punch`).
     Punch(usize),
-    /// Two fighters, or one body alone, afresh.
-    ToggleBodies,
     ToggleDebug,
     TogglePause,
     Reset,
@@ -45,10 +46,9 @@ enum ControlAction {
     About,
 }
 
-const KEY_CONTROLS: [(KeyCode, ControlAction); 12] = [
+const KEY_CONTROLS: [(KeyCode, ControlAction); 11] = [
     (KeyCode::Left, ControlAction::Punch(0)),
     (KeyCode::Right, ControlAction::Punch(1)),
-    (KeyCode::Key2, ControlAction::ToggleBodies),
     (KeyCode::H, ControlAction::Tool(rp::ToolMode::Heavy)),
     (KeyCode::B, ControlAction::Tool(rp::ToolMode::Blunt)),
     (KeyCode::S, ControlAction::Tool(rp::ToolMode::Sharp)),
@@ -71,7 +71,8 @@ struct AppState {
     /// `rp::fighter_frames`) whatever the window, so a blow hurts them alike
     /// on every screen.
     world: rp::World,
-    /// Two fighters, or one body alone.
+    /// One body alone, or two fighters where capture mode or the viewer
+    /// stands them.
     bodies: Bodies,
     /// How the world is drawn in the window: larger or smaller, to fit the
     /// bodies between the HUD and the control buttons.
@@ -120,10 +121,11 @@ struct AppState {
     /// ran before it opened, so it runs again once the card closes.
     about_open: Option<bool>,
     /// The punch keys or buttons pressed since the last simulation step,
-    /// which throw on the next one: each fighter's, the left one's first,
-    /// so both fighters' punches pressed together both throw.
+    /// which throw on the next one, the left one's first, so both pressed
+    /// together both throw.
     pending_punches: [bool; 2],
-    /// How far apart the two fighters stand, in body heights.
+    /// How far apart two fighters stand, in body heights, where capture mode
+    /// or the viewer stands two.
     spacing: f64,
 }
 
@@ -135,7 +137,7 @@ impl AppState {
         };
         let mut app = Self {
             world: rp::World::new(rp::Materials::default()),
-            bodies: Bodies::Two,
+            bodies: Bodies::One,
             view: rp::View::IDENTITY,
             view_for: None,
             running: true,
@@ -182,21 +184,6 @@ impl AppState {
         self.tool_blood = 0.0;
         self.seen_fluid = 0;
         self.accumulator = 0.0;
-    }
-
-    /// Two fighters if one body stood alone, or one body alone if two
-    /// fighters stood, afresh and fitted to the window, the hand left under
-    /// the pointer so the tool does not sweep across the new view.
-    fn switch_bodies(&mut self) {
-        self.bodies = match self.bodies {
-            Bodies::Two => Bodies::One,
-            Bodies::One => Bodies::Two,
-        };
-        self.reset_body();
-        if let Some((width, height, ..)) = self.view_for {
-            self.fit_view(width, height);
-        }
-        self.stepped_hand = self.view.to_world(self.pointer);
     }
 
     /// Fits the view to a window of this size, to the control buttons as
@@ -421,7 +408,6 @@ fn apply_control(app: &mut AppState, action: ControlAction) {
                 *pending = true;
             }
         }
-        ControlAction::ToggleBodies => app.switch_bodies(),
         ControlAction::ToggleDebug => app.debug_overlay = !app.debug_overlay,
         ControlAction::TogglePause => app.running = !app.running,
         ControlAction::Reset => app.reset_body(),
@@ -704,7 +690,7 @@ impl ControlLayout {
     }
 }
 
-fn control_hints(app: &AppState, palette: &Palette) -> [ControlHint; 13] {
+fn control_hints(app: &AppState, palette: &Palette) -> [ControlHint; 12] {
     let punching = |side: usize| {
         let (body, arm) = punch_for(app, side);
         app.world.punch(body, arm).is_some()
@@ -745,8 +731,9 @@ fn control_hints(app: &AppState, palette: &Palette) -> [ControlHint; 13] {
             active: app.tool == rp::ToolMode::Fist,
             action: Some(ControlAction::Tool(rp::ToolMode::Fist)),
         },
-        // The fighter on that side of the screen punches the other, with
-        // its arm toward it; a body alone punches with its arm on that side.
+        // The body punches with its arm on that side; of two fighters, as
+        // capture mode stands them, the one on that side of the screen
+        // punches the other, with its arm toward it.
         ControlHint {
             key: "LEFT",
             label: HintLabel::Text("punch"),
@@ -760,15 +747,6 @@ fn control_hints(app: &AppState, palette: &Palette) -> [ControlHint; 13] {
             accent: palette.tool_accent,
             active: punching(1),
             action: Some(ControlAction::Punch(1)),
-        },
-        // Lit while two fighters stand; tapped, one body stands alone, to
-        // strike and punch as a punching bag, and tapped again, two.
-        ControlHint {
-            key: "2",
-            label: HintLabel::Text("fighters"),
-            accent: palette.tool_accent,
-            active: app.bodies == Bodies::Two,
-            action: Some(ControlAction::ToggleBodies),
         },
         ControlHint {
             key: "D",
