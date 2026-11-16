@@ -249,7 +249,7 @@ mod tests {
     /// here with the limit lowered under what a cross landed well gives (10
     /// rad/s within the blow): the fighter goes limp, falls, and stays down,
     /// taking no moves, and nothing tears as it falls. The fighter that threw
-    /// it stands on.
+    /// it stands on, and throws no punch at it while it is down.
     #[test]
     fn a_fighter_knocked_out_falls_and_stays_down() {
         let mut world = create_side_fighters_at(Materials::default(), 0.60);
@@ -270,11 +270,19 @@ mod tests {
             if step == 20 {
                 input.moves[0] = Some((0, Move::Cross));
             }
-            // Told to move once knocked out, it takes no notice.
+            // Told to move once knocked out, it takes no notice; and the
+            // other, told to punch it, does not.
             if step > 40 && step % 30 == 0 {
                 input.moves[1] = Some((1, Move::StepIn));
+                input.moves[0] = Some((0, Move::Cross));
             }
             world.step(dt, &input, SCENARIO_WIDTH);
+            if step > 40 {
+                assert!(
+                    !world.striking_out(0, Limb::RightArm) && !world.striking_out(0, Limb::LeftArm),
+                    "a fighter punched at one knocked out on the floor, at step {step}"
+                );
+            }
             if world.knocked_out(1) && out_at.is_none() {
                 out_at = Some(step);
             }

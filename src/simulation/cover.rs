@@ -60,6 +60,17 @@ const BARE_BONE_STIFFNESS: f64 = 600_000.0;
 const FOREARM_BREAKING_FORCE: f64 = 1370.0;
 const LOAD_PER_NEWTON: f64 = BONE_FRACTURE_IMPULSE * FOREARM_STRENGTH / FOREARM_BREAKING_FORCE;
 
+/// How far the rib cage gives under a blow on a rib, as a spring of this
+/// many newtons a metre in series with the flesh and the tool: the rib
+/// cage's initial stiffness in the lumped model of the thorax fitted to
+/// cadaver chest impacts (Lobdell et al. 1973), as a 2022 model of single
+/// ribs takes it. Ribs break as the chest is pressed in, not by the force on
+/// one of them (Kent and Patrie 2005: even odds of a broken rib at a third
+/// of the chest's depth). Met as bare bone braced on the trunk, a cross broke
+/// ribs in three of 24 fights at 1.14 to 1.36 times their strength, where
+/// bare-knuckle bouts break none (Muzzi et al. 2022).
+const RIB_CAGE_STIFFNESS: f64 = 26_300.0;
+
 /// The flesh over one bone, by station along it and direction around it:
 /// each row turns from the bone's direction in `COVER_DIRECTIONS` steps.
 #[derive(Clone, Debug)]
@@ -465,11 +476,18 @@ impl World {
             .sqrt()
             .max(MIN_COVER_SHARE);
         let flesh = BARE_BONE_STIFFNESS * softening * softening;
-        let stiffness = if tool_stiffness.is_finite() {
-            flesh * tool_stiffness / (flesh + tool_stiffness).max(EPSILON)
+        // The flesh, the tool, and for a rib the cage it is part of, each a
+        // spring in series.
+        let cage = if part == BonePart::Rib {
+            RIB_CAGE_STIFFNESS
         } else {
-            flesh
+            f64::INFINITY
         };
+        let stiffness = 1.0
+            / [flesh, tool_stiffness, cage]
+                .iter()
+                .map(|&spring| 1.0 / spring)
+                .sum::<f64>();
         let metres_per_second = speed.max(0.0) * self.mm_per_px() * 0.001;
         Blow {
             force: metres_per_second * (stiffness * mass).sqrt() * LOAD_PER_NEWTON,

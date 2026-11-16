@@ -2381,6 +2381,7 @@ mod tests {
             }
             let before = flung.map(|_| world.clone());
             let torn = torn_so_far(&world);
+            let broken = world.stats.fractured_bones;
             let follows = followed
                 .as_ref()
                 .filter(|(frames, _)| frames.contains(&(frame + 1)));
@@ -2389,6 +2390,17 @@ mod tests {
                 world.trace(&traced);
             }
             world.step(dt, &input, crate::scenarios::SCENARIO_WIDTH);
+            // `RP_BREAKS=1` prints what each fighter was doing as a bone broke.
+            if world.stats.fractured_bones > broken && std::env::var("RP_BREAKS").is_ok() {
+                println!(
+                    "    frame {}: a bone broke
+      fighter 0: {}
+      fighter 1: {}",
+                    frame + 1,
+                    world.mover_line(0),
+                    world.mover_line(1)
+                );
+            }
             if let Some((_, bones)) = follows {
                 println!("    frame {}: moves {:?}", frame + 1, &input.moves[..2]);
                 // Where each fighter's head and hips are, and what it is

@@ -1373,7 +1373,8 @@ impl World {
     }
 
     /// Tells body `body`, a side-view fighter, to make a move: it throws a
-    /// punch unless one is still on its way or the arm hangs limp, takes a
+    /// punch unless one is still on its way, the arm hangs limp, or the
+    /// other fighter is down, takes a
     /// step unless it is in the middle of one, toward the other fighter only
     /// as far as there is room (`NEAREST_STAND`), and leans back, ducks, or
     /// blocks for as long as told to. Other bodies take no notice.
@@ -1405,8 +1406,16 @@ impl World {
                     .as_ref()
                     .is_some_and(|mover| mover.strike.is_none())
         };
-        let lead_free = throws(self, Side::Lead);
-        let rear_free = throws(self, Side::Rear);
+        // No punch at a fighter who is down, as boxing's rules have had it
+        // since the Marquess of Queensberry's (1867): a man down may not be
+        // struck. A punch already on its way goes on.
+        let others: Vec<usize> = (0..self.bodies.len())
+            .filter(|&other| other != body && self.bodies[other].fighter.is_some())
+            .collect();
+        let others_down =
+            !others.is_empty() && others.iter().all(|&other| self.fighter_fallen(other));
+        let lead_free = throws(self, Side::Lead) && !others_down;
+        let rear_free = throws(self, Side::Rear) && !others_down;
         let Some(mover) = self.bodies[body]
             .mover
             .as_mut()
