@@ -230,6 +230,10 @@ pub struct FootHold {
 /// gives or betters.
 pub(super) const FOOT_FRICTION: f64 = 0.6;
 
+/// The most a sole's pressed flesh holds an end of a foot up with, in the
+/// body's weights: more than a fighter's legs ever push it down with.
+const SOLE_HOLDS: f64 = 4.0;
+
 /// How firmly a planted foot is held, in hertz on the leg's weight, damped
 /// critically: as firmly as the hips are held, a foot standing on the floor
 /// moves only as far as its friction lets it.
@@ -617,6 +621,7 @@ impl World {
                         if let Some(report) = self.balance_reports.get_mut(body) {
                             report.aim_off_cm = (previous.x - target.x) * cm;
                             report.pose_off_cm = (previous.x - posed) * cm;
+                            report.sunk_cm = (previous.y - target.y) * cm;
                         }
                     }
                 }
@@ -679,12 +684,11 @@ impl World {
                 let newtons = self.newtons() * h * self.materials.carry_strength;
                 let total = add(hold.impulse, impulse);
                 // Legs push the hips across no harder than the feet's grip
-                // on the weight they bear, half at each end of the pelvis.
+                // on all the weight they bear, the whole body's, half at
+                // each end of the pelvis.
                 let across = if legs == Some(true) {
-                    FOOT_FRICTION
-                        * self.weight_on_the_legs(self.bone_body(hold.bone), h)
-                        * 0.5
-                        * self.materials.carry_strength
+                    let borne = tissue::BODY_MASS_KG * self.materials.gravity * self.newtons() * h;
+                    FOOT_FRICTION * borne * 0.5 * self.materials.carry_strength
                 } else {
                     carry.limit.x * newtons
                 };
@@ -980,6 +984,8 @@ impl World {
         // of its bone, as an impulse over the substep.
         let weight = tissue::BODY_MASS_KG * self.materials.gravity * self.newtons() * 0.25 * h;
         let friction = FOOT_FRICTION * weight;
+        // The body's weight, as an impulse over the substep.
+        let weight_unit = weight * 4.0;
         let pieces = std::mem::take(&mut self.foot_pieces);
         for (index, piece) in pieces.iter().enumerate() {
             let hold = self.foot_holds[index];
@@ -1000,7 +1006,8 @@ impl World {
             // foot standing on its ball, its heel raised, gripped with half
             // its weight and slid, while its heel held on to the air.
             let foot_bone = self.bones[hold.bone];
-            let floor = self.floor_y - foot_bone.radius.max(1.0) - FOOT_LIFT_MARGIN;
+            let floor =
+                self.floor_y - foot_bone.sole.max(foot_bone.radius.max(1.0)) - FOOT_LIFT_MARGIN;
             let touching = [
                 foot_bone.previous_a.y >= floor,
                 foot_bone.previous_b.y >= floor,
@@ -1041,7 +1048,17 @@ impl World {
                     continue;
                 }
                 let given = hold.impulse[end];
-                let error = subtract(previous, planted);
+                let mut error = subtract(previous, planted);
+                // A foot the legs press on stands on its sole: the floor
+                // pushes it up, bone and flesh together, wherever its end
+                // sinks below the pressed sole (`BoneSegment::sole`), and
+                // never pulls it down. Stopped there by its bone alone, the
+                // bone stayed while the legs' push carried the foot's flesh
+                // on, and a cross dragged the flesh of the rear foot off it.
+                let sole = bears.map(|_| self.floor_y - bone.sole);
+                if let Some(level) = sole {
+                    error.y = previous.y - level;
+                }
                 let speed = scale(subtract(place, previous), 1.0 / h);
                 // How hard the foot, bone and flesh, is to move at this end,
                 // each way.
@@ -1056,7 +1073,10 @@ impl World {
                 };
                 let total = Vec2 {
                     x: pull.x.clamp(-friction, friction),
-                    y: pull.y.clamp(0.0, weight),
+                    y: match sole {
+                        Some(_) => pull.y.clamp(-SOLE_HOLDS * weight_unit, 0.0),
+                        None => pull.y.clamp(0.0, weight),
+                    },
                 };
                 let state = &mut self.foot_holds[index];
                 state.impulse[end] = total;
@@ -1317,6 +1337,7 @@ impl World {
         let sunk: Vec<Vec2> = self
             .hip_holds
             .iter()
+            .filter(|hold| self.learns_hip_height(hold))
             .filter_map(|hold| {
                 let bone = self.bones.get(hold.bone)?;
                 let at = if hold.end_b { bone.b } else { bone.a };
@@ -1330,9 +1351,19 @@ impl World {
             sunk.iter().fold(Vec2::default(), |sum, &end| add(sum, end)),
             1.0 / sunk.len() as f64,
         );
-        for hold in &mut self.hip_holds {
-            hold.aim = subtract(hold.aim, scale(sunk, LEARN_WEIGHT_RATE));
+        for index in 0..self.hip_holds.len() {
+            if self.learns_hip_height(&self.hip_holds[index]) {
+                let hold = &mut self.hip_holds[index];
+                hold.aim = subtract(hold.aim, scale(sunk, LEARN_WEIGHT_RATE));
+            }
         }
+    }
+
+    /// Whether the hold `hold` learns how far up to hold the hips as the body
+    /// settles: legs that carry a fighter's hips hold them where the pose
+    /// puts them over the feet, and learn nothing (`balance.rs`).
+    fn learns_hip_height(&self, hold: &HipHold) -> bool {
+        hold.carry.is_none() || self.legs_carry(self.bone_body(hold.bone)).is_none()
     }
 
     /// The stiffness and damping, across and upward, of one end of a

@@ -262,19 +262,22 @@ named_settings!(
 );
 
 /// What to say about a setting no field is called, with the names that come
-/// closest.
+/// closest: those holding the whole name first, then those sharing a word of
+/// it.
 fn unknown_setting(name: &str) -> String {
-    let close: Vec<&str> = Materials::NAMES
+    let shares_a_word = |known: &str| {
+        name.split('_')
+            .any(|word| word.len() > 3 && known.contains(word))
+    };
+    let whole = Materials::NAMES
         .iter()
         .copied()
-        .filter(|known| {
-            known.contains(name)
-                || name
-                    .split('_')
-                    .any(|word| word.len() > 3 && known.contains(word))
-        })
-        .take(8)
-        .collect();
+        .filter(|known| known.contains(name));
+    let partly = Materials::NAMES
+        .iter()
+        .copied()
+        .filter(|known| !known.contains(name) && shares_a_word(known));
+    let close: Vec<&str> = whole.chain(partly).take(8).collect();
     if close.is_empty() {
         format!("no setting is called `{name}`")
     } else {

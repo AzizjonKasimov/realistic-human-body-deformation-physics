@@ -434,8 +434,18 @@ fn unsettled_side_fighter_in(frame: BodyFrame, materials: Materials) -> World {
     world.bodies[0].fighter = Some(rig.clone());
 
     // It stands on the floor at its soles, its hips held up and its feet
-    // where they stand.
+    // where they stand. Each foot's bone rests on the pressed flesh of its
+    // sole: the heel pad keeps about half its thickness under the body's
+    // weight (Prichasuk 1994: a compressibility index, loaded over unloaded
+    // thickness, of about 0.5-0.6 in healthy heels). Meeting the floor
+    // along its own line, the bone sank 3.6 cm through the sole once the
+    // legs bore the weight, and the whole fighter with it.
     world.set_floor_y(frame.point(0.0, 1.0).y);
+    for foot in rig.feet {
+        let bone = world.bones[foot];
+        let resting = (world.floor_y() - bone.a.y).min(world.floor_y() - bone.b.y);
+        world.bones[foot].sole = resting.max(0.0) * HEEL_PAD_LOADED;
+    }
     world.hold_hip(rig.pelvis, false);
     world.hold_hip(rig.pelvis, true);
     for foot in rig.feet {
@@ -463,6 +473,10 @@ fn settle_side_fighter(world: &mut World, frame: BodyFrame, mut watch: impl FnMu
     world.materials.gravity = gravity;
     world.give_mover(0);
 }
+
+/// How much of its thickness the flesh of a sole keeps under the body's
+/// weight (`BoneSegment::sole`).
+const HEEL_PAD_LOADED: f64 = 0.55;
 
 /// How many steps a new fighter settles under its own weight, its muscles
 /// learning to carry it all the while, and over how many of those it takes
@@ -979,6 +993,19 @@ mod tests {
         create_side_fighter_in(crate::world_frame(), Materials::default())
     }
 
+    /// The settings the tools that print play with: the defaults, changed by
+    /// `RP_SET=name=value,...` as `--set` changes them.
+    fn materials() -> Materials {
+        let mut materials = Materials::default();
+        if let Ok(settings) = std::env::var("RP_SET") {
+            for setting in settings.split(',').filter(|setting| !setting.is_empty()) {
+                let (name, value) = setting.split_once('=').expect("RP_SET takes name=value");
+                materials.set(name, value).unwrap();
+            }
+        }
+        materials
+    }
+
     /// The fighter weighs what a man does, part by part.
     #[test]
     fn a_fighter_weighs_what_a_man_does() {
@@ -992,21 +1019,51 @@ mod tests {
         );
     }
 
-    /// It settles in its stance as built: no bone far from where it was
-    /// built, nothing torn, and every joint within its range.
+    /// It settles in its stance as built: standing on its own feet it comes
+    /// down as one as far as the flesh of its soles presses, no further, and
+    /// from there no bone lies far from where it was built; nothing torn,
+    /// and every joint within its range.
     #[test]
     fn a_fighter_rests_in_its_stance() {
         let world = fighter();
+        let rig = world.bodies[0].fighter.clone().unwrap();
+        let moved = |bone: &BoneSegment| {
+            scale(
+                add(subtract(bone.a, bone.home_a), subtract(bone.b, bone.home_b)),
+                0.5,
+            )
+        };
+        let drop = scale(
+            rig.feet.iter().fold(Vec2::default(), |sum, &foot| {
+                add(sum, moved(&world.bones[foot]))
+            }),
+            0.5,
+        );
+        // Each sole keeps `HEEL_PAD_LOADED` of its thickness, so it presses
+        // the rest of it.
+        let pressed = rig
+            .feet
+            .iter()
+            .map(|&foot| world.bones[foot].sole * (1.0 / HEEL_PAD_LOADED - 1.0))
+            .fold(0.0, f64::max);
+        assert!(
+            drop.y <= pressed + 2.0,
+            "the fighter came down {:.1} px where its soles press {pressed:.1}",
+            drop.y
+        );
         let worst = world
             .bones
             .iter()
-            .map(|bone| distance(bone.a, bone.home_a).max(distance(bone.b, bone.home_b)))
+            .map(|bone| {
+                distance(subtract(bone.a, drop), bone.home_a)
+                    .max(distance(subtract(bone.b, drop), bone.home_b))
+            })
             .fold(0.0, f64::max);
         // Its hands, at the end of the trunk and the arms, rest a
         // centimetre and a half off at the most.
         assert!(
             worst < 6.0,
-            "a bone rests {worst:.1} px from where it was built"
+            "a bone rests {worst:.1} px from where it was built, from where its feet came down"
         );
         assert_eq!(world.stats.broken_bone_joints, 0, "a joint tore");
         assert!(
@@ -1243,12 +1300,13 @@ mod tests {
     fn print_balance_reports(world: &World) {
         for (body, report) in world.balance_reports.iter().enumerate() {
             let mut legs = format!(
-                "    [{body}] centre of mass {:3.0}% over the feet, capture point {:3.0}% over the planted ones, hips shifted {:+.1} cm, {:+.1} cm off the aim and {:+.1} cm off the move's place; legs push the hips ({:+5.0}, {:+5.0}) N and turn the pelvis {:+4.0} N m;",
+                "    [{body}] centre of mass {:3.0}% over the feet, capture point {:3.0}% over the planted ones, hips shifted {:+.1} cm, {:+.1} cm off the aim and {:+.1} cm off the move's place, {:+.1} cm below it; legs push the hips ({:+5.0}, {:+5.0}) N and turn the pelvis {:+4.0} N m;",
                 report.over_feet * 100.0,
                 report.capture_over_feet * 100.0,
                 report.shift_cm,
                 report.aim_off_cm,
                 report.pose_off_cm,
+                report.sunk_cm,
                 report.push.x,
                 report.push.y,
                 report.turn
@@ -1294,13 +1352,7 @@ mod tests {
     #[test]
     #[ignore]
     fn print_fighter_support() {
-        let mut materials = Materials::default();
-        if let Ok(settings) = std::env::var("RP_SET") {
-            for setting in settings.split(',').filter(|setting| !setting.is_empty()) {
-                let (name, value) = setting.split_once('=').expect("RP_SET takes name=value");
-                materials.set(name, value).unwrap();
-            }
-        }
+        let materials = materials();
         let every: usize = std::env::var("RP_EVERY")
             .ok()
             .and_then(|every| every.parse().ok())
@@ -1423,7 +1475,12 @@ mod tests {
                 let skull = world.bones[rig.skull];
                 let head_height = (world.floor_y() - lerp(skull.a, skull.b, 0.5).y) * cm;
                 line.push_str(&format!(
-                    "  [{body}] held up {:3.0}%, across {:+5.0} N, tilt {:+4.0} N m, hips {:+5.1} cm, head {:3.0} cm up {:3.0} cm off pose",
+                    "  [{body}] {} {:3.0}%, across {:+5.0} N, tilt {:+4.0} N m, hips {:+5.1} cm, head {:3.0} cm up {:3.0} cm off pose",
+                    if world.materials.legs_carry {
+                        "legs push up"
+                    } else {
+                        "held up from outside"
+                    },
                     share * 100.0,
                     across,
                     tilt,
@@ -1438,14 +1495,27 @@ mod tests {
             }
         }
         for (body, most) in held.iter().enumerate() {
+            // Legs that carry the hips push them from the floor, and every
+            // push comes back on the feet: nothing holds them up from
+            // outside (`balance.rs`).
             println!(
-                "fighter {body}: the hips' hold held up {:.0}% of its weight on average and {:.0}% at most, pushed across with up to {:.0} N, and turned the pelvis with up to {:.0} N m (its cap {:.0})",
+                "fighter {body}: {} pushed the hips up with {:.0}% of its weight on average and {:.0}% at most, across with up to {:.0} N, and turned the pelvis with up to {:.0} N m (its cap {:.0}); from outside: {}",
+                if world.materials.legs_carry {
+                    "its legs"
+                } else {
+                    "the hold on its hips"
+                },
                 most.0 / steps.max(1) as f64 * 100.0,
                 most.1 * 100.0,
                 most.2,
                 most.3,
                 // As `mover.rs` caps it: both hips' strength.
                 2.0 * HIP_STRENGTH * world.materials.carry_strength,
+                if world.materials.legs_carry {
+                    "nothing".to_string()
+                } else {
+                    format!("{:.0}% of its weight on average", most.0 / steps.max(1) as f64 * 100.0)
+                },
             );
         }
         println!(
@@ -1463,7 +1533,7 @@ mod tests {
     #[ignore]
     fn print_fighter_punches() {
         let story = std::env::var("RP_STORY").is_ok();
-        let one = fighter();
+        let one = create_side_fighter_in(crate::world_frame(), materials());
         let mm = one.mm_per_px();
         // What each bone weighs with the flesh held to it (`sides.rs`).
         let rig = one.bodies[0].fighter.clone().unwrap();
@@ -1935,7 +2005,7 @@ mod tests {
         flung: Option<f64>,
         followed: Option<(std::ops::RangeInclusive<usize>, Vec<usize>)>,
     ) -> FightSeen {
-        let mut world = create_side_fighters(Materials::default());
+        let mut world = create_side_fighters(materials());
         world.keep_journal();
         let dt = world.materials.fixed_dt;
         let mut tears = vec![(hips_apart(&world), 0)];

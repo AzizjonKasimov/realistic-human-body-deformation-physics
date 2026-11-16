@@ -648,7 +648,7 @@ impl Default for Materials {
             legs_carry: true,
             legs_across_hertz: 2.0,
             legs_tilt_hertz: 3.0,
-            legs_up_hertz: 4.0,
+            legs_up_hertz: 0.0,
             hip_hold_damping_ratio: 1.0,
             // Living skin's Young's modulus is about 0.5-0.6 MPa at small
             // strain (Lakhani et al. 2021), and tissue that keeps its volume
@@ -1272,6 +1272,11 @@ pub struct BoneSegment {
     /// Which of its body's sheets of flesh it lies in (`Point::sheet`); its
     /// pieces keep it.
     pub sheet: u8,
+    /// How far above the floor its ends rest bearing a body's weight, in
+    /// pixels: the pressed flesh of the sole under a side-view fighter's
+    /// foot, which the hold on the foot keeps it on (`fighter.rs`,
+    /// `solve_foot_holds`). 0 for every other bone.
+    pub sole: f64,
 }
 
 impl Default for BoneSegment {
@@ -1313,6 +1318,7 @@ impl Default for BoneSegment {
             body: 0,
             flesh: 0.0,
             sheet: 0,
+            sole: 0.0,
         }
     }
 }

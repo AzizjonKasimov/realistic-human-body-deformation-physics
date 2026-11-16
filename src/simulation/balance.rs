@@ -105,6 +105,9 @@ pub(super) struct BalanceReport {
     /// where the move put them over the feet, in centimetres.
     pub(super) aim_off_cm: f64,
     pub(super) pose_off_cm: f64,
+    /// How far below where the move puts them over the feet the hips stood,
+    /// in centimetres.
+    pub(super) sunk_cm: f64,
 }
 
 impl World {

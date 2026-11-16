@@ -428,6 +428,10 @@ impl Mover {
         pose.thorax += 0.05 * block;
         pose.neck += 0.06 * block;
         pose.head += 0.08 * block;
+        // The weight stays where the stance and the steps put the hips,
+        // however a duck, a lean, or a block bends the trunk; a punch, below,
+        // carries it on into the blow, as a cross does.
+        profile::keep_the_weight(&mut pose);
         // A punch turns the trunk into it before the fists are placed, so
         // the guard rides on the trunk as it turns.
         let reach = self.strike.map_or(0.0, |strike| strike.reach());
@@ -450,9 +454,6 @@ impl Mover {
                 }
             }
         }
-        // The weight stays where the move puts the hips, however it bends
-        // the trunk.
-        profile::keep_the_weight(&mut pose);
         // The fists stand by the head, wherever the trunk has taken it, and
         // close in front of the face in a block.
         let joints = Joints::of(&pose);
