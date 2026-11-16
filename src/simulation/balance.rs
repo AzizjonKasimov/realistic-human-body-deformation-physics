@@ -145,6 +145,10 @@ impl World {
         }
         let state = self.bodies.get(body)?;
         state.fighter.as_ref()?;
+        // A fighter that has fallen no longer stands up on its legs.
+        if self.fighter_fallen(body) {
+            return Some(false);
+        }
         Some(
             self.stances
                 .get(body)
@@ -431,6 +435,38 @@ impl World {
             add(sum, add(foot.ankle, from_ankles[foot.side.index()]))
         });
         Some(scale(sum, 1.0 / stance.feet.len() as f64))
+    }
+
+    /// How far fighter `body`'s capture point lies past its feet standing on
+    /// the floor, the way it faces (`facing`), in body heights `height`
+    /// pixels tall: positive in front of them, negative behind, nothing
+    /// within them. Past them, a person's margin of stability is gone, and
+    /// only a step, or arms and trunk swung against the fall, can still
+    /// catch the body (Hof, Gazendam and Sinke 2005, whose extrapolated
+    /// centre of mass the capture point is).
+    /// And how far the centre of mass still has to go to the capture point,
+    /// the same way: where a step that catches it is measured from, as
+    /// Coros, Beaudoin and van de Panne (2010) place a step from the centre
+    /// of mass by the inverted pendulum.
+    pub(super) fn capture_beyond(&self, body: usize, facing: f64, height: f64) -> (f64, f64) {
+        let Some(stance) = self.stances.get(body).and_then(Option::as_ref) else {
+            return (0.0, 0.0);
+        };
+        if stance.feet.is_empty() || height <= 0.0 {
+            return (0.0, 0.0);
+        }
+        let (back, front) = stance.support;
+        let past = if stance.capture > front {
+            stance.capture - front
+        } else if stance.capture < back {
+            stance.capture - back
+        } else {
+            0.0
+        };
+        (
+            past * facing / height,
+            (stance.capture - stance.centre_x) * facing / height,
+        )
     }
 
     /// The weight fighter `body`'s legs hold up at its hips standing as it

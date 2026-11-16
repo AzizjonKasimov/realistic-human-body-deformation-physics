@@ -577,7 +577,9 @@ impl Gesture {
 
 /// The move `part` of a gesture tells a side-view fighter to make, if it is
 /// one: `jab`, `cross`, `step=in`, `step=out`, and `back=`, `duck=`, and
-/// `block=` with `on` or `off`, the second fighter's with a 2 after the word.
+/// `block=` with `on` or `off`, the second fighter's with a 2 after the word;
+/// and `shove=60`, a shove of 60 N s on its trunk from outside, back toward
+/// its rear foot (negative, forward).
 pub(crate) fn fighter_move(part: &str) -> Option<GestureStep> {
     let (word, value) = match part.split_once('=') {
         Some((word, value)) => (word, Some(value)),
@@ -600,6 +602,7 @@ pub(crate) fn fighter_move(part: &str) -> Option<GestureStep> {
         ("back", value) => Move::LeanBack(held(value)?),
         ("duck", value) => Move::Duck(held(value)?),
         ("block", value) => Move::Block(held(value)?),
+        ("shove", Some(value)) => Move::Shoved(value.parse().ok()?),
         _ => return None,
     };
     Some(GestureStep::Act(body, made))
@@ -657,6 +660,7 @@ impl fmt::Display for Gesture {
                         Move::LeanBack(held) => write!(f, ":back{who}={}", on(held))?,
                         Move::Duck(held) => write!(f, ":duck{who}={}", on(held))?,
                         Move::Block(held) => write!(f, ":block{who}={}", on(held))?,
+                        Move::Shoved(newton_seconds) => write!(f, ":shove{who}={newton_seconds}")?,
                     }
                 }
             }

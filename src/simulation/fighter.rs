@@ -1374,6 +1374,92 @@ mod tests {
         }
     }
 
+    /// Shoves the first side-view fighter's trunk, back toward its rear foot
+    /// and then forward over its lead foot, with growing impulses over a
+    /// tenth of a second, and prints for each whether it held where it
+    /// stood, stepped (how far its feet went), or fell, and what tore
+    /// (`cargo test --release --lib print_fighter_shoves -- --ignored
+    /// --nocapture`). People pushed in experiments take impulses of 12 to
+    /// 56 N s, stepping above a threshold and holding below it (McGreavy et
+    /// al. 2020). `RP_SHOVES=20,40` gives the impulses in newton seconds,
+    /// `RP_EVERY=10` prints every tenth step of each shove, and `RP_SET`
+    /// changes settings.
+    #[test]
+    #[ignore]
+    fn print_fighter_shoves() {
+        let base = create_side_fighters(materials());
+        let impulses: Vec<f64> = std::env::var("RP_SHOVES")
+            .unwrap_or_else(|_| "10,20,30,40,60,80,100,150,200".to_string())
+            .split(',')
+            .filter_map(|impulse| impulse.parse().ok())
+            .collect();
+        let every: Option<usize> = std::env::var("RP_EVERY")
+            .ok()
+            .and_then(|every| every.parse().ok());
+        let dt = base.materials.fixed_dt;
+        let cm = base.mm_per_px() * 0.1;
+        let rig = base.bodies[0].fighter.clone().unwrap();
+        let facing = if base.bodies[0].mirrored { -1.0 } else { 1.0 };
+        let steps = (2.5 / dt).round() as usize;
+        for (name, way) in [("back", -1.0), ("forward", 1.0)] {
+            for &impulse in &impulses {
+                let mut world = base.clone();
+                let feet_home: Vec<f64> =
+                    rig.feet.iter().map(|&foot| world.bones[foot].b.x).collect();
+                let hips_home = world.bones[rig.pelvis].b.x;
+                let (mut lowest_head, mut farthest_foot, mut farthest_hips) =
+                    (f64::INFINITY, 0.0_f64, 0.0_f64);
+                for step in 0..steps {
+                    let mut input = InputState::default();
+                    if step == 0 {
+                        input.moves[0] = Some((0, Move::Shoved((-way * impulse).round() as i32)));
+                    }
+                    world.step(dt, &input, crate::scenarios::SCENARIO_WIDTH);
+                    let skull = world.bones[rig.skull];
+                    let head = (world.floor_y() - lerp(skull.a, skull.b, 0.5).y) * cm;
+                    lowest_head = lowest_head.min(head);
+                    for (side, &foot) in rig.feet.iter().enumerate() {
+                        farthest_foot =
+                            farthest_foot.max((world.bones[foot].b.x - feet_home[side]).abs() * cm);
+                    }
+                    let hips = (world.bones[rig.pelvis].b.x - hips_home) * facing * cm;
+                    farthest_hips = farthest_hips.max(hips * way);
+                    if every.is_some_and(|every| step % every == 0) {
+                        println!(
+                            "    step {step:3}: hips {hips:+.1} cm, head {head:.0} cm up, lead and rear feet {}; {}",
+                            rig.feet
+                                .iter()
+                                .enumerate()
+                                .map(|(side, &foot)| format!(
+                                    "{:+.1}",
+                                    (world.bones[foot].b.x - feet_home[side]) * facing * cm
+                                ))
+                                .collect::<Vec<_>>()
+                                .join(" and "),
+                            world.mover_line(0)
+                        );
+                    }
+                }
+                let hips_end = (world.bones[rig.pelvis].b.x - hips_home) * facing * cm;
+                let fell = lowest_head < 100.0;
+                let outcome = if fell {
+                    "fell"
+                } else if farthest_foot >= 3.0 {
+                    "stepped"
+                } else {
+                    "held"
+                };
+                println!(
+                    "shoved {name} with {impulse:3.0} N s: {outcome}; hips at most {farthest_hips:.0} cm the way it was shoved, {hips_end:+.0} cm at the end; a foot moved at most {farthest_foot:.0} cm; head as low as {lowest_head:.0} cm; torn joints {}, skin {}, muscle {}, bones broken {}",
+                    world.stats.broken_bone_joints,
+                    world.stats.broken_skin,
+                    world.stats.broken_muscle,
+                    world.stats.fractured_bones,
+                );
+            }
+        }
+    }
+
     /// Prints how much of each side-view fighter's weight the hold that
     /// carries its hips bears (`Carry`), how hard it pushes them across and
     /// turns the pelvis, how far the hips move, and how high the head stands,
@@ -1979,6 +2065,48 @@ mod tests {
         assert!(
             uneven < 1.0e-3,
             "stepping in together, the fighters stood {uneven:.2e} px off mirror images"
+        );
+    }
+
+    /// A fighter shoved back holds where it stands under a light shove,
+    /// steps back to catch itself under a harder one, and falls, and stays
+    /// down, under one no step can catch (Hof, Gazendam and Sinke 2005's
+    /// margin of stability; people pushed in experiments hold below a
+    /// threshold and step above it).
+    #[test]
+    fn a_shoved_fighter_holds_steps_or_falls() {
+        let base = pair(SIDE_FIGHTER_SPACING);
+        let rig = base.bodies[0].fighter.clone().unwrap();
+        let cm = base.mm_per_px() * 0.1;
+        let shoved = |newton_seconds: i32| {
+            let mut world = base.clone();
+            let home = rig.feet.map(|foot| world.bones[foot].b.x);
+            let mut moved = 0.0_f64;
+            play(&mut world, 0..1, &[(0, 0, Move::Shoved(newton_seconds))]);
+            for step in 1..150 {
+                play(&mut world, step..step + 1, &[]);
+                for (side, &foot) in rig.feet.iter().enumerate() {
+                    moved = moved.max((world.bones[foot].b.x - home[side]).abs() * cm);
+                }
+            }
+            (moved, world.fighter_fallen(0), world)
+        };
+        let (moved, fallen, _) = shoved(30);
+        assert!(
+            moved < 3.0 && !fallen,
+            "shoved with 30 N s, a foot moved {moved:.1} cm (fallen: {fallen})"
+        );
+        let (moved, fallen, _) = shoved(90);
+        assert!(
+            moved > 10.0 && !fallen,
+            "shoved with 90 N s, a foot moved {moved:.1} cm (fallen: {fallen})"
+        );
+        let (_, fallen, world) = shoved(200);
+        let pelvis = world.bones[rig.pelvis];
+        assert!(
+            fallen && (world.floor_y() - pelvis.b.y) * cm < 50.0,
+            "shoved with 200 N s, the fighter fell: {fallen}, its hips {:.0} cm up",
+            (world.floor_y() - pelvis.b.y) * cm
         );
     }
 

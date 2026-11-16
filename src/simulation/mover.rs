@@ -48,6 +48,12 @@ pub enum Move {
     /// the face and stop a punch, which otherwise goes through the hands
     /// ([`World::stands`]).
     Block(bool),
+    /// Not a move the fighter makes but a shove it takes: a push on its
+    /// trunk over a tenth of a second from outside, of so many newton
+    /// seconds, back toward its rear foot (negative, forward), as a person
+    /// is pushed in balance experiments (12 to 56 N s; McGreavy et al. 2020).
+    /// For films and tests of how a fighter holds, steps, or falls.
+    Shoved(i32),
 }
 
 /// How often the stance bounces, in hertz: a boxer on the balls of the feet
@@ -194,6 +200,16 @@ struct Step {
     /// `forward`'s.
     by: f64,
     forward: bool,
+    /// Taken to catch the body as its weight runs past its feet: the first
+    /// foot hands its weight over at once, the body already falling the way
+    /// the step goes.
+    catching: bool,
+    /// Where the hips' way begins, in body heights on from where the stance
+    /// has them: where they already are for a step that catches the body.
+    /// Begun from where the stance had them, a step catching a fighter shoved
+    /// forward pulled its hips back 17 cm against their run, and it rebounded
+    /// into a second step 41 cm back.
+    hips_from: f64,
     age: f64,
     /// A foot's swing ends as it strikes the floor, as in SIMBICON (Yin,
     /// Loken and van de Panne 2007) and Coros, Beaudoin and van de Panne
@@ -225,13 +241,41 @@ const LANDING_GRACE_SECONDS: f64 = 0.08;
 /// 9 cm, set down 3 cm short, went a third less far.
 const LANDING_NEAR: f64 = 0.006;
 
+/// How far past where a fighter's weight is running a step that catches it
+/// puts the foot, in body heights (5 cm), and the farthest such a step
+/// goes, in body heights (52 cm): about the 0.6 leg lengths Coros, Beaudoin
+/// and van de Panne (2010) take as a step's longest, short of the 78% of
+/// their height a young adult steps out on purpose.
+const CATCH_PAST: f64 = 0.03;
+const FARTHEST_STEP: f64 = 0.30;
+
+/// How long a shove from outside pushes (`Move::Shoved`), in seconds.
+const SHOVE_SECONDS: f64 = 0.1;
+
+/// How high above the floor a fighter's hips are, at the least, while its
+/// legs still bear it, in body heights (44 cm): a duck takes them down to
+/// about 0.40, and below this it has fallen.
+const FALLEN_HIPS: f64 = 0.25;
+
 impl Step {
     fn new(by: f64) -> Self {
         Self {
             by,
             forward: by > 0.0,
+            catching: false,
+            hips_from: 0.0,
             age: 0.0,
             down: [None; 2],
+        }
+    }
+
+    /// A step `by` body heights long taken to catch the body (`catching`),
+    /// its hips `hips_from` body heights on from where the stance has them.
+    fn catching(by: f64, hips_from: f64) -> Self {
+        Self {
+            catching: true,
+            hips_from,
+            ..Self::new(by)
         }
     }
 
@@ -275,8 +319,8 @@ impl Step {
     }
 
     /// How long the foot that goes `order`-th takes to hand its weight over.
-    fn handing(order: usize) -> f64 {
-        if order == 0 {
+    fn handing(&self, order: usize) -> f64 {
+        if order == 0 && !self.catching {
             LEAN_SECONDS
         } else {
             UNLOAD_SECONDS
@@ -286,7 +330,7 @@ impl Step {
     /// When the foot that goes `order`-th lifts, if it has begun to hand
     /// its weight over.
     fn lifts(&self, order: usize) -> Option<f64> {
-        self.starts(order).map(|start| start + Self::handing(order))
+        self.starts(order).map(|start| start + self.handing(order))
     }
 
     /// Whether the foot that goes `order`-th is in the air: its weight
@@ -345,7 +389,7 @@ impl Step {
         for order in 0..2 {
             loads[self.side(order)] = match (self.down[order], self.starts(order)) {
                 (Some(down), _) => smooth((self.age - down) / UNLOAD_SECONDS),
-                (None, Some(start)) => 1.0 - smooth((self.age - start) / Self::handing(order)),
+                (None, Some(start)) => 1.0 - smooth((self.age - start) / self.handing(order)),
                 (None, None) => 1.0,
             };
         }
@@ -463,6 +507,12 @@ pub struct Mover {
     /// built, in body heights, the lead foot's first.
     feet: [f64; 2],
     step: Option<Step>,
+    /// Its weight ran past where any step could catch it: it no longer
+    /// stands up on its legs or takes moves, and stays down.
+    fallen: bool,
+    /// A shove it is taking (`Move::Shoved`): how hard, in newton seconds,
+    /// and how long ago it began.
+    shoved: Option<(f64, f64)>,
     strike: Option<Strike>,
     lean: Held,
     duck: Held,
@@ -490,6 +540,8 @@ impl Mover {
             place: 0.0,
             feet: [stance.feet[0].ball.0, stance.feet[1].ball.0],
             step: None,
+            fallen: false,
+            shoved: None,
             strike: None,
             lean: Held::default(),
             duck: Held::default(),
@@ -544,7 +596,7 @@ impl Mover {
                 pose.feet[side].ball.0 += step.by * feet[side];
                 pose.feet[side].ball.1 += STEP_LIFT * libm::sin(PI * feet[side]);
             }
-            pose.hips.0 += step.by * hips;
+            pose.hips.0 += step.hips_from + (step.by - step.hips_from) * hips;
         }
         // Leaning back: the weight goes over the back leg, whose heel comes
         // down to bear it, and the trunk away from the punch, the chin
@@ -1001,14 +1053,23 @@ impl World {
             frame.world(Joints::of(&pose).head()),
             frame.world(pose.hips),
         );
+        let step = mover.step.map_or(String::from("none"), |step| {
+            format!(
+                "{:+.3}{} {:.2} s old, down {:?}",
+                step.by,
+                if step.catching { " catching" } else { "" },
+                step.age,
+                step.down,
+            )
+        });
         format!(
-            "pose puts the head at ({:.0}, {:.0}) and the hips at ({:.0}, {:.0}); place {:+.3}, step {:?}, lean {:.2}, duck {:.2}, block {:.2}; {strike}",
+            "pose puts the head at ({:.0}, {:.0}) and the hips at ({:.0}, {:.0}); place {:+.3}, step {step}{}, lean {:.2}, duck {:.2}, block {:.2}; {strike}",
             head.x,
             head.y,
             hips.x,
             hips.y,
             mover.place,
-            mover.step.map(|step| step.by),
+            if mover.fallen { ", fallen" } else { "" },
             mover.lean.amount,
             mover.duck.amount,
             mover.block.amount,
@@ -1114,6 +1175,82 @@ impl World {
         ends
     }
 
+    /// Lets a fallen fighter's joints stay as they lie: each joint's muscles
+    /// aim it where it is and only slow it, and the shoulders' seats stop
+    /// sliding. Aimed at its stance still, a fighter shoved off its feet
+    /// pushed itself back up from sitting on the floor to standing, which
+    /// getting up, a movement of its own, should do.
+    fn let_fallen_joints_be(&mut self, rig: &fighter::Rig) {
+        for &index in &rig.hinges {
+            let Some(turn) = self.joint_turn(index) else {
+                continue;
+            };
+            if let Some(joint) = self.bone_joints.get_mut(index) {
+                joint.drive.swing = turn;
+                joint.drive.swing_speed = 0.0;
+                joint.seat_speed = Vec2::default();
+            }
+        }
+    }
+
+    /// Pushes side-view fighter `body`'s trunk, its spine, head, and ribs
+    /// with the flesh held to them, across by `newton_seconds` (positive to
+    /// the window's right) over the coming step `dt` long: as much farther as
+    /// it then travels, since a step begins moving each thing as far as the
+    /// last moved it (`split_step_into_substeps`).
+    fn shove_trunk(&mut self, body: usize, rig: &fighter::Rig, newton_seconds: f64, dt: f64) {
+        let spine = [
+            rig.pelvis,
+            rig.lumbar,
+            rig.thoracic,
+            rig.cervical,
+            rig.skull,
+        ];
+        let trunk: Vec<usize> = (0..self.bones.len())
+            .filter(|&bone| {
+                spine.contains(&bone)
+                    || (self.bones[bone].body as usize == body
+                        && self.bones[bone].part == BonePart::Rib)
+            })
+            .collect();
+        let points: Vec<usize> = (0..self.points.len())
+            .filter(|&point| {
+                let held = &self.point_holds[point];
+                self.points[point].body as usize == body
+                    && !self.points[point].pinned
+                    && !self.points[point].is_ghost()
+                    && trunk.contains(&held.posture.bones[0])
+            })
+            .collect();
+        let kilograms = (trunk.iter().map(|&bone| self.bones[bone].mass).sum::<f64>()
+            + points
+                .iter()
+                .map(|&point| self.points[point].mass)
+                .sum::<f64>())
+            * KG_PER_MASS;
+        if kilograms <= 0.0 {
+            return;
+        }
+        // Metres a second gained, as pixels moved over the step.
+        let shift = newton_seconds / kilograms * 1000.0 / self.mm_per_px() * dt;
+        for bone in trunk {
+            self.bones[bone].a.x += shift;
+            self.bones[bone].b.x += shift;
+        }
+        for point in points {
+            self.points[point].position.x += shift;
+        }
+    }
+
+    /// Whether side-view fighter `body` has fallen, its weight run past where
+    /// any step could catch it (`Mover::fallen`).
+    pub(super) fn fighter_fallen(&self, body: usize) -> bool {
+        self.bodies
+            .get(body)
+            .and_then(|state| state.mover.as_ref())
+            .is_some_and(|mover| mover.fallen)
+    }
+
     /// Whether side-view fighter `body` would take a step if told to: it is
     /// not in the middle of one.
     fn free_to_step(&self, body: usize) -> bool {
@@ -1177,7 +1314,11 @@ impl World {
         };
         let lead_free = throws(self, Side::Lead);
         let rear_free = throws(self, Side::Rear);
-        let Some(mover) = self.bodies[body].mover.as_mut() else {
+        let Some(mover) = self.bodies[body]
+            .mover
+            .as_mut()
+            .filter(|mover| !mover.fallen)
+        else {
             return;
         };
         let strike = |mover: &Mover, hand: Side| {
@@ -1210,6 +1351,7 @@ impl World {
             Move::LeanBack(held) => mover.lean.held = held,
             Move::Block(held) => mover.block.held = held,
             Move::Duck(held) => mover.duck.held = held,
+            Move::Shoved(newton_seconds) => mover.shoved = Some((f64::from(newton_seconds), 0.0)),
             _ => {}
         }
     }
@@ -1227,6 +1369,10 @@ impl World {
                 let mover = self.bodies[body].mover.as_ref()?;
                 Some(frame.stand.x + frame.facing * mover.guard_front() * frame.height)
             })
+            .collect();
+        // How far each fighter could step toward the other, as all stood.
+        let rooms: Vec<f64> = (0..self.bodies.len())
+            .map(|body| self.room_ahead(body))
             .collect();
         for body in 0..self.bodies.len() {
             let (Some(frame), Some(rig)) =
@@ -1252,6 +1398,13 @@ impl World {
             mover.lean.ease(2.4, dt);
             mover.duck.ease(2.4, dt);
             mover.block.ease(BLOCK_HERTZ, dt);
+            // A shove from outside pushes the trunk, a share each step.
+            if let Some((newton_seconds, age)) = mover.shoved {
+                let share = newton_seconds * dt.min(SHOVE_SECONDS - age).max(0.0) / SHOVE_SECONDS;
+                self.shove_trunk(body, &rig, -frame.facing * share, dt);
+                mover.shoved =
+                    Some((newton_seconds, age + dt)).filter(|_| age + dt < SHOVE_SECONDS);
+            }
             // A foot swings while its part of a step lasts, and is set down
             // as it ends: the first as it strikes the floor on its way down,
             // or as its time runs out.
@@ -1294,6 +1447,50 @@ impl World {
                     mover.step = None;
                     swinging = [false; 2];
                     loads = [1.0; 2];
+                }
+            }
+            // Its hips down near the floor, a fighter has fallen, whether or
+            // not a step was still trying to catch it: sat down by a shove
+            // in the middle of its step, a fighter not counted as fallen
+            // was pushed back up to standing by its legs.
+            let hips_up = self
+                .bones
+                .get(rig.pelvis)
+                .map_or(f64::INFINITY, |pelvis| frame.own(pelvis.b).1);
+            if !mover.fallen && hips_up < FALLEN_HIPS {
+                mover.fallen = true;
+                mover.step = None;
+            }
+            // Its weight run past its feet, a fighter steps to catch itself,
+            // toward where its weight is going and past it, no farther than
+            // a step goes (Hof, Gazendam and Sinke 2005; Pratt, Carff,
+            // Drakunov and Goswami 2006); past that, no step can catch it, and
+            // it falls and stays down. Toward the other fighter, it steps no
+            // nearer than two fighters stand.
+            if mover.step.is_none() && !mover.fallen {
+                let (beyond, travel) = self.capture_beyond(body, frame.facing, frame.height);
+                if beyond != 0.0 {
+                    // The whole stance moves under where the body comes to
+                    // rest. Moved only far enough to put the capture point
+                    // inside the feet, a step catching a shove of 100 N s went
+                    // 11 cm while the hips ran on 28.
+                    let needed = travel + travel.signum() * CATCH_PAST;
+                    if needed.abs() > FARTHEST_STEP {
+                        mover.fallen = true;
+                    } else {
+                        let by = if needed > 0.0 {
+                            needed.min(rooms[body].max(0.0))
+                        } else {
+                            needed
+                        };
+                        if by.abs() >= SHORTEST_STEP {
+                            let hips_from = self
+                                .bones
+                                .get(rig.pelvis)
+                                .map_or(0.0, |pelvis| frame.own(pelvis.b).0 - mover.pose().hips.0);
+                            mover.step = Some(Step::catching(by, hips_from));
+                        }
+                    }
                 }
             }
             if let Some(strike) = &mut mover.strike {
@@ -1360,6 +1557,11 @@ impl World {
                 }
             }
             let joints = Joints::of(&pose);
+            if mover.fallen {
+                self.let_fallen_joints_be(&rig);
+                self.bodies[body].mover = Some(mover);
+                continue;
+            }
             self.aim_joints(body, &rig, &frame, &mut mover, &joints, dt);
             self.carry_hips(&rig, &frame, &mut mover, &joints, dt);
             self.place_feet(&rig, &frame, &Joints::of(&planned), swinging, loads, dt);
