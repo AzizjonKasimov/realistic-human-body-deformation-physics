@@ -191,6 +191,8 @@ pub enum Measure {
     Force,
     /// How fast a head's turning changed, in radians a second squared.
     Spin,
+    /// How much a head's turning changed within a blow, in radians a second.
+    Turn,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

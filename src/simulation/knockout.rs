@@ -4,20 +4,23 @@
 //! where a blow that only throws the head does far less (Ommaya and
 //! Gennarelli 1974; Gennarelli et al. 1982). So the engine watches how each
 //! fighter's head turns, substep by substep, as a mouthguard's sensors watch
-//! a boxer's, and a fighter whose head's turning changed faster than
-//! `Materials::knockout_spin` ([`KNOCKOUT_SPIN`]) is knocked out: its legs give way and stop carrying it,
-//! every muscle lets go, as an arm's do when a bone in it breaks
+//! a boxer's, and knocks out a fighter whose head a blow turns past either
+//! of the two measures the one knockout measured on a person reached: its
+//! turning changed by more than `Materials::knockout_turn` within the blow
+//! ([`KNOCKOUT_TURN`]), or faster than `Materials::knockout_spin` from one
+//! substep to the next ([`KNOCKOUT_SPIN`]). Its legs give way and stop
+//! carrying it, every muscle lets go, as an arm's do when a bone in it breaks
 //! (`World::let_limb_go`), and it stays down (`Mover::fallen`).
 //!
-//! The fighters' punches turn the head about as hard as people's: a cross
-//! landed well turned the struck head at about 2,300 rad/s², and jabs and
-//! crosses landed from every distance at about 1,600 on average
-//! (`print_fighter_punches`), where boxing turned the heads of 22 West Point
-//! cadets sparring at 1,520 ± 960 rad/s² (at most 8,850 in 205 bouts,
-//! instrumented mouthguards) and mixed martial arts the heads of 13 fighters
-//! at 2,567 ± 1,739 (Tiernan et al. 2020). A dummy's head takes the same
-//! punches harder, 6,343 ± 1,789 for Olympic boxers' straight punches
-//! (Walilko, Viano and Bir 2005), and is not built for punches.
+//! A fighter's punches aim at the other's jaw, as boxers' do (`mover.rs`),
+//! and turn the head about as hard as people's: a cross landed well turns
+//! the struck head at about 2,800 to 3,100 rad/s² and 17 to 20 rad/s, and
+//! jabs and crosses landed from every distance less (`print_fighter_punches`),
+//! where boxing turned the heads of 22 West Point cadets sparring at 1,520 ±
+//! 960 rad/s² (at most 8,850 in 205 bouts, instrumented mouthguards) and
+//! mixed martial arts the heads of 13 fighters at 2,567 ± 1,739 (Tiernan et
+//! al. 2020). A dummy's head took Olympic boxers' hardest straight punches to
+//! the chin at 6,343 ± 1,789 rad/s² (Walilko, Viano and Bir 2005).
 //!
 //! Left out for now: getting up, how long a knockout lasts, and the stiff
 //! arm two in three knocked-out fighters hold up for a few seconds as they
@@ -27,28 +30,45 @@ use super::*;
 
 /// How fast a blow must change how fast a fighter's head turns to knock it
 /// out, in radians a second squared, from one substep to the next, as
-/// `Materials::knockout_spin` is built. No study
-/// gives a knockout threshold. Concussion comes at even odds near 5,800 to
-/// 6,400 rad/s² (King et al. 2003; Rowson et al. 2012), but only about one
-/// concussion in ten puts the person out (9.3% of the NFL's, Pellman et al.
-/// 2004), and the one knockout measured on a person turned the head at
-/// 12,900 rad/s² and 34 rad/s (Hernandez et al. 2015). So between the two:
-/// a punch must turn the head about four times as hard as a cross landed
-/// well.
+/// `Materials::knockout_spin` is built. No study gives a knockout threshold.
+/// Concussion comes at even odds near 5,800 to 6,400 rad/s² and 28 rad/s
+/// (King et al. 2003; Rowson et al. 2012), but only about one concussion in
+/// ten puts the person out (9.3% of the NFL's, Pellman et al. 2004), and the
+/// one knockout measured on a person, a college football player tackled,
+/// his head turned mostly sideways, turned it at 12,900 rad/s² and 34 rad/s
+/// (Hernandez et al. 2015).
 pub(super) const KNOCKOUT_SPIN: f64 = 10_000.0;
+
+/// How much a blow must change how fast a fighter's head turns, within the
+/// blow, to knock it out, in radians a second, as `Materials::knockout_turn`
+/// is built: as much as the one knockout measured (34 rad/s, above the 28 of
+/// concussion at even odds). A punch's blow lasts longer than a tackle's,
+/// so it reaches this before [`KNOCKOUT_SPIN`]: over the fighters' 8 ms blow,
+/// 10,000 rad/s² would turn the head at 51 rad/s.
+pub(super) const KNOCKOUT_TURN: f64 = 34.0;
+
+/// How many substeps a blow's change in the head's turning is measured over
+/// (17 ms): the 8 ms of a fist's push and a little more, before the neck
+/// pulls the head back. Over 33 ms the head's swing back counted as well,
+/// and a cross to the jaw seemed to change its turning by 33 rad/s where the
+/// blow itself changed it by 22.
+const BLOW_SUBSTEPS: usize = 4;
 
 /// How a side-view fighter's head has turned (`World::watch_heads`), and
 /// whether a blow has knocked it out.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct HeadSpin {
-    /// How fast the head turned over the last substep, in radians a second;
-    /// `None` before the first.
-    last: Option<f64>,
-    /// The fastest the head has turned, in radians a second, and the
-    /// fastest its turning has changed from one substep to the next, in
-    /// radians a second squared, since the fighter was built.
+    /// How fast the head turned over each of the last substeps, in radians
+    /// a second, oldest first, and how many of them there are yet.
+    recent: [f64; BLOW_SUBSTEPS],
+    seen: usize,
+    /// Since the fighter was built: the fastest the head has turned, in
+    /// radians a second; the fastest its turning has changed from one
+    /// substep to the next, in radians a second squared; and the most its
+    /// turning has changed within a blow's time, in radians a second.
     pub fastest: f64,
     pub hardest: f64,
+    pub changed: f64,
     /// Whether a blow has knocked it out.
     pub knocked_out: bool,
 }
@@ -56,17 +76,41 @@ pub struct HeadSpin {
 impl HeadSpin {
     /// The same head in a mirror image, turning the other way.
     pub(super) fn mirror(&mut self) {
-        self.last = self.last.map(|spin| -spin);
+        for spin in &mut self.recent {
+            *spin = -*spin;
+        }
+    }
+
+    /// Takes how fast the head turned over the substep `h` long that just
+    /// ended, in radians a second: returns how fast its turning changed from
+    /// the substep before, in radians a second squared, and how much it has
+    /// changed within a blow's time, in radians a second.
+    fn watch(&mut self, spin: f64, h: f64) -> (f64, f64) {
+        let jolt = if self.seen > 0 {
+            (spin - self.recent[BLOW_SUBSTEPS - 1]).abs() / h
+        } else {
+            0.0
+        };
+        self.recent.rotate_left(1);
+        self.recent[BLOW_SUBSTEPS - 1] = spin;
+        self.seen = (self.seen + 1).min(BLOW_SUBSTEPS);
+        let kept = &self.recent[BLOW_SUBSTEPS - self.seen..];
+        let change = kept.iter().fold(f64::MIN, |most, &spin| most.max(spin))
+            - kept.iter().fold(f64::MAX, |least, &spin| least.min(spin));
+        self.fastest = self.fastest.max(spin.abs());
+        self.hardest = self.hardest.max(jolt);
+        self.changed = self.changed.max(change);
+        (jolt, change)
     }
 }
 
 impl World {
     /// Watches how each side-view fighter's head turns as a substep `h`
     /// long begins, from how its skull turned over the last: a fighter still
-    /// on its feet whose head's turning changed faster than
+    /// on its feet whose head a blow turns past `Materials::knockout_turn` or
     /// `Materials::knockout_spin` is knocked out.
     pub(super) fn watch_heads(&mut self, h: f64) {
-        let limit = self.materials.knockout_spin;
+        let (turn_limit, spin_limit) = (self.materials.knockout_turn, self.materials.knockout_spin);
         for body in 0..self.bodies.len() {
             let Some(skull) = self.bodies[body].fighter.as_ref().map(|rig| rig.skull) else {
                 continue;
@@ -77,22 +121,23 @@ impl World {
             let angle = |a: Vec2, b: Vec2| libm::atan2(b.y - a.y, b.x - a.x);
             let spin =
                 wrap_angle(angle(bone.a, bone.b) - angle(bone.previous_a, bone.previous_b)) / h;
-            let head = &mut self.bodies[body].head;
-            let jolt = head.last.map_or(0.0, |last| (spin - last).abs() / h);
-            head.last = Some(spin);
-            head.fastest = head.fastest.max(spin.abs());
-            head.hardest = head.hardest.max(jolt);
-            if jolt > limit && !head.knocked_out && !self.fighter_fallen(body) {
-                self.knock_out(body, jolt);
+            let (jolt, change) = self.bodies[body].head.watch(spin, h);
+            if self.bodies[body].head.knocked_out || self.fighter_fallen(body) {
+                continue;
+            }
+            if change > turn_limit {
+                self.knock_out(body, Measure::Turn, change, turn_limit);
+            } else if jolt > spin_limit {
+                self.knock_out(body, Measure::Spin, jolt, spin_limit);
             }
         }
     }
 
-    /// Knocks side-view fighter `body` out, its head's turning changed at
-    /// `jolt` radians a second squared: every muscle lets go, the pull each
-    /// carried with it, its legs no longer carry it, and it takes no more
-    /// moves.
-    fn knock_out(&mut self, body: usize, jolt: f64) {
+    /// Knocks side-view fighter `body` out, its head turned by a blow to
+    /// `value` past `limit`, as `measure` measures them: every muscle lets
+    /// go, the pull each carried with it, its legs no longer carry it, and it
+    /// takes no more moves.
+    fn knock_out(&mut self, body: usize, measure: Measure, value: f64, limit: f64) {
         self.bodies[body].head.knocked_out = true;
         if let Some(mover) = &mut self.bodies[body].mover {
             mover.knock_down();
@@ -115,9 +160,9 @@ impl World {
             Subject::Bone(skull),
             at,
             None,
-            Measure::Spin,
-            jolt,
-            self.materials.knockout_spin,
+            measure,
+            value,
+            limit,
         );
     }
 
@@ -128,13 +173,16 @@ impl World {
             .is_some_and(|state| state.head.knocked_out)
     }
 
-    /// The hardest body `body`'s head has been turned, in radians a second
-    /// squared ([`HeadSpin::hardest`]), and the fastest, in radians a second.
-    pub fn hardest_head_spin(&self, body: usize) -> Option<(f64, f64)> {
+    /// How hard body `body`'s head has been turned, if it is a side-view
+    /// fighter ([`HeadSpin`]): the fastest its turning changed from one
+    /// substep to the next, in radians a second squared, the fastest it
+    /// turned, and the most its turning changed within a blow's time, in
+    /// radians a second.
+    pub fn hardest_head_spin(&self, body: usize) -> Option<(f64, f64, f64)> {
         self.bodies
             .get(body)
             .filter(|state| state.fighter.is_some())
-            .map(|state| (state.head.hardest, state.head.fastest))
+            .map(|state| (state.head.hardest, state.head.fastest, state.head.changed))
     }
 
     /// Whether the muscles of body `body`'s `limb` have let go: it hangs
@@ -161,37 +209,52 @@ mod tests {
         world
     }
 
-    /// A head whose turning changes faster than a knockout takes, from one
-    /// substep to the next, is knocked out, and one a little slower is not.
+    /// A head whose turning a blow changes by more than a knockout takes,
+    /// within the blow, or faster than one takes from one substep to the
+    /// next, is knocked out, and one turned a little less is not.
     #[test]
-    fn a_jolt_past_the_limit_knocks_a_fighter_out() {
+    fn a_head_turned_past_either_limit_is_knocked_out() {
         let h = Materials::default().fixed_dt / Materials::default().substeps as f64;
         for (share, out) in [(0.9, false), (1.1, true)] {
+            // Its turning changed by `share` of the limit within the blow,
+            // over a substep: far slower than the other limit.
             let mut world = standing();
             world.watch_heads(h);
-            // As though the head had turned slower over the last substep, by
-            // `share` of the limit.
-            let last = world.bodies[1].head.last.unwrap();
-            world.bodies[1].head.last = Some(last - share * KNOCKOUT_SPIN * h);
+            let now = world.bodies[1].head.recent[BLOW_SUBSTEPS - 1];
+            world.bodies[1].head.recent = [now - share * KNOCKOUT_TURN; BLOW_SUBSTEPS];
             world.watch_heads(h);
             assert_eq!(
                 world.knocked_out(1),
                 out,
-                "a head's turning changed at {share} of the knockout limit"
+                "a head's turning changed by {share} of the limit within a blow"
+            );
+            // Its turning changing at `share` of the other limit, from one
+            // substep to the next, with no limit on how much.
+            let mut world = standing();
+            world.materials.knockout_turn = f64::INFINITY;
+            world.watch_heads(h);
+            let now = world.bodies[1].head.recent[BLOW_SUBSTEPS - 1];
+            world.bodies[1].head.recent = [now - share * KNOCKOUT_SPIN * h; BLOW_SUBSTEPS];
+            world.watch_heads(h);
+            assert_eq!(
+                world.knocked_out(1),
+                out,
+                "a head's turning changed at {share} of the limit from one substep to the next"
             );
             assert!(!world.knocked_out(0), "the other fighter was knocked out");
         }
     }
 
     /// A cross knocks out a fighter whose head takes less than it gives,
-    /// here with the limit lowered under what a cross landed well gives:
-    /// the fighter goes limp, falls, and stays down, taking no moves, and
-    /// nothing tears as it falls. The fighter that threw it stands on.
+    /// here with the limit lowered under what a cross landed well gives (10
+    /// rad/s within the blow): the fighter goes limp, falls, and stays down,
+    /// taking no moves, and nothing tears as it falls. The fighter that threw
+    /// it stands on.
     #[test]
     fn a_fighter_knocked_out_falls_and_stays_down() {
         let mut world = create_side_fighters_at(Materials::default(), 0.60);
         world.keep_journal();
-        world.materials.knockout_spin = 1_500.0;
+        world.materials.knockout_turn = 10.0;
         let dt = world.materials.fixed_dt;
         let rig = world.bodies[1].fighter.clone().unwrap();
         let cm = world.mm_per_px() * 0.1;

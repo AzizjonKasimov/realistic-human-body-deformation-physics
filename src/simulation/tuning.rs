@@ -66,6 +66,7 @@ named_settings!(
     legs_across_hertz,
     legs_tilt_hertz,
     legs_up_hertz,
+    knockout_turn,
     knockout_spin,
     skin_shear_modulus,
     skin_thickness,

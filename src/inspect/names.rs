@@ -414,5 +414,8 @@ pub fn measure_text(measure: Measure, value: f64, limit: f64) -> String {
         Measure::Spin => {
             format!("its turning changed at {value:.0} rad/s2 (limit {limit:.0} rad/s2)")
         }
+        Measure::Turn => format!(
+            "its turning changed by {value:.1} rad/s within the blow (limit {limit:.1} rad/s)"
+        ),
     }
 }

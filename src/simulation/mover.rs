@@ -186,9 +186,15 @@ impl Held {
     /// Moves `amount` toward 1 while held and 0 once let go, as a critically
     /// damped spring settles, `quickness` hertz fast.
     fn ease(&mut self, quickness: f64, dt: f64) {
+        self.ease_at_most(quickness, f64::INFINITY, dt);
+    }
+
+    /// As [`Held::ease`], but speeding `amount` up toward 1 by no more than
+    /// `most` a second each second.
+    fn ease_at_most(&mut self, quickness: f64, most: f64, dt: f64) {
         let omega = 2.0 * PI * quickness;
         let target = if self.held { 1.0 } else { 0.0 };
-        let pull = omega * omega * (target - self.amount) - 2.0 * omega * self.speed;
+        let pull = (omega * omega * (target - self.amount) - 2.0 * omega * self.speed).min(most);
         self.speed += pull * dt;
         self.amount += self.speed * dt;
         if !self.held && self.amount.abs() < 1.0e-4 && self.speed.abs() < 1.0e-3 {
@@ -258,6 +264,30 @@ const LANDING_NEAR: f64 = 0.006;
 /// their height a young adult steps out on purpose.
 const CATCH_PAST: f64 = 0.03;
 const FARTHEST_STEP: f64 = 0.30;
+
+/// Where along the other fighter's skull a punch aims, from its base (0) to
+/// its crown (1): at the height of the jaw, as boxers aim. Strikes to the
+/// jaw ended 54% of UFC knockouts (Hutchison et al. 2014), and on a dummy's
+/// head a blow off its centre turned it about twice as hard as one through
+/// it (McIntosh and Patton 2015). Aimed at the middle of the head (0.45), a
+/// cross landed well turned it at about 2,300 rad/s^2, its turning changing
+/// by 15 rad/s within the blow; at the jaw, at about 3,100 and by 20. Aimed
+/// lower still, at the chin's point, it turned the head no harder and met
+/// the hands of the guard more often.
+const AIM_UP_THE_SKULL: f64 = 0.0;
+
+/// How far a duck lowers the hips, in body heights (18 cm).
+const DUCK_DROP: f64 = 0.100;
+
+/// How fast a duck sets the hips falling, at the most, as a share of how
+/// fast things fall: a body drops by its legs giving way under it, the floor
+/// pushing back less than its weight, and in a countermovement jump's
+/// unweighting the floor's push falls to about a fifth of the body's weight
+/// (McMahon, Suchomel, Lake and Comfort 2018). Eased in as a spring that
+/// pulls hardest at once, a duck asked the hips to fall at 4 g, and the legs,
+/// folding faster than the body could drop, pulled both feet off the floor
+/// for a tenth of a second; stepping back so, a fighter fell.
+const DUCK_FALL: f64 = 0.8;
 
 /// How long a shove from outside pushes (`Move::Shoved`), in seconds.
 const SHOVE_SECONDS: f64 = 0.1;
@@ -635,7 +665,7 @@ impl Mover {
         // punch, the eyes still on the other fighter.
         let duck = self.duck.amount;
         pose.hips.0 += 0.010 * duck;
-        pose.hips.1 -= 0.100 * duck;
+        pose.hips.1 -= DUCK_DROP * duck;
         pose.pelvis += 0.16 * duck;
         pose.lumbar += 0.28 * duck;
         pose.thorax += 0.40 * duck;
@@ -1081,12 +1111,52 @@ impl World {
                 step.down,
             )
         });
+        // Where its hips really are, and how far past its feet its weight
+        // runs (`World::capture_beyond`), in body heights.
+        let really = self
+            .bodies
+            .get(body)
+            .and_then(|state| state.fighter.as_ref())
+            .and_then(|rig| self.bones.get(rig.pelvis))
+            .map_or(Vec2::default(), |pelvis| pelvis.b);
+        let (beyond, travel) = self.capture_beyond(body, frame.facing, frame.height);
+        // How each foot stands: swung by a step, lifted off the floor at
+        // both ends, or touching it, and the share of the weight it bears.
+        let feet: Vec<String> = self
+            .bodies
+            .get(body)
+            .and_then(|state| state.fighter.as_ref())
+            .map_or(Vec::new(), |rig| {
+                rig.feet
+                    .iter()
+                    .map(|&foot| {
+                        self.foot_holds
+                            .iter()
+                            .find(|hold| hold.bone == foot)
+                            .map_or(String::from("no hold"), |hold| {
+                                format!(
+                                    "{}{}load {:.2}",
+                                    if hold.swinging { "swinging, " } else { "" },
+                                    if self.foot_on_floor(foot) {
+                                        "on the floor, "
+                                    } else {
+                                        "off the floor, "
+                                    },
+                                    hold.load
+                                )
+                            })
+                    })
+                    .collect()
+            });
         format!(
-            "pose puts the head at ({:.0}, {:.0}) and the hips at ({:.0}, {:.0}); place {:+.3}, step {step}{}, lean {:.2}, duck {:.2}, block {:.2}; {strike}",
+            "pose puts the head at ({:.0}, {:.0}) and the hips at ({:.0}, {:.0}), the hips really at ({:.0}, {:.0}), {:.2} body heights up, the weight {beyond:+.3} past the feet and going {travel:+.3}; feet {feet:?}; place {:+.3}, step {step}{}, lean {:.2}, duck {:.2}, block {:.2}; {strike}",
             head.x,
             head.y,
             hips.x,
             hips.y,
+            really.x,
+            really.y,
+            frame.own(really).1,
             mover.place,
             match (self.knocked_out(body), mover.fallen) {
                 (true, _) => ", knocked out",
@@ -1140,7 +1210,7 @@ impl World {
         self.bones
             .iter()
             .filter(|bone| skull(bone))
-            .map(|bone| lerp(bone.a, bone.b, 0.45))
+            .map(|bone| lerp(bone.a, bone.b, AIM_UP_THE_SKULL))
             .min_by(|p, q| (p.x - own).abs().total_cmp(&(q.x - own).abs()))
     }
 
@@ -1419,7 +1489,14 @@ impl World {
             }
             mover.clock += dt;
             mover.lean.ease(2.4, dt);
-            mover.duck.ease(2.4, dt);
+            // A duck drops the hips no faster than legs giving way let the
+            // body fall (`DUCK_FALL`).
+            let metres = frame.height * self.mm_per_px() * 0.001;
+            mover.duck.ease_at_most(
+                2.4,
+                DUCK_FALL * self.materials.gravity / (DUCK_DROP * metres),
+                dt,
+            );
             mover.block.ease(BLOCK_HERTZ, dt);
             // A shove from outside pushes the trunk, a share each step.
             if let Some((newton_seconds, age)) = mover.shoved {

@@ -353,9 +353,11 @@ pub struct Materials {
     /// them over the feet, on top of the weight they bear, in hertz on the
     /// body's weight; 0 bears the weight alone.
     pub legs_up_hertz: f64,
-    /// How fast a blow must change how fast a side-view fighter's head
-    /// turns, from one substep to the next, to knock it out, in radians a
-    /// second squared (`knockout.rs`).
+    /// How much a blow must change how fast a side-view fighter's head
+    /// turns, within the blow, to knock it out, in radians a second; and how
+    /// fast, from one substep to the next, in radians a second squared
+    /// (`knockout.rs`).
+    pub knockout_turn: f64,
     pub knockout_spin: f64,
     /// The dermis's shear modulus at small strain, in pascals, and its
     /// thickness, in metres; it stiffens `skin_stiffening_ratio` times once
@@ -654,6 +656,7 @@ impl Default for Materials {
             legs_across_hertz: 2.0,
             legs_tilt_hertz: 3.0,
             legs_up_hertz: 0.0,
+            knockout_turn: knockout::KNOCKOUT_TURN,
             knockout_spin: knockout::KNOCKOUT_SPIN,
             hip_hold_damping_ratio: 1.0,
             // Living skin's Young's modulus is about 0.5-0.6 MPa at small

@@ -1837,10 +1837,18 @@ mod tests {
                 // a second. Measured as Walilko, Viano and Bir (2005) measured
                 // Olympic boxers' punches on a dummy's head.
                 let mut head_motion: Vec<(f64, Vec2)> = Vec::new();
+                // `RP_COUNTER=10` has the struck fighter step in that many
+                // frames before the punch is thrown, so it lands as a counter.
+                let counter: Option<usize> = std::env::var("RP_COUNTER")
+                    .ok()
+                    .and_then(|frames| frames.parse().ok());
                 for step in 0..70 {
                     let mut input = InputState::default();
                     if step == 0 && blocked {
                         input.moves[0] = Some((1, Move::Block(true)));
+                    }
+                    if counter.is_some_and(|frames| step + frames == 20) {
+                        input.moves[0] = Some((1, Move::StepIn));
                     }
                     if step == 20 {
                         input.moves[1] = Some((0, made));
@@ -1898,6 +1906,16 @@ mod tests {
                 // The head's hardest turning and throwing, substep to substep.
                 let h = dt / world.materials.substeps as f64;
                 let (mut spin, mut spun, mut thrown) = (0.0_f64, 0.0_f64, 0.0_f64);
+                // How much the head's turning changed within a blow's time
+                // (four substeps, 17 ms), as the engine measures a knockout
+                // (`knockout.rs`).
+                let changed = head_motion
+                    .windows(4)
+                    .map(|window| {
+                        let turning = window.iter().map(|(turning, _)| *turning);
+                        turning.clone().fold(f64::MIN, f64::max) - turning.fold(f64::MAX, f64::min)
+                    })
+                    .fold(0.0_f64, f64::max);
                 for pair in head_motion.windows(2) {
                     let ((was_turning, was_moving), (turning, moving)) = (pair[0], pair[1]);
                     spin = spin.max(turning.abs());
@@ -1929,9 +1947,9 @@ mod tests {
                 if !detail && !story {
                     continue;
                 }
-                let (watched, _) = world.hardest_head_spin(1).unwrap_or_default();
+                let (watched, _, _) = world.hardest_head_spin(1).unwrap_or_default();
                 println!(
-                    "{spacing:.3} apart, {made:?}{}: fist up to {fastest:.1} m/s, landed at {landed:.1?} m/s; reddened points head and trunk {}, arms {}; skull pressed {pressed:.2} of its strength, head up to {head_speed:.1} m/s and {:.1} cm off its hips, turned {:.0} deg, spun at up to {spun:.0} rad/s2 (watched {watched:.0}{}) and {spin:.1} rad/s and thrown at {thrown:.0} g, hips shoved {:.1} cm; torn joints {}, skin {}, muscle {}, broken bones {}",
+                    "{spacing:.3} apart, {made:?}{}: fist up to {fastest:.1} m/s, landed at {landed:.1?} m/s; reddened points head and trunk {}, arms {}; skull pressed {pressed:.2} of its strength, head up to {head_speed:.1} m/s and {:.1} cm off its hips, turned {:.0} deg, spun at up to {spun:.0} rad/s2 (watched {watched:.0}{}) and {spin:.1} rad/s, its turning changed by {changed:.1} rad/s within the blow, and thrown at {thrown:.0} g, hips shoved {:.1} cm; torn joints {}, skin {}, muscle {}, broken bones {}",
                     if blocked { " into a block" } else { "" },
                     reddened[0],
                     reddened[1],
@@ -2591,10 +2609,37 @@ mod tests {
                 started.elapsed().as_secs_f64() * 1000.0 / steps,
             );
             println!("    the fastest a bone moved was {fastest:.1} m/s");
+            // `RP_GESTURE=1` with `RP_SEED` writes the fight as a gesture the
+            // app's capture mode plays (`--side --gesture`), to film it.
+            if only.is_some() && std::env::var("RP_GESTURE").is_ok() {
+                let on = |held: bool| if held { "on" } else { "off" };
+                let mut gesture = String::from("hammer:-1.6,0.95");
+                let mut at = 0;
+                for &(frame, body, made) in &moves {
+                    let frame = frame - 1;
+                    if frame > at {
+                        gesture += &format!(":wait={}", frame - at);
+                        at = frame;
+                    }
+                    let who = if body == 0 { "" } else { "2" };
+                    gesture += &match made {
+                        Move::Jab => format!(":jab{who}"),
+                        Move::Cross => format!(":cross{who}"),
+                        Move::StepIn => format!(":step{who}=in"),
+                        Move::StepOut => format!(":step{who}=out"),
+                        Move::LeanBack(held) => format!(":back{who}={}", on(held)),
+                        Move::Duck(held) => format!(":duck{who}={}", on(held)),
+                        Move::Block(held) => format!(":block{who}={}", on(held)),
+                        Move::Shoved(newton_seconds) => format!(":shove{who}={newton_seconds}"),
+                    };
+                }
+                gesture += &format!(":wait={}", (steps as usize).saturating_sub(at));
+                println!("    gesture: {gesture}");
+            }
             // How hard each head was turned, and whether it was knocked out
             // (`knockout.rs`).
             for body in 0..2 {
-                let (hardest, spin) = world.hardest_head_spin(body).unwrap_or_default();
+                let (hardest, spin, changed) = world.hardest_head_spin(body).unwrap_or_default();
                 let out = world.journal().and_then(|journal| {
                     journal
                         .events
@@ -2609,7 +2654,7 @@ mod tests {
                         .map(|event| event.step + 1)
                 });
                 println!(
-                    "    fighter {body}'s head was turned at up to {hardest:.0} rad/s2 and {spin:.1} rad/s{}{}",
+                    "    fighter {body}'s head was turned at up to {hardest:.0} rad/s2 and {spin:.1} rad/s, its turning changed by up to {changed:.1} rad/s within a blow{}{}",
                     out.map_or(String::new(), |frame| format!(", knocked out at frame {frame}")),
                     if world.fighter_fallen(body) && out.is_none() {
                         ", fallen"
