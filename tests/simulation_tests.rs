@@ -1058,7 +1058,10 @@ fn direct_bone_strike_fractures_and_emits_fluid() {
         down: true,
         x: center.x,
         y: center.y,
-        vx: 2200.0,
+        // The spine lies out of a blow's reach, so this breaks a rib, which
+        // gives with the rib cage (`RIB_CAGE_STIFFNESS`): at 2,200 px/s
+        // (about 7 m/s) it no longer did.
+        vx: 3000.0,
         vy: 120.0,
         power: 4.0,
         tool: rp::ToolMode::Blunt,
