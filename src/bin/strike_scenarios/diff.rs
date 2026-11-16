@@ -164,11 +164,244 @@ pub(crate) fn number_moved(before: f64, after: f64, p: f64) -> bool {
 pub(crate) fn stars(p: f64) -> &'static str {
     if p < 0.01 {
         "**"
-    } else if p < 0.05 {
+    } else if p < SURE {
         "* "
     } else {
         "  "
     }
+}
+
+/// How unlikely chance must be to make a difference for it to count as
+/// more than chance: under 5%, which the reports mark `*` (and `**` under
+/// 1%).
+pub(crate) const SURE: f64 = 0.05;
+
+/// How one thing that can happen in a play (a fight, a blow), counted per
+/// play, differs between side A's plays and side B's.
+pub(crate) struct Change {
+    /// The plays it happened in on each side, and how many times in all.
+    pub(crate) plays: (usize, usize),
+    pub(crate) total: (u64, u64),
+    /// How many plays each side played.
+    pub(crate) of: (usize, usize),
+    /// The plays in which B had more of it than A, and fewer; only paired.
+    pub(crate) more: usize,
+    pub(crate) fewer: usize,
+    /// How likely chance is to make a difference as large.
+    pub(crate) p: f64,
+}
+
+impl Change {
+    /// Sides that played the same plays (`paired`) are set play against
+    /// play, by the sign test on the plays in which B had more or fewer of it
+    /// than A; other sides as two samples, by Fisher's exact test on the
+    /// plays it happened in.
+    pub(crate) fn of<T>(a: &[T], b: &[T], paired: bool, count: &dyn Fn(&T) -> u32) -> Change {
+        let happened = |plays: &[T]| plays.iter().filter(|play| count(play) > 0).count();
+        let total = |plays: &[T]| plays.iter().map(|play| u64::from(count(play))).sum::<u64>();
+        let plays = (happened(a), happened(b));
+        let (mut more, mut fewer) = (0, 0);
+        let p = if paired {
+            for (x, y) in a.iter().zip(b) {
+                match count(y).cmp(&count(x)) {
+                    std::cmp::Ordering::Greater => more += 1,
+                    std::cmp::Ordering::Less => fewer += 1,
+                    std::cmp::Ordering::Equal => {}
+                }
+            }
+            sign_test(more, fewer)
+        } else {
+            fisher(plays.0, a.len(), plays.1, b.len())
+        };
+        Change {
+            plays,
+            total: (total(a), total(b)),
+            of: (a.len(), b.len()),
+            more,
+            fewer,
+            p,
+        }
+    }
+
+    /// Whether B has more of it than A, and whether less: play against
+    /// play when paired, else by the share of plays it happened in.
+    fn direction(&self, paired: bool) -> (bool, bool) {
+        if paired {
+            (self.more > self.fewer, self.fewer > self.more)
+        } else {
+            let a = self.plays.0 as u64 * self.of.1 as u64;
+            let b = self.plays.1 as u64 * self.of.0 as u64;
+            (b > a, b < a)
+        }
+    }
+
+    /// The change as a report's line: how sure, what, and the counts A ->
+    /// B, in `plays` (fights, plays).
+    pub(crate) fn line(&self, what: &str, paired: bool, plays: &str) -> String {
+        let mut line = format!(
+            "{} {what}: in {} -> {} {plays}",
+            stars(self.p),
+            self.plays.0,
+            self.plays.1
+        );
+        if self.total != (self.plays.0 as u64, self.plays.1 as u64) {
+            line.push_str(&format!(", {} -> {} in all", self.total.0, self.total.1));
+        }
+        if paired && self.more + self.fewer > 0 {
+            line.push_str(&format!(
+                " (B more in {} {plays}, fewer in {})",
+                self.more, self.fewer
+            ));
+        }
+        line
+    }
+
+    /// The change as a finding, the plays it happened in out of each side's:
+    /// worse or better beyond chance by `worse`, else the same.
+    pub(crate) fn finding(
+        &self,
+        section: &str,
+        item: &str,
+        paired: bool,
+        worse: Worse,
+        holds: Holds,
+    ) -> Finding {
+        let (rose, fell) = self.direction(paired);
+        Finding::new(
+            section,
+            item,
+            (self.plays.0 as u64, self.of.0 as u64),
+            (self.plays.1 as u64, self.of.1 as u64),
+            self.p,
+            judged(self.p, rose, fell, worse),
+        )
+        .holding(holds)
+    }
+}
+
+/// Which way a finding gets worse: as it grows (a watchdog's trips), as it
+/// shrinks (runs in band), or neither (an injury count, which a change may
+/// mean to move).
+#[derive(Clone, Copy)]
+pub(crate) enum Worse {
+    Up,
+    Down,
+    Neither,
+}
+
+/// What a difference means: worse or better beyond chance, `moved` beyond
+/// chance when neither way is worse, or the same.
+pub(crate) fn judged(p: f64, rose: bool, fell: bool, worse: Worse) -> &'static str {
+    if p >= SURE || (!rose && !fell) {
+        return "same";
+    }
+    match worse {
+        Worse::Up if rose => "worse",
+        Worse::Down if fell => "worse",
+        Worse::Neither => "moved",
+        _ => "better",
+    }
+}
+
+/// Whether a change must not make a finding clearly worse before it merges
+/// (`Must`: the tests, the bands and real-life checks across the sweep, the
+/// rules every play follows, and the watchdogs for a body that breaks), may
+/// let it drift, reported (`Drift`), or whether the finding details another
+/// and is listed only (`Detail`): README, "Check A Change Before Merging".
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Holds {
+    Must,
+    Drift,
+    Detail,
+}
+
+impl Holds {
+    fn name(self) -> &'static str {
+        match self {
+            Holds::Must => "must",
+            Holds::Drift => "drift",
+            Holds::Detail => "detail",
+        }
+    }
+}
+
+/// One thing a diff compared, as its findings file holds it for
+/// `tools\merge_check.ps1`: how often it happened in A and in B out of how
+/// many, how likely chance is to make the difference, and what that means.
+#[derive(Clone, Debug)]
+pub(crate) struct Finding {
+    pub(crate) section: String,
+    pub(crate) item: String,
+    pub(crate) a: (u64, u64),
+    pub(crate) b: (u64, u64),
+    pub(crate) p: f64,
+    /// worse, better, moved, borderline (a real-life check a few runs could
+    /// flip, reported), or same.
+    pub(crate) change: &'static str,
+    holds: Option<Holds>,
+}
+
+impl Finding {
+    pub(crate) fn new(
+        section: &str,
+        item: &str,
+        a: (u64, u64),
+        b: (u64, u64),
+        p: f64,
+        change: &'static str,
+    ) -> Finding {
+        Finding {
+            section: section.to_string(),
+            item: item.to_string(),
+            a,
+            b,
+            p,
+            change,
+            holds: None,
+        }
+    }
+
+    pub(crate) fn holding(mut self, holds: Holds) -> Finding {
+        self.holds = Some(holds);
+        self
+    }
+
+    pub(crate) fn holds(&self) -> Holds {
+        self.holds.unwrap_or(Holds::Detail)
+    }
+}
+
+/// The first line of a findings file, which `tools\merge_check.ps1` reads.
+const FINDINGS_HEADER: &str = "section,item,a,a_of,b,b_of,p,change,holds";
+
+/// A field for a CSV line, quoted when it holds a comma or a quote.
+fn csv_field(text: &str) -> String {
+    if text.contains([',', '"']) {
+        format!("\"{}\"", text.replace('"', "\"\""))
+    } else {
+        text.to_string()
+    }
+}
+
+/// Writes `findings` to `path`, a findings file (`*_diff.csv`) beside a
+/// diff's report.
+pub(crate) fn write_findings(path: &Path, findings: &[Finding]) -> Result<(), String> {
+    let mut text = format!("{FINDINGS_HEADER}\n");
+    for finding in findings {
+        text.push_str(&format!(
+            "{},{},{},{},{},{},{:.6},{},{}\n",
+            csv_field(&finding.section),
+            csv_field(&finding.item),
+            finding.a.0,
+            finding.a.1,
+            finding.b.0,
+            finding.b.1,
+            finding.p,
+            finding.change,
+            finding.holds().name()
+        ));
+    }
+    fs::write(path, text).map_err(|error| format!("cannot write {}: {error}", path.display()))
 }
 
 /// The first line of the file at `path` that is not a comment: a CSV's
@@ -354,6 +587,25 @@ pub(crate) fn diff_sweeps(a: &Path, b: &Path, output: &Path) -> Result<(), Strin
     // made: not compared, and named once at the end.
     let mut one_sided: BTreeSet<String> = BTreeSet::new();
     let (mut runs_left, mut runs_right) = (0, 0);
+    // Everything compared, for tools\merge_check.ps1 (sweep_diff.csv).
+    let mut findings = Vec::new();
+    // How often `x` of `n1` runs against `y` of `n2` happened, as a finding.
+    let counted = |section: &str,
+                   item: &str,
+                   (x, n1): (usize, usize),
+                   (y, n2): (usize, usize),
+                   worse: Worse| {
+        let p = fisher(x, n1, y, n2);
+        let (rose, fell) = (y * n1 > x * n2, y * n1 < x * n2);
+        Finding::new(
+            section,
+            item,
+            (x as u64, n1 as u64),
+            (y as u64, n2 as u64),
+            p,
+            judged(p, rose, fell, worse),
+        )
+    };
     for scenario in names {
         let (n1, n2) = (left.runs(scenario), right.runs(scenario));
         if n1 == 0 || n2 == 0 {
@@ -369,6 +621,16 @@ pub(crate) fn diff_sweeps(a: &Path, b: &Path, output: &Path) -> Result<(), Strin
         let in_band = (
             left.hits(scenario, "band", "in_band"),
             right.hits(scenario, "band", "in_band"),
+        );
+        findings.push(
+            counted(
+                "in band",
+                scenario,
+                (in_band.0, n1),
+                (in_band.1, n2),
+                Worse::Down,
+            )
+            .holding(Holds::Must),
         );
         if in_band.0 != in_band.1 {
             let p = fisher(in_band.0, n1, in_band.1, n2);
@@ -396,6 +658,16 @@ pub(crate) fn diff_sweeps(a: &Path, b: &Path, output: &Path) -> Result<(), Strin
                     "{} out of band on {band} {x}/{n1} -> {y}/{n2}",
                     stars(p)
                 ));
+                findings.push(
+                    counted(
+                        "out of band",
+                        &format!("{scenario}: {band}"),
+                        (x, n1),
+                        (y, n2),
+                        Worse::Up,
+                    )
+                    .holding(Holds::Must),
+                );
             }
         }
         if let Some(tuned) = checks.get(scenario.as_str()) {
@@ -415,8 +687,35 @@ pub(crate) fn diff_sweeps(a: &Path, b: &Path, output: &Path) -> Result<(), Strin
                 let edge = borderline(check.often, y, n2)
                     .map(|note| format!("; B {note}"))
                     .unwrap_or_default();
+                // Worse is a check that fit and now misses, beyond chance
+                // and not borderline; better the other way round.
+                let p = fisher(x, n1, y, n2);
+                let (fit_a, fit_b) = (check.often.fits(x, n1), check.often.fits(y, n2));
+                let change = if !edge.is_empty() {
+                    "borderline"
+                } else if p >= SURE || fit_a == fit_b {
+                    if x * n2 != y * n1 && p < SURE {
+                        "moved"
+                    } else {
+                        "same"
+                    }
+                } else if fit_a {
+                    "worse"
+                } else {
+                    "better"
+                };
+                findings.push(
+                    Finding::new(
+                        "real-life check",
+                        &format!("{scenario}: {}", check.outcome.describe()),
+                        (x as u64, n1 as u64),
+                        (y as u64, n2 as u64),
+                        p,
+                        change,
+                    )
+                    .holding(Holds::Must),
+                );
                 if x != y || !edge.is_empty() {
-                    let p = fisher(x, n1, y, n2);
                     lines.push(format!(
                         "{} {} {x}/{n1} ({}) -> {y}/{n2} ({}), real life: {}{edge}",
                         stars(p),
@@ -443,6 +742,16 @@ pub(crate) fn diff_sweeps(a: &Path, b: &Path, output: &Path) -> Result<(), Strin
                     stars(p),
                     watchdog.describe()
                 ));
+                findings.push(
+                    counted(
+                        "watchdog in a scenario",
+                        &format!("{scenario}: {}", watchdog.describe()),
+                        (x, n1),
+                        (y, n2),
+                        Worse::Up,
+                    )
+                    .holding(Holds::Detail),
+                );
             }
         }
         let numbers: BTreeSet<String> = left
@@ -488,6 +797,17 @@ pub(crate) fn diff_sweeps(a: &Path, b: &Path, output: &Path) -> Result<(), Strin
                     shown(m1),
                     shown(m2)
                 ));
+                findings.push(
+                    Finding::new(
+                        "median number",
+                        &format!("{scenario}: {number} {} -> {}", shown(m1), shown(m2)),
+                        (more as u64, pairs.len() as u64),
+                        (less as u64, pairs.len() as u64),
+                        p,
+                        "moved",
+                    )
+                    .holding(Holds::Drift),
+                );
             }
         }
         if !lines.is_empty() {
@@ -502,6 +822,20 @@ pub(crate) fn diff_sweeps(a: &Path, b: &Path, output: &Path) -> Result<(), Strin
     ));
     for watchdog in Watchdog::ALL {
         let (x, y) = totals.get(watchdog.slug()).copied().unwrap_or((0, 0));
+        findings.push(
+            counted(
+                "watchdog",
+                watchdog.describe(),
+                (x, runs_left),
+                (y, runs_right),
+                Worse::Up,
+            )
+            .holding(if watchdog.breaks_the_body() {
+                Holds::Must
+            } else {
+                Holds::Drift
+            }),
+        );
         if x == 0 && y == 0 {
             continue;
         }
@@ -530,6 +864,7 @@ pub(crate) fn diff_sweeps(a: &Path, b: &Path, output: &Path) -> Result<(), Strin
     let path = output.join("sweep_diff.txt");
     fs::write(&path, &report)
         .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    write_findings(&output.join("sweep_diff.csv"), &findings)?;
     print!("{report}");
     println!("wrote {}", path.display());
     Ok(())
