@@ -1790,7 +1790,7 @@ mod tests {
             );
         }
         let detail = std::env::var("RP_DETAIL").is_ok();
-        let mut tally: std::collections::BTreeMap<String, [f64; 13]> = Default::default();
+        let mut tally: std::collections::BTreeMap<String, [f64; 16]> = Default::default();
         for spacing in (0..46).map(|step| 0.50 + step as f64 * 0.005) {
             let pair = side_fighters_from(&one, spacing);
             for (made, blocked) in [
@@ -1831,6 +1831,12 @@ mod tests {
                 let head_from_hips =
                     |world: &World| middle(&world.bones[rig.skull]).x - world.bones[rig.pelvis].b.x;
                 let stood = head_from_hips(&world);
+                // How the struck head spins and is thrown, substep by
+                // substep, from the skull's bone as it began each: its
+                // turning speed in radians a second and its speed in pixels
+                // a second. Measured as Walilko, Viano and Bir (2005) measured
+                // Olympic boxers' punches on a dummy's head.
+                let mut head_motion: Vec<(f64, Vec2)> = Vec::new();
                 for step in 0..70 {
                     let mut input = InputState::default();
                     if step == 0 && blocked {
@@ -1841,7 +1847,21 @@ mod tests {
                     }
                     let hand = world.bones[own.hands[side.index()]];
                     let head = middle(&world.bones[rig.skull]);
+                    let watching = (20..50).contains(&step);
+                    if watching {
+                        world.trace(&[Traced::Bone(rig.skull)]);
+                    }
                     world.step(dt, &input, crate::scenarios::SCENARIO_WIDTH);
+                    if watching {
+                        head_motion.extend(
+                            world
+                                .traced_stages()
+                                .iter()
+                                .filter(|stage| stage.phase == "integrate")
+                                .map(|stage| (stage.spin_before, stage.velocity_before)),
+                        );
+                        world.trace(&[]);
+                    }
                     let now = world.bones[own.hands[side.index()]];
                     fastest = fastest.max(distance(hand.b, now.b) / dt * mm * 0.001);
                     if step > 20 {
@@ -1875,6 +1895,17 @@ mod tests {
                     }
                 }
                 let landed_speed = landed.first().copied().unwrap_or(0.0);
+                // The head's hardest turning and throwing, substep to substep.
+                let h = dt / world.materials.substeps as f64;
+                let (mut spin, mut spun, mut thrown) = (0.0_f64, 0.0_f64, 0.0_f64);
+                for pair in head_motion.windows(2) {
+                    let ((was_turning, was_moving), (turning, moving)) = (pair[0], pair[1]);
+                    spin = spin.max(turning.abs());
+                    spun = spun.max(((turning - was_turning) / h).abs());
+                    let gained = subtract(moving, was_moving);
+                    thrown =
+                        thrown.max(hypot(gained.x, gained.y) / h * mm * 0.001 / STANDARD_GRAVITY);
+                }
                 let key = format!("{made:?}{}", if blocked { " into a block" } else { "" });
                 let sums = tally.entry(key).or_default();
                 sums[0] += 1.0;
@@ -1891,12 +1922,15 @@ mod tests {
                     sums[10] += head_moved * mm * 0.1;
                     sums[11] = sums[11].max(pressed);
                     sums[12] += turned.to_degrees();
+                    sums[13] += spun;
+                    sums[14] += spin;
+                    sums[15] += thrown;
                 }
                 if !detail && !story {
                     continue;
                 }
                 println!(
-                    "{spacing:.3} apart, {made:?}{}: fist up to {fastest:.1} m/s, landed at {landed:.1?} m/s; reddened points head and trunk {}, arms {}; skull pressed {pressed:.2} of its strength, head up to {head_speed:.1} m/s and {:.1} cm off its hips, turned {:.0} deg, hips shoved {:.1} cm; torn joints {}, skin {}, muscle {}, broken bones {}",
+                    "{spacing:.3} apart, {made:?}{}: fist up to {fastest:.1} m/s, landed at {landed:.1?} m/s; reddened points head and trunk {}, arms {}; skull pressed {pressed:.2} of its strength, head up to {head_speed:.1} m/s and {:.1} cm off its hips, turned {:.0} deg, spun at up to {spun:.0} rad/s2 and {spin:.1} rad/s and thrown at {thrown:.0} g, hips shoved {:.1} cm; torn joints {}, skin {}, muscle {}, broken bones {}",
                     if blocked { " into a block" } else { "" },
                     reddened[0],
                     reddened[1],
@@ -1920,7 +1954,7 @@ mod tests {
         for (key, sums) in tally {
             let landed = sums[1].max(1.0);
             println!(
-                "{key}: landed in {:.0} of {:.0} runs, at {:.1} m/s on average; of those it reddened the head or trunk in {:.0} and the arms in {:.0}, moved the head {:.1} cm off its hips and turned it {:.0} deg on average (up to {:.1} m/s), pressed the skull with at most {:.2} of its strength; runs with skin torn {:.0}, a joint torn {:.0}, a joint slipped {:.0}, a bone broken {:.0}",
+                "{key}: landed in {:.0} of {:.0} runs, at {:.1} m/s on average; of those it reddened the head or trunk in {:.0} and the arms in {:.0}, moved the head {:.1} cm off its hips and turned it {:.0} deg on average (up to {:.1} m/s), spun it at up to {:.0} rad/s2 and {:.1} rad/s and threw it at {:.0} g on average, pressed the skull with at most {:.2} of its strength; runs with skin torn {:.0}, a joint torn {:.0}, a joint slipped {:.0}, a bone broken {:.0}",
                 sums[1],
                 sums[0],
                 sums[2] / landed,
@@ -1929,6 +1963,9 @@ mod tests {
                 sums[10] / landed,
                 sums[12] / landed,
                 sums[3] / sums[0],
+                sums[13] / landed,
+                sums[14] / landed,
+                sums[15] / landed,
                 sums[11],
                 sums[4],
                 sums[5],
