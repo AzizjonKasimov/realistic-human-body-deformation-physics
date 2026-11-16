@@ -2410,39 +2410,15 @@ mod tests {
         let mut moves = Vec::new();
         let mut head_off = [(0.0_f64, None); 2];
         let mut fastest = 0.0_f64;
-        let mut state = seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
-        let mut next = move || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state
-        };
-        let mut held = [[false; 3]; 2];
+        // The same moves `play_side_fight` and the scenario tool's
+        // `--side-fights` draw for this seed (`side_fights.rs`).
+        let mut random = RandomMoves::new(seed);
         let steps = (seconds / dt) as usize;
         for frame in 0..steps {
             let mut input = InputState::default();
-            for body in 0..2 {
-                // A move about four times a second.
-                if next() % 15 != 0 {
+            for (body, made) in random.next_step().into_iter().enumerate() {
+                let Some(made) = made else {
                     continue;
-                }
-                let made = match next() % 10 {
-                    0 | 1 => Move::Jab,
-                    2 | 3 => Move::Cross,
-                    4 => Move::StepIn,
-                    5 => Move::StepOut,
-                    6 => {
-                        held[body][0] = !held[body][0];
-                        Move::LeanBack(held[body][0])
-                    }
-                    7 => {
-                        held[body][1] = !held[body][1];
-                        Move::Duck(held[body][1])
-                    }
-                    _ => {
-                        held[body][2] = !held[body][2];
-                        Move::Block(held[body][2])
-                    }
                 };
                 input.moves[body] = Some((body, made));
                 moves.push((frame + 1, body, made));

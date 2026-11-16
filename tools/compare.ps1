@@ -28,6 +28,16 @@ make each difference (fights_diff.txt; both sides need strike_scenarios
 leans or the partner's punches out.
 
 .EXAMPLE
+.\tools\compare.ps1 -Ref main -SideFights 100
+Also play 100 random fights between the side-view fighters on both sides,
+the same moves on each (seeds -Seed onward, 20 s each, as the engine's
+print_random_fights plays them), and set them fight against fight: each
+fighter's torn and slipped joints, broken bones, falls with no knockout
+(these must hold), torn skin, knockouts, and heads far off their poses,
+with how likely chance is to make each difference (side_fights_diff.txt;
+both sides need strike_scenarios --side-fights).
+
+.EXAMPLE
 .\tools\compare.ps1 -Ref main -Random 2000
 Also play 2000 random blows from each of seeds 1, 2, and 3 on both sides and
 set them blow against blow: the plays each watchdog tripped in and each rule
@@ -48,6 +58,7 @@ param(
     [string]$Ref = "HEAD",
     [switch]$Sweep,
     [int]$Fights = 0,
+    [int]$SideFights = 0,
     [int]$Seed = 1,
     [ValidateSet("game", "spam", "spam-lean")]
     [string]$Mix = "game",
@@ -167,6 +178,35 @@ if ($Fights -gt 0) {
         Invoke-Fights -Tree $baseTree -TargetDir $baseTarget -Dir $baseFights -Label "$Ref ($short)"
     }
     Invoke-Fights -Tree $repoRoot -TargetDir (Join-Path $repoRoot "target") -Dir $currentFights -Label "working tree"
+}
+
+# Random side-view fights, the same moves on both sides, the commit's cached
+# by what was played.
+$sideName = "side-fights-$SideFights-$Seed"
+$baseSide = Join-Path $baseResults $sideName
+$currentSide = Join-Path $currentResults $sideName
+$baseHasSide = Test-SourceHas $baseTree "src\bin\strike_scenarios\main.rs" "--side-fights"
+function Invoke-SideFights([string]$Tree, [string]$TargetDir, [string]$Dir, [string]$Label) {
+    $cargo = Get-CargoPath
+    Invoke-Checked -Label "Build $Label's scenario tool (Release)" -Command {
+        Push-Location $Tree
+        try {
+            & $cargo build --release --bin strike_scenarios --target-dir $TargetDir
+        } finally {
+            Pop-Location
+        }
+    }
+    New-Item -ItemType Directory -Force $Dir | Out-Null
+    $arguments = @((Join-Path $Dir "strike_scenarios.csv"), "--side-fights", $SideFights, "--seed", $Seed)
+    Invoke-Checked -Label "$SideFights random side-view fights ($Label)" -Command {
+        & (Join-Path $TargetDir "release\strike_scenarios.exe") @arguments
+    }
+}
+if ($SideFights -gt 0) {
+    if ($baseHasSide -and -not (Test-Path -LiteralPath (Join-Path $baseSide "side_fights.csv"))) {
+        Invoke-SideFights -Tree $baseTree -TargetDir $baseTarget -Dir $baseSide -Label "$Ref ($short)"
+    }
+    Invoke-SideFights -Tree $repoRoot -TargetDir (Join-Path $repoRoot "target") -Dir $currentSide -Label "working tree"
 }
 
 # Random blows, a folder for each seed, the same blows on both sides while the
@@ -362,6 +402,19 @@ if ($Fights -gt 0) {
     } else {
         $diff = & (Join-Path $repoRoot "target\release\strike_scenarios.exe") (Join-Path $Out "strike_scenarios.csv") --diff $baseFights $currentFights 2>&1
         Add-Line "Random fights, fight against fight with how sure each difference is (fights_diff.txt):" -Headline
+        foreach ($line in $diff | Where-Object { $_ -notmatch "^wrote " }) {
+            Add-Line "  $line" -Headline
+        }
+    }
+}
+
+if ($SideFights -gt 0) {
+    Add-Line "" -Headline
+    if (-not $baseHasSide) {
+        Add-Line "Side-view fights: $short has no strike_scenarios --side-fights; only the working tree's fights are in $currentSide" -Headline
+    } else {
+        $diff = & (Join-Path $repoRoot "target\release\strike_scenarios.exe") (Join-Path $Out "strike_scenarios.csv") --diff $baseSide $currentSide 2>&1
+        Add-Line "Random side-view fights, fight against fight with how sure each difference is (side_fights_diff.txt):" -Headline
         foreach ($line in $diff | Where-Object { $_ -notmatch "^wrote " }) {
             Add-Line "  $line" -Headline
         }

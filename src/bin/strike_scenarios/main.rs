@@ -101,6 +101,15 @@
 //!                                     leans and the right one's punches out,
 //!                                     spam-lean the right one's punches, with
 //!                                     the left one's punches on the same steps
+//!   --side-fights N [--seed S]       instead, play N random fights between two
+//!                                     side-view fighters, seeds S to S+N-1, 20 s
+//!                                     each, both making a move four times a
+//!                                     second, as the engine's
+//!                                     print_random_fights does; report each
+//!                                     fighter's torn and slipped joints, broken
+//!                                     bones, torn skin, knockouts, and falls
+//!                                     (side_fights_report.txt, side_fights.csv),
+//!                                     for --diff to set beside another build's
 //!   --set NAME=VALUE[,NAME=VALUE...]  change any setting of `Materials` from its
 //!                                     default for every world played (gravity,
 //!                                     bone_joint_hertz, ...), to try a value
@@ -191,6 +200,8 @@ mod moved;
 mod random;
 mod random_diff;
 mod record;
+mod side_fights;
+mod side_fights_diff;
 mod summary;
 mod sweep;
 mod twin;
@@ -262,6 +273,7 @@ struct Options {
     random: Option<usize>,
     /// Random fights to play instead, from the same seed.
     fights: Option<usize>,
+    side_fights: Option<usize>,
     /// Which presses the random fights play; the game's if not given.
     mix: Option<fights::Mix>,
     seed: u64,
@@ -316,16 +328,24 @@ fn main() {
         let sweeps = diff::holds_runs(a) && diff::holds_runs(b);
         let fights = fights_diff::holds_fights(a) && fights_diff::holds_fights(b);
         let blows = random_diff::holds_blows(a) && random_diff::holds_blows(b);
-        if !sweeps && !fights && !blows {
+        let side = side_fights_diff::holds_side_fights(a) && side_fights_diff::holds_side_fights(b);
+        if !sweeps && !fights && !blows && !side {
             eprintln!(
-                "--diff sets two sweeps, two sets of random fights, or two sets of random blows side by side: {} and {} must both hold {}, both hold {}, or both hold {} (or a folder of them, a seed each; or be such files)",
+                "--diff sets two sweeps, two sets of random fights, of random side-view fights, or of random blows side by side: {} and {} must both hold {}, both hold {}, both hold {}, or both hold {} (or a folder of them, a seed each; or be such files)",
                 a.display(),
                 b.display(),
                 diff::RUNS_FILE,
                 fights::FIGHTS_FILE,
+                side_fights::SIDE_FIGHTS_FILE,
                 random_diff::BLOWS_FILE
             );
             process::exit(2);
+        }
+        if side {
+            if let Err(message) = side_fights_diff::diff_side_fights(a, b, &output_dir) {
+                eprintln!("{message}");
+                process::exit(2);
+            }
         }
         if blows {
             if let Err(message) = random_diff::diff_blows(a, b, &output_dir) {
@@ -355,6 +375,10 @@ fn main() {
             &output_dir,
             options.shrink,
         );
+        return;
+    }
+    if let Some(count) = options.side_fights {
+        side_fights::side_fights(count, options.seed, &output_dir);
         return;
     }
     if let Some(count) = options.fights {
@@ -512,6 +536,7 @@ fn parse_options() -> Result<Options, String> {
         twin_frame: None,
         random: None,
         fights: None,
+        side_fights: None,
         mix: None,
         seed: 1,
         tools: vec![
@@ -661,6 +686,14 @@ fn parse_options() -> Result<Options, String> {
                         format!("--fights takes a number of fights, got `{count}`")
                     })?);
             }
+            "--side-fights" => {
+                let count = args
+                    .next()
+                    .ok_or("--side-fights needs a number of fights")?;
+                options.side_fights = Some(count.parse().map_err(|_| {
+                    format!("--side-fights takes a number of fights, got `{count}`")
+                })?);
+            }
             "--mix" => {
                 let mix = args.next().ok_or("--mix needs game, spam, or spam-lean")?;
                 options.mix = Some(fights::Mix::parse(&mix)?);
@@ -728,6 +761,7 @@ fn check_grid_options(options: &Options) -> Result<(), String> {
         (options.diff.is_some(), "--diff"),
         (options.random.is_some(), "--random"),
         (options.fights.is_some(), "--fights"),
+        (options.side_fights.is_some(), "--side-fights"),
         (options.moved, "--moved"),
         (options.twin.is_some(), "--twin"),
         (options.why.is_some(), "--why"),

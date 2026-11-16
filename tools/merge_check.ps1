@@ -11,15 +11,17 @@ to this: the tests and verify.ps1 pass, the browser build simulates as the
 native one and still runs smoothly, and nothing else that must hold is worse
 beyond chance: the scenarios' bands and real-life checks across the sweep,
 the rules every play follows, and the watchdogs for a body that breaks, in
-the sweep and in random blows over three seeds. The rest may drift; it is
-reported, not held.
+the sweep and in random blows over three seeds; and in random fights between
+the side-view fighters, their torn and slipped joints, broken bones, and
+falls with no knockout. The rest may drift; it is reported, not held.
 
 The round runs these steps, each logged in -Out (output\merge_check):
 
   verify   verify.ps1 -SkipSweep (compare plays the sweep)
-  compare  compare.ps1 -Sweep -Fights -Random against the commit: the sweep,
-           random fights, and random blows on both sides, each set side by
-           side with how likely chance is to make each difference
+  compare  compare.ps1 -Sweep -Fights -SideFights -Random against the
+           commit: the sweep, random fights, random side-view fights, and
+           random blows on both sides, each set side by side with how likely
+           chance is to make each difference
   moved    the moved-body tests on the working tree (strike_scenarios --moved)
   parity   parity.ps1: the browser build simulates as the native one
   bench    bench.ps1: the step time against the commit
@@ -44,6 +46,11 @@ The random blows' seeds (1, 2, 3).
 
 .PARAMETER Fights
 Random fights, the same fights on both sides (300).
+
+.PARAMETER SideFights
+Random fights between the side-view fighters, the same fights on both sides
+(100, 20 s each). A commit without strike_scenarios --side-fights (before
+v0.18) is not compared on them: the row says so and does not block.
 
 .PARAMETER Fight
 A checkout of the game's repository: also build the site with the Fight page
@@ -73,6 +80,7 @@ param(
     # Lists, or comma separated text, as a script run with pwsh -File takes them.
     [string[]]$Seeds = @("1", "2", "3"),
     [int]$Fights = 300,
+    [int]$SideFights = 100,
     [string]$Fight = "",
     [string[]]$Skip = @(),
     [switch]$Fresh,
@@ -184,8 +192,8 @@ $benchOut = Join-Path $Out "bench"
 $seedList = $Seeds -join ","
 
 Invoke-Step "verify" "" { Invoke-Tool "verify.ps1" @("-SkipSweep") }
-Invoke-Step "compare" "$refSha $Blows $seedList $Fights" {
-    Invoke-Tool "compare.ps1" @("-Ref", $refSha, "-Sweep", "-Fights", $Fights, "-Random", $Blows, "-RandomSeeds", $seedList, "-Out", $compareOut)
+Invoke-Step "compare" "$refSha $Blows $seedList $Fights $SideFights" {
+    Invoke-Tool "compare.ps1" @("-Ref", $refSha, "-Sweep", "-Fights", $Fights, "-SideFights", $SideFights, "-Random", $Blows, "-RandomSeeds", $seedList, "-Out", $compareOut)
 }
 Invoke-Step "moved" "" {
     Invoke-Cargo -Arguments @("build", "--release", "--bin", "strike_scenarios") -Label "Build the scenario tool (Release)"
@@ -339,6 +347,7 @@ $drift = "May drift, reported"
 $sweep = Read-Findings "sweep"
 $blowFindings = Read-Findings "random"
 $fightRows = Read-Findings "fights"
+$sideRows = Read-Findings "side_fights"
 $randomReport = Join-Path $compareOut "random_diff.txt"
 
 Add-Step $must "The tests and verify.ps1" "verify"
@@ -355,6 +364,12 @@ Add-Findings $must "The real-life checks across the sweep" $sweep { $_.holds -eq
 Add-Findings $must "The watchdogs for a body that breaks, in the sweep" $sweep { $_.holds -eq "must" -and $_.section -eq "watchdog" } "" "watchdogs"
 Add-Findings $must "The watchdogs for a body that breaks, in random blows" $blowFindings { $_.holds -eq "must" -and $_.section -like "Watchdogs*" } $randomReport "watchdogs"
 Add-Findings $must "The rules every play follows, in random blows" $blowFindings { $_.holds -eq "must" -and $_.section -like "The rules*" } $randomReport "rules"
+$sideCheck = "Side-view fights: joints, bones, and falls"
+if ($exits["compare"] -eq 0 -and $null -eq $sideRows) {
+    Add-Row $must $sideCheck "not compared" @("$Ref has no strike_scenarios --side-fights; compare against a commit that has it (v0.18 on)")
+} else {
+    Add-Findings $must $sideCheck $sideRows { $_.holds -eq "must" } (Join-Path $compareOut "side_fights_diff.txt") "counts"
+}
 
 Add-Findings $drift "The other watchdogs, in the sweep" $sweep { $_.holds -eq "drift" -and $_.section -eq "watchdog" } "" "watchdogs"
 Add-Findings $drift "The other watchdogs and flung flesh, in random blows" $blowFindings { $_.holds -eq "drift" -and $_.section -ne "Injuries" } $randomReport "watchdogs and rules"
@@ -369,6 +384,9 @@ if ($null -ne $sweep) {
     Add-Row $drift "The sweep's median numbers" "not run" @()
 }
 Add-Findings $drift "Random fights, fight against fight" $fightRows { $_.holds -eq "drift" } "" "counts"
+if ($null -ne $sideRows) {
+    Add-Findings $drift "Side-view fights: torn fibres, knockouts, and poses" $sideRows { $_.holds -eq "drift" } (Join-Path $compareOut "side_fights_diff.txt") "counts"
+}
 Add-Step $drift "The moved-body tests" "moved" (Get-Lines (Join-Path $movedOut "strike_moved_report.txt") "scenarios differ under 1%")
 Add-Step $drift "Speed" "bench" @(
     Get-Lines (Join-Path $benchOut "report.txt") "^Speedup"
@@ -380,7 +398,7 @@ if ($stale) {
     $verdict.Add("The last round's verdict, read again: $($stale -join ', ') ran on another tree, commit, or options than now.")
 }
 $verdict.Add("Merge check: the working tree ($((& git -C $repoRoot rev-parse --short HEAD).Trim())$(if ((& git -C $repoRoot status --porcelain) -ne $null) { ' with changes' })) against $Ref ($refShort), $(Get-Date -Format 'yyyy-MM-dd HH:mm')")
-$verdict.Add("Random blows: $Blows from each of seeds $($Seeds -join ', '); random fights: $Fights. * a difference chance gives under 5% of the time, ** under 1%.")
+$verdict.Add("Random blows: $Blows from each of seeds $($Seeds -join ', '); random fights: $Fights; random side-view fights: $SideFights. * a difference chance gives under 5% of the time, ** under 1%.")
 foreach ($group in $must, $drift) {
     $verdict.Add("")
     $verdict.Add("${group}:")

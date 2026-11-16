@@ -22,6 +22,7 @@ mod phases;
 #[cfg(test)]
 mod properties;
 mod punch;
+mod side_fights;
 mod sides;
 mod sight;
 mod soft;
@@ -47,6 +48,7 @@ pub use motion::MotionSnapshot;
 pub use mover::{Move, Mover};
 pub use phases::{PhaseClock, PhaseTime, PhaseTimes, Traced, TracedStage};
 pub use punch::Punch;
+pub use side_fights::{play_side_fight, RandomMoves, SideFight};
 pub use sight::{Doing, LandedPunch, PunchKind, Punching, Stepping, Struck};
 pub use stance::{Carry, FootHold, HipHold, JointDrive, Limb, PostureBinding};
 pub use tendons::{Muscle, Tendon, TendonEnd};

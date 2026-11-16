@@ -1208,7 +1208,6 @@ impl World {
     /// How far side-view fighter `body`'s head is from where its pose puts
     /// it, in metres, for the tools and the tests: a body that follows its
     /// moves keeps its head within a few centimetres of it.
-    #[cfg(test)]
     pub(super) fn head_off_pose(&self, body: usize) -> Option<f64> {
         let frame = self.fighter_frame(body)?;
         let state = self.bodies.get(body)?;
