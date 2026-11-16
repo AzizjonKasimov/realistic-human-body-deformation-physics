@@ -2,6 +2,13 @@
 
 What each version of Realistic Physics changed, newest first. The game shows its version on the start screen and in its bottom-left corner, and every Short made from the game shows the version it was made with. Only the newest version is online.
 
+## v0.16 (2026-11-16)
+
+- The Fight page has new fighters, seen from the side and facing each other: they stand on their own legs, step in and back, jab, cross, block, duck, and lean back, with a trained boxer's speed and power.
+- A hard punch to the jaw can knock a fighter out: it goes down and stays down, and the fight is over.
+- A punch to the ribs no longer breaks a rib: the rib cage gives under a blow, as a real chest does.
+- Known issue, as in v0.15.2: a bat blow now and then leaves a whole bone outside the skin.
+
 ## v0.15.2 (2026-10-20)
 
 - Punching again and again, or punching from a lean, no longer tears the puncher's wrist, elbow, or lower back: every joint now holds its bones and the flesh round them together, as a real body's joints do.
