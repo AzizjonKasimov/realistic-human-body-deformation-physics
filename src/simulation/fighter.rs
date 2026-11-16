@@ -228,6 +228,14 @@ pub(super) fn arm_of_sheet(sheet: u8) -> Option<Side> {
     }
 }
 
+/// Whether sheet `sheet` of a fighter's flesh is part of a leg.
+pub(super) fn leg_sheet(sheet: u8) -> bool {
+    matches!(
+        Part::FAR_TO_NEAR.get(sheet as usize),
+        Some(Part::Thigh(_) | Part::Shin(_) | Part::Foot(_))
+    )
+}
+
 /// The sheet of a fighter's flesh that is the forearm and hand on `side`.
 pub(super) fn forearm_sheet(side: Side) -> u8 {
     Part::FAR_TO_NEAR
@@ -1182,6 +1190,12 @@ mod tests {
                 ("ankle", Hinge::Ankle(Side::Lead)),
                 ("ankle'", Hinge::Ankle(Side::Rear)),
             ];
+            // `RP_EVERY=1` prints every step instead of every fifth.
+            let every: usize = std::env::var("RP_EVERY")
+                .ok()
+                .and_then(|every| every.parse().ok())
+                .unwrap_or(5)
+                .max(1);
             for step in 0..steps {
                 let mut input = InputState::default();
                 for (slot, (_, body, made)) in
@@ -1190,7 +1204,7 @@ mod tests {
                     input.moves[slot] = Some((*body, *made));
                 }
                 world.step(dt, &input, crate::scenarios::SCENARIO_WIDTH);
-                if step % 5 != 0 {
+                if step % every != 0 {
                     continue;
                 }
                 let pelvis = world.bones[rig.pelvis];
@@ -1300,7 +1314,9 @@ mod tests {
     fn print_balance_reports(world: &World) {
         for (body, report) in world.balance_reports.iter().enumerate() {
             let mut legs = format!(
-                "    [{body}] centre of mass {:3.0}% over the feet, capture point {:3.0}% over the planted ones, hips shifted {:+.1} cm, {:+.1} cm off the aim and {:+.1} cm off the move's place, {:+.1} cm below it; legs push the hips ({:+5.0}, {:+5.0}) N and turn the pelvis {:+4.0} N m;",
+                "    [{body}] centre of mass at {:.1} cm moving {:+.2} m/s, {:3.0}% over the feet, capture point {:3.0}% over the planted ones, hips shifted {:+.1} cm, {:+.1} cm off the aim and {:+.1} cm off the move's place, {:+.1} cm below it; legs push the hips ({:+5.0}, {:+5.0}) N and turn the pelvis {:+4.0} N m;",
+                report.centre_cm,
+                report.centre_speed,
                 report.over_feet * 100.0,
                 report.capture_over_feet * 100.0,
                 report.shift_cm,
@@ -1311,12 +1327,31 @@ mod tests {
                 report.push.y,
                 report.turn
             );
+            let h = world.materials.fixed_dt / world.materials.substeps as f64;
+            let rig = world.bodies[body].fighter.as_ref();
             for (side, name) in ["lead", "rear"].iter().enumerate() {
                 if report.planted[side] {
                     legs.push_str(&format!(
-                        " {name} foot pressed {:4.0} N down, {:+4.0} N across;",
+                        " {name} foot pressed {:4.0} N down, {:+4.0} N across",
                         report.feet[side].y, report.feet[side].x
                     ));
+                    // What the floor gave the foot back, up and across.
+                    if let Some(hold) = rig.and_then(|rig| {
+                        world
+                            .foot_holds
+                            .iter()
+                            .find(|hold| hold.bone == rig.feet[side])
+                    }) {
+                        let floor = scale(
+                            add(hold.impulse[0], hold.impulse[1]),
+                            1.0 / (h * world.newtons()),
+                        );
+                        legs.push_str(&format!(
+                            ", the floor gives ({:+.0}, {:+.0}) N",
+                            floor.x, -floor.y
+                        ));
+                    }
+                    legs.push(';');
                 } else {
                     legs.push_str(&format!(" {name} foot off the floor;"));
                 }
@@ -1398,7 +1433,14 @@ mod tests {
             });
             return;
         }
-        let mut world = create_side_fighters(materials);
+        // `RP_SPACING=0.6` stands the fighters that many body heights apart.
+        let mut world = std::env::var("RP_SPACING")
+            .ok()
+            .and_then(|spacing| spacing.parse().ok())
+            .map_or_else(
+                || create_side_fighters(materials),
+                |spacing| create_side_fighters_at(materials, spacing),
+            );
         // `RP_SET_AFTER` changes settings once the fighters have settled.
         if let Ok(settings) = std::env::var("RP_SET_AFTER") {
             for setting in settings.split(',').filter(|setting| !setting.is_empty()) {
@@ -1445,12 +1487,115 @@ mod tests {
         // For each fighter: the shares of its weight held up summed, the
         // most held up, the hardest pushed across, and the hardest turned.
         let mut held = vec![(0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64); rigs.len()];
+        // `RP_TRACE=30-34` follows the first fighter's feet and hips through
+        // every phase of those steps and prints what each phase did to them,
+        // summed over the step's substeps.
+        let steps_in = |name: &str| {
+            std::env::var(name).ok().and_then(|range| {
+                let (from, to) = range.split_once('-')?;
+                Some(from.parse::<usize>().ok()?..=to.parse::<usize>().ok()?)
+            })
+        };
+        let traced_steps = steps_in("RP_TRACE");
+        // `RP_MOMENTUM=36-40` adds up, for each of those steps, how hard each
+        // phase pushed the first fighter's whole body across and up, in
+        // newtons: what pushes within the body adds up to nothing, so what
+        // is left is the floor's, gravity's, drag's, and the other
+        // fighter's.
+        let momentum_steps = steps_in("RP_MOMENTUM");
         for step in 0..steps {
             let mut input = InputState::default();
             for (slot, (_, body, made)) in moves.iter().filter(|made| made.0 == step).enumerate() {
                 input.moves[slot] = Some((*body, *made));
             }
+            if momentum_steps
+                .as_ref()
+                .is_some_and(|range| range.contains(&step))
+            {
+                let mut traced = Vec::new();
+                let mut masses = Vec::new();
+                for (index, point) in world.points.iter().enumerate() {
+                    if point.body == 0 && !point.pinned && !point.is_ghost() {
+                        traced.push(Traced::Point(index));
+                        masses.push(point.mass);
+                    }
+                }
+                for (index, bone) in world.bones.iter().enumerate() {
+                    if bone.body == 0 {
+                        traced.push(Traced::Bone(index));
+                        masses.push(bone.mass);
+                    }
+                }
+                world.trace(&traced);
+                world.step(dt, &input, crate::scenarios::SCENARIO_WIDTH);
+                let mut phases: Vec<(&str, Vec2)> = Vec::new();
+                for stage in world.traced_stages() {
+                    let change = scale(
+                        subtract(stage.velocity_after, stage.velocity_before),
+                        masses[stage.target],
+                    );
+                    match phases.iter_mut().find(|(phase, _)| *phase == stage.phase) {
+                        Some(summed) => summed.1 = add(summed.1, change),
+                        None => phases.push((stage.phase, change)),
+                    }
+                }
+                // Mass times pixels a second over the step, as newtons.
+                let to_newtons =
+                    crate::simulation::soft::KG_PER_MASS * world.mm_per_px() * 0.001 / dt;
+                let mut line = format!("step {step:3}, pushes on the first fighter's body:");
+                for (phase, change) in phases {
+                    let (across, up) = (change.x * to_newtons, -change.y * to_newtons);
+                    if across.abs() > 5.0 || up.abs() > 5.0 {
+                        line.push_str(&format!(" {phase} ({across:+.0}, {up:+.0});"));
+                    }
+                }
+                println!("{line}");
+                world.trace(&[]);
+                continue;
+            }
+            let tracing = traced_steps
+                .as_ref()
+                .is_some_and(|range| range.contains(&step));
+            if tracing {
+                let rig = &rigs[0];
+                world.trace(&[
+                    Traced::Bone(rig.feet[0]),
+                    Traced::Bone(rig.feet[1]),
+                    Traced::Bone(rig.pelvis),
+                ]);
+            }
             world.step(dt, &input, crate::scenarios::SCENARIO_WIDTH);
+            if tracing {
+                println!("step {step:3}, what each phase did to the first fighter:");
+                for (target, name) in ["lead foot", "rear foot", "hips"].iter().enumerate() {
+                    let mut phases: Vec<(&str, Vec2, f64)> = Vec::new();
+                    for stage in world.traced_stages() {
+                        if stage.target != target {
+                            continue;
+                        }
+                        match phases.iter_mut().find(|(phase, ..)| *phase == stage.phase) {
+                            Some(summed) => {
+                                summed.1 = add(summed.1, stage.moved);
+                                summed.2 += stage.turned;
+                            }
+                            None => phases.push((stage.phase, stage.moved, stage.turned)),
+                        }
+                    }
+                    let mut parts = String::new();
+                    for (phase, moved, turned) in phases {
+                        if hypot(moved.x, moved.y) * cm > 0.05 || turned.abs() > 0.005 {
+                            parts.push_str(&format!(
+                                " {phase} ({:+.1}, {:+.1}) cm {:+.2} rad;",
+                                moved.x * cm,
+                                -moved.y * cm,
+                                turned
+                            ));
+                        }
+                    }
+                    println!("    {name}:{parts}");
+                }
+                world.trace(&[]);
+            }
             let mut line = format!("step {step:3}:");
             for (body, rig) in rigs.iter().enumerate() {
                 let (mut up, mut across, mut tilt) = (0.0, 0.0, 0.0);

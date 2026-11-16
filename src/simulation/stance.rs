@@ -222,6 +222,18 @@ pub struct FootHold {
     /// A side-view fighter's step is carrying the foot through the air
     /// (`mover.rs`): the floor holds none of it until the step sets it down.
     pub swinging: bool,
+    /// How much of what its leg would bear the foot bears, from 1 standing
+    /// to 0 about to lift: a step hands a foot's weight to the other foot
+    /// before lifting it, and gives it back once it is down (`mover.rs`,
+    /// `balance.rs`).
+    pub load: f64,
+    /// Where a step carries the swinging foot, its bone's middle, and how
+    /// fast, in pixels and pixels a second (`mover.rs`), and the push the
+    /// leg gave it last substep, which warm starts the next
+    /// (`World::carry_swinging_foot`).
+    pub swing_to: Vec2,
+    pub swing_speed: Vec2,
+    pub swing_impulse: Vec2,
 }
 
 /// How much a dry floor's friction holds a foot sideways, as a share of the
@@ -229,6 +241,13 @@ pub struct FootHold {
 /// coefficient of friction of at least 0.5 against a shoe, which a dry floor
 /// gives or betters.
 pub(super) const FOOT_FRICTION: f64 = 0.6;
+
+/// How much of the feet's grip legs that carry the hips push them across
+/// with at most: force controllers keep their pushes inside a friction cone
+/// shrunk from the real one, so that a contact never stands at the edge of
+/// slipping. Pushed across with all the grip there was, a fighter stepping
+/// in slid its lead foot back 16 cm.
+const GRIP_TO_SPARE: f64 = 0.8;
 
 /// The most a sole's pressed flesh holds an end of a foot up with, in the
 /// body's weights: more than a fighter's legs ever push it down with.
@@ -685,10 +704,11 @@ impl World {
                 let total = add(hold.impulse, impulse);
                 // Legs push the hips across no harder than the feet's grip
                 // on all the weight they bear, the whole body's, half at
-                // each end of the pelvis.
+                // each end of the pelvis, with room to spare
+                // (`GRIP_TO_SPARE`).
                 let across = if legs == Some(true) {
                     let borne = tissue::BODY_MASS_KG * self.materials.gravity * self.newtons() * h;
-                    FOOT_FRICTION * borne * 0.5 * self.materials.carry_strength
+                    FOOT_FRICTION * GRIP_TO_SPARE * borne * 0.5 * self.materials.carry_strength
                 } else {
                     carry.limit.x * newtons
                 };
@@ -997,6 +1017,7 @@ impl World {
             };
             if hold.swinging {
                 self.foot_holds[index].impulse = [Vec2::default(); 2];
+                self.carry_swinging_foot(index, piece, h);
                 continue;
             }
             // A fighter's foot its legs push on (`balance.rs`) grips by the
@@ -1162,6 +1183,22 @@ impl World {
         stands.then_some(bone)
     }
 
+    /// Whether the foot whose bone is `bone` stands on the floor at either
+    /// end (`ends_on_floor`).
+    pub(super) fn foot_on_floor(&self, bone: usize) -> bool {
+        self.bones
+            .get(bone)
+            .is_some_and(|foot| self.ends_on_floor(foot, [foot.a, foot.b]).contains(&true))
+    }
+
+    /// Which of the foot bone `foot`'s ends, standing at `ends`, stand on
+    /// the floor, by the same measure the floor holds a foot by
+    /// (`solve_foot_holds`).
+    pub(super) fn ends_on_floor(&self, foot: &BoneSegment, ends: [Vec2; 2]) -> [bool; 2] {
+        let floor = self.floor_y - foot.sole.max(foot.radius.max(1.0)) - FOOT_LIFT_MARGIN;
+        ends.map(|end| end.y >= floor)
+    }
+
     pub(super) fn warm_start_foot_holds(&mut self, h: f64) {
         let pieces = std::mem::take(&mut self.foot_pieces);
         for (index, piece) in pieces.iter().enumerate() {
@@ -1170,6 +1207,7 @@ impl World {
                 continue;
             };
             if hold.swinging {
+                self.warm_start_swinging_foot(index, piece, h);
                 continue;
             }
             for end in 0..2 {

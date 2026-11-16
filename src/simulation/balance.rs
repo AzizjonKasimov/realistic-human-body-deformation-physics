@@ -9,18 +9,21 @@
 //! knock a fighter over, and without the hold both fell flat on their backs
 //! within a second.
 //!
-//! Here the legs make that push: every push and turn the hold gives the hips
-//! is given back on the feet standing on the floor, as legs pushing the hips
-//! up push the feet down, so the floor bears the fighter's weight and its
-//! feet grip by the weight really on them (`solve_foot_holds`). A fighter
-//! with no foot on the floor has nothing to push from, and its hips are not
-//! held at all. The two feet share a push as legs standing apart do, each
-//! pushing along the line from its ankle to the hips (Pratt, Chew, Torres,
-//! Dilworth and Pratt 2001's virtual model control, which turns a push on
-//! the body into the legs' pushes), turned off that line just enough to
-//! give the turn on the pelvis between them as the share of the weight
-//! each bears says (Coros, Beaudoin and van de Panne 2010), so that each
-//! foot takes its push at the ankle, inside its heel and its ball.
+//! Here the legs make that push: every push the hold gives the hips comes
+//! from the feet standing on the floor, each leg pressing its foot down with
+//! the weight it bears, the floor taking the leg's push across through the
+//! gripping foot, and the turn on the pelvis going back on the thighs, so
+//! the floor bears the fighter's weight and its feet grip by the weight
+//! really on them (`solve_foot_holds`). A fighter with no foot touching the
+//! floor has nothing to push from, and its hips are not held at all. The two
+//! feet share a push as legs standing apart do, each pushing along the line
+//! from its ankle to the hips (Pratt, Chew, Torres, Dilworth and Pratt
+//! 2001's virtual model control, which turns a push on the body into the
+//! legs' pushes), turned off that line just enough to give the turn on the
+//! pelvis between them as the share of the weight each bears says (Coros,
+//! Beaudoin and van de Panne 2010). A step hands a foot's share to the
+//! other before it lifts, and the leg carries the lifted foot along its
+//! way (`carry_swinging_foot`).
 //!
 //! The legs push as a whole, between hips and feet: the hold does not yet
 //! turn the hips, knees, and ankles that a person's legs push with, whose
@@ -32,6 +35,7 @@
 //! solver's other soft constraints are, which never overshoot.
 
 use super::sides::BonePiece;
+use super::soft::{Softness, KG_PER_MASS};
 use super::*;
 use crate::profile::{Hinge, Side};
 
@@ -50,6 +54,10 @@ pub(super) struct Stance {
     /// shift to keep it over the feet (`World::shift_over_the_feet`).
     capture: f64,
     support: (f64, f64),
+    /// Where the body's centre of mass lies across the window, and how fast
+    /// it moves across, for the tools that print it.
+    centre_x: f64,
+    speed_x: f64,
     /// The share of the body's mass that moves with the hips.
     moving: f64,
     /// All the hold has given the hips so far this substep, as a push and a
@@ -68,11 +76,24 @@ const CAPTURE_MARGIN: f64 = 0.15;
 /// bearing while the legs push the hips across.
 const LEAST_LOAD: f64 = 0.25;
 
+/// How firmly a step carries a swinging foot along its way, in hertz,
+/// critically damped, on the mass a leg turning about its hip has at its
+/// foot: about 2.5 kg m² about the hip over a leg 0.9 m long (de Leva 1996's
+/// thigh, shank, and foot), 3 kg.
+const SWING_HERTZ: f64 = 10.0;
+const SWING_MASS_KG: f64 = 3.0;
+
+/// The hardest a leg swings its foot, in newtons: its hip's muscles
+/// (`fighter::HIP_STRENGTH`) over the leg's 0.9 m.
+const SWING_FORCE: f64 = fighter::HIP_STRENGTH / 0.9;
+
 /// A foot standing on the floor, as the substep began.
 #[derive(Clone, Debug)]
 struct PlantedFoot {
     side: Side,
     foot_hold: usize,
+    /// How much of its share the foot bears (`FootHold::load`).
+    load: f64,
     /// Where the leg's ankle joint holds the shin, and the foot's piece and
     /// the thigh's.
     ankle: Vec2,
@@ -108,6 +129,10 @@ pub(super) struct BalanceReport {
     /// How far below where the move puts them over the feet the hips stood,
     /// in centimetres.
     pub(super) sunk_cm: f64,
+    /// Where the body's centre of mass is across the window, in
+    /// centimetres, and how fast it moves across, in metres a second.
+    pub(super) centre_cm: f64,
+    pub(super) centre_speed: f64,
 }
 
 impl World {
@@ -171,11 +196,21 @@ impl World {
                                 0.5
                             }
                         });
+                let cm = self.mm_per_px() * 0.1;
+                let (centre_cm, centre_speed) = self
+                    .stances
+                    .get(body)
+                    .and_then(Option::as_ref)
+                    .map_or((0.0, 0.0), |stance| {
+                        (stance.centre_x * cm, stance.speed_x * cm * 0.01)
+                    });
                 self.balance_reports[body] = BalanceReport {
                     planted,
                     over_feet: self.centre_over_feet(body, &rig),
                     capture_over_feet,
-                    shift_cm: self.shift_over_the_feet(body) * self.mm_per_px() * 0.1,
+                    shift_cm: self.shift_over_the_feet(body) * cm,
+                    centre_cm,
+                    centre_speed,
                     ..BalanceReport::default()
                 };
             }
@@ -248,19 +283,31 @@ impl World {
                 1.0 / hip_joints.len() as f64,
             )
         };
-        // All of the body but the planted legs hangs on the hips.
+        // All of the body but the planted legs hangs on the hips, and as much
+        // of a leg as its foot no longer bears: a hip takes up its leg's
+        // weight as the foot hands its share over, so that the leg already
+        // hangs from it as the foot lifts.
+        let leg = |s: usize| [rig.thighs[s], rig.shins[s], rig.feet[s]];
         let planted: Vec<usize> = feet
             .iter()
-            .flat_map(|foot| {
-                let s = foot.side.index();
-                [rig.thighs[s], rig.shins[s], rig.feet[s]]
-            })
+            .flat_map(|foot| leg(foot.side.index()))
             .collect();
+        let mass_of = |index: usize| {
+            self.bone_pieces
+                .get(index)
+                .and_then(Option::as_ref)
+                .map_or(0.0, |piece| piece.mass)
+        };
         let above: f64 = (0..self.bones.len())
             .filter(|&index| self.bones[index].body as usize == body && !planted.contains(&index))
-            .filter_map(|index| self.bone_pieces.get(index).and_then(Option::as_ref))
-            .map(|piece| piece.mass)
-            .sum();
+            .map(mass_of)
+            .sum::<f64>()
+            + feet
+                .iter()
+                .map(|foot| {
+                    (1.0 - foot.load) * leg(foot.side.index()).into_iter().map(mass_of).sum::<f64>()
+                })
+                .sum::<f64>();
         // The capture point: where the centre of mass would come to rest
         // over a point it could stop on, as far ahead of it as it moves in
         // the time an upturned pendulum of its height takes to fall a
@@ -299,13 +346,29 @@ impl World {
         };
         let height = (self.floor_y - centre.y).max(1.0);
         let capture = centre.x + speed.x * (height / self.gravity_px().max(EPSILON)).sqrt();
-        let ends: Vec<f64> = feet
+        // A foot a step swings counts where it will come down: a step
+        // carries the capture point on toward it, as robots step, keeping
+        // the pressure on the standing foot and letting the capture point run
+        // on to the next foothold (Englsberger, Ott and Albu-Schäffer 2015).
+        // Counted by the standing foot alone, a step in read as a fall, and
+        // the hold pulled the hips back 23 cm with all the push it had.
+        // The floor presses only where a foot touches it, so a raised heel
+        // bears nothing; a foot touching it at neither end yet counts both.
+        let mut ends: Vec<f64> = feet
             .iter()
             .flat_map(|foot| {
                 let bone = self.bones[foot.foot.bone];
-                [bone.previous_a.x, bone.previous_b.x]
+                let ends = [bone.previous_a, bone.previous_b];
+                let touching = self.ends_on_floor(&bone, ends);
+                (0..2)
+                    .filter(|&end| touching[end] || !touching.contains(&true))
+                    .map(|end| ends[end].x)
+                    .collect::<Vec<f64>>()
             })
             .collect();
+        if !ends.is_empty() {
+            ends.extend(self.step_landing(body));
+        }
         let support = (
             ends.iter().copied().fold(f64::INFINITY, f64::min),
             ends.iter().copied().fold(f64::NEG_INFINITY, f64::max),
@@ -317,6 +380,8 @@ impl World {
             above,
             capture,
             support,
+            centre_x: centre.x,
+            speed_x: speed.x,
             moving: if mass > 0.0 {
                 (above / mass).clamp(0.1, 1.0)
             } else {
@@ -379,8 +444,12 @@ impl World {
     }
 
     /// Fighter `body`'s foot on `side`, if it stands on the floor bearing
-    /// weight: its leg not hanging limp, the foot standing and not swung by
-    /// a step, and its ankle holding the shin.
+    /// weight: its leg not hanging limp, the foot standing, not swung by a
+    /// step, and touching the floor at one end at least, and its ankle
+    /// holding the shin. Counted as standing while its ball was 2 cm up and
+    /// its heel as high as the pose lifts it, a ducking fighter's feet,
+    /// lifted by its own folding legs, went on pushing its hips, and it
+    /// floated forward half a metre on feet that touched nothing.
     fn planted_foot(&self, body: usize, rig: &fighter::Rig, side: Side) -> Option<PlantedFoot> {
         let s = side.index();
         let limb = match side {
@@ -398,6 +467,13 @@ impl World {
         if hold.swinging || hold.lifted == [true; 2] {
             return None;
         }
+        let bone = self.bones.get(hold.bone)?;
+        if !self
+            .ends_on_floor(bone, [bone.previous_a, bone.previous_b])
+            .contains(&true)
+        {
+            return None;
+        }
         let foot = self.foot_pieces.get(foot_hold)?.clone()?;
         let thigh = self.bone_pieces.get(rig.thighs[s])?.clone()?;
         let ankle = self
@@ -408,16 +484,115 @@ impl World {
         Some(PlantedFoot {
             side,
             foot_hold,
+            load: hold.load,
             ankle,
             foot,
             thigh,
         })
     }
 
+    /// Carries the foot `foot` that foot hold `index` holds, which a step
+    /// swings, along its way over the floor, as the leg's muscles do: a
+    /// spring and a damper on the foot, bone and flesh, toward where the step
+    /// has its bone's middle (`FootHold::swing_to`) at the step's speed, that
+    /// pushes back on the pelvis at the hip and pushes no harder than a leg
+    /// swings (`SWING_FORCE`). Virtual model control places a swinging foot
+    /// so (Pratt, Chew, Torres, Dilworth and Pratt 2001), and Coros, Beaudoin
+    /// and van de Panne (2010) carry it along a path over the ground; it is
+    /// solved as the holds are, so it never overshoots. Swung by its joints'
+    /// muscles alone, which pull their hardest only a quarter of a radian off
+    /// their aims, a lead foot meant to go 23 cm forward in 0.16 s slid back
+    /// along the floor instead, its knee folding while its hip lagged 0.12
+    /// radians behind.
+    pub(super) fn carry_swinging_foot(&mut self, index: usize, foot: &BonePiece, h: f64) {
+        let hold = self.foot_holds[index];
+        let Some((pelvis, hip)) = self.hip_above_foot(hold.bone) else {
+            self.foot_holds[index].swing_impulse = Vec2::default();
+            return;
+        };
+        let bone = self.bones[hold.bone];
+        let (at, now) = (
+            lerp(bone.previous_a, bone.previous_b, 0.5),
+            lerp(bone.a, bone.b, 0.5),
+        );
+        let speed = subtract(scale(subtract(now, at), 1.0 / h), hold.swing_speed);
+        let error = subtract(at, hold.swing_to);
+        let lever = subtract(at, foot.centre);
+        let masses = (
+            1.0 / (1.0 / foot.mass + lever.y * lever.y / foot.inertia),
+            1.0 / (1.0 / foot.mass + lever.x * lever.x / foot.inertia),
+        );
+        let leg = SWING_MASS_KG / KG_PER_MASS;
+        let omega = 2.0 * PI * SWING_HERTZ;
+        let (stiffness, damping) = (leg * omega * omega, 2.0 * leg * omega);
+        let given = hold.swing_impulse;
+        let impulse = Vec2 {
+            x: Softness::of_stiffness(stiffness, damping, masses.0, h)
+                .impulse(masses.0, speed.x, error.x, given.x),
+            y: Softness::of_stiffness(stiffness, damping, masses.1, h)
+                .impulse(masses.1, speed.y, error.y, given.y),
+        };
+        let most = SWING_FORCE * self.newtons() * h;
+        let total = add(given, impulse);
+        let length = hypot(total.x, total.y);
+        let total = if length > most {
+            scale(total, most / length)
+        } else {
+            total
+        };
+        let impulse = subtract(total, given);
+        self.foot_holds[index].swing_impulse = total;
+        self.push_piece(foot, lever, impulse, h);
+        self.push_piece(
+            &pelvis,
+            subtract(hip, pelvis.centre),
+            scale(impulse, -1.0),
+            h,
+        );
+    }
+
+    /// Gives the swinging foot that foot hold `index` holds, and its
+    /// pelvis, the push its leg gave it last substep, to begin this one
+    /// from (`carry_swinging_foot`).
+    pub(super) fn warm_start_swinging_foot(&mut self, index: usize, foot: &BonePiece, h: f64) {
+        let hold = self.foot_holds[index];
+        if hold.swing_impulse == Vec2::default() {
+            return;
+        }
+        let Some((pelvis, hip)) = self.hip_above_foot(hold.bone) else {
+            return;
+        };
+        let bone = self.bones[hold.bone];
+        let at = lerp(bone.previous_a, bone.previous_b, 0.5);
+        self.push_piece(foot, subtract(at, foot.centre), hold.swing_impulse, h);
+        self.push_piece(
+            &pelvis,
+            subtract(hip, pelvis.centre),
+            scale(hold.swing_impulse, -1.0),
+            h,
+        );
+    }
+
+    /// The pelvis, bone and flesh, of the side-view fighter whose foot's
+    /// bone is `foot`, and where its hip joint on that foot's side holds the
+    /// thigh, as the substep began.
+    fn hip_above_foot(&self, foot: usize) -> Option<(BonePiece, Vec2)> {
+        let body = self.bones.get(foot)?.body as usize;
+        let rig = self.bodies.get(body)?.fighter.as_ref()?;
+        let side = Side::BOTH
+            .into_iter()
+            .find(|side| rig.feet[side.index()] == foot)?;
+        let joint = self.bone_joints.get(rig.hinge(Hinge::Hip(side)))?;
+        let pelvis = self.bones.get(joint.a)?;
+        let seat = joint_seat(joint, pelvis, pelvis.previous_a, pelvis.previous_b);
+        let piece = self.bone_pieces.get(rig.pelvis)?.clone()?;
+        Some((piece, seat))
+    }
+
     /// Gives back on fighter `body`'s planted feet the push `push`, an
     /// impulse over the substep `h`, that its hold gave the pelvis at `at`,
     /// and the turn `turn` it gave it, so that the legs, not the window, push
-    /// the hips (`press_on_the_feet`). What the feet are given follows all
+    /// the hips. What the feet are given follows all
     /// the hold has given this substep, not each push as it comes: the hold
     /// gives its push a little at a time, warm started and then pass by pass,
     /// and each little push shared out on its own, as if it were all, put
@@ -453,14 +628,32 @@ impl World {
         let newtons = self.newtons() * h;
         let newton_metres = self.newton_metres() * h;
         for (index, foot) in stance.feet.iter().enumerate() {
+            // Each leg presses its foot into the floor with the weight it
+            // bears, and the floor takes the leg's push across through the
+            // foot, which grips by that weight (`solve_foot_holds`,
+            // `foot_bearing`), as the floor holds a planted foot still: the
+            // push on the hips no harder than all the feet grip
+            // (`solve_hip_hold`), it is the floor's push back, given the body
+            // as residual forces on its root are (Yuan and Kitani 2020).
+            // Given to the foot's bone at the ankle as well, the push across
+            // went up the leg through the ankle, knee, and hip joints to the
+            // pelvis and undid itself: legs pushing the hips forward with
+            // 341 N had the floor push back with 81, and a fighter stepping
+            // in stood still. Not pressed down either, the feet were held to
+            // the floor by their own legs' weight alone, and a duck folding
+            // the knees lifted both off it.
             let back = scale(pushes[index], -1.0);
             let turned = -turn * shares[index];
             // Take back what the leg was given so far, and give it what all
             // the hold has given asks of it.
             let (was_back, was_turned) = stance.pressed[index];
-            let lever = subtract(foot.ankle, foot.foot.centre);
-            if back != was_back {
-                self.push_piece(&foot.foot, lever, subtract(back, was_back), h);
+            if back.y != was_back.y {
+                let lever = subtract(foot.ankle, foot.foot.centre);
+                let pressed = Vec2 {
+                    x: 0.0,
+                    y: back.y - was_back.y,
+                };
+                self.push_piece(&foot.foot, lever, pressed, h);
             }
             if turned != was_turned {
                 self.turn_piece(&foot.thigh, turned - was_turned, h);
@@ -493,7 +686,7 @@ impl World {
 /// gives the hips; and its share.
 fn along_the_legs(stance: &Stance, push: Vec2) -> (Vec<Vec2>, Vec<f64>) {
     let hips = stance.hips;
-    let pushes: Vec<Vec2> = match stance.feet.as_slice() {
+    let mut pushes: Vec<Vec2> = match stance.feet.as_slice() {
         [first, second] => {
             let line = |foot: &PlantedFoot| {
                 normalized(subtract(hips, foot.ankle), Vec2 { x: 0.0, y: -1.0 })
@@ -544,6 +737,26 @@ fn along_the_legs(stance: &Stance, push: Vec2) -> (Vec<Vec2>, Vec<f64>) {
         }
         _ => vec![push; stance.feet.len()],
     };
+    // A foot handing its weight to the other before it lifts bears as much
+    // of its share as it has left, the other foot the rest, as a robot
+    // brings a foot's push on the floor to nothing before letting go of it
+    // (Herzog, Righetti, Grimminger, Pastor and Schaal 2014). Let go of
+    // bearing its share at once, a lead foot was kicked back 3 cm in a step
+    // by its own leg, which the push on the foot had stretched.
+    if let [first, second] = stance.feet.as_slice() {
+        let keep = first.load.min(second.load).clamp(0.0, 1.0);
+        if keep < 1.0 {
+            let other = usize::from(first.load <= second.load);
+            for (index, leg) in pushes.iter_mut().enumerate() {
+                let alone = if index == other {
+                    push
+                } else {
+                    Vec2::default()
+                };
+                *leg = add(scale(*leg, keep), scale(alone, 1.0 - keep));
+            }
+        }
+    }
     let bearing: Vec<f64> = pushes.iter().map(|push| (-push.y).max(0.0)).collect();
     let borne: f64 = bearing.iter().sum();
     let shares: Vec<f64> = if borne > EPSILON {

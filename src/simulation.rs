@@ -2385,6 +2385,10 @@ impl World {
             impulse: [Vec2::default(); 2],
             lifted: [false; 2],
             swinging: false,
+            load: 1.0,
+            swing_to: Vec2::default(),
+            swing_speed: Vec2::default(),
+            swing_impulse: Vec2::default(),
         });
     }
 

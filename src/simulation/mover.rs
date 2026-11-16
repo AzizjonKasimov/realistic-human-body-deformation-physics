@@ -59,10 +59,12 @@ const BOUNCE_RISE: f64 = 0.004;
 const BOUNCE_SWAY: f64 = 0.004;
 
 /// How far a step carries the fighter, in body heights (about 23 cm), and
-/// how long it takes, in seconds: as fast as feet gripping the floor can
-/// push a body off and stop it again.
+/// how long its hips take to get there, in seconds: about two thirds of the
+/// way by the time the lead foot comes down, 0.37 s on, since the lead leg
+/// reaches only about 11 cm past where the stance has it. Moved a fifth of
+/// the way by then, the hips left the lead foot out of reach of the floor.
 const STEP_LENGTH: f64 = 0.13;
-const STEP_SECONDS: f64 = 0.42;
+const STEP_SECONDS: f64 = 0.6;
 /// How high a stepping foot lifts, in body heights: a boxer's feet skim the
 /// floor.
 const STEP_LIFT: f64 = 0.020;
@@ -181,32 +183,178 @@ impl Held {
 }
 
 /// A step being taken: how far it carries the fighter, in body heights
-/// (forward positive), and how long ago it began.
+/// (forward positive), how long ago it began, and when each foot came down
+/// on the floor, the one that went first first.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Step {
+    /// How far each foot goes: as far as the step is told to go until the
+    /// first foot is down, then as far as that foot really went, so that the
+    /// other foot keeps the stance's length behind it and the hips go to
+    /// where the stance has them over both. Which way it goes stays
+    /// `forward`'s.
     by: f64,
+    forward: bool,
     age: f64,
+    /// A foot's swing ends as it strikes the floor, as in SIMBICON (Yin,
+    /// Loken and van de Panne 2007) and Coros, Beaudoin and van de Panne
+    /// (2010), or a moment after its time runs out; the other foot hands its
+    /// weight over and lifts only once the first is down, so that a foot
+    /// always stands. Lifted together for a tenth of the step, both feet were
+    /// off the floor at once, and nothing held the fighter up.
+    down: [Option<f64>; 2],
 }
 
+/// How long the first foot takes to hand its weight to the other foot
+/// before it lifts, while the body begins to fall the way the step goes, in
+/// seconds: a person's first step begins so, the pressure under the feet
+/// moving back to push the body forward before the stepping foot lifts (the
+/// postural phase of gait initiation). Lifted after 0.05 s, the lead foot
+/// swung forward while the body stood still, and swinging it pushed the
+/// hips back. How long the second foot takes, and how long a foot takes its
+/// share back once it is down: its push on the floor is brought to nothing
+/// before it lets go (`balance.rs`).
+const LEAN_SECONDS: f64 = 0.12;
+const UNLOAD_SECONDS: f64 = 0.05;
+/// How long the first foot and then the second swing, in seconds, and how
+/// much longer a foot still in the air is carried down before it is set
+/// down regardless.
+const SWING_SECONDS: [f64; 2] = [0.25, 0.20];
+const LANDING_GRACE_SECONDS: f64 = 0.08;
+/// How near where the step sets it down a swinging foot must be, in body
+/// heights (1 cm), to be set down as it touches the floor: a short step of
+/// 9 cm, set down 3 cm short, went a third less far.
+const LANDING_NEAR: f64 = 0.006;
+
 impl Step {
-    /// How far through its swing each foot is, from 0 on the floor where it
-    /// stood to 1 on the floor where it lands, the lead foot's first, and
-    /// how far the hips have gone. The foot on the side the step goes to
-    /// moves first, and the other follows it.
-    fn progress(&self) -> ([f64; 2], f64) {
-        let t = self.age / STEP_SECONDS;
-        let first = smooth(t / 0.55);
-        let second = smooth((t - 0.45) / 0.55);
-        let hips = smooth((t - 0.10) / 0.85);
-        if self.by > 0.0 {
-            ([first, second], hips)
-        } else {
-            ([second, first], hips)
+    fn new(by: f64) -> Self {
+        Self {
+            by,
+            forward: by > 0.0,
+            age: 0.0,
+            down: [None; 2],
         }
+    }
+
+    /// The foot that goes first, the lead's 0: the one on the side the step
+    /// goes to.
+    fn first(&self) -> usize {
+        if self.forward {
+            0
+        } else {
+            1
+        }
+    }
+
+    /// The first foot is down, `went` body heights on from where it stood:
+    /// the step goes as far, no farther than it was told and never back.
+    fn went(&mut self, went: f64) {
+        self.by = if self.forward {
+            went.clamp(0.0, self.by)
+        } else {
+            went.clamp(self.by, 0.0)
+        };
+    }
+
+    /// The side of the foot that goes `order`-th, 0 first.
+    fn side(&self, order: usize) -> usize {
+        if order == 0 {
+            self.first()
+        } else {
+            1 - self.first()
+        }
+    }
+
+    /// When the foot that goes `order`-th begins to hand its weight over:
+    /// the first at once, the second once the first is down.
+    fn starts(&self, order: usize) -> Option<f64> {
+        if order == 0 {
+            Some(0.0)
+        } else {
+            self.down[0]
+        }
+    }
+
+    /// How long the foot that goes `order`-th takes to hand its weight over.
+    fn handing(order: usize) -> f64 {
+        if order == 0 {
+            LEAN_SECONDS
+        } else {
+            UNLOAD_SECONDS
+        }
+    }
+
+    /// When the foot that goes `order`-th lifts, if it has begun to hand
+    /// its weight over.
+    fn lifts(&self, order: usize) -> Option<f64> {
+        self.starts(order).map(|start| start + Self::handing(order))
+    }
+
+    /// Whether the foot that goes `order`-th is in the air: its weight
+    /// handed over and not yet down.
+    fn swinging(&self, order: usize) -> bool {
+        self.down[order].is_none() && self.lifts(order).is_some_and(|lifts| self.age >= lifts)
+    }
+
+    /// How far through its swing the foot that goes `order`-th is, from 0
+    /// on the floor where it stood to 1 over where it lands.
+    fn swung(&self, order: usize) -> f64 {
+        match (self.down[order], self.lifts(order)) {
+            (Some(_), _) => 1.0,
+            (None, Some(lifts)) => smooth((self.age - lifts) / SWING_SECONDS[order]),
+            (None, None) => 0.0,
+        }
+    }
+
+    /// Whether the foot that goes `order`-th, in the air, is to be set down
+    /// now: on the floor at its swing's end, `near` where it lands, or its
+    /// time and a moment more gone. Set down as soon as it grazed the floor,
+    /// still moving at 1.4 m/s, a foot slid on 10 cm past where it was meant
+    /// to land; carried on instead, it is slowed there.
+    fn lands(&self, order: usize, on_floor: bool, near: bool) -> bool {
+        let Some(lifts) = self.lifts(order).filter(|_| self.swinging(order)) else {
+            return false;
+        };
+        let late = self.age >= lifts + SWING_SECONDS[order] + LANDING_GRACE_SECONDS;
+        late || (on_floor && near && self.swung(order) >= 0.9)
+    }
+
+    /// How far through its swing each foot is, the lead foot's first, and
+    /// how far the hips have gone.
+    fn progress(&self) -> ([f64; 2], f64) {
+        let mut feet = [0.0; 2];
+        for order in 0..2 {
+            feet[self.side(order)] = self.swung(order);
+        }
+        (feet, smooth(self.age / STEP_SECONDS))
+    }
+
+    /// Which feet are in the air, the lead foot's first.
+    fn lifted(&self) -> [bool; 2] {
+        let mut lifted = [false; 2];
+        for order in 0..2 {
+            lifted[self.side(order)] = self.swinging(order);
+        }
+        lifted
+    }
+
+    /// How much of its share each foot bears, the lead's first: all of it
+    /// standing, handed to the other foot before it lifts, and taken back
+    /// once it is down.
+    fn loads(&self) -> [f64; 2] {
+        let mut loads = [1.0; 2];
+        for order in 0..2 {
+            loads[self.side(order)] = match (self.down[order], self.starts(order)) {
+                (Some(down), _) => smooth((self.age - down) / UNLOAD_SECONDS),
+                (None, Some(start)) => 1.0 - smooth((self.age - start) / Self::handing(order)),
+                (None, None) => 1.0,
+            };
+        }
+        loads
     }
 
     fn done(&self) -> bool {
         self.age >= STEP_SECONDS
+            && self.down[1].is_some_and(|down| self.age >= down + UNLOAD_SECONDS)
     }
 }
 
@@ -571,6 +719,14 @@ pub(super) enum Stands {
     Striking,
     /// A fighter's arm closed in front of it in a block.
     Guarding,
+    /// A fighter's leg: in the way of the other fighter's trunk and arms,
+    /// but not of its legs, which stand to one side of it. A boxer stands
+    /// with its feet about shoulder-width apart across, so two facing each
+    /// other, each leading with the same foot, have their lead feet either
+    /// side of the line between them; met leg to leg in the side view, two
+    /// fighters stepping in to the nearest they stand stubbed their lead
+    /// feet on each other's and stood 5 cm short.
+    Leg,
 }
 
 /// How much of the bare fist's weight is behind a punch thrown with the arm
@@ -672,6 +828,9 @@ impl World {
         let (Some(_), Some(mover)) = (&state.fighter, &state.mover) else {
             return Stands::Body;
         };
+        if fighter::leg_sheet(sheet) {
+            return Stands::Leg;
+        }
         let Some(side) = fighter::arm_of_sheet(sheet) else {
             return Stands::Body;
         };
@@ -694,6 +853,7 @@ impl World {
         a != Stands::Beside
             && b != Stands::Beside
             && !(a == Stands::Striking && b == Stands::Striking)
+            && !(a == Stands::Leg && b == Stands::Leg)
     }
 
     /// Whether two parts of two different bodies, each a body and a sheet
@@ -930,6 +1090,30 @@ impl World {
         Some(frame.stand.x + frame.facing * ahead * frame.height)
     }
 
+    /// Where each foot side-view fighter `body`'s step is swinging will come
+    /// down, across the world: its heel and its ball where the step sets it.
+    pub(super) fn step_landing(&self, body: usize) -> Vec<f64> {
+        let (Some(frame), Some(mover)) = (
+            self.fighter_frame(body),
+            self.bodies.get(body).and_then(|state| state.mover.as_ref()),
+        ) else {
+            return Vec::new();
+        };
+        let Some(step) = mover.step else {
+            return Vec::new();
+        };
+        let lifted = step.lifted();
+        let mut pose = mover.pose();
+        let mut ends = Vec::new();
+        for side in (0..2).filter(|&side| lifted[side]) {
+            pose.feet[side].ball = (mover.feet[side] + step.by, 0.0);
+            let joints = Joints::of(&pose);
+            ends.push(frame.world(joints.heel[side]).x);
+            ends.push(frame.world(joints.ball[side]).x);
+        }
+        ends
+    }
+
     /// Whether side-view fighter `body` would take a step if told to: it is
     /// not in the middle of one.
     fn free_to_step(&self, body: usize) -> bool {
@@ -1017,14 +1201,11 @@ impl World {
             Move::StepIn if mover.step.is_none() => {
                 let by = STEP_LENGTH.min(room);
                 if by >= SHORTEST_STEP {
-                    mover.step = Some(Step { by, age: 0.0 });
+                    mover.step = Some(Step::new(by));
                 }
             }
             Move::StepOut if mover.step.is_none() => {
-                mover.step = Some(Step {
-                    by: -STEP_LENGTH,
-                    age: 0.0,
-                });
+                mover.step = Some(Step::new(-STEP_LENGTH));
             }
             Move::LeanBack(held) => mover.lean.held = held,
             Move::Block(held) => mover.block.held = held,
@@ -1072,12 +1253,38 @@ impl World {
             mover.duck.ease(2.4, dt);
             mover.block.ease(BLOCK_HERTZ, dt);
             // A foot swings while its part of a step lasts, and is set down
-            // as it ends.
+            // as it ends: the first as it strikes the floor on its way down,
+            // or as its time runs out.
             let mut swinging = [false; 2];
+            let mut loads = [1.0; 2];
             if let Some(step) = &mut mover.step {
                 step.age += dt;
-                let (feet, _) = step.progress();
-                swinging = feet.map(|progress| progress > 0.0 && progress < 1.0);
+                for order in 0..2 {
+                    let side = step.side(order);
+                    // Near where the step sets it down: within a few
+                    // centimetres of the end of its way.
+                    let near = self
+                        .foot_holds
+                        .iter()
+                        .find(|hold| hold.bone == rig.feet[side])
+                        .zip(self.bones.get(rig.feet[side]))
+                        .is_some_and(|(hold, foot)| {
+                            let middle = lerp(foot.a, foot.b, 0.5);
+                            let off = subtract(middle, hold.swing_to);
+                            hypot(off.x, off.y) < LANDING_NEAR * frame.height
+                        });
+                    if !step.lands(order, self.foot_on_floor(rig.feet[side]), near) {
+                        continue;
+                    }
+                    step.down[order] = Some(step.age);
+                    if order == 0 {
+                        if let Some(foot) = self.bones.get(rig.feet[side]) {
+                            step.went(frame.own(foot.b).0 - mover.feet[side]);
+                        }
+                    }
+                }
+                swinging = step.lifted();
+                loads = step.loads();
                 if step.done() {
                     let by = step.by;
                     mover.place += by;
@@ -1086,6 +1293,7 @@ impl World {
                     }
                     mover.step = None;
                     swinging = [false; 2];
+                    loads = [1.0; 2];
                 }
             }
             if let Some(strike) = &mut mover.strike {
@@ -1105,10 +1313,56 @@ impl World {
                 }
             }
 
-            let joints = Joints::of(&mover.pose());
+            // A swinging foot goes where the step puts it over the floor,
+            // reached from where the hips really are, as Coros, Beaudoin and
+            // van de Panne (2010) aim a swinging foot along a path over the
+            // ground and work out its hip and knee from there. Reached from
+            // where the move puts the hips, it went wherever they went: as
+            // the hips lagged behind a step in, the lead foot came down 8 cm
+            // short of where the step meant it to land.
+            let mut planned = mover.pose();
+            // A swinging foot stays up until it has got as far along its way
+            // as its time says: lowered by the clock while it lagged 2.5 cm
+            // behind, a short step's lead foot came down short, and the
+            // floor held it there.
+            if let Some(step) = mover.step {
+                for order in 0..2 {
+                    let side = step.side(order);
+                    let (Some(foot), true) = (self.bones.get(rig.feet[side]), swinging[side])
+                    else {
+                        continue;
+                    };
+                    let along = if step.by.abs() > EPSILON {
+                        ((frame.own(foot.b).0 - mover.feet[side]) / step.by).clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    };
+                    let swung = step.swung(order).min(along);
+                    planned.feet[side].ball.1 = STEP_LIFT * libm::sin(PI * swung);
+                }
+            }
+            // A foot handing its weight over or taking it back is reached
+            // from where the hips really are as far as it has no weight to
+            // bear: switched at once as it came down, the leg's aims jumped,
+            // the ankle turned half a radian in a step, and it kicked the foot,
+            // gripping by almost nothing yet, 7 cm on along the floor.
+            let mut pose = planned;
+            if let Some(pelvis) = self.bones.get(rig.pelvis).filter(|_| mover.step.is_some()) {
+                let hips = frame.own(pelvis.b);
+                for side in 0..2 {
+                    let free = if swinging[side] {
+                        1.0
+                    } else {
+                        1.0 - loads[side]
+                    };
+                    pose.feet[side].ball.0 += (pose.hips.0 - hips.0) * free;
+                    pose.feet[side].ball.1 += (pose.hips.1 - hips.1) * free;
+                }
+            }
+            let joints = Joints::of(&pose);
             self.aim_joints(body, &rig, &frame, &mut mover, &joints, dt);
             self.carry_hips(&rig, &frame, &mut mover, &joints, dt);
-            self.place_feet(&rig, &frame, &joints, swinging);
+            self.place_feet(&rig, &frame, &Joints::of(&planned), swinging, loads, dt);
             self.bodies[body].mover = Some(mover);
         }
     }
@@ -1224,16 +1478,19 @@ impl World {
         [subtract(sacrum, scale(up, gap)), hips]
     }
 
-    /// Stands each of the fighter's feet where `joints` puts it: a foot a
-    /// step is swinging is held by nothing, and one on the floor stands
-    /// with its ball where it stood and its heel as high as the pose lifts
-    /// it.
+    /// Stands each of the fighter's feet where `joints` puts it, bearing
+    /// `loads` of its share: a foot a step is swinging is carried along its
+    /// way by its leg alone (`World::carry_swinging_foot`), and one on the
+    /// floor stands with its ball where it stood and its heel as high as the
+    /// pose lifts it.
     fn place_feet(
         &mut self,
         rig: &fighter::Rig,
         frame: &Frame,
         joints: &Joints,
         swinging: [bool; 2],
+        loads: [f64; 2],
+        dt: f64,
     ) {
         for side in 0..2 {
             let (heel, ball) = (
@@ -1244,14 +1501,36 @@ impl World {
                 if hold.bone != rig.feet[side] {
                     continue;
                 }
+                hold.load = loads[side];
                 if swinging[side] {
+                    let to = lerp(heel, ball, 0.5);
+                    hold.swing_speed = if hold.swinging {
+                        scale(subtract(to, hold.swing_to), 1.0 / dt.max(EPSILON))
+                    } else {
+                        Vec2::default()
+                    };
+                    hold.swing_to = to;
                     hold.swinging = true;
                     continue;
                 }
+                hold.swing_impulse = Vec2::default();
                 if hold.swinging {
-                    // Set down where the step ends.
+                    // Set down where it came down, its heel as high as the
+                    // pose lifts it: held toward where the step meant it to
+                    // land instead, a foot that came down a little off it
+                    // was dragged over the floor.
                     hold.swinging = false;
-                    hold.planted = [heel, ball];
+                    let foot = self.bones[hold.bone];
+                    hold.planted = [
+                        Vec2 {
+                            x: foot.a.x,
+                            y: heel.y,
+                        },
+                        Vec2 {
+                            x: foot.b.x,
+                            y: ball.y,
+                        },
+                    ];
                     hold.lifted = [false; 2];
                     continue;
                 }
