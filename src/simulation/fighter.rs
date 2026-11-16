@@ -1929,13 +1929,15 @@ mod tests {
                 if !detail && !story {
                     continue;
                 }
+                let (watched, _) = world.hardest_head_spin(1).unwrap_or_default();
                 println!(
-                    "{spacing:.3} apart, {made:?}{}: fist up to {fastest:.1} m/s, landed at {landed:.1?} m/s; reddened points head and trunk {}, arms {}; skull pressed {pressed:.2} of its strength, head up to {head_speed:.1} m/s and {:.1} cm off its hips, turned {:.0} deg, spun at up to {spun:.0} rad/s2 and {spin:.1} rad/s and thrown at {thrown:.0} g, hips shoved {:.1} cm; torn joints {}, skin {}, muscle {}, broken bones {}",
+                    "{spacing:.3} apart, {made:?}{}: fist up to {fastest:.1} m/s, landed at {landed:.1?} m/s; reddened points head and trunk {}, arms {}; skull pressed {pressed:.2} of its strength, head up to {head_speed:.1} m/s and {:.1} cm off its hips, turned {:.0} deg, spun at up to {spun:.0} rad/s2 (watched {watched:.0}{}) and {spin:.1} rad/s and thrown at {thrown:.0} g, hips shoved {:.1} cm; torn joints {}, skin {}, muscle {}, broken bones {}",
                     if blocked { " into a block" } else { "" },
                     reddened[0],
                     reddened[1],
                     head_moved * mm * 0.1,
                     turned.to_degrees(),
+                    if world.knocked_out(1) { ", knocked out" } else { "" },
                     shoved * mm * 0.1,
                     world.stats.broken_bone_joints,
                     world.stats.broken_skin,
@@ -2523,7 +2525,11 @@ mod tests {
                 continue;
             }
             let started = std::time::Instant::now();
-            let seconds = 20.0;
+            // `RP_SECONDS=30` plays each fight that long instead of 20 s.
+            let seconds = std::env::var("RP_SECONDS")
+                .ok()
+                .and_then(|seconds| seconds.parse().ok())
+                .unwrap_or(20.0);
             // `RP_FLUNG=30` stops at the first bone moved faster than 30 m/s
             // and prints which phase moved it.
             let flung = std::env::var("RP_FLUNG")
@@ -2585,6 +2591,33 @@ mod tests {
                 started.elapsed().as_secs_f64() * 1000.0 / steps,
             );
             println!("    the fastest a bone moved was {fastest:.1} m/s");
+            // How hard each head was turned, and whether it was knocked out
+            // (`knockout.rs`).
+            for body in 0..2 {
+                let (hardest, spin) = world.hardest_head_spin(body).unwrap_or_default();
+                let out = world.journal().and_then(|journal| {
+                    journal
+                        .events
+                        .iter()
+                        .find(|event| {
+                            event.kind == EventKind::KnockedOut
+                                && world.bone_body(match event.subject {
+                                    Subject::Bone(bone) => bone,
+                                    _ => MISSING_BONE,
+                                }) == body
+                        })
+                        .map(|event| event.step + 1)
+                });
+                println!(
+                    "    fighter {body}'s head was turned at up to {hardest:.0} rad/s2 and {spin:.1} rad/s{}{}",
+                    out.map_or(String::new(), |frame| format!(", knocked out at frame {frame}")),
+                    if world.fighter_fallen(body) && out.is_none() {
+                        ", fallen"
+                    } else {
+                        ""
+                    },
+                );
+            }
             // How well each body followed its moves.
             for (body, (farthest, first)) in head_off.iter().enumerate() {
                 println!(

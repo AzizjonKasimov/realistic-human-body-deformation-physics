@@ -411,5 +411,8 @@ pub fn measure_text(measure: Measure, value: f64, limit: f64) -> String {
         Measure::Count => format!("{value:.0}"),
         Measure::Speed => format!("met at {value:.1} m/s (limit {limit:.1} m/s)"),
         Measure::Force => format!("pressed {value:.0} N (limit {limit:.0} N)"),
+        Measure::Spin => {
+            format!("its turning changed at {value:.0} rad/s2 (limit {limit:.0} rad/s2)")
+        }
     }
 }

@@ -121,6 +121,16 @@ const STRIKE_REACH: f64 = 0.975;
 /// leaves it at about 3.5.
 const FOLLOW_THROUGH_SECONDS: f64 = 0.03;
 
+/// How long a fist's push on what it struck lasts, in seconds, rising and
+/// falling as half a sine wave (`World::land_fist_blows`): a punch's force
+/// on a head spikes over about 8 to 10 ms (80 g blows over about 8 ms; 10 ms
+/// in models of punch force), though the fist stays against it longer.
+/// Passed on evenly over the 30 ms the fist stays in contact, a cross gave
+/// the head the speed Walilko, Viano and Bir (2005) measured (2.9 m/s) but
+/// spun it at 768 rad/s^2 and threw it at 10 g, where Olympic boxers'
+/// straight punches spun a dummy's head at 6,343 and threw it at 58.
+const BLOW_SECONDS: f64 = 0.008;
+
 /// How firmly a fighter's hips are carried across and upward, in hertz on
 /// the body's weight, and the hardest the hold pushes each end of the pelvis
 /// each way, in body weights: half of what feet gripping a dry floor can
@@ -507,8 +517,9 @@ pub struct Mover {
     /// built, in body heights, the lead foot's first.
     feet: [f64; 2],
     step: Option<Step>,
-    /// Its weight ran past where any step could catch it: it no longer
-    /// stands up on its legs or takes moves, and stays down.
+    /// Its weight ran past where any step could catch it, or a blow knocked
+    /// it out (`knockout.rs`): it no longer stands up on its legs or takes
+    /// moves, and stays down.
     fallen: bool,
     /// A shove it is taking (`Move::Shoved`): how hard, in newton seconds,
     /// and how long ago it began.
@@ -550,6 +561,14 @@ impl Mover {
             last_turns: None,
             last_hips: None,
         }
+    }
+
+    /// Knocked out (`knockout.rs`): it falls, the step and the punch it was
+    /// making stop with its muscles, and it stays down.
+    pub(super) fn knock_down(&mut self) {
+        self.fallen = true;
+        self.step = None;
+        self.strike = None;
     }
 
     /// The pose the fighter is asked to take now.
@@ -743,7 +762,7 @@ pub(super) struct FistBlow {
     /// What the fist passes without touching.
     spares: Spared,
     /// Once the pieces it landed on are measured: the bone struck, the
-    /// momentum still to pass on, and how much of it passes each second.
+    /// momentum the fist passes on, and how long it has been passing it.
     passing: Option<(usize, f64, f64)>,
 }
 
@@ -1069,7 +1088,11 @@ impl World {
             hips.x,
             hips.y,
             mover.place,
-            if mover.fallen { ", fallen" } else { "" },
+            match (self.knocked_out(body), mover.fallen) {
+                (true, _) => ", knocked out",
+                (false, true) => ", fallen",
+                (false, false) => "",
+            },
             mover.lean.amount,
             mover.duck.amount,
             mover.block.amount,
@@ -2180,7 +2203,7 @@ impl World {
         let arm = cross(subtract(blow.at, middle), blow.heading);
         let struck_inverse = 1.0 / mass + arm * arm / inertia;
         let impulse = closing.max(0.0) / (1.0 / blow.mass + struck_inverse) - blow.given;
-        (impulse > 0.0).then_some((index, impulse, impulse / FOLLOW_THROUGH_SECONDS))
+        (impulse > 0.0).then_some((index, impulse, 0.0))
     }
 
     /// Each fist a fighter has landed shares its momentum with what it
@@ -2193,25 +2216,28 @@ impl World {
     /// (`land_fist`) bruises, splits, and breaks what it strikes and shoves
     /// the flesh under the knuckles, but passes on only what that shove
     /// carries, and a head struck at 9.6 m/s moved off at 1 m/s; this gives
-    /// the rest, and takes it from the arm that threw the fist. It passes
-    /// evenly over the time a fist stays in contact
-    /// (`FOLLOW_THROUGH_SECONDS`): given all at once, in one substep, it
-    /// moved the head off faster than the flesh between head and neck
-    /// could follow, and split the skin there. `h` is the substep it
-    /// happens in.
+    /// the rest, and takes it from the arm that threw the fist. It passes as
+    /// a punch's force does, rising and falling as half a sine wave over
+    /// `BLOW_SECONDS`: given all at once, in one substep, it moved the head
+    /// off faster than the flesh between head and neck could follow, and
+    /// split the skin there; given evenly over the 30 ms the fist stays in
+    /// contact, it jolted the head eight times more gently than a punch
+    /// does. `h` is the substep it happens in.
     pub(super) fn land_fist_blows(&mut self, h: f64) {
         if self.fist_blows.is_empty() {
             return;
         }
         let mut blows = std::mem::take(&mut self.fist_blows);
         for blow in &mut blows {
-            let Some((index, remaining, rate)) =
+            let Some((index, total, age)) =
                 blow.passing.or_else(|| self.measure_fist_blow(blow, h))
             else {
                 continue;
             };
-            let impulse = remaining.min(rate * h);
-            blow.passing = Some((index, remaining - impulse, rate));
+            // The share of the push that falls in this substep.
+            let passed = |t: f64| 0.5 * (1.0 - libm::cos(PI * (t / BLOW_SECONDS).clamp(0.0, 1.0)));
+            let impulse = total * (passed(age + h) - passed(age));
+            blow.passing = Some((index, total, age + h));
             // Where the knuckles are now.
             let at = self
                 .bones
@@ -2222,10 +2248,7 @@ impl World {
             self.push_together(&pieces, at, push, h);
             self.push_fighter_arm(blow.body, blow.side, scale(push, -1.0), at, h);
         }
-        blows.retain(|blow| {
-            blow.passing
-                .is_some_and(|(_, remaining, _)| remaining > 0.0)
-        });
+        blows.retain(|blow| blow.passing.is_some_and(|(_, _, age)| age < BLOW_SECONDS));
         self.fist_blows = blows;
     }
 

@@ -67,6 +67,9 @@ pub enum EventKind {
     /// A punching arm met another body's limb on its way out and the punch
     /// gave way (`clash.rs`).
     PunchTurnedBack,
+    /// A blow turned a fighter's head hard enough to knock it out
+    /// (`knockout.rs`).
+    KnockedOut,
 }
 
 impl EventKind {
@@ -106,6 +109,7 @@ impl EventKind {
             EventKind::WoundOpened => "wound opened",
             EventKind::WoundReopened => "wound reopened",
             EventKind::PunchTurnedBack => "punch turned back",
+            EventKind::KnockedOut => "knocked out",
         }
     }
 
@@ -185,6 +189,8 @@ pub enum Measure {
     Speed,
     /// How hard one pressed on another, in newtons.
     Force,
+    /// How fast a head's turning changed, in radians a second squared.
+    Spin,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

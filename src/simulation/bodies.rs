@@ -47,6 +47,9 @@ pub struct BodyState {
     pub(super) fighter: Option<super::fighter::Rig>,
     /// What moves a side-view fighter (`mover.rs`).
     pub(super) mover: Option<super::mover::Mover>,
+    /// How a side-view fighter's head has turned, and whether a blow has
+    /// knocked it out (`knockout.rs`).
+    pub(super) head: super::knockout::HeadSpin,
 }
 
 impl BodyState {
@@ -63,6 +66,7 @@ impl BodyState {
             skin_tears: 0,
             fighter: None,
             mover: None,
+            head: Default::default(),
         }
     }
 }
@@ -306,6 +310,7 @@ impl World {
         }
         for state in &mut world.bodies {
             state.mirrored = !state.mirrored;
+            state.head.mirror();
             if let Some(rig) = &mut state.fighter {
                 rig.mirror(middle);
             }

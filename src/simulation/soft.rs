@@ -223,6 +223,9 @@ impl World {
             self.solver_dt = h;
             self.solver_progress = (substep + 1) as f64 / substeps as f64;
             self.mark_trace_time(substep as f64 / substeps as f64);
+            // How each fighter's head turns as the substep begins, from how
+            // it turned over the last (`knockout.rs`).
+            self.timed("heads", |world| world.watch_heads(h));
             // Points, the outline's hold on them, the cuts' ghosts, then the
             // bones: each a phase of its own, so a trace names which moved
             // what.

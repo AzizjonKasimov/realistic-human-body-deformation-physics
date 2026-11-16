@@ -314,15 +314,15 @@ impl World {
                 || self.striking_out(bone.body as usize, bone.limb))
     }
 
-    /// Whether bone `index` is of a limb hanging limp (`World::let_limb_go`),
-    /// which knocked aside blocks no punch: held at its joints with its
-    /// flesh, a dropped guard's hanging hand pressed on the punching arm
-    /// going over it harder than an arm gives way to, and the punch turned
-    /// back short of the head.
+    /// Whether bone `index` is of a limb hanging limp (`World::let_limb_go`)
+    /// or of a body knocked out (`knockout.rs`), which knocked aside blocks
+    /// no punch: held at its joints with its flesh, a dropped guard's
+    /// hanging hand pressed on the punching arm going over it harder than an
+    /// arm gives way to, and the punch turned back short of the head.
     fn hangs_limp(&self, index: usize) -> bool {
         self.bones
             .get(index)
-            .is_some_and(|bone| self.limp(bone.body as usize, bone.limb))
+            .is_some_and(|bone| self.muscles_let_go(bone.body as usize, bone.limb))
     }
 
     /// Bone `index` with its share of the flesh, the piece the joints hold

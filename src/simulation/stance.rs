@@ -1461,13 +1461,15 @@ impl World {
             // it (`sides.rs`).
             let pieces = sides.get(index).and_then(Option::as_ref);
             let mass = pieces.map_or(1.0 / turn.inverse_mass, |pieces| pieces.turning_mass(false));
-            // A limb hanging from a break holds no pose, but its relaxed
-            // muscles still damp how it swings.
-            let (stiffness, damping) = if self.limp(self.joint_body(&joint), joint.drive.limb) {
-                (0.0, joint.drive.damping * LIMP_DAMPING_SHARE)
-            } else {
-                (joint.drive.stiffness, joint.drive.damping)
-            };
+            // A limb hanging from a break holds no pose, nor does any joint
+            // of a body knocked out, but their relaxed muscles still damp
+            // how they swing.
+            let (stiffness, damping) =
+                if self.muscles_let_go(self.joint_body(&joint), joint.drive.limb) {
+                    (0.0, joint.drive.damping * LIMP_DAMPING_SHARE)
+                } else {
+                    (joint.drive.stiffness, joint.drive.damping)
+                };
             let stiffness = (stiffness * newton_metres).min(mass * cap * cap);
             let damping = damping * newton_metres;
             let softness = Softness::of_stiffness(stiffness, damping, mass, h);
