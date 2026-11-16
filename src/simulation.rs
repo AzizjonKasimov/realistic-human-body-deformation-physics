@@ -23,6 +23,7 @@ mod phases;
 mod properties;
 mod punch;
 mod sides;
+mod sight;
 mod soft;
 mod stance;
 mod tendons;
@@ -46,6 +47,7 @@ pub use motion::MotionSnapshot;
 pub use mover::{Move, Mover};
 pub use phases::{PhaseClock, PhaseTime, PhaseTimes, Traced, TracedStage};
 pub use punch::Punch;
+pub use sight::{Doing, LandedPunch, PunchKind, Punching, Stepping, Struck};
 pub use stance::{Carry, FootHold, HipHold, JointDrive, Limb, PostureBinding};
 pub use tendons::{Muscle, Tendon, TendonEnd};
 pub use tissue::SpringKind;
@@ -2096,6 +2098,9 @@ pub struct World {
     /// The fists side-view fighters landed this step, each waiting to share
     /// its momentum with the piece it landed on (`mover.rs`).
     fist_blows: Vec<mover::FistBlow>,
+    /// The punches side-view fighters landed on another body this step, and
+    /// what each struck, for a game to read (`sight.rs`).
+    landed_punches: Vec<LandedPunch>,
     /// The parts of two side-view fighters that are passing each other, each
     /// a body and a sheet of its flesh, the lower body's first
     /// (`World::note_passing_parts`).
@@ -2240,6 +2245,7 @@ impl World {
             blunt_knock: Vec::new(),
             fist_contacts: Vec::new(),
             fist_blows: Vec::new(),
+            landed_punches: Vec::new(),
             passing_parts: Vec::new(),
             flesh: Vec::new(),
             body_height: blood::STANDARD_BODY_HEIGHT,
@@ -2852,6 +2858,7 @@ impl World {
         // Where the punching fists stood as the step began, to tell how fast
         // they moved over it.
         let fists = self.punching_fists();
+        self.landed_punches.clear();
         self.timed("flesh mask", |world| {
             world.refresh_open_skin();
             world.refresh_flesh();

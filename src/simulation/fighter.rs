@@ -2091,6 +2091,74 @@ mod tests {
         assert_eq!(hurt(&blocked), 0, "a blocked cross tore something");
     }
 
+    /// What a game can see of the fighters (`sight.rs`): a cross into open
+    /// hands is seen on its way out, then reported landed once, on the head,
+    /// at the speed it landed; into a block, on an arm, the blocker seen
+    /// blocking with its guard closed; a step in is seen as one.
+    #[test]
+    fn what_is_seen_of_punches_blocks_and_steps() {
+        let both = pair(0.65);
+        let watch = |world: &mut World, steps: usize, moves: &[(usize, usize, Move)], at: usize| {
+            let (mut landed, mut seen) = (Vec::new(), None);
+            for step in 0..steps {
+                play(world, step..step + 1, moves);
+                landed.extend_from_slice(world.landed_punches());
+                if step == at {
+                    seen = Some([0, 1].map(|body| world.fighter_doing(body).unwrap()));
+                }
+            }
+            (landed, seen.unwrap())
+        };
+
+        let mut open = both.clone();
+        let (landed, seen) = watch(&mut open, 45, &[(5, 0, Move::Cross)], 7);
+        let punch = seen[0].punch.expect("the thrower was not seen punching");
+        assert!(
+            punch.kind == PunchKind::Cross && punch.going_out && !punch.landed,
+            "two steps into a cross, the thrower was seen {punch:?}"
+        );
+        assert!(seen[1].punch.is_none() && !seen[1].guarded);
+        match landed[..] {
+            [LandedPunch {
+                by: 0,
+                kind: PunchKind::Cross,
+                on: 1,
+                struck: Struck::Head,
+                speed,
+            }] if (7.0..11.5).contains(&speed) => {}
+            _ => panic!("a cross into open hands was reported as {landed:?}"),
+        }
+
+        let mut blocked = both.clone();
+        let moves = [(0, 1, Move::Block(true)), (20, 0, Move::Cross)];
+        let (landed, seen) = watch(&mut blocked, 60, &moves, 19);
+        assert!(
+            seen[1].blocking && seen[1].guarded && seen[1].block > 0.9,
+            "blocking for 19 steps, the blocker was seen {:?}",
+            seen[1]
+        );
+        assert!(
+            matches!(
+                landed[..],
+                [LandedPunch {
+                    struck: Struck::Arm,
+                    on: 1,
+                    ..
+                }]
+            ),
+            "a blocked cross was reported as {landed:?}"
+        );
+
+        let mut stepping = both;
+        let (landed, seen) = watch(&mut stepping, 20, &[(0, 0, Move::StepIn)], 18);
+        let step = seen[0].step.expect("the fighter was not seen stepping");
+        assert!(
+            step.forward && !step.catching && (0.4..0.6).contains(&step.progress),
+            "18 steps into a step in, the fighter was seen {step:?}"
+        );
+        assert!(landed.is_empty() && seen[1].step.is_none());
+    }
+
     /// Fighters step no nearer each other than the nearest two fighters
     /// stand, and two that step in on the same step share the room left
     /// between them, so that neither is favoured: they stay each other's

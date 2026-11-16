@@ -593,6 +593,33 @@ impl Mover {
         }
     }
 
+    /// What it is doing, as someone watching it would see it (`sight.rs`).
+    pub(super) fn doing(&self) -> Doing {
+        Doing {
+            punch: self.strike.map(|strike| Punching {
+                kind: punch_kind(strike.hand),
+                age: strike.age,
+                out_seconds: strike.seconds().0,
+                going_out: strike.going_out() && strike.landed.is_none(),
+                landed: strike.landed.is_some(),
+                reach: strike.fist_reach(),
+            }),
+            step: self.step.map(|step| Stepping {
+                forward: step.forward,
+                progress: (step.age / STEP_SECONDS).min(1.0),
+                catching: step.catching,
+            }),
+            lean: self.lean.amount.clamp(0.0, 1.0),
+            duck: self.duck.amount.clamp(0.0, 1.0),
+            block: self.block.amount.clamp(0.0, 1.0),
+            leaning: self.lean.held,
+            ducking: self.duck.held,
+            blocking: self.block.held,
+            guarded: self.block.amount >= BLOCK_CLOSED,
+            fallen: self.fallen,
+        }
+    }
+
     /// Knocked out (`knockout.rs`): it falls, the step and the punch it was
     /// making stop with its muscles, and it stays down.
     pub(super) fn knock_down(&mut self) {
@@ -741,6 +768,15 @@ impl Mover {
             }
         }
         (pose, line_thrown)
+    }
+}
+
+/// The punch thrown with the hand on `side`: the lead's jab, the rear's
+/// cross.
+fn punch_kind(side: Side) -> PunchKind {
+    match side {
+        Side::Lead => PunchKind::Jab,
+        Side::Rear => PunchKind::Cross,
     }
 }
 
@@ -2024,6 +2060,11 @@ impl World {
             self.brace_arm(arm);
         }
         for ((body, side, hand, from, to, heading), landing) in sweeps.into_iter().zip(landings) {
+            // Where the knuckles stopped, in what they met: the sweep's end
+            // lies as far on as the fist would have gone through the step.
+            let met = landing.contact.as_ref().map_or(to, |contact| {
+                scale(add(contact.shape.axis_start, contact.shape.axis_end), 0.5)
+            });
             let given = hypot(landing.given.x, landing.given.y) > EPSILON;
             let speed = distance(from, to) / dt.max(EPSILON) * self.mm_per_px() * 0.001;
             let landed = given && speed > LANDING_SPEED;
@@ -2069,6 +2110,15 @@ impl World {
                     .and_then(|mover| mover.strike.as_mut())
                 {
                     strike.land();
+                }
+                if let Some((on, struck)) = self.struck_by_fist(body, met) {
+                    self.landed_punches.push(LandedPunch {
+                        by: body,
+                        kind: punch_kind(side),
+                        on,
+                        struck,
+                        speed,
+                    });
                 }
             }
             if let Some(contact) = landing.contact {

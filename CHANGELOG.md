@@ -2,6 +2,12 @@
 
 What each version of Realistic Physics changed, newest first. The game shows its version on the start screen and in its bottom-left corner, and every Short made from the game shows the version it was made with. Only the newest version is online.
 
+## v0.17 (2026-11-16)
+
+- The Fight page has a computer opponent in three levels, and rounds: three of a minute, won by a knockout or on clean punches.
+- The opponent sees what a fighter is doing, and where each punch lands, only as the screen shows it, a moment late.
+- Known issue, as in v0.15.2: a bat blow now and then leaves a whole bone outside the skin.
+
 ## v0.16.1 (2026-11-16)
 
 - The sandbox has one body again, to strike and punch as a punching bag, drawn larger now that it stands alone: two fighters box on the Fight page. The 2 key and the "2 fighters" button are gone.
