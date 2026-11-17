@@ -187,12 +187,12 @@ The live page counts visits with [GoatCounter](https://www.goatcounter.com), whi
 | `crashed` | it stopped with an error after loading |
 | `hit` | the first blow with any tool |
 | `tool-sledgehammer`, `tool-bat`, `tool-knife`, `tool-fist` | the first blow with each tool, which the app reports through the page |
-| `played-1min`, `played-5min`, `played-15min` | that much play: time with the simulation on screen, the tab in front, and a pointer move, touch, or key press within the last minute |
+| `played-1min`, `played-5min`, `played-15min` | that much play: time with the simulation on screen, the tab in front, and a pointer move, touch, key press, or on the Fight page a game controller's press within the last minute |
 | `fps-smooth-*`, `fps-uneven-*`, `fps-choppy-*` | after 20 seconds of play, the typical frame rate: 50 fps or more, 30-49, or under 30, on a touch screen (`-touch`) or with a mouse or touchpad (`-mouse`) |
 | `link-*` | a link on the page was followed, named after its text (`link-source-code`) |
 | `opened-as-app` | the page opened as the installed app, from the home screen or the computer's apps |
 | `installed` | the visitor installed it as an app, from the start screen's button or the browser's menu (Chrome, Edge and Samsung Internet tell the page; Safari does not) |
-| `fight-*` | the same on the [Fight](#fight) page, counted apart (`fight-start`, `fight-loaded`, `fight-played-1min`, ...), and the game's own, each once a visit: `fight-punch` (the player's first jab or cross), `fight-step`, `fight-block`, `fight-duck`, and `fight-lean` (the first of each), `fight-knockout` (a fighter was knocked out, either one), `fight-two-players` (a friend took the right fighter), `fight-restart` |
+| `fight-*` | the same on the [Fight](#fight) page, counted apart (`fight-start`, `fight-loaded`, `fight-played-1min`, ...), and the game's own, each once a visit: `fight-punch` (the player's first jab or cross), `fight-step`, `fight-block`, `fight-duck`, and `fight-lean` (the first of each), `fight-knockout` (a fighter was knocked out, either one), `fight-two-players` (a friend took the right fighter), `fight-restart`, `fight-controller` (a game controller played a fighter) |
 
 It sends only from `azizjonkasimov.github.io`, so local builds, copies published elsewhere, and `?selftest` runs count nothing. Every event still lands in `window.__analytics`, and the play time counted so far in `window.rpAnalytics.playedSeconds()`, for checks. To leave your own visits out, open the page once in each browser you use with `#toggle-goatcounter` at the end of its address. To see which post brought visitors when the referrer is missing (apps' built-in browsers often drop it), add `?campaign=NAME` to the links you share; GoatCounter lists them under Campaigns.
 
@@ -214,7 +214,7 @@ The site builds the game from its repository at the version [`web/fight.version`
 .\tools\build_web.ps1 -Fight ..\realistic_physics_fight -Serve
 ```
 
-builds the sandbox with the Fight page in it and serves both at <http://localhost:8080> (the Fight page at <http://localhost:8080/fight/>). Without `-Fight` the build leaves the Fight button out. `.\tools\touch_check.ps1 -Fight` then plays the Fight page's buttons with real fingers on a phone in headless Edge (`-Size 844x390` sideways): STEP IN, JAB tapped by a second finger while BLOCK is held, CROSS, then DUCK and LEAN BACK held, and prints the frame cost the page measured (`?stats`).
+builds the sandbox with the Fight page in it and serves both at <http://localhost:8080> (the Fight page at <http://localhost:8080/fight/>). Without `-Fight` the build leaves the Fight button out. `.\tools\touch_check.ps1 -Fight` then plays the Fight page's buttons with real fingers on a phone in headless Edge (`-Size 844x390` sideways): STEP IN, JAB tapped by a second finger while BLOCK is held, CROSS, then DUCK and LEAN BACK held, and prints the frame cost the page measured (`?stats`). `.\tools\pad_check.ps1` plays it with fake game controllers in place of the browser's Gamepad API: a DualSense named on the start card and starting the fight with cross, walking, jabbing, blocking, ducking, and leaning back as the left fighter; an Xbox controller taking the right fighter; a clean punch rumbling both (the one hit harder); a key turning the buttons back to keys, CREATE switching fighters, OPTIONS pausing; and a clean console. Screenshots go to `output\pad_check`. It cannot press a real controller: the user plays with one.
 
 ## Side-View Fighters
 

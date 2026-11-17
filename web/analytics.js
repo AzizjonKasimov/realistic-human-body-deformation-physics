@@ -152,6 +152,11 @@
     playedSeconds: function () {
       return playedMs / 1000;
     },
+    // The visitor is playing with something the page hears no events from,
+    // a game controller on the Fight page, so play time goes on counting.
+    active: function () {
+      lastInput = performance.now();
+    },
     event: function (name) {
       if (counted[name]) {
         return;
