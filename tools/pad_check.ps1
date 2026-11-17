@@ -10,14 +10,16 @@ before the page loads, by fake controllers that this script presses. It
 checks that:
 
 - the start card asks for a controller, then names the DualSense once it is
-  connected and shows its buttons beside the keys;
+  connected and shows its buttons beside the keys, and says so of a
+  controller the browser cannot rumble;
 - cross on it starts the fight;
 - the game gives it the left fighter (window.__fightPads), and the stick held
-  right walks in, square jabs, R1 blocks, the stick down ducks and up leans
-  back (the page counts fight-step, fight-punch, fight-block, fight-duck,
-  fight-lean, and fight-controller), and the buttons show its symbols;
-- a second controller, an Xbox one, gets the right fighter, and its Y crosses
-  as player 2 (fight-two-players);
+  right walks in, L2 and square jab, L1 blocks, the stick down ducks and up
+  leans back (the page counts fight-step, fight-punch, fight-block,
+  fight-duck, fight-lean, and fight-controller), and the buttons show its
+  symbols;
+- a second controller, an Xbox one, gets the right fighter, and its RT
+  crosses as player 2 (fight-two-players);
 - clean punches rumble the controllers of both players, the one whose punch
   landed and the one hit (each fake controller records its rumbles);
 - a key of the left fighter's turns the buttons back to keys, CREATE moves a
@@ -77,23 +79,30 @@ $fakeGamepads = @"
   window.__rumbles = [];
   const button = () => ({ pressed: false, touched: false, value: 0 });
   window.__fakePads = {
-    connect(index, id) {
+    // A controller the browser can rumble, unless rumble is false: Chrome
+    // and Edge on Windows cannot rumble a DualSense. (No backticks in this
+    // script: PowerShell reads them as escapes inside the here-string.)
+    connect(index, id, rumble = true) {
       const pad = {
         id, index, connected: true, mapping: "standard", timestamp: performance.now(),
         axes: [0, 0, 0, 0], buttons: Array.from({ length: 17 }, button),
-        vibrationActuator: {
+        vibrationActuator: rumble ? {
           type: "dual-rumble",
           playEffect(type, params) {
             window.__rumbles.push(Object.assign({ index, type }, params));
             return Promise.resolve("complete");
           },
           reset() { return Promise.resolve("complete"); }
-        }
+        } : null
       };
       slots[index] = pad;
       const event = new Event("gamepadconnected");
       event.gamepad = pad;
       window.dispatchEvent(event);
+    },
+    disconnect(index) {
+      slots[index] = null;
+      window.dispatchEvent(new Event("gamepaddisconnected"));
     },
     press(index, which, down) {
       const pressed = slots[index].buttons[which];
@@ -235,14 +244,23 @@ return {
   labels: Array.from(card.querySelectorAll('.controls .pad svg')).map(svg => svg.getAttribute('aria-label'))
 };
 "@
-    if ($card.line -notmatch "DualSense connected" -or -not $card.shown) {
+    if ($card.line -notmatch "DualSense connected" -or $card.line -match "rumble" -or -not $card.shown) {
         $problems.Add("With a DualSense connected, the start card said '$($card.line)' (its buttons shown: $($card.shown)).")
     }
-    foreach ($label in @("square", "triangle", "R1", "R2", "OPTIONS", "CREATE", "cross")) {
+    foreach ($label in @("L2", "R2", "R1", "L1", "OPTIONS", "CREATE", "cross")) {
         if ($card.labels -notcontains $label) {
             $problems.Add("The start card shows no $label button (it shows: $($card.labels -join ', ')).")
         }
     }
+    # A controller the browser cannot rumble is named as one.
+    Invoke-PageScript $page "window.__fakePads.connect(3, 'Wireless Controller (STANDARD GAMEPAD Vendor: 054c Product: 09cc)', false); return true;" | Out-Null
+    Wait-Page 0.4
+    $silent = Invoke-PageScript $page "return document.getElementById('pads').textContent;"
+    if ($silent -notmatch "cannot make the DualShock 4 rumble") {
+        $problems.Add("With a controller the browser cannot rumble, the start card said '$silent'.")
+    }
+    Invoke-PageScript $page "window.__fakePads.disconnect(3); return true;" | Out-Null
+    Wait-Page 0.4
     Invoke-Cdp $page "Emulation.setDeviceMetricsOverride" @{
         width = $width; height = [Math]::Max($height, 1100); deviceScaleFactor = 1; mobile = $false
     } | Out-Null
@@ -264,10 +282,12 @@ return await new Promise(done => {
 });
 "@
 
-    # The DualSense plays the left fighter: walk in, jab, block, duck, lean.
+    # The DualSense plays the left fighter: walk in, jab with L2 and with
+    # square, block with L1, duck, lean.
     Send-Stick 0 0.9 0 1.6
+    Send-Press 0 6 0.12 0.6
     Send-Press 0 2 0.12 0.6
-    Send-Press 0 5 0.6 0.3
+    Send-Press 0 4 0.6 0.3
     Send-Stick 0 0 0.9 0.6
     Save-Screenshot "fight-dualsense-duck.png"
     Send-Stick 0 0 -0.9 0.6
@@ -281,10 +301,10 @@ return await new Promise(done => {
     }
     Save-Screenshot "fight-dualsense.png"
 
-    # A friend's Xbox controller takes the right fighter, and its Y crosses.
+    # A friend's Xbox controller takes the right fighter, and its RT crosses.
     Invoke-PageScript $page "window.__fakePads.connect(1, 'Xbox 360 Controller (XInput STANDARD GAMEPAD)'); return true;" | Out-Null
     Wait-Page 0.3
-    Send-Press 1 3 0.12 0.8
+    Send-Press 1 7 0.12 0.8
     $pads = Get-Pads
     $right = @($pads.pads | Where-Object { $_.slot -eq 1 })
     if (-not $right -or $right[0].kind -ne "xbox" -or $right[0].fighter -ne 1) {
@@ -297,7 +317,7 @@ return await new Promise(done => {
     Send-Stick 0 0.9 0 1.2
     Invoke-PageScript $page "window.__rumbles.length = 0; return true;" | Out-Null
     for ($jab = 0; $jab -lt 8; $jab++) {
-        Send-Press 0 2 0.1 0.45
+        Send-Press 0 6 0.1 0.45
         $rumbled = Invoke-PageScript $page "return [0, 1].map(index => window.__rumbles.some(rumble => rumble.index === index));"
         if ($rumbled[0] -and $rumbled[1]) {
             break
@@ -354,7 +374,7 @@ foreach ($line in $errors) {
 Write-Host ""
 Write-Host "Fake controllers on the Fight page at $Size, $fps fps:"
 if ($problems.Count -eq 0) {
-    Write-Host "  the start card named the DualSense and showed its buttons, cross started the fight, the DualSense walked, jabbed, blocked, ducked and leaned back as the left fighter, the Xbox controller crossed as the right, a clean punch rumbled both (the one hit harder), J brought the keys back, CREATE switched fighters, OPTIONS paused, and the console stayed clean."
+    Write-Host "  the start card named the DualSense, showed its buttons, and named a controller it cannot rumble; cross started the fight; the DualSense walked, jabbed (L2 and square), blocked, ducked and leaned back as the left fighter; the Xbox controller crossed (RT) as the right; a clean punch rumbled both (the one hit harder); J brought the keys back, CREATE switched fighters, OPTIONS paused, and the console stayed clean."
 } else {
     $problems | ForEach-Object { Write-Host "  FAIL: $_" }
     exit 1
