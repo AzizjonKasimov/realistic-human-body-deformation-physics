@@ -1,5 +1,5 @@
 //! The sounds themselves, built from noise, filters, and decaying tones the
-//! way `video_tools/tools/foley.py` builds them for the videos: its `thud`,
+//! way `shared-tools/video-tools/tools/foley.py` builds them for the videos: its `thud`,
 //! `crack`, `tear`, `spatter`, and `click`, and the air and knife sounds of
 //! `Soundtrack.shot`, here as loops whose volume the game sets. scipy's
 //! second-order Butterworth filters become RBJ-cookbook biquads; a band-pass

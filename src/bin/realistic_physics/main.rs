@@ -276,7 +276,7 @@ fn window_conf() -> Conf {
 
 fn main() {
     // `--version` prints the version the game shows and exits before the
-    // window opens; video_tools' short.py stamps it on each Short.
+    // window opens; the video toolkit's short.py stamps it on each Short.
     #[cfg(not(target_arch = "wasm32"))]
     if std::env::args().skip(1).any(|arg| arg == "--version") {
         println!("{}", rp::version_label());

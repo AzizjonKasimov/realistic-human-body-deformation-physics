@@ -12,7 +12,7 @@
 //! a scenario (`strike_scenarios --sound DIR`).
 //!
 //! Rebuilt from the foley that makes the sound of the project's videos
-//! (`video_tools/tools/foley.py`, which reads the same counts from the capture
+//! (`shared-tools/video-tools/tools/foley.py`, which reads the same counts from the capture
 //! mode's `--events` log), so the game sounds like them.
 
 mod mixdown;
