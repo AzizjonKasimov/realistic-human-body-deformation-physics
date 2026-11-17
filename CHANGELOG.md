@@ -2,6 +2,12 @@
 
 What each version of Realistic Physics changed, newest first. The game shows its version on the start screen and in its bottom-left corner, and every Short made from the game shows the version it was made with. Only the newest version is online.
 
+## v0.18 (2026-11-17)
+
+- On the Fight page, a jab or cross thrown while ducking goes to the body, under the other fighter's block; a block held while ducking comes down over the body, stops a punch there, and leaves the head open.
+- The computer opponent goes to the body about one punch in four, and mostly when the guard is up, and blocks low against punches to the body.
+- Known issue, as in v0.15.2: a bat blow now and then leaves a whole bone outside the skin.
+
 ## v0.17 (2026-11-16)
 
 - The Fight page has a computer opponent in three levels, and rounds: three of a minute, won by a knockout or on clean punches.

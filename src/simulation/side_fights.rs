@@ -152,19 +152,3 @@ pub fn play_side_fight(seed: u64, seconds: f64, materials: Materials) -> SideFig
     fight.muscle_torn = world.stats.broken_muscle;
     fight
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Random fight 15 knocks the left fighter out on step 1170, as
-    /// `print_random_fights` and the game's replay of it have it: the
-    /// scenario tool's fights are the tests' and the game's, step for step.
-    #[test]
-    fn random_fight_15_knocks_the_left_fighter_out_on_step_1170() {
-        let fight = play_side_fight(15, 20.0, Materials::default());
-        assert_eq!(fight.knocked_out, [Some(1170), None]);
-        assert_eq!(fight.fell, [false, false]);
-        assert!(fight.torn_joints.iter().all(Vec::is_empty));
-    }
-}

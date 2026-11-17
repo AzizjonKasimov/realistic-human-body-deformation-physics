@@ -5,6 +5,7 @@
 //! None of it feeds the simulation: it is read after a step, and reading it
 //! changes nothing.
 
+use super::tools::Spared;
 use super::*;
 
 /// A punch: the lead hand's straight jab or the rear hand's cross.
@@ -18,6 +19,8 @@ pub enum PunchKind {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Punching {
     pub kind: PunchKind,
+    /// Thrown at the body, from a duck, rather than at the head.
+    pub to_body: bool,
     /// Seconds since it set off.
     pub age: f64,
     /// Seconds its fist takes from the guard to the end of its way, unless
@@ -59,9 +62,11 @@ pub struct Doing {
     pub leaning: bool,
     pub ducking: bool,
     pub blocking: bool,
-    /// Its forearms are closed far enough in front of its face to stop a
-    /// punch; until then a punch goes between its hands.
+    /// Its forearms are closed far enough to stop a punch; until then a
+    /// punch goes between its hands. Closed while it ducks, they cover its
+    /// body instead of its face (`guard_low`).
     pub guarded: bool,
+    pub guard_low: bool,
     /// It is down, fallen or knocked out ([`World::fighter_fallen`]).
     pub fallen: bool,
 }
@@ -110,14 +115,23 @@ impl World {
     /// What the knuckles of fighter `puncher`'s fist, their face's middle at
     /// `at`, met first: the body nearest them other than its own and the
     /// part of it, by the flesh nearest the knuckles and the bone that
-    /// flesh is held to, or by the nearest bone where no flesh lies near.
-    pub(super) fn struck_by_fist(&self, puncher: usize, at: Vec2) -> Option<(usize, Struck)> {
+    /// flesh is held to, or by the nearest bone where no flesh lies near,
+    /// leaving out what the fist passes (`spares`, as it lands): a body
+    /// punch's knuckles in a belly under a high block's elbows struck the
+    /// belly, though the elbows' flesh lay nearer.
+    pub(super) fn struck_by_fist(
+        &self,
+        puncher: usize,
+        at: Vec2,
+        spares: Spared,
+    ) -> Option<(usize, Struck)> {
         let reach =
             tool_geometry(ToolMode::Fist).contact_radius + 2.0 * self.materials.point_spacing;
         let flesh = (0..self.points.len())
             .filter(|&point| {
                 let held = &self.points[point];
                 held.body as usize != puncher
+                    && !spares.holds(held.body, held.sheet)
                     && !held.pinned
                     && !held.is_ghost()
                     && is_flesh(&self.flesh, point)
@@ -131,7 +145,10 @@ impl World {
             });
         let bone = flesh.or_else(|| {
             (0..self.bones.len())
-                .filter(|&bone| self.bones[bone].body as usize != puncher)
+                .filter(|&bone| {
+                    let segment = &self.bones[bone];
+                    segment.body as usize != puncher && !spares.holds(segment.body, segment.sheet)
+                })
                 .map(|bone| {
                     let segment = &self.bones[bone];
                     (

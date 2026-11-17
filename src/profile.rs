@@ -558,6 +558,14 @@ pub(crate) fn block_fists(head: Place) -> [Place; 2] {
     [plus(head, (0.155, 0.010)), plus(head, (0.095, 0.004))]
 }
 
+/// Where a low block holds the fists' knuckles for a head at `head`: down
+/// in front of the lower chest, the forearms hanging over the belly and the
+/// liver with the elbows tucked to the sides, as boxers drop their elbows
+/// onto their ribs against body punches; the face behind them is open.
+pub(crate) fn low_block_fists(head: Place) -> [Place; 2] {
+    [plus(head, (0.140, -0.200)), plus(head, (0.090, -0.215))]
+}
+
 /// A part of the figure with flesh of its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Part {

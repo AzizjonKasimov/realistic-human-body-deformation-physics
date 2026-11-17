@@ -2091,6 +2091,210 @@ mod tests {
         assert_eq!(hurt(&blocked), 0, "a blocked cross tore something");
     }
 
+    /// Prints where body punches land (`cargo test --release --lib
+    /// print_body_punches -- --ignored --nocapture`): a jab and a cross
+    /// thrown from a duck, over the punch ladder's 46 distances, at a fighter
+    /// standing open, holding a high block, and holding a low block (block
+    /// while ducking): what each struck first, how fast, and what tore or
+    /// broke. `RP_HEAD=1` throws head punches into the same defences, to set
+    /// beside them.
+    #[test]
+    #[ignore]
+    fn print_body_punches() {
+        let one = create_side_fighter_in(crate::world_frame(), materials());
+        let to_head = std::env::var("RP_HEAD").is_ok();
+        for defence in ["open", "a high block", "a low block"] {
+            for made in [Move::Jab, Move::Cross] {
+                let mut struck: std::collections::BTreeMap<String, usize> = Default::default();
+                let (mut speeds, mut hurt_total, mut ribs) = (Vec::new(), 0, 0);
+                for spacing in (0..46).map(|step| 0.50 + step as f64 * 0.005) {
+                    let mut world = side_fighters_from(&one, spacing);
+                    world.keep_journal();
+                    let mut moves = Vec::new();
+                    if !to_head {
+                        moves.push((0, 0, Move::Duck(true)));
+                    }
+                    if defence != "open" {
+                        moves.push((0, 1, Move::Block(true)));
+                    }
+                    if defence == "a low block" {
+                        moves.push((0, 1, Move::Duck(true)));
+                    }
+                    moves.push((25, 0, made));
+                    let mut landed = None;
+                    for step in 0..75 {
+                        play(&mut world, step..step + 1, &moves);
+                        if landed.is_none() {
+                            landed = world.landed_punches().iter().find(|p| p.by == 0).copied();
+                        }
+                    }
+                    let what = landed.map_or("nothing".to_string(), |p| format!("{:?}", p.struck));
+                    // `RP_DETAIL=1` names what tore or broke, and where.
+                    if std::env::var("RP_DETAIL").is_ok() && hurt(&world) > 0 {
+                        let journal = world.journal().map_or(&[][..], |j| &j.events[..]);
+                        let named: Vec<String> = journal
+                            .iter()
+                            .filter(|event| {
+                                matches!(
+                                    event.kind,
+                                    EventKind::SkinTorn
+                                        | EventKind::MuscleTorn
+                                        | EventKind::JointSlipped
+                                        | EventKind::JointTorn
+                                        | EventKind::BoneBroken
+                                )
+                            })
+                            .map(|event| {
+                                let bone = match event.subject {
+                                    Subject::Spring(spring) => world
+                                        .springs
+                                        .get(spring)
+                                        .map(|s| world.point_holds[s.a].posture.bones[0]),
+                                    Subject::Joint(joint) => {
+                                        world.bone_joints.get(joint).map(|j| j.a)
+                                    }
+                                    Subject::Bone(bone) => Some(bone),
+                                    _ => None,
+                                };
+                                let part = bone
+                                    .and_then(|bone| world.bones.get(bone))
+                                    .map_or("?".to_string(), |bone| {
+                                        format!("{} of body {}", bone.part.name(), bone.body)
+                                    });
+                                format!(
+                                    "{} at frame {} ({part})",
+                                    event.kind.describe(),
+                                    event.step + 1
+                                )
+                            })
+                            .collect();
+                        println!("  {spacing:.3} {what}: {}", named.join("; "));
+                    }
+                    *struck.entry(what).or_default() += 1;
+                    speeds.extend(landed.map(|p| p.speed));
+                    hurt_total += hurt(&world);
+                    ribs += world
+                        .body_state(1)
+                        .map_or(0, |state| state.fractures[BonePart::Rib.index()]);
+                }
+                let mean = speeds.iter().sum::<f64>() / speeds.len().max(1) as f64;
+                println!(
+                    "{made:?} {} into {defence}: struck {struck:?}, at {mean:.1} m/s on average; {hurt_total} torn or broken in all, {ribs} ribs",
+                    if to_head { "at the head" } else { "from a duck, at the body" },
+                );
+            }
+        }
+    }
+
+    /// A high block covers the head and a low block the body: a cross thrown
+    /// while ducking goes to the body, under a high block, and lands there;
+    /// a low block (block while ducking) stops it on the forearms; a cross
+    /// at the head goes over a low block and lands on the head. Nothing
+    /// tears, and the read-outs say what was struck (`sight.rs`).
+    #[test]
+    fn a_body_punch_goes_under_a_high_block_and_a_low_block_stops_it() {
+        let struck = |defence: &[(usize, usize, Move)], to_body: bool| {
+            let mut world = pair(0.60);
+            let mut moves = defence.to_vec();
+            if to_body {
+                moves.push((0, 0, Move::Duck(true)));
+            }
+            moves.push((25, 0, Move::Cross));
+            let mut landed = None;
+            for step in 0..75 {
+                play(&mut world, step..step + 1, &moves);
+                if landed.is_none() {
+                    landed = world
+                        .landed_punches()
+                        .iter()
+                        .find(|punch| punch.by == 0)
+                        .map(|punch| punch.struck);
+                }
+            }
+            assert_eq!(hurt(&world), 0, "a cross into {defence:?} tore something");
+            landed
+        };
+        let high = [(0, 1, Move::Block(true))];
+        let low = [(0, 1, Move::Block(true)), (0, 1, Move::Duck(true))];
+        assert_eq!(
+            struck(&high, true),
+            Some(Struck::Body),
+            "a body cross into a high block"
+        );
+        assert_eq!(
+            struck(&low, true),
+            Some(Struck::Arm),
+            "a body cross into a low block"
+        );
+        assert_eq!(
+            struck(&low, false),
+            Some(Struck::Head),
+            "a head cross into a low block"
+        );
+        assert_eq!(
+            struck(&high, false),
+            Some(Struck::Arm),
+            "a head cross into a high block"
+        );
+    }
+
+    /// A fighter holding a low block (block while ducking), or ducking to
+    /// punch to the body, steps in and out and throws body punches without
+    /// falling or tearing anything, as a player holding those keys does.
+    #[test]
+    fn low_blocks_and_body_punches_keep_a_fighter_on_its_feet() {
+        let scripts: [&[(usize, usize, Move)]; 3] = [
+            // A low block held while stepping in, a body jab, stepping out.
+            &[
+                (0, 0, Move::Duck(true)),
+                (0, 0, Move::Block(true)),
+                (30, 0, Move::StepIn),
+                (75, 0, Move::Jab),
+                (110, 0, Move::StepIn),
+                (160, 0, Move::Cross),
+                (200, 0, Move::StepOut),
+                (250, 0, Move::StepOut),
+            ],
+            // Ducking, body punches between steps in, and up again.
+            &[
+                (0, 0, Move::Duck(true)),
+                (20, 0, Move::StepIn),
+                (60, 0, Move::Cross),
+                (95, 0, Move::Jab),
+                (130, 0, Move::StepIn),
+                (170, 0, Move::Cross),
+                (210, 0, Move::Duck(false)),
+                (230, 0, Move::StepOut),
+            ],
+            // The other fighter low-blocking while this one body-punches.
+            &[
+                (0, 1, Move::Duck(true)),
+                (0, 1, Move::Block(true)),
+                (0, 0, Move::Duck(true)),
+                (20, 0, Move::StepIn),
+                (60, 0, Move::Cross),
+                (100, 0, Move::Jab),
+                (140, 1, Move::StepOut),
+                (150, 0, Move::StepIn),
+                (190, 0, Move::Cross),
+            ],
+        ];
+        for (index, script) in scripts.iter().enumerate() {
+            let mut world = pair(SIDE_FIGHTER_SPACING);
+            for step in 0..320 {
+                play(&mut world, step..step + 1, script);
+            }
+            for body in 0..2 {
+                assert!(
+                    !world.fighter_fallen(body),
+                    "script {index}: fighter {body} fell"
+                );
+            }
+            let joints = world.stats.broken_bone_joints + world.stats.bone_joint_subluxations;
+            assert_eq!(joints, 0, "script {index} tore or put out a joint");
+        }
+    }
+
     /// What a game can see of the fighters (`sight.rs`): a cross into open
     /// hands is seen on its way out, then reported landed once, on the head,
     /// at the speed it landed; into a block, on an arm, the blocker seen
@@ -2388,6 +2592,27 @@ mod tests {
             + world.stats.broken_muscle
             + world.stats.broken_bone_joints
             + world.stats.bone_joint_subluxations
+    }
+
+    /// The scenario tool's random side-view fights (`play_side_fight`) are
+    /// this module's, step for step: fight 15 played both ways ends with the
+    /// same fighters down, the same skin torn, and each head as far off its
+    /// pose at its farthest, to the last bit.
+    #[test]
+    fn the_scenario_tools_random_fights_are_the_tests() {
+        let fight = play_side_fight(15, 20.0, materials());
+        let seen = random_fight_watched(15, 20.0, None, None);
+        assert_eq!(fight.head_off, [seen.head_off[0].0, seen.head_off[1].0]);
+        for body in 0..2 {
+            assert_eq!(
+                fight.knocked_out[body].is_some() || fight.fell[body],
+                seen.world.fighter_fallen(body)
+            );
+            assert_eq!(
+                fight.skin_torn[body],
+                seen.world.body_state(body).unwrap().skin_tears
+            );
+        }
     }
 
     /// A random fight as [`random_fight`] plays it, with what was seen of

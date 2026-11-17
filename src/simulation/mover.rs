@@ -42,11 +42,14 @@ pub enum Move {
     /// Leaning back out of reach, for as long as it is held (`true`) until
     /// let go (`false`).
     LeanBack(bool),
-    /// Ducking under a punch, for as long as it is held.
+    /// Ducking under a punch, for as long as it is held. A jab or a cross
+    /// thrown while ducking, and not leaning back, goes to the body.
     Duck(bool),
     /// Blocking, for as long as it is held: the forearms close in front of
-    /// the face and stop a punch, which otherwise goes through the hands
-    /// ([`World::stands`]).
+    /// the face and stop a punch at the head, which otherwise goes through
+    /// the hands ([`World::stands`]), and a punch to the body passes under
+    /// them. Held while ducking, they come down over the body instead (a low
+    /// block): they stop a punch to the body and leave the head open.
     Block(bool),
     /// Not a move the fighter makes but a shove it takes: a push on its
     /// trunk over a tenth of a second from outside, of so many newton
@@ -164,6 +167,18 @@ const BLOCK_HERTZ: f64 = 5.0;
 /// How far closed a block is, from 0 to 1, once its arms stand in a punch's
 /// way.
 const BLOCK_CLOSED: f64 = 0.5;
+
+/// How much of a duck's fold of the trunk a body punch takes out as it goes,
+/// at its full reach: a boxer punching to the body drops level by bending
+/// the knees and keeps from pitching forward over them, chin and shoulder
+/// in line with the target (coaches' advice on body jabs and crosses). Left
+/// folded, a fighter punching from a duck reached down past its own knees,
+/// and its fist stopped on a blocking fighter's elbows or fell short.
+const BODY_UPRIGHT: f64 = 0.6;
+/// Where a body punch aims on the other fighter, from the top of its lower
+/// back toward its hips: the solar plexus and the liver, under the ribs,
+/// where boxers aim body shots.
+const BODY_TARGET: f64 = 0.1;
 
 /// How much of the bare fist's weight is behind a jab (`World::land_fist`).
 /// Elite boxers' lead hand lands with 0.59 of their rear hand's force, 2,847
@@ -448,8 +463,11 @@ struct Strike {
     hand: Side,
     age: f64,
     /// Where the knuckles aim, in the fighter's own frame: where the other
-    /// fighter's head was as the punch set off.
+    /// fighter's head was as the punch set off, or its body.
     target: Place,
+    /// Thrown while ducking, at the other fighter's body: the knees stay
+    /// bent and the trunk comes up out of the duck as it goes.
+    body: bool,
     /// When its fist first landed on something, if it has.
     landed: Option<f64>,
     /// When it turned back before reaching its full length, its fist having
@@ -529,9 +547,18 @@ impl Strike {
     /// contact, and should now come back.
     fn followed_through(&self) -> bool {
         self.going_out()
-            && self
-                .landed
-                .is_some_and(|landed| self.age >= landed + FOLLOW_THROUGH_SECONDS)
+            && self.landed.is_some_and(|landed| {
+                // A punch to the body turns back as it lands: the trunk
+                // does not give way as a struck head does, and driven on
+                // into it the fist pinned its own skin there, which tore
+                // (21 of 92 body punches into an open fighter, 6 so).
+                let through = if self.body {
+                    0.0
+                } else {
+                    FOLLOW_THROUGH_SECONDS
+                };
+                self.age >= landed + through
+            })
     }
 }
 
@@ -598,6 +625,7 @@ impl Mover {
         Doing {
             punch: self.strike.map(|strike| Punching {
                 kind: punch_kind(strike.hand),
+                to_body: strike.body,
                 age: strike.age,
                 out_seconds: strike.seconds().0,
                 going_out: strike.going_out() && strike.landed.is_none(),
@@ -616,6 +644,7 @@ impl Mover {
             ducking: self.duck.held,
             blocking: self.block.held,
             guarded: self.block.amount >= BLOCK_CLOSED,
+            guard_low: self.block.amount >= BLOCK_CLOSED && self.duck.held,
             fallen: self.fallen,
         }
     }
@@ -691,13 +720,20 @@ impl Mover {
         // Ducking: the knees bend and the trunk folds forward under the
         // punch, the eyes still on the other fighter.
         let duck = self.duck.amount;
+        // A body punch keeps the knees bent and brings the trunk up out of
+        // the fold as it goes.
+        let body_reach = self
+            .strike
+            .filter(|strike| strike.body)
+            .map_or(0.0, |strike| strike.reach());
+        let fold = duck * (1.0 - BODY_UPRIGHT * body_reach);
         pose.hips.0 += 0.010 * duck;
         pose.hips.1 -= DUCK_DROP * duck;
-        pose.pelvis += 0.16 * duck;
-        pose.lumbar += 0.28 * duck;
-        pose.thorax += 0.40 * duck;
-        pose.neck += 0.26 * duck;
-        pose.head += 0.02 * duck;
+        pose.pelvis += 0.16 * fold;
+        pose.lumbar += 0.28 * fold;
+        pose.thorax += 0.40 * fold;
+        pose.neck += 0.26 * fold;
+        pose.head += 0.02 * fold;
         // Blocking: the chin tucks behind the forearms and the back rounds.
         let block = self.block.amount;
         pose.hips.1 -= 0.006 * block;
@@ -735,7 +771,15 @@ impl Mover {
         let joints = Joints::of(&pose);
         let head = joints.head();
         pose.fists = profile::guard_fists(head);
-        for (fist, closed) in pose.fists.iter_mut().zip(profile::block_fists(head)) {
+        // Held while ducking, the block comes down over the body: the low
+        // block, which leaves the head open.
+        let low = if self.duck.held { duck } else { 0.0 };
+        let (high, under) = (profile::block_fists(head), profile::low_block_fists(head));
+        for (side, fist) in pose.fists.iter_mut().enumerate() {
+            let closed = (
+                high[side].0 + (under[side].0 - high[side].0) * low,
+                high[side].1 + (under[side].1 - high[side].1) * low,
+            );
             fist.0 += (closed.0 - fist.0) * block;
             fist.1 += (closed.1 - fist.1) * block;
         }
@@ -986,11 +1030,36 @@ impl World {
     /// punching arms, which pass each other as two straight punches thrown
     /// together do.
     fn stand_in_the_way(&self, a: (u8, u8), b: (u8, u8)) -> bool {
-        let (a, b) = (self.stands(a.0, a.1), self.stands(b.0, b.1));
-        a != Stands::Beside
-            && b != Stands::Beside
-            && !(a == Stands::Striking && b == Stands::Striking)
-            && !(a == Stands::Leg && b == Stands::Leg)
+        let (stands_a, stands_b) = (self.stands(a.0, a.1), self.stands(b.0, b.1));
+        stands_a != Stands::Beside
+            && stands_b != Stands::Beside
+            && !(stands_a == Stands::Striking && stands_b == Stands::Striking)
+            && !(stands_a == Stands::Leg && stands_b == Stands::Leg)
+            && !self.strike_passes_guard(a, b)
+    }
+
+    /// Whether, of two parts of two different bodies, one is an arm
+    /// throwing a punch and the other an arm closed in a block that does not
+    /// cover where the punch goes, so they pass: a high block covers the
+    /// head, and a punch to the body goes under it; a low block covers the
+    /// body, and a punch to the head goes over it. Met regardless, a body
+    /// punch thrown under a high block grazed the blocker's low elbows and
+    /// tore the skin of its own forearm (29 of 46 body crosses).
+    fn strike_passes_guard(&self, a: (u8, u8), b: (u8, u8)) -> bool {
+        let mover = |body: u8| {
+            self.bodies
+                .get(body as usize)
+                .and_then(|state| state.mover.as_ref())
+        };
+        let passes = |striker: (u8, u8), guard: (u8, u8)| {
+            self.stands(striker.0, striker.1) == Stands::Striking
+                && self.stands(guard.0, guard.1) == Stands::Guarding
+                && mover(striker.0)
+                    .and_then(|mover| mover.strike)
+                    .map(|strike| strike.body)
+                    != mover(guard.0).map(|mover| mover.duck.held)
+        };
+        passes(a, b) || passes(b, a)
     }
 
     /// Whether two parts of two different bodies, each a body and a sheet
@@ -1100,6 +1169,7 @@ impl World {
                     self.stands(other as u8, sheet),
                     Stands::Beside | Stands::Striking
                 ) || self.passing(fist, (other as u8, sheet))
+                    || self.strike_passes_guard(fist, (other as u8, sheet))
                 {
                     spared = spared.and_sheet(other as u8, sheet);
                 }
@@ -1237,6 +1307,27 @@ impl World {
     }
 
     /// Where the middle of the head of the body nearest body `body` is.
+    /// Where a body punch at the body nearest body `body` aims: under its
+    /// ribs, the solar plexus and the liver, `BODY_TARGET` of the way down
+    /// its lower back's bone from the chest.
+    fn opponents_body(&self, body: usize) -> Option<Vec2> {
+        let own = self.midline_of(body)?;
+        (0..self.bodies.len())
+            .filter(|&other| other != body)
+            .filter_map(|other| {
+                let rig = self.bodies[other].fighter.as_ref()?;
+                let bone = self.bones.get(rig.lumbar)?;
+                // The world's y runs down: the chest's end is the higher.
+                let (top, bottom) = if bone.a.y < bone.b.y {
+                    (bone.a, bone.b)
+                } else {
+                    (bone.b, bone.a)
+                };
+                Some(lerp(top, bottom, BODY_TARGET))
+            })
+            .min_by(|p, q| (p.x - own).abs().total_cmp(&(q.x - own).abs()))
+    }
+
     fn opponents_head(&self, body: usize) -> Option<Vec2> {
         let own = self.midline_of(body)?;
         let skull = |bone: &BoneSegment| {
@@ -1427,6 +1518,7 @@ impl World {
             return;
         };
         let head = self.opponents_head(body).map(|head| frame.own(head));
+        let belly = self.opponents_body(body).map(|belly| frame.own(belly));
         let limp = |world: &World, side: Side| {
             world.limp(
                 body,
@@ -1461,16 +1553,24 @@ impl World {
             return;
         };
         let strike = |mover: &Mover, hand: Side| {
-            // At the other fighter's head, or straight ahead at the height
-            // of its own.
-            let target = head.unwrap_or_else(|| {
+            // A punch thrown while ducking goes to the body: a boxer's level
+            // change. Leaning back too, it goes to the head as ever: a lean
+            // takes the weight back as a body punch carries it up out of the
+            // duck, and a fighter ducking, leaning, and punching to the body
+            // at once fell (random side-view fight 12).
+            let body = mover.duck.held && !mover.lean.held;
+            // At the other fighter's head or body, or straight ahead at the
+            // height of its own.
+            let aimed = if body { belly } else { head };
+            let target = aimed.unwrap_or_else(|| {
                 let own = Joints::of(&mover.pose()).head();
-                (own.0 + 0.45, own.1 - 0.02)
+                (own.0 + 0.45, own.1 - if body { 0.30 } else { 0.02 })
             });
             Strike {
                 hand,
                 age: 0.0,
                 target,
+                body,
                 landed: None,
                 turned: None,
             }
@@ -2110,7 +2210,9 @@ impl World {
                 {
                     strike.land();
                 }
-                if let Some((on, struck)) = self.struck_by_fist(body, met) {
+                if let Some((on, struck)) =
+                    self.struck_by_fist(body, met, self.fist_spares(body, side))
+                {
                     self.landed_punches.push(LandedPunch {
                         by: body,
                         kind: punch_kind(side),
