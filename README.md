@@ -4,7 +4,7 @@ A no-engine 2D physics sandbox rewritten in Rust. The simulation is kept separat
 
 **[Play it in your browser](https://azizjonkasimov.github.io/realistic-human-body-deformation-physics/)**: nothing to download, and the simulation runs entirely on your own device. To keep it one tap away, [install it as an app](#install-it-as-an-app) on your phone or computer.
 
-**[Fight](https://azizjonkasimov.github.io/realistic-human-body-deformation-physics/fight/)**: the fighting game built on the engine, on the same site: two side-on boxers step in, jab and cross to the head or the body, block high or low, duck, and lean back, against a computer opponent over three rounds or with a friend. Its code is [its own repository](https://github.com/AzizjonKasimov/realistic-physics-fight) (see [Fight](#fight)).
+**[Fight](https://azizjonkasimov.github.io/realistic-human-body-deformation-physics/fight/)**: the fighting game built on the engine, on the same site: two side-on boxers step in, jab and cross to the head or the body, block high or low, duck, and lean back, and get up off the floor while the referee counts, against a computer opponent over three rounds or with a friend. Its code is [its own repository](https://github.com/AzizjonKasimov/realistic-physics-fight) (see [Fight](#fight)).
 
 **[How it was made](https://azizjonkasimov.github.io/work/body-physics/)**: the story on the author's site, of building it with AI coding agents and checking its injuries against published research.
 
