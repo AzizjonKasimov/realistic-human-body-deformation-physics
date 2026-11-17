@@ -22,6 +22,7 @@ mod phases;
 #[cfg(test)]
 mod properties;
 mod punch;
+mod rise;
 mod side_fights;
 mod sides;
 mod sight;
@@ -373,6 +374,11 @@ pub struct Materials {
     /// (`knockout.rs`).
     pub knockout_turn: f64,
     pub knockout_spin: f64,
+    /// How long a side-view fighter knocked out by a blow just past either
+    /// limit lies limp before it comes to and gets up, in seconds, and how
+    /// much longer for each whole limit past it (`rise.rs`).
+    pub knockout_seconds: f64,
+    pub knockout_more_seconds: f64,
     /// The dermis's shear modulus at small strain, in pascals, and its
     /// thickness, in metres; it stiffens `skin_stiffening_ratio` times once
     /// stretched past `skin_stiffening_stretch` of its length (`tissue.rs`).
@@ -672,6 +678,8 @@ impl Default for Materials {
             legs_up_hertz: 0.0,
             knockout_turn: knockout::KNOCKOUT_TURN,
             knockout_spin: knockout::KNOCKOUT_SPIN,
+            knockout_seconds: rise::KNOCKOUT_SECONDS,
+            knockout_more_seconds: rise::KNOCKOUT_MORE_SECONDS,
             hip_hold_damping_ratio: 1.0,
             // Living skin's Young's modulus is about 0.5-0.6 MPa at small
             // strain (Lakhani et al. 2021), and tissue that keeps its volume

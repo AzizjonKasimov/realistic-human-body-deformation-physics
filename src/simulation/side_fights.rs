@@ -79,10 +79,17 @@ pub struct SideFight {
     /// Fibres of muscle torn, both fighters' together: the world counts
     /// them so.
     pub muscle_torn: i32,
-    /// The step a blow knocked it out on, if one did, and whether it fell
-    /// with no knockout: its weight ran past where any step could catch it.
+    /// The step a blow first knocked it out on, if one did, and whether it
+    /// ever fell with no knockout: its weight ran past where any step could
+    /// catch it, or its hips sank to the floor.
     pub knocked_out: [Option<usize>; 2],
     pub fell: [bool; 2],
+    /// How many times it went down, knocked out or fallen, how many times it
+    /// got up again (`rise.rs`), and the longest it was down, in seconds,
+    /// counted to the fight's end for one still down.
+    pub downs: [u32; 2],
+    pub got_up: [u32; 2],
+    pub longest_down: [f64; 2],
     /// The farthest its head got from where its moves put it, in metres.
     pub head_off: [f64; 2],
     /// The fastest an end of any bone moved over a step, in metres a second.
@@ -103,6 +110,7 @@ pub fn play_side_fight(seed: u64, seconds: f64, materials: Materials) -> SideFig
     };
     let steps = (seconds / dt) as usize;
     let metres = world.mm_per_px() * 0.001;
+    let mut down_since: [Option<usize>; 2] = [None; 2];
     for step in 0..steps {
         let mut input = InputState::default();
         for (body, made) in moves.next_step().into_iter().enumerate() {
@@ -126,6 +134,27 @@ pub fn play_side_fight(seed: u64, seconds: f64, materials: Materials) -> SideFig
             if fight.knocked_out[body].is_none() && world.knocked_out(body) {
                 fight.knocked_out[body] = Some(step + 1);
             }
+            match (down_since[body], world.fighter_fallen(body)) {
+                (None, true) => {
+                    down_since[body] = Some(step);
+                    fight.downs[body] += 1;
+                    if !world.knocked_out(body) {
+                        fight.fell[body] = true;
+                    }
+                }
+                (Some(since), false) => {
+                    down_since[body] = None;
+                    fight.got_up[body] += 1;
+                    fight.longest_down[body] =
+                        fight.longest_down[body].max((step - since) as f64 * dt);
+                }
+                _ => {}
+            }
+        }
+    }
+    for body in 0..2 {
+        if let Some(since) = down_since[body] {
+            fight.longest_down[body] = fight.longest_down[body].max((steps - since) as f64 * dt);
         }
     }
     for (index, joint) in world.bone_joints.iter().enumerate() {
@@ -147,7 +176,6 @@ pub fn play_side_fight(seed: u64, seconds: f64, materials: Materials) -> SideFig
             fight.bones_broken[body] = state.fractures.iter().sum();
             fight.skin_torn[body] = state.skin_tears;
         }
-        fight.fell[body] = world.fighter_fallen(body) && fight.knocked_out[body].is_none();
     }
     fight.muscle_torn = world.stats.broken_muscle;
     fight

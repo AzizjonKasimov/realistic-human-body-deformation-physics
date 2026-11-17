@@ -21,6 +21,7 @@
 //! as `punch.rs`'s is.
 
 use super::punch::{smooth, FIST_FRONT, LANDING_SPEED};
+use super::rise::Down;
 use super::sides::BonePiece;
 use super::soft::{perpendicular, KG_PER_MASS};
 use super::tools::{FistContact, FistLanding, Spared};
@@ -304,6 +305,12 @@ const DUCK_DROP: f64 = 0.100;
 /// for a tenth of a second; stepping back so, a fighter fell.
 const DUCK_FALL: f64 = 0.8;
 
+/// How quickly a fighter stands up out of a crouch after getting up off the
+/// floor, in hertz (`Mover::crouch`): most of the way in about a second; and
+/// how far down it may still be, from 1 crouched to 0, once it stands.
+const CROUCH_HERTZ: f64 = 0.7;
+const STOOD_UP: f64 = 0.05;
+
 /// How long a shove from outside pushes (`Move::Shoved`), in seconds.
 const SHOVE_SECONDS: f64 = 0.1;
 
@@ -574,10 +581,10 @@ pub struct Mover {
     /// built, in body heights, the lead foot's first.
     feet: [f64; 2],
     step: Option<Step>,
-    /// Its weight ran past where any step could catch it, or a blow knocked
-    /// it out (`knockout.rs`): it no longer stands up on its legs or takes
-    /// moves, and stays down.
-    fallen: bool,
+    /// Off its feet: its weight ran past where any step could catch it, its
+    /// hips sank to the floor, or a blow knocked it out (`knockout.rs`). It
+    /// takes no moves until it has got up again (`rise.rs`).
+    pub(super) down: Option<Down>,
     /// A shove it is taking (`Move::Shoved`): how hard, in newton seconds,
     /// and how long ago it began.
     shoved: Option<(f64, f64)>,
@@ -585,6 +592,13 @@ pub struct Mover {
     lean: Held,
     duck: Held,
     block: Held,
+    /// How far down it is crouched, standing up after getting up off the
+    /// floor (`rise.rs`): from 1 in a deep crouch to 0 in its stance; and
+    /// how far forward of where its stance has them over its feet its hips
+    /// were as it began, in body heights, which they come back from as it
+    /// stands.
+    crouch: Held,
+    crouch_place: f64,
     /// How far it sits back on its hips, in body heights, to keep its guard
     /// from reaching past the other fighter's (`World::drive_movers`): a
     /// fighter that leans or ducks toward one standing close goes down
@@ -608,12 +622,14 @@ impl Mover {
             place: 0.0,
             feet: [stance.feet[0].ball.0, stance.feet[1].ball.0],
             step: None,
-            fallen: false,
+            down: None,
             shoved: None,
             strike: None,
             lean: Held::default(),
             duck: Held::default(),
             block: Held::default(),
+            crouch: Held::default(),
+            crouch_place: 0.0,
             crowded: 0.0,
             last_turns: None,
             last_hips: None,
@@ -645,20 +661,59 @@ impl Mover {
             blocking: self.block.held,
             guarded: self.block.amount >= BLOCK_CLOSED,
             guard_low: self.block.amount >= BLOCK_CLOSED && self.duck.held,
-            fallen: self.fallen,
+            fallen: self.down.is_some(),
+            getting_up: self.down.as_ref().is_some_and(Down::getting_up),
         }
     }
 
-    /// Knocked out (`knockout.rs`): it falls, the step and the punch it was
-    /// making stop with its muscles, and it stays down.
-    pub(super) fn knock_down(&mut self) {
-        self.fallen = true;
+    /// Down, as `down` has it: the step and the punch it was making stop,
+    /// and it lets go of what it held. Getting up, it stands with its hands
+    /// in its guard; a move held before it went down is held again only when
+    /// told again.
+    pub(super) fn go_down(&mut self, down: Down) {
+        self.down = Some(down);
         self.step = None;
         self.strike = None;
+        self.shoved = None;
+        for held in [&mut self.lean, &mut self.duck, &mut self.block] {
+            *held = Held::default();
+        }
+        self.last_turns = None;
+        self.last_hips = None;
+    }
+
+    /// Up on its feet after getting up off the floor (`rise.rs`), `crouch`
+    /// of the way down into a deep crouch, its feet's balls at `feet`, and
+    /// its hips at `hips`, in body heights forward of where it was built: it
+    /// stands up out of the crouch into its stance over its feet, its hips
+    /// coming from where they are to where the stance has them as it rises.
+    /// Its stance set by its hips alone, a fighter getting up off a knee, its
+    /// hips over its lead foot, had its stance's lead foot 30 cm ahead of
+    /// its own, and stood bobbing from foot to foot.
+    pub(super) fn stand_up_from(&mut self, hips: f64, feet: [f64; 2], crouch: f64) {
+        self.feet = feet;
+        self.crowded = 0.0;
+        self.crouch = Held {
+            held: false,
+            amount: crouch,
+            speed: 0.0,
+        };
+        self.last_turns = None;
+        self.last_hips = None;
+        // Where the stance has its hips over its lead foot, and where the
+        // crouch puts them from there.
+        self.place = feet[0] - profile::stance().feet[0].ball.0;
+        self.crouch_place = 0.0;
+        let crouched = self.pose().hips.0;
+        self.crouch_place = if crouch > EPSILON {
+            (hips - crouched) / crouch
+        } else {
+            0.0
+        };
     }
 
     /// The pose the fighter is asked to take now.
-    fn pose(&self) -> Pose {
+    pub(super) fn pose(&self) -> Pose {
         self.pose_and_strike_line().0
     }
 
@@ -734,6 +789,12 @@ impl Mover {
         pose.thorax += 0.40 * fold;
         pose.neck += 0.26 * fold;
         pose.head += 0.02 * fold;
+        // Standing up after getting up off the floor, it comes up out of a
+        // deep crouch.
+        if self.crouch.amount > 0.0 {
+            pose = profile::crouched(&pose, self.crouch.amount);
+            pose.hips.0 += self.crouch_place * self.crouch.amount;
+        }
         // Blocking: the chin tucks behind the forearms and the back rounds.
         let block = self.block.amount;
         pose.hips.1 -= 0.006 * block;
@@ -828,21 +889,21 @@ fn punch_kind(side: Side) -> PunchKind {
 /// stand, how tall it is, and which way it faces (1 the window's right, -1
 /// its left).
 #[derive(Clone, Copy)]
-struct Frame {
-    stand: Vec2,
-    height: f64,
-    facing: f64,
+pub(super) struct Frame {
+    pub(super) stand: Vec2,
+    pub(super) height: f64,
+    pub(super) facing: f64,
 }
 
 impl Frame {
-    fn world(&self, place: Place) -> Vec2 {
+    pub(super) fn world(&self, place: Place) -> Vec2 {
         Vec2 {
             x: self.stand.x + self.facing * place.0 * self.height,
             y: self.stand.y - place.1 * self.height,
         }
     }
 
-    fn own(&self, at: Vec2) -> Place {
+    pub(super) fn own(&self, at: Vec2) -> Place {
         (
             (at.x - self.stand.x) * self.facing / self.height,
             (self.stand.y - at.y) / self.height,
@@ -1264,10 +1325,10 @@ impl World {
             really.y,
             frame.own(really).1,
             mover.place,
-            match (self.knocked_out(body), mover.fallen) {
-                (true, _) => ", knocked out",
-                (false, true) => ", fallen",
-                (false, false) => "",
+            match (self.knocked_out(body), &mover.down) {
+                (true, _) => String::from(", knocked out"),
+                (false, Some(down)) => format!(", {}", down.describe()),
+                (false, None) => String::new(),
             },
             mover.lean.amount,
             mover.duck.amount,
@@ -1283,7 +1344,13 @@ impl World {
         let state = self.bodies.get(body)?;
         let (rig, mover) = (state.fighter.as_ref()?, state.mover.as_ref()?);
         let skull = self.bones.get(rig.skull)?;
-        let aimed = frame.world(Joints::of(&mover.pose()).head());
+        // Down, it follows no move until it gets up, and getting up, the
+        // pose it is getting up through.
+        let pose = match &mover.down {
+            Some(down) if !down.standing_up() => down.rising_pose()?,
+            _ => mover.pose(),
+        };
+        let aimed = frame.world(Joints::of(&pose).head());
         // The pose's head is the joint under the skull.
         Some(distance(skull.a, aimed) * self.mm_per_px() * 0.001)
     }
@@ -1296,7 +1363,7 @@ impl World {
     }
 
     /// Body `body`'s own frame, if it is a side-view fighter.
-    fn fighter_frame(&self, body: usize) -> Option<Frame> {
+    pub(super) fn fighter_frame(&self, body: usize) -> Option<Frame> {
         let state = self.bodies.get(body)?;
         let rig = state.fighter.as_ref()?;
         Some(Frame {
@@ -1399,7 +1466,7 @@ impl World {
     /// sliding. Aimed at its stance still, a fighter shoved off its feet
     /// pushed itself back up from sitting on the floor to standing, which
     /// getting up, a movement of its own, should do.
-    fn let_fallen_joints_be(&mut self, rig: &fighter::Rig) {
+    pub(super) fn let_fallen_joints_be(&mut self, rig: &fighter::Rig) {
         for &index in &rig.hinges {
             let Some(turn) = self.joint_turn(index) else {
                 continue;
@@ -1469,7 +1536,7 @@ impl World {
         self.bodies
             .get(body)
             .and_then(|state| state.mover.as_ref())
-            .is_some_and(|mover| mover.fallen)
+            .is_some_and(|mover| mover.down.is_some())
     }
 
     /// Whether side-view fighter `body` would take a step if told to: it is
@@ -1548,7 +1615,7 @@ impl World {
         let Some(mover) = self.bodies[body]
             .mover
             .as_mut()
-            .filter(|mover| !mover.fallen)
+            .filter(|mover| mover.down.is_none())
         else {
             return;
         };
@@ -1605,7 +1672,10 @@ impl World {
         let fronts: Vec<Option<f64>> = (0..self.bodies.len())
             .map(|body| {
                 let frame = self.fighter_frame(body)?;
-                let mover = self.bodies[body].mover.as_ref()?;
+                let mover = self.bodies[body]
+                    .mover
+                    .as_ref()
+                    .filter(|mover| mover.down.is_none())?;
                 Some(frame.stand.x + frame.facing * mover.guard_front() * frame.height)
             })
             .collect();
@@ -1644,6 +1714,7 @@ impl World {
                 dt,
             );
             mover.block.ease(BLOCK_HERTZ, dt);
+            mover.crouch.ease(CROUCH_HERTZ, dt);
             // A shove from outside pushes the trunk, a share each step.
             if let Some((newton_seconds, age)) = mover.shoved {
                 let share = newton_seconds * dt.min(SHOVE_SECONDS - age).max(0.0) / SHOVE_SECONDS;
@@ -1703,9 +1774,8 @@ impl World {
                 .bones
                 .get(rig.pelvis)
                 .map_or(f64::INFINITY, |pelvis| frame.own(pelvis.b).1);
-            if !mover.fallen && hips_up < FALLEN_HIPS {
-                mover.fallen = true;
-                mover.step = None;
+            if mover.down.is_none() && hips_up < FALLEN_HIPS {
+                mover.go_down(Down::fell());
             }
             // Its weight run past its feet, a fighter steps to catch itself,
             // toward where its weight is going and past it, no farther than
@@ -1713,7 +1783,7 @@ impl World {
             // Drakunov and Goswami 2006); past that, no step can catch it, and
             // it falls and stays down. Toward the other fighter, it steps no
             // nearer than two fighters stand.
-            if mover.step.is_none() && !mover.fallen {
+            if mover.step.is_none() && mover.down.is_none() {
                 let (beyond, travel) = self.capture_beyond(body, frame.facing, frame.height);
                 if beyond != 0.0 {
                     // The whole stance moves under where the body comes to
@@ -1722,7 +1792,7 @@ impl World {
                     // 11 cm while the hips ran on 28.
                     let needed = travel + travel.signum() * CATCH_PAST;
                     if needed.abs() > FARTHEST_STEP {
-                        mover.fallen = true;
+                        mover.go_down(Down::fell());
                     } else {
                         let by = if needed > 0.0 {
                             needed.min(rooms[body].max(0.0))
@@ -1803,12 +1873,27 @@ impl World {
                 }
             }
             let joints = Joints::of(&pose);
-            if mover.fallen {
-                self.let_fallen_joints_be(&rig);
+            if mover.down.as_ref().is_some_and(|down| !down.standing_up()) {
+                // Down: it lies, comes to, or gets up (`rise.rs`).
+                self.drive_down(body, &rig, &frame, &mut mover, dt);
                 self.bodies[body].mover = Some(mover);
                 continue;
             }
-            self.aim_joints(body, &rig, &frame, &mut mover, &joints, dt);
+            // Standing up out of a crouch, it is down until it stands in
+            // its stance, and down again should it sink to the floor.
+            if let Some(down) = mover.down.as_mut() {
+                down.age_by(dt);
+                if hips_up < FALLEN_HIPS * 0.7 {
+                    mover.go_down(Down::fell());
+                    mover.crouch = Held::default();
+                    self.bodies[body].mover = Some(mover);
+                    continue;
+                }
+                if mover.crouch.amount < STOOD_UP && hips_up > profile::stance().hips.1 - 0.06 {
+                    mover.down = None;
+                }
+            }
+            self.aim_joints(body, &rig, &frame, &mut mover, &joints, None, dt);
             self.carry_hips(&rig, &frame, &mut mover, &joints, dt);
             self.place_feet(&rig, &frame, &Joints::of(&planned), swinging, loads, dt);
             self.bodies[body].mover = Some(mover);
@@ -1833,14 +1918,18 @@ impl World {
     }
 
     /// Aims each of the fighter's joints where `joints` has it turned, and
-    /// slides its shoulders across its chest.
-    fn aim_joints(
+    /// slides its shoulders across its chest; with `from`, each joint's turn
+    /// as a move began and how far from it toward `joints` the joint has
+    /// come (`rise.rs`), so that a body getting up is asked first for where
+    /// its joints already are.
+    pub(super) fn aim_joints(
         &mut self,
         body: usize,
         rig: &fighter::Rig,
         frame: &Frame,
         mover: &mut Mover,
         joints: &Joints,
+        from: Option<(&[f64; 16], f64)>,
         dt: f64,
     ) {
         let asked = joints.directions();
@@ -1850,7 +1939,14 @@ impl World {
         for (place, &hinge) in Hinge::ALL.iter().enumerate() {
             // The window's angles run the other way from the figure's for
             // a fighter facing right, and the same way for its mirror image.
-            let turn = wrap_angle(asked.turn(hinge) - stood.turn(hinge));
+            let mut turn = wrap_angle(asked.turn(hinge) - stood.turn(hinge));
+            // Both within the joint's range, which for a shoulder spans more
+            // than half a turn: taken the shorter way round, an arm lying
+            // over a knocked-out fighter's head swung on up past it, away
+            // from the floor its hand was reaching for.
+            if let Some((started, come)) = from {
+                turn = started[place] + (turn - started[place]) * come;
+            }
             turns[place] = turn;
             let was = mover.last_turns.map_or(turn, |last| last[place]);
             let limb = match hinge {
@@ -1891,7 +1987,7 @@ impl World {
 
     /// Has the hold on the fighter's hips carry each end of its pelvis to
     /// where `joints` puts it.
-    fn carry_hips(
+    pub(super) fn carry_hips(
         &mut self,
         rig: &fighter::Rig,
         frame: &Frame,
@@ -1931,7 +2027,7 @@ impl World {
     /// way by its leg alone (`World::carry_swinging_foot`), and one on the
     /// floor stands with its ball where it stood and its heel as high as the
     /// pose lifts it.
-    fn place_feet(
+    pub(super) fn place_feet(
         &mut self,
         rig: &fighter::Rig,
         frame: &Frame,

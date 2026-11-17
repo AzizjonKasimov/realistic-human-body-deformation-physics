@@ -590,6 +590,9 @@ impl World {
                 self.hip_holds[index].impulse = Vec2::default();
                 continue;
             }
+            // Getting up, the legs carry the hips through the poses as a
+            // spring does, from the feet and knees under them (`rise.rs`).
+            let rising = legs == Some(true) && self.rising(self.bone_body(hold.bone));
             let (place, previous) = if hold.end_b {
                 (bone.b, bone.previous_b)
             } else {
@@ -645,7 +648,12 @@ impl World {
                     }
                 }
                 speed = subtract(speed, carry.speed);
-                springs = if legs == Some(true) {
+                springs = if rising {
+                    self.carry_springs(&Carry {
+                        hertz: rise::RISE_HERTZ,
+                        ..carry
+                    })
+                } else if legs == Some(true) {
                     self.carry_springs(&Carry {
                         hertz: Vec2 {
                             x: self.materials.legs_across_hertz,
@@ -666,7 +674,7 @@ impl World {
                 x: soft_x.impulse(masses.0, speed.x, error.x, hold.impulse.x),
                 y: soft_y.impulse(masses.1, speed.y, error.y, hold.impulse.y),
             };
-            if legs == Some(true) {
+            if legs == Some(true) && !rising {
                 // Legs push the hips up with the weight above them, at the
                 // hips, and their joints, holding the pose, keep the hips'
                 // height: held up to a height of its own as well, the hold
@@ -674,7 +682,8 @@ impl World {
                 // the legs' joints, bent as the pose has them, pulled them
                 // back down.
                 let up = if hold.end_b {
-                    -self.weight_on_the_legs(self.bone_body(hold.bone), h)
+                    let body = self.bone_body(hold.bone);
+                    -self.weight_on_the_legs(body, h) * self.muscle_strength(body)
                 } else {
                     0.0
                 };
@@ -699,8 +708,10 @@ impl World {
             if let Some(carry) = hold.carry {
                 // No harder across than the feet grip the floor, no harder
                 // up than legs bear, and never down (the window's y runs
-                // down, so holding up is negative).
-                let newtons = self.newtons() * h * self.materials.carry_strength;
+                // down, so holding up is negative); a fighter coming to after
+                // a knockout, only as hard as its muscles have come back.
+                let strength = self.muscle_strength(self.bone_body(hold.bone));
+                let newtons = self.newtons() * h * self.materials.carry_strength * strength;
                 let total = add(hold.impulse, impulse);
                 // Legs push the hips across no harder than the feet's grip
                 // on all the weight they bear, the whole body's, half at
@@ -708,7 +719,12 @@ impl World {
                 // (`GRIP_TO_SPARE`).
                 let across = if legs == Some(true) {
                     let borne = tissue::BODY_MASS_KG * self.materials.gravity * self.newtons() * h;
-                    FOOT_FRICTION * GRIP_TO_SPARE * borne * 0.5 * self.materials.carry_strength
+                    FOOT_FRICTION
+                        * GRIP_TO_SPARE
+                        * borne
+                        * 0.5
+                        * self.materials.carry_strength
+                        * strength
                 } else {
                     carry.limit.x * newtons
                 };
@@ -785,7 +801,7 @@ impl World {
             // floor, and the feet take the turn back (`balance.rs`).
             let body = self.bone_body(hold.bone);
             let legs = self.legs_carry(body);
-            if legs == Some(false) {
+            if legs == Some(false) || (legs == Some(true) && !self.legs_take_the_turn(body)) {
                 if let Some(carry) = &mut self.hip_holds[index].carry {
                     carry.tilt_impulse = 0.0;
                 }
@@ -800,7 +816,11 @@ impl World {
             let stiffness = carry.tilt_inertia * omega * omega;
             let damping = 2.0 * self.materials.hip_hold_damping_ratio * carry.tilt_inertia * omega;
             let soft = Softness::of_stiffness(stiffness, damping, piece.inertia, h);
-            let limit = carry.tilt_limit * newton_metres * h * self.materials.carry_strength;
+            let limit = carry.tilt_limit
+                * newton_metres
+                * h
+                * self.materials.carry_strength
+                * self.muscle_strength(body);
             let given = carry.tilt_impulse.clamp(-limit, limit);
             let total =
                 (given + soft.impulse(piece.inertia, speed, error, given)).clamp(-limit, limit);
@@ -1233,7 +1253,7 @@ impl World {
     /// The hold's stiffness and damping at each end of a foot's bone, in the
     /// engine's units: the leg springs back on it at `FOOT_HOLD_HERTZ`,
     /// critically damped.
-    fn foot_hold_spring(&self) -> (f64, f64) {
+    pub(super) fn foot_hold_spring(&self) -> (f64, f64) {
         let leg = LEG_MASS_KG / KG_PER_MASS;
         let omega = 2.0 * PI * FOOT_HOLD_HERTZ;
         (leg * omega * omega / 2.0, 2.0 * leg * omega / 2.0)
@@ -1443,7 +1463,10 @@ impl World {
         let sides = std::mem::take(&mut self.joint_sides);
         for index in 0..self.bone_joints.len() {
             let joint = self.bone_joints[index];
-            let limit = self.drive_limit(&joint) * h;
+            // A fighter coming to after a knockout has its muscles back only
+            // as far as they have come back (`rise.rs`).
+            let strength = self.muscle_strength(self.joint_body(&joint));
+            let limit = self.drive_limit(&joint) * h * strength;
             if limit <= 0.0 {
                 self.bone_joints[index].drive_impulse = 0.0;
                 continue;
@@ -1470,7 +1493,7 @@ impl World {
                 } else {
                     (joint.drive.stiffness, joint.drive.damping)
                 };
-            let stiffness = (stiffness * newton_metres).min(mass * cap * cap);
+            let stiffness = (stiffness * strength * newton_metres).min(mass * cap * cap);
             let damping = damping * newton_metres;
             let softness = Softness::of_stiffness(stiffness, damping, mass, h);
             let angle =
@@ -1561,7 +1584,8 @@ impl World {
                 continue;
             }
             let joint = self.bone_joints[index];
-            let limit = self.drive_limit(&joint) * h;
+            let strength = self.muscle_strength(self.joint_body(&joint));
+            let limit = self.drive_limit(&joint) * h * strength;
             let given = joint.drive_impulse.clamp(-limit, limit);
             self.bone_joints[index].drive_impulse = given;
             if given != 0.0 {

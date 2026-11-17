@@ -45,7 +45,7 @@ use crate::profile::{Hinge, Side};
 #[derive(Clone, Debug)]
 pub(super) struct Stance {
     hips: Vec2,
-    feet: Vec<PlantedFoot>,
+    pub(super) feet: Vec<PlantedFoot>,
     /// The mass the legs hold up at the hips: all of the body but the
     /// planted legs, in the engine's units.
     above: f64,
@@ -65,7 +65,66 @@ pub(super) struct Stance {
     /// hard its foot was pushed at the ankle, and how its thigh was turned.
     given: (Vec2, f64),
     pressed: Vec<(Vec2, f64)>,
+    /// Getting up off the floor (`rise.rs`): what else bears the body on the
+    /// floor besides its feet, and the share of the hips' push each foot,
+    /// then each of those, bears, by where they stand under the hips; a hand
+    /// bears none of it, only the chest's (`World::solve_chest_holds`).
+    rising: bool,
+    pub(super) others: Vec<Support>,
+    pub(super) shares: Vec<f64>,
+    /// What each of those was pressed into the floor with so far this
+    /// substep, and the turn its thigh was given.
+    others_pressed: Vec<(f64, f64)>,
+    /// All the hold on the chest has given it so far this substep, getting
+    /// up (`World::solve_chest_holds`), and all the floor has given each
+    /// knee and fist it holds up (`World::hold_supports_up`).
+    pub(super) chest_given: Vec2,
+    floor_given: Vec<f64>,
 }
+
+/// What a support is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Bears {
+    /// A knee, of the leg on that side.
+    Knee(Side),
+    /// A hand, the fist resting on the floor.
+    Hand(Side),
+}
+
+/// A part of a fighter getting up that bears it on the floor besides its
+/// feet: a knee or a hand.
+#[derive(Clone, Debug)]
+pub(super) struct Support {
+    pub(super) bears: Bears,
+    /// The bone and its flesh, and where the floor bears it: the knee's end
+    /// of the shin, the knuckles' end of the hand.
+    pub(super) piece: BonePiece,
+    pub(super) at: Vec2,
+    /// For a knee, the thigh it pushes through, which the turn the legs give
+    /// the pelvis comes back on.
+    thigh: Option<BonePiece>,
+}
+
+/// How near the floor the bone of a knee and a fist may be, in body
+/// heights, for the flesh round it to rest on the floor and bear weight: the
+/// shin's flesh round the knee and the fist's are about 6 and 5 cm thick
+/// (`profile.rs`).
+const KNEE_ON_FLOOR: f64 = 0.045;
+const FIST_ON_FLOOR: f64 = 0.040;
+
+/// How far across from the hips a foot or a knee may rest, at the most, in
+/// body heights, for its leg to push them up: about a leg's length leaning
+/// out under them (the hip joint stands 0.53 of the height up).
+const LEG_REACH: f64 = 0.55;
+
+/// How much of its flesh's thickness the floor leaves under the bone of a
+/// knee and a fist it bears, in body heights: about half, as a heel's pad
+/// keeps (`fighter.rs`, `HEEL_PAD_LOADED`), of the shin's 6 cm round the knee
+/// and the fist's 5 cm. And the most the floor holds either up with, in body
+/// weights.
+const KNEE_PAD: f64 = 0.019;
+const FIST_PAD: f64 = 0.015;
+const SUPPORT_HOLDS: f64 = 2.0;
 
 /// How far inside the planted feet's ends a fighter keeps its capture
 /// point, as a share of how far apart those ends are: a centre of mass
@@ -89,7 +148,7 @@ const SWING_FORCE: f64 = fighter::HIP_STRENGTH / 0.9;
 
 /// A foot standing on the floor, as the substep began.
 #[derive(Clone, Debug)]
-struct PlantedFoot {
+pub(super) struct PlantedFoot {
     side: Side,
     foot_hold: usize,
     /// How much of its share the foot bears (`FootHold::load`).
@@ -145,9 +204,17 @@ impl World {
         }
         let state = self.bodies.get(body)?;
         state.fighter.as_ref()?;
-        // A fighter that has fallen no longer stands up on its legs.
-        if self.fighter_fallen(body) {
-            return Some(false);
+        // A fighter down on the floor no longer stands up on its legs, until
+        // it gets up on what bears it there (`rise.rs`).
+        if self.fighter_fallen(body) && !self.standing_up(body) {
+            return Some(
+                self.rising(body)
+                    && self
+                        .stances
+                        .get(body)
+                        .and_then(Option::as_ref)
+                        .is_some_and(|stance| stance.shares.iter().any(|&share| share > 0.0)),
+            );
         }
         Some(
             self.stances
@@ -287,6 +354,14 @@ impl World {
                 1.0 / hip_joints.len() as f64,
             )
         };
+        // Getting up, its knees and hands bear it too, where they rest on the
+        // floor.
+        let rising = self.rising(body);
+        let others = if rising {
+            self.supports_on_floor(rig)
+        } else {
+            Vec::new()
+        };
         // All of the body but the planted legs hangs on the hips, and as much
         // of a leg as its foot no longer bears: a hip takes up its leg's
         // weight as the foot hands its share over, so that the leg already
@@ -378,6 +453,45 @@ impl World {
             ends.iter().copied().fold(f64::NEG_INFINITY, f64::max),
         );
         let pressed = vec![(Vec2::default(), 0.0); feet.len()];
+        // Getting up, the hips are pushed from the feet and knees under
+        // them, each bearing a share by where it stands under them; the
+        // hands bear the chest. A seat on the floor bears the hips as they
+        // rest there, but cannot push them up.
+        let shares = if rising {
+            let reach = LEG_REACH * rig.height;
+            let places: Vec<Option<f64>> = feet
+                .iter()
+                .map(|foot| {
+                    let bone = self.bones[foot.foot.bone];
+                    let ends = [bone.previous_a, bone.previous_b];
+                    let touching = self.ends_on_floor(&bone, ends);
+                    let on: Vec<f64> = (0..2)
+                        .filter(|&end| touching[end])
+                        .map(|end| ends[end].x)
+                        .collect();
+                    if on.is_empty() {
+                        foot.ankle.x
+                    } else {
+                        on.iter().sum::<f64>() / on.len() as f64
+                    }
+                })
+                .chain(others.iter().map(|support| match support.bears {
+                    Bears::Hand(_) => f64::NAN,
+                    _ => support.at.x,
+                }))
+                .map(|x| (!x.is_nan() && (x - hips.x).abs() < reach).then_some(x))
+                .collect();
+            let under: Vec<f64> = places.iter().flatten().copied().collect();
+            let mut shared = weight_shares(&under, hips.x).into_iter();
+            places
+                .iter()
+                .map(|place| place.map_or(0.0, |_| shared.next().unwrap_or(0.0)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let others_pressed = vec![(0.0, 0.0); others.len()];
+        let others_count = others.len();
         Stance {
             hips,
             feet,
@@ -393,6 +507,12 @@ impl World {
             },
             given: (Vec2::default(), 0.0),
             pressed,
+            rising,
+            others,
+            shares,
+            others_pressed,
+            chest_given: Vec2::default(),
+            floor_given: vec![0.0; others_count],
         }
     }
 
@@ -403,6 +523,10 @@ impl World {
         let Some(stance) = self.stances.get(body).and_then(Option::as_ref) else {
             return 0.0;
         };
+        // Getting up, its moves put its weight where its key poses do.
+        if stance.rising {
+            return 0.0;
+        }
         let (back, front) = stance.support;
         if !(front > back) {
             return 0.0;
@@ -428,7 +552,7 @@ impl World {
     /// feet's grip, until they slid and the fighter fell.
     pub(super) fn hips_over_the_feet(&self, body: usize, from_ankles: [Vec2; 2]) -> Option<Vec2> {
         let stance = self.stances.get(body)?.as_ref()?;
-        if stance.feet.is_empty() {
+        if stance.feet.is_empty() || stance.rising {
             return None;
         }
         let sum = stance.feet.iter().fold(Vec2::default(), |sum, foot| {
@@ -645,7 +769,7 @@ impl World {
         let Some(mut stance) = self.stances.get(body).and_then(Option::as_ref).cloned() else {
             return;
         };
-        if stance.feet.is_empty() {
+        if stance.feet.is_empty() && stance.others.is_empty() {
             return;
         }
         // All the hold has given, as a push at the hips and a turn about
@@ -653,6 +777,10 @@ impl World {
         stance.given.0 = add(stance.given.0, push);
         stance.given.1 += turn + cross(subtract(at, stance.hips), push);
         let (push, turn) = stance.given;
+        if stance.rising {
+            self.push_back_on_supports(body, stance, h);
+            return;
+        }
         // The push comes back on the feet along the legs; the turn, which
         // the hips' muscles give the pelvis against the thighs, on the
         // thighs, and the legs' joints pass it on to the floor. Given back
@@ -708,6 +836,256 @@ impl World {
         }
         if let Some(slot) = self.stances.get_mut(body) {
             *slot = Some(stance);
+        }
+    }
+}
+
+impl World {
+    /// What bears side-view fighter `rig` on the floor besides its feet, as
+    /// the substep began, while it gets up: each knee, each fist, and its
+    /// seat resting there, of a limb whose muscles hold.
+    fn supports_on_floor(&self, rig: &fighter::Rig) -> Vec<Support> {
+        let body = self.bones[rig.pelvis].body as usize;
+        let near = |at: Vec2, reach: f64| self.floor_y - at.y < reach * rig.height;
+        let piece = |bone: usize| self.bone_pieces.get(bone).cloned().flatten();
+        let mut found = Vec::new();
+        for side in Side::BOTH {
+            let s = side.index();
+            let (leg, arm) = match side {
+                Side::Lead => (Limb::LeftLeg, Limb::LeftArm),
+                Side::Rear => (Limb::RightLeg, Limb::RightArm),
+            };
+            let knee = self.bones[rig.shins[s]].previous_a;
+            if !self.limp(body, leg) && near(knee, KNEE_ON_FLOOR) {
+                if let Some(shin) = piece(rig.shins[s]) {
+                    found.push(Support {
+                        bears: Bears::Knee(side),
+                        piece: shin,
+                        at: knee,
+                        thigh: piece(rig.thighs[s]),
+                    });
+                }
+            }
+            let knuckles = self.bones[rig.hands[s]].previous_b;
+            if !self.limp(body, arm) && near(knuckles, FIST_ON_FLOOR) {
+                if let Some(hand) = piece(rig.hands[s]) {
+                    found.push(Support {
+                        bears: Bears::Hand(side),
+                        piece: hand,
+                        at: knuckles,
+                        thigh: None,
+                    });
+                }
+            }
+        }
+        found
+    }
+
+    /// The floor holds up each knee and fist a fighter getting up rests on,
+    /// bone and flesh together, wherever its bone sinks below the pressed
+    /// flesh under it, and never pulls it down, as it holds a foot up on its
+    /// sole (`solve_foot_holds`): pressed by the hold on the chest with
+    /// nothing under its bone but flesh, a fist was crushed into the floor
+    /// and a wound on it opened again.
+    pub(super) fn hold_supports_up(&mut self, h: f64) {
+        let (stiffness, damping) = self.foot_hold_spring();
+        let most =
+            SUPPORT_HOLDS * tissue::BODY_MASS_KG * self.materials.gravity * self.newtons() * h;
+        for body in 0..self.stances.len() {
+            let Some(height) = self
+                .bodies
+                .get(body)
+                .and_then(|state| state.fighter.as_ref())
+                .map(|rig| rig.height)
+            else {
+                continue;
+            };
+            let Some(stance) = self.stances[body].as_ref().filter(|stance| stance.rising) else {
+                continue;
+            };
+            let supports: Vec<(Bears, BonePiece)> = stance
+                .others
+                .iter()
+                .map(|support| (support.bears, support.piece.clone()))
+                .collect();
+            for (index, (bears, piece)) in supports.into_iter().enumerate() {
+                let bone = self.bones[piece.bone];
+                let (place, previous, pad) = match bears {
+                    Bears::Knee(_) => (bone.a, bone.previous_a, KNEE_PAD),
+                    Bears::Hand(_) => (bone.b, bone.previous_b, FIST_PAD),
+                };
+                let level = self.floor_y - pad * height;
+                let lever = subtract(previous, piece.centre);
+                let mass = 1.0 / (1.0 / piece.mass + lever.x * lever.x / piece.inertia);
+                let speed = (place.y - previous.y) / h;
+                let given = self.stances[body]
+                    .as_ref()
+                    .map_or(0.0, |stance| stance.floor_given[index]);
+                let impulse = Softness::of_stiffness(stiffness, damping, mass, h).impulse(
+                    mass,
+                    speed,
+                    previous.y - level,
+                    given,
+                );
+                let total = (given + impulse).clamp(-most, 0.0);
+                if let Some(stance) = self.stances[body].as_mut() {
+                    stance.floor_given[index] = total;
+                }
+                self.push_piece(
+                    &piece,
+                    lever,
+                    Vec2 {
+                        x: 0.0,
+                        y: total - given,
+                    },
+                    h,
+                );
+            }
+        }
+    }
+
+    /// Gives back on what bears fighter `body` on the floor as it gets up
+    /// all its hold has given its hips this substep (`stance.given`): the
+    /// push up shared by where each stands under the centre of mass
+    /// (`Stance::shares`), each pressed into the floor where it rests, the
+    /// feet at their ankles; and the turn on the pelvis on the thighs of the
+    /// legs bearing it, by their shares. The floor holds the feet across by
+    /// what they bear (`solve_foot_holds`).
+    fn push_back_on_supports(&mut self, body: usize, mut stance: Stance, h: f64) {
+        let (push, turn) = stance.given;
+        let newtons = self.newtons() * h;
+        let feet = stance.feet.len();
+        let legs: f64 = stance.shares[..feet].iter().sum::<f64>()
+            + stance
+                .others
+                .iter()
+                .zip(&stance.shares[feet..])
+                .filter(|(support, _)| support.thigh.is_some())
+                .map(|(_, share)| share)
+                .sum::<f64>();
+        let turned_by = |share: f64| {
+            if legs > EPSILON {
+                -turn * share / legs
+            } else {
+                0.0
+            }
+        };
+        for (index, foot) in stance.feet.iter().enumerate() {
+            let share = stance.shares[index];
+            let back = Vec2 {
+                x: 0.0,
+                y: -push.y * share,
+            };
+            let turned = turned_by(share);
+            let (was_back, was_turned) = stance.pressed[index];
+            if back.y != was_back.y {
+                let lever = subtract(foot.ankle, foot.foot.centre);
+                let pressed = Vec2 {
+                    x: 0.0,
+                    y: back.y - was_back.y,
+                };
+                self.push_piece(&foot.foot, lever, pressed, h);
+            }
+            if turned != was_turned {
+                self.turn_piece(&foot.thigh, turned - was_turned, h);
+            }
+            stance.pressed[index] = (back, turned);
+            if let Some(bearing) = self.foot_bearing.get_mut(foot.foot_hold) {
+                *bearing = back;
+            }
+            if let Some(report) = self.balance_reports.get_mut(body) {
+                report.feet[foot.side.index()] = scale(back, 1.0 / newtons);
+            }
+        }
+        for (index, support) in stance.others.iter().enumerate() {
+            let share = stance.shares[feet + index];
+            let back = -push.y * share;
+            let turned = if support.thigh.is_some() {
+                turned_by(share)
+            } else {
+                0.0
+            };
+            let (was_back, was_turned) = stance.others_pressed[index];
+            if back != was_back {
+                let lever = subtract(support.at, support.piece.centre);
+                let pressed = Vec2 {
+                    x: 0.0,
+                    y: back - was_back,
+                };
+                self.push_piece(&support.piece, lever, pressed, h);
+            }
+            if let Some(thigh) = support.thigh.as_ref().filter(|_| turned != was_turned) {
+                self.turn_piece(thigh, turned - was_turned, h);
+            }
+            stance.others_pressed[index] = (back, turned);
+        }
+        let newton_metres = self.newton_metres() * h;
+        if let Some(report) = self.balance_reports.get_mut(body) {
+            report.push = scale(push, 1.0 / newtons);
+            report.turn = turn / newton_metres;
+        }
+        if let Some(slot) = self.stances.get_mut(body) {
+            *slot = Some(stance);
+        }
+    }
+
+    /// Whether the turn fighter `body`'s hold gives its pelvis comes back on
+    /// a leg bearing it: getting up on its hands or its seat alone, nothing
+    /// would take it back, and its pelvis is left to them.
+    pub(super) fn legs_take_the_turn(&self, body: usize) -> bool {
+        self.stances
+            .get(body)
+            .and_then(Option::as_ref)
+            .is_some_and(|stance| {
+                !stance.rising
+                    || stance.shares[..stance.feet.len()]
+                        .iter()
+                        .any(|&share| share > 0.0)
+                    || stance
+                        .others
+                        .iter()
+                        .zip(&stance.shares[stance.feet.len()..])
+                        .any(|(support, &share)| support.thigh.is_some() && share > 0.0)
+            })
+    }
+}
+
+/// How a body whose centre of mass stands at `centre`, across the floor, is
+/// borne by things resting on the floor at `places`, as shares of its
+/// weight: as evenly as they can bear it while their moments about the
+/// centre balance, the least-squares answer to the two sums, none bearing
+/// less than nothing; a centre past the outermost leaves it all on that
+/// one, as a body tips over its edge.
+pub(super) fn weight_shares(places: &[f64], centre: f64) -> Vec<f64> {
+    let mut bearing = vec![true; places.len()];
+    loop {
+        let on: Vec<usize> = (0..places.len()).filter(|&index| bearing[index]).collect();
+        if on.is_empty() {
+            return vec![0.0; places.len()];
+        }
+        let count = on.len() as f64;
+        let mean = on.iter().map(|&index| places[index]).sum::<f64>() / count;
+        let spread: f64 = on
+            .iter()
+            .map(|&index| (places[index] - mean) * (places[index] - mean))
+            .sum();
+        let mut shares = vec![0.0; places.len()];
+        for &index in &on {
+            shares[index] = 1.0 / count
+                + if spread > 1.0e-9 {
+                    (places[index] - mean) * (centre - mean) / spread
+                } else {
+                    0.0
+                };
+        }
+        match on
+            .iter()
+            .copied()
+            .filter(|&index| shares[index] < 0.0)
+            .min_by(|&a, &b| shares[a].total_cmp(&shares[b]))
+        {
+            Some(least) => bearing[least] = false,
+            None => return shares,
         }
     }
 }

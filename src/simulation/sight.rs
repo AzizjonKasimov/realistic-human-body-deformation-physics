@@ -67,8 +67,12 @@ pub struct Doing {
     /// body instead of its face (`guard_low`).
     pub guarded: bool,
     pub guard_low: bool,
-    /// It is down, fallen or knocked out ([`World::fighter_fallen`]).
+    /// It is down, fallen or knocked out ([`World::fighter_fallen`]), from
+    /// the moment it goes down until it stands on its feet again.
     pub fallen: bool,
+    /// It is getting up: its muscles have come back and it is on its way
+    /// from the floor to its stance (`rise.rs`).
+    pub getting_up: bool,
 }
 
 /// What a landed punch struck ([`LandedPunch::struck`]).

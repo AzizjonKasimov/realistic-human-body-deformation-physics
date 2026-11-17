@@ -281,6 +281,8 @@ impl World {
                     self.timed("posture", |world| world.solve_posture(h));
                 }
                 self.timed("hip hold", |world| world.solve_hip_hold(h));
+                self.timed("chest hold", |world| world.solve_chest_holds(h));
+                self.timed("supports", |world| world.hold_supports_up(h));
                 self.timed("foot hold", |world| world.solve_foot_holds(h));
                 self.timed("joint muscles", |world| world.solve_joint_drives(h));
                 self.timed("punch muscles", |world| world.solve_punch_drives(h));

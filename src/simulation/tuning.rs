@@ -68,6 +68,8 @@ named_settings!(
     legs_up_hertz,
     knockout_turn,
     knockout_spin,
+    knockout_seconds,
+    knockout_more_seconds,
     skin_shear_modulus,
     skin_thickness,
     skin_stiffening_stretch,

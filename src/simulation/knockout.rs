@@ -10,7 +10,8 @@
 //! ([`KNOCKOUT_TURN`]), or faster than `Materials::knockout_spin` from one
 //! substep to the next ([`KNOCKOUT_SPIN`]). Its legs give way and stop
 //! carrying it, every muscle lets go, as an arm's do when a bone in it breaks
-//! (`World::let_limb_go`), and it stays down (`Mover::fallen`).
+//! (`World::let_limb_go`), and it goes down (`Mover::down`), to lie limp for
+//! longer the harder the blow and then get up (`rise.rs`).
 //!
 //! A fighter's punches aim at the other's jaw, as boxers' do (`mover.rs`),
 //! and turn the head about as hard as people's: a cross landed well turns
@@ -22,10 +23,10 @@
 //! al. 2020). A dummy's head took Olympic boxers' hardest straight punches to
 //! the chin at 6,343 ± 1,789 rad/s² (Walilko, Viano and Bir 2005).
 //!
-//! Left out for now: getting up, how long a knockout lasts, and the stiff
-//! arm two in three knocked-out fighters hold up for a few seconds as they
-//! fall (Hosseini and Lifshitz 2009).
+//! Left out for now: the stiff arm two in three knocked-out fighters hold
+//! up for a few seconds as they fall (Hosseini and Lifshitz 2009).
 
+use super::rise::Down;
 use super::*;
 
 /// How fast a blow must change how fast a fighter's head turns to knock it
@@ -139,8 +140,16 @@ impl World {
     /// takes no more moves.
     fn knock_out(&mut self, body: usize, measure: Measure, value: f64, limit: f64) {
         self.bodies[body].head.knocked_out = true;
+        // Out for longer the harder the blow turned the head past the limit
+        // (`rise.rs`).
+        let past = if limit > 0.0 {
+            (value / limit - 1.0).max(0.0)
+        } else {
+            0.0
+        };
+        let out_for = self.materials.knockout_seconds + self.materials.knockout_more_seconds * past;
         if let Some(mover) = &mut self.bodies[body].mover {
-            mover.knock_down();
+            mover.go_down(Down::knocked_out(out_for));
         }
         for index in 0..self.bone_joints.len() {
             if self.joint_body(&self.bone_joints[index]) == body {
@@ -247,11 +256,14 @@ mod tests {
 
     /// A cross knocks out a fighter whose head takes less than it gives,
     /// here with the limit lowered under what a cross landed well gives (10
-    /// rad/s within the blow): the fighter goes limp, falls, and stays down,
-    /// taking no moves, and nothing tears as it falls. The fighter that threw
-    /// it stands on, and throws no punch at it while it is down.
+    /// rad/s within the blow): the fighter goes limp, falls, and lies limp
+    /// for as long as the blow sets, taking no moves, and nothing tears as it
+    /// falls. Then it comes to and gets up (`rise.rs`), seen getting up, and
+    /// stands in its stance, nothing torn. The fighter that threw it stands
+    /// on, steps back as a referee would send it, and throws no punch at it
+    /// until it stands.
     #[test]
-    fn a_fighter_knocked_out_falls_and_stays_down() {
+    fn a_fighter_knocked_out_lies_limp_then_gets_up() {
         let mut world = create_side_fighters_at(Materials::default(), 0.60);
         world.keep_journal();
         world.materials.knockout_turn = 10.0;
@@ -264,39 +276,58 @@ mod tests {
             up(world, world.bones[rig.pelvis].b)
         };
         let stood = hips(&world, 0);
-        let mut out_at = None;
-        for step in 0..200 {
+        let (mut out_at, mut lying, mut seen_getting_up, mut up_at) = (None, None, false, None);
+        for step in 0..900 {
             let mut input = InputState::default();
             if step == 20 {
                 input.moves[0] = Some((0, Move::Cross));
             }
-            // Told to move once knocked out, it takes no notice; and the
-            // other, told to punch it, does not.
-            if step > 40 && step % 30 == 0 {
+            if [80, 125, 170, 215].contains(&step) {
+                input.moves[0] = Some((0, Move::StepOut));
+            }
+            // Told to move while down, it takes no notice; and the other,
+            // told to punch it, does not.
+            if step > 40 && step % 30 == 0 && up_at.is_none() {
                 input.moves[1] = Some((1, Move::StepIn));
-                input.moves[0] = Some((0, Move::Cross));
+                input.moves[2] = Some((0, Move::Cross));
             }
             world.step(dt, &input, SCENARIO_WIDTH);
-            if step > 40 {
+            if step > 40 && up_at.is_none() {
                 assert!(
                     !world.striking_out(0, Limb::RightArm) && !world.striking_out(0, Limb::LeftArm),
-                    "a fighter punched at one knocked out on the floor, at step {step}"
+                    "a fighter punched at one down on the floor, at step {step}"
                 );
             }
             if world.knocked_out(1) && out_at.is_none() {
                 out_at = Some(step);
             }
+            if step == 200 {
+                let skull = world.bones[rig.skull];
+                lying = Some((hips(&world, 1), up(&world, lerp(skull.a, skull.b, 0.5))));
+            }
+            seen_getting_up |= world.fighter_doing(1).is_some_and(|doing| doing.getting_up);
+            if out_at.is_some() && up_at.is_none() && !world.fighter_fallen(1) {
+                up_at = Some(step);
+            }
         }
-        let skull = world.bones[rig.skull];
-        let head = up(&world, lerp(skull.a, skull.b, 0.5));
         assert!(
-            out_at.is_some_and(|step| (20..35).contains(&step)) && world.fighter_fallen(1),
-            "knocked out at step {out_at:?}, fallen: {}",
+            out_at.is_some_and(|step| (20..35).contains(&step)),
+            "knocked out at step {out_at:?}"
+        );
+        let (lying_hips, lying_head) = lying.unwrap();
+        assert!(
+            lying_hips < 35.0 && lying_head < 30.0,
+            "three seconds after a knockout the fighter's hips were {lying_hips:.0} cm up and its head {lying_head:.0}"
+        );
+        assert!(seen_getting_up, "the fighter was never seen getting up");
+        assert!(
+            up_at.is_some_and(|step| step < 720) && !world.fighter_fallen(1),
+            "the knocked-out fighter stood again on step {up_at:?}, and is down now: {}",
             world.fighter_fallen(1)
         );
         assert!(
-            hips(&world, 1) < 30.0 && head < 30.0,
-            "three seconds after a knockout the fighter's hips are {:.0} cm up and its head {head:.0}",
+            (hips(&world, 1) - stood).abs() < 6.0,
+            "standing again, its hips are {:.0} cm up, where they stood at {stood:.0}",
             hips(&world, 1)
         );
         assert!(

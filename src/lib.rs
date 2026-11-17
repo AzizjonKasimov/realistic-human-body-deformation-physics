@@ -5,6 +5,8 @@ mod profile;
 pub mod scenarios;
 mod silhouette;
 pub mod simulation;
+#[cfg(test)]
+mod sketch;
 pub mod sound;
 mod version;
 mod view;

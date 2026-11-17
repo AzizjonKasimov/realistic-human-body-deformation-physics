@@ -466,6 +466,263 @@ pub(crate) fn stance() -> Pose {
     pose
 }
 
+/// The key poses a fighter gets up off the floor through
+/// (`simulation::rise`), each with its hips over the floor's zero. People
+/// rise from their backs most simply by curling up to sit, coming to a
+/// squat, and standing (VanSant 1988); a humanoid robot got up from its back
+/// and its front, a hundred times in a hundred, through a handful of key
+/// poses, each standing still on what touched the floor, with one short tip
+/// over its feet between them (Stückler, Schwenk and Behnke 2006). From the
+/// back: sat up onto the hands, the feet drawn in as far apart as they stand
+/// in the stance; the hips lifted toward the heels between hands and feet;
+/// and tipped forward over the feet into a crouch (`crouching`), from which
+/// it stands as it comes up out of a duck. From the front: up onto hands and
+/// knees; then the lead foot forward onto the floor, down on the rear knee
+/// (`kneeling`), and up. Each gets its feet to where the stance has them on
+/// the way, so that standing up needs no step.
+pub(crate) fn sitting_up() -> Pose {
+    let mut pose = Pose {
+        hips: (0.0, 0.062),
+        pelvis: -0.55,
+        lumbar: -0.45,
+        thorax: -0.30,
+        neck: 0.05,
+        head: 0.05,
+        shoulders: [0.0; 2],
+        fists: [(0.0, 0.0); 2],
+        feet: [
+            Foot {
+                ball: (0.50, 0.0),
+                pitch: 0.0,
+            },
+            Foot {
+                ball: (0.19, 0.0),
+                pitch: 0.0,
+            },
+        ],
+    };
+    pose.fists = hands_behind(&pose);
+    pose
+}
+
+/// The hips lifted toward the heels, the weight between the hands behind
+/// and the feet.
+pub(crate) fn bridging() -> Pose {
+    let mut pose = Pose {
+        hips: (0.0, 0.16),
+        pelvis: -0.95,
+        lumbar: -0.90,
+        thorax: -0.80,
+        neck: -0.15,
+        head: 0.10,
+        shoulders: [0.0; 2],
+        fists: [(0.0, 0.0); 2],
+        feet: [
+            Foot {
+                ball: (0.43, 0.0),
+                pitch: 0.0,
+            },
+            Foot {
+                ball: (0.12, 0.0),
+                pitch: 0.45,
+            },
+        ],
+    };
+    pose.fists = hands_behind(&pose);
+    pose
+}
+
+/// How far a crouch lowers the stance's hips, in body heights, to 0.27 of
+/// the height up: a deep squat, its knees bent near their furthest.
+pub(crate) const CROUCH_DROP: f64 = 0.225;
+
+/// `pose` crouched down, `amount` of the way from it to a deep crouch: the
+/// hips lowered and the trunk folded forward over the knees, the weight
+/// kept over the feet as the stance keeps it (`keep_the_weight`), as a
+/// person comes up off the floor (`simulation::mover`, `Mover::crouch`).
+pub(crate) fn crouched(pose: &Pose, amount: f64) -> Pose {
+    let mut deep = *pose;
+    deep.hips.1 -= CROUCH_DROP * amount;
+    deep.pelvis += 0.35 * amount;
+    deep.lumbar += 0.45 * amount;
+    deep.thorax += 0.30 * amount;
+    deep.neck += 0.10 * amount;
+    deep
+}
+
+/// The stance crouched all the way down: where a fighter that tipped onto
+/// its feet stands up from.
+pub(crate) fn crouching() -> Pose {
+    let mut pose = crouched(&stance(), 1.0);
+    keep_the_weight(&mut pose);
+    let head = Joints::of(&pose).head();
+    pose.fists = guard_fists(head);
+    pose
+}
+
+/// Down on the rear knee, the rear foot behind on its toes and the lead
+/// foot flat on the floor in front, the lead glove on the lead knee, its
+/// feet as far apart as the stance has them: where a boxer waits out a
+/// count, and stands up from.
+pub(crate) fn kneeling() -> Pose {
+    Pose {
+        hips: (0.0, 0.285),
+        pelvis: 0.05,
+        lumbar: 0.12,
+        thorax: 0.22,
+        neck: 0.30,
+        head: 0.14,
+        shoulders: [0.03, -0.02],
+        fists: [(0.25, 0.33), (0.16, 0.48)],
+        feet: [
+            Foot {
+                ball: (0.055, 0.0),
+                pitch: 0.0,
+            },
+            Foot {
+                ball: (-0.255, 0.0),
+                pitch: 1.30,
+            },
+        ],
+    }
+}
+
+/// Up on both knees, the trunk upright over them and the feet behind on
+/// their toes: where a fighter getting up from its front brings its lead
+/// foot forward from. Brought forward from hands and knees, the trunk lying
+/// forward, the lead foot stopped short under the hips, its hip bent as far
+/// as it goes.
+pub(crate) fn kneeling_up() -> Pose {
+    let mut pose = kneeling();
+    pose.pelvis = 0.05;
+    pose.lumbar = 0.10;
+    pose.thorax = 0.18;
+    pose.neck = 0.28;
+    pose.head = 0.12;
+    pose.feet[0] = pose.feet[1];
+    let head = Joints::of(&pose).head();
+    pose.fists = guard_fists(head);
+    pose
+}
+
+/// On hands and knees, the hands under the shoulders and the knees under
+/// the hips, the feet behind on their toes.
+pub(crate) fn on_all_fours() -> Pose {
+    let mut pose = Pose {
+        hips: (0.0, 0.27),
+        pelvis: 1.45,
+        lumbar: 1.50,
+        thorax: 1.40,
+        neck: 1.00,
+        head: 0.70,
+        shoulders: [0.0; 2],
+        fists: [(0.0, 0.0); 2],
+        feet: [
+            Foot {
+                ball: (-0.26, 0.0),
+                pitch: 1.25,
+            },
+            Foot {
+                ball: (-0.255, 0.0),
+                pitch: 1.30,
+            },
+        ],
+    };
+    let shoulders = Joints::of(&pose).shoulder;
+    pose.fists = shoulders.map(|shoulder| (shoulder.0 + 0.02, 0.02));
+    pose
+}
+
+/// Where hands planted on the floor under a pose's shoulders are, a little
+/// behind them, the arms nearly straight, as a person props themselves up
+/// sitting: planted at the arms' reach behind the shoulders instead, they
+/// asked the shoulders to swing back past their range (about 55 degrees),
+/// and one hand never reached the floor while the other was levered over it
+/// until its wrist tore.
+fn hands_behind(pose: &Pose) -> [Place; 2] {
+    Joints::of(pose)
+        .shoulder
+        .map(|shoulder| (shoulder.0 - 0.04, 0.02))
+}
+
+/// Where a side-view fighter's bones lie, in its own frame, each from its
+/// first end to its second as the body is built (`simulation::fighter`): the
+/// pelvis from the foot of the spine down to the hips, the spine's bones
+/// upward, each foot from its heel to its ball; and each fist's knuckles.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BonePlaces {
+    pub(crate) pelvis: (Place, Place),
+    pub(crate) lumbar: (Place, Place),
+    pub(crate) thoracic: (Place, Place),
+    pub(crate) cervical: (Place, Place),
+    pub(crate) skull: (Place, Place),
+    pub(crate) feet: [(Place, Place); 2],
+    pub(crate) knuckles: [Place; 2],
+}
+
+/// The pose a body whose bones lie at `bones` is in: the one whose joints
+/// [`Joints::of`] puts where they are, its hips at the pelvis's lower end,
+/// each of the trunk's bones leaning as it lies, each fist at its knuckles
+/// and each foot as it stands or lies. Getting up begins from it, so that
+/// the body's muscles are asked first for where they already are.
+pub(crate) fn measured(bones: &BonePlaces) -> Pose {
+    let way = |v: Place| libm::atan2(v.1, v.0);
+    // A bone `built` from its joint, leaned by `lean`, runs `built`'s way
+    // turned back by `lean`.
+    let lean = |built: Place, from: Place, to: Place| wrap(way(built) - way(minus(to, from)));
+    let (sacrum_end, hips) = bones.pelvis;
+    let mut pose = Pose {
+        hips,
+        pelvis: lean(PELVIS, hips, sacrum_end),
+        lumbar: lean(LUMBAR, bones.lumbar.0, bones.lumbar.1),
+        thorax: lean(THORACIC, bones.thoracic.0, bones.thoracic.1),
+        neck: lean(CERVICAL, bones.cervical.0, bones.cervical.1),
+        head: lean(SKULL, bones.skull.0, bones.skull.1),
+        shoulders: [0.0; 2],
+        fists: bones.knuckles,
+        feet: [Foot {
+            ball: (0.0, 0.0),
+            pitch: 0.0,
+        }; 2],
+    };
+    for side in 0..2 {
+        let (heel, ball) = bones.feet[side];
+        let pitch = wrap(way(minus(FOOT_BALL_END, FOOT_HEEL_END)) - way(minus(ball, heel)));
+        let ankle = minus(heel, leaned(FOOT_HEEL_END, pitch));
+        pose.feet[side] = Foot {
+            ball: plus(ankle, leaned(BALL_ON_FLOOR, pitch)),
+            pitch,
+        };
+    }
+    pose
+}
+
+/// The pose `t` of the way from `a` to `b`, field by field.
+pub(crate) fn blend(a: &Pose, b: &Pose, t: f64) -> Pose {
+    let mix = |x: f64, y: f64| x + (y - x) * t;
+    let place = |p: Place, q: Place| (mix(p.0, q.0), mix(p.1, q.1));
+    let mut pose = *a;
+    pose.hips = place(a.hips, b.hips);
+    pose.pelvis = mix(a.pelvis, b.pelvis);
+    pose.lumbar = mix(a.lumbar, b.lumbar);
+    pose.thorax = mix(a.thorax, b.thorax);
+    pose.neck = mix(a.neck, b.neck);
+    pose.head = mix(a.head, b.head);
+    for side in 0..2 {
+        pose.shoulders[side] = mix(a.shoulders[side], b.shoulders[side]);
+        pose.fists[side] = place(a.fists[side], b.fists[side]);
+        pose.feet[side].ball = place(a.feet[side].ball, b.feet[side].ball);
+        pose.feet[side].pitch = mix(a.feet[side].pitch, b.feet[side].pitch);
+    }
+    pose
+}
+
+/// `angle` brought within a half turn of zero.
+fn wrap(angle: f64) -> f64 {
+    let turn = 2.0 * std::f64::consts::PI;
+    angle - turn * libm::floor((angle + std::f64::consts::PI) / turn)
+}
+
 /// How high off the floor a heel or a ball may be, in body heights, and
 /// still bear weight on it.
 const FOOT_ON_FLOOR: f64 = 0.01;

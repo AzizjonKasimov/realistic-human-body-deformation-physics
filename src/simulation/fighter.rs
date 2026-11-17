@@ -2596,8 +2596,8 @@ mod tests {
 
     /// The scenario tool's random side-view fights (`play_side_fight`) are
     /// this module's, step for step: fight 15 played both ways ends with the
-    /// same fighters down, the same skin torn, and each head as far off its
-    /// pose at its farthest, to the last bit.
+    /// same fighters still down, the same skin torn, and each head as far off
+    /// its pose at its farthest, to the last bit.
     #[test]
     fn the_scenario_tools_random_fights_are_the_tests() {
         let fight = play_side_fight(15, 20.0, materials());
@@ -2605,7 +2605,7 @@ mod tests {
         assert_eq!(fight.head_off, [seen.head_off[0].0, seen.head_off[1].0]);
         for body in 0..2 {
             assert_eq!(
-                fight.knocked_out[body].is_some() || fight.fell[body],
+                fight.downs[body] > fight.got_up[body],
                 seen.world.fighter_fallen(body)
             );
             assert_eq!(
