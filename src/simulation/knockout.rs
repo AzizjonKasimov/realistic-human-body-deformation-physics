@@ -137,7 +137,8 @@ impl World {
     /// Knocks side-view fighter `body` out, its head turned by a blow to
     /// `value` past `limit`, as `measure` measures them: every muscle lets
     /// go, the pull each carried with it, its legs no longer carry it, and it
-    /// takes no more moves.
+    /// takes no more moves, lying limp for longer the further past the limit
+    /// the blow went, until it comes to and gets up (`rise.rs`).
     fn knock_out(&mut self, body: usize, measure: Measure, value: f64, limit: f64) {
         self.bodies[body].head.knocked_out = true;
         // Out for longer the harder the blow turned the head past the limit

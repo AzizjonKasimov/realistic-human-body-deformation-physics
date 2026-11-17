@@ -2,6 +2,13 @@
 
 What each version of Realistic Physics changed, newest first. The game shows its version on the start screen and in its bottom-left corner, and every Short made from the game shows the version it was made with. Only the newest version is online.
 
+## v0.19 (2026-11-17)
+
+- On the Fight page, a knockdown no longer ends the fight: the fighter knocked down gets up on its own legs, off its back through a sit, its hands, and a crouch, or off its front through its hands and knees and a knee. Knocked out, it lies limp first, longer the harder the punch was.
+- The referee counts over a fighter knocked down while the other waits at the ropes on its own side: up before ten, the fighter boxes on once the count reaches eight; still down at ten, it is knocked out; and a third knockdown ends the fight. A fall with no punch is a slip, and goes uncounted.
+- A fighter on the floor or getting up cannot be punched, and throws no punch itself until it stands.
+- Known issue, as in v0.15.2: a bat blow now and then leaves a whole bone outside the skin.
+
 ## v0.18 (2026-11-17)
 
 - On the Fight page, a jab or cross thrown while ducking goes to the body, under the other fighter's block; a block held while ducking comes down over the body, stops a punch there, and leaves the head open.

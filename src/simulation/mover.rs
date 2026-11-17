@@ -1528,10 +1528,12 @@ impl World {
         }
     }
 
-    /// Whether side-view fighter `body` has fallen, its weight run past where
-    /// any step could catch it, or knocked out ([`World::knocked_out`]) and
-    /// gone down (`Mover::fallen`). A fallen fighter makes no more moves and
-    /// stays down, for a game's own rules about how a fight ends.
+    /// Whether side-view fighter `body` is down: fallen, its weight run past
+    /// where any step could catch it, or knocked out ([`World::knocked_out`]),
+    /// from the moment it goes down until it stands on its feet again
+    /// (`Mover::down`, `rise.rs`). A fighter down makes no moves and the
+    /// other throws no punch at it, for a game's own rules about a knockdown
+    /// and its count.
     pub fn fighter_fallen(&self, body: usize) -> bool {
         self.bodies
             .get(body)
@@ -1781,8 +1783,8 @@ impl World {
             // toward where its weight is going and past it, no farther than
             // a step goes (Hof, Gazendam and Sinke 2005; Pratt, Carff,
             // Drakunov and Goswami 2006); past that, no step can catch it, and
-            // it falls and stays down. Toward the other fighter, it steps no
-            // nearer than two fighters stand.
+            // it falls (and gets up again, `rise.rs`). Toward the other
+            // fighter, it steps no nearer than two fighters stand.
             if mover.step.is_none() && mover.down.is_none() {
                 let (beyond, travel) = self.capture_beyond(body, frame.facing, frame.height);
                 if beyond != 0.0 {

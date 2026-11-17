@@ -20,19 +20,20 @@
 //! on the floor where the part of the body it stands on already is, and
 //! blended into from where the body really lies, so that the muscles are
 //! asked first for where the joints already are. From its back a fighter
-//! sits up onto its hands, lifts its hips toward its heels, tips forward over
-//! its feet into a squat, steps its rear foot back onto its knee, and stands;
-//! from its front it comes up onto its hands and knees, brings its lead foot
-//! forward, and stands: a humanoid robot got up from its back and its front
-//! a hundred times in a hundred through such key poses, each standing still
-//! on what touched the floor, with one short tip over its feet (Stückler,
-//! Schwenk and Behnke 2006), and people rising from their backs most simply
-//! curl up to sit, come to a squat, and stand (VanSant 1988). The hold on
-//! the hips carries them through the poses, as it does standing, and gives
-//! what it pushes back on whatever bears the body on the floor: its feet, a
-//! knee, its hands, or its seat (`balance.rs`), so that the floor bears it,
-//! and a fighter touching the floor with nothing that could bear it cannot
-//! get up at all.
+//! sits up onto its hands, lifts its hips onto its hands and feet, and tips
+//! forward over its feet into a crouch; from its front it comes up onto its
+//! hands and knees, up onto its knees, and takes a knee, its lead foot
+//! forward; out of the crouch or off the knee it rises into its stance as
+//! out of a duck (`Mover::stand_up_from`): a humanoid robot got up from its
+//! back and its front a hundred times in a hundred through such key poses,
+//! each standing still on what touched the floor, with one short tip over
+//! its feet (Stückler, Schwenk and Behnke 2006), and people rising from
+//! their backs most simply curl up to sit, come to a squat, and stand
+//! (VanSant 1988). The hold on the hips carries them through the poses, as
+//! it does standing, pushing them only from the feet and knees under them
+//! and giving what it pushes back on those (`balance.rs`), so that the floor
+//! bears it; the hands hold the chest up. A fighter touching the floor with
+//! nothing that could bear it cannot get up at all.
 
 use super::balance::{weight_shares, Bears};
 use super::mover::Frame;
