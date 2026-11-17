@@ -23,7 +23,14 @@ checks that:
 - clean punches rumble the controllers of both players, the one whose punch
   landed and the one hit (each fake controller records its rumbles);
 - a key of the left fighter's turns the buttons back to keys, CREATE moves a
-  controller to the other fighter, and the page logs no errors.
+  controller to the other fighter;
+- a DualSense the browser cannot rumble (as Chrome and Edge on Windows
+  cannot) opens the browser's window for picking it on its first press, once
+  a visit, and the start card and a button during the fight offer it too;
+  once picked, the page drives it over a fake WebHID on Bluetooth: its
+  effects reports, their CRC-32s, rumble started and stopped, and its own
+  input reports playing the fighter;
+- and the page logs no errors.
 
 Screenshots go to output\pad_check. No agent can press a real controller's
 buttons: this checks the page's and the game's side, not the browser's
@@ -124,9 +131,11 @@ $fakeGamepads = @"
 "@
 
 # A fake DualSense on Bluetooth behind a fake WebHID, which the page drives
-# itself for its rumble (the game's web/dualsense.js): the browser grants it
-# when asked, its firmware reads as 3.16, every report the page sends it
-# lands in window.__hidReports, and window.__fakeHid.input sends a full
+# itself for its rumble (the game's web/dualsense.js): the browser's window
+# for picking it counts each opening in window.__fakeHid.requests and picks
+# it while window.__fakeHid.grant is true (else closes with none), its
+# firmware reads as 3.16, every report the page sends it lands in
+# window.__hidReports, and window.__fakeHid.input sends a full
 # Bluetooth input report (id 0x31) of sticks and triggers from 0 to 255 and
 # button bytes: face (0x10 square, 0x20 cross; the D-pad hat in the low half,
 # 8 for none), shoulders (0x01 L1, 0x02 R1), middle (0x01 PS).
@@ -155,6 +164,8 @@ $fakeHid = @"
     addEventListener(type, listener) { if (type === "inputreport") { listeners.push(listener); } }
   };
   window.__fakeHid = {
+    requests: 0,
+    grant: true,
     input(state) {
       const data = new Uint8Array(77);
       data[1] = state.lx ?? 128;
@@ -172,7 +183,12 @@ $fakeHid = @"
   };
   const hid = {
     getDevices() { return Promise.resolve(granted.slice()); },
-    requestDevice() { granted = [device]; return Promise.resolve([device]); },
+    requestDevice() {
+      window.__fakeHid.requests += 1;
+      if (!window.__fakeHid.grant) { return Promise.resolve([]); }
+      granted = [device];
+      return Promise.resolve([device]);
+    },
     addEventListener() {}
   };
   Object.defineProperty(Navigator.prototype, "hid", { configurable: true, get() { return hid; } });
@@ -187,7 +203,7 @@ const crc = bytes => { let c = 0xffffffff; for (const b of bytes) { c ^= b; for 
 const known = crc(Array.from("123456789", ch => ch.charCodeAt(0)));
 const pageKnown = window.fightDualSense.crc32(new TextEncoder().encode("123456789"));
 return {
-  known, pageKnown,
+  known, pageKnown, now: performance.now(),
   reports: window.__hidReports.map(report => {
     const stored = (report.bytes[73] | (report.bytes[74] << 8) | (report.bytes[75] << 16) | (report.bytes[76] << 24)) >>> 0;
     return {
@@ -440,26 +456,51 @@ return await new Promise(done => {
     }
 
     # A DualSense the browser cannot rumble, as Chrome and Edge on Windows
-    # cannot: the start card offers to turn its rumble on, and the page then
-    # drives it itself over the fake WebHID, on Bluetooth.
+    # cannot. Its first press opens the browser's window for picking it,
+    # which the fake closes with none picked, once a visit: the start card
+    # then offers it. Cross on the Gamepad API's copy starts the fight; the
+    # offer shows under the game's title, and a click on it picks the fake
+    # Bluetooth DualSense, which the page then drives itself.
     Invoke-Cdp $page "Page.navigate" @{ url = $url + "fight/?stats" } | Out-Null
     Wait-Until "return document.readyState === 'complete' && !!document.getElementById('pads') && !!window.fightDualSense;" "The Fight page did not load again"
-    Invoke-PageScript $page "window.__fakePads.connect(0, 'DualSense Wireless Controller (STANDARD GAMEPAD Vendor: 054c Product: 0ce6)', false); return true;" | Out-Null
-    Wait-Page 0.5
-    $offer = Invoke-PageScript $page "const b = document.querySelector('#pads button.rumble'); if (!b) { return null; } const r = b.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2, text: b.textContent };"
+    Invoke-PageScript $page "window.__fakeHid.grant = false; window.__fakePads.connect(0, 'DualSense Wireless Controller (STANDARD GAMEPAD Vendor: 054c Product: 0ce6)', false); return true;" | Out-Null
+    Wait-Page 0.3
+    Send-Press 0 2 0.15 0.4
+    $asked = Invoke-PageScript $page "return { requests: window.__fakeHid.requests, card: !document.getElementById('rumble-card').hidden, remembered: localStorage.getItem('fight-rumble-asked') };"
+    if ($asked.requests -ne 1) {
+        $problems.Add("The first press of a DualSense the browser cannot rumble opened the window for picking it $($asked.requests) times, not once.")
+    }
+    if (-not $asked.card) {
+        $problems.Add("With that window closed and nothing picked, the start card did not offer to turn on rumble.")
+    }
+    if ($asked.remembered -ne "1") {
+        $problems.Add("The page did not remember that the window opened, so it would open by itself again on the next visit.")
+    }
+    Invoke-Cdp $page "Emulation.setDeviceMetricsOverride" @{ width = $width; height = [Math]::Max($height, 1100); deviceScaleFactor = 1; mobile = $false } | Out-Null
+    Save-Screenshot "card-rumble-offer.png"
+    Invoke-Cdp $page "Emulation.setDeviceMetricsOverride" @{ width = $width; height = $height; deviceScaleFactor = 1; mobile = $false } | Out-Null
+    Send-Press 0 2 0.15 0.4
+    if ((Invoke-PageScript $page "return window.__fakeHid.requests;") -ne 1) {
+        $problems.Add("A second press opened the window for picking the DualSense again in the same visit.")
+    }
+    Send-Press 0 0 0.15 0.2
+    Wait-Until "return !!window.wasm_exports;" "Cross on the DualSense did not start the fight"
+    Wait-Page 1.5
+    $offer = Invoke-PageScript $page "if (document.getElementById('rumble-offer').hidden) { return null; } const r = document.getElementById('rumble-offer-button').getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 };"
     if (-not $offer) {
-        $problems.Add("With a DualSense the browser cannot rumble, the start card offered no Turn on rumble button: '$(Invoke-PageScript $page "return document.getElementById('pads').textContent;")'.")
+        $problems.Add("During the fight no Turn on DualSense rumble button showed for a DualSense that does not rumble.")
     } else {
-        Save-Screenshot "card-turn-on-rumble.png"
+        Save-Screenshot "fight-rumble-offer.png"
+        Invoke-PageScript $page "window.__fakeHid.grant = true; return true;" | Out-Null
         foreach ($type in @("mousePressed", "mouseReleased")) {
             Invoke-Cdp $page "Input.dispatchMouseEvent" @{ type = $type; x = $offer.x; y = $offer.y; button = "left"; clickCount = 1 } | Out-Null
         }
         Wait-Page 0.4
         Invoke-PageScript $page "window.__fakeHid.input({}); return true;" | Out-Null
-        Wait-Page 0.4
-        $line = Invoke-PageScript $page "return document.getElementById('pads').textContent;"
-        if ($line -notmatch "Rumble is on") {
-            $problems.Add("After Turn on rumble the start card said '$line'.")
+        Wait-Page 0.6
+        $after = Invoke-PageScript $page "return { requests: window.__fakeHid.requests, shown: !document.getElementById('rumble-offer').hidden };"
+        if ($after.requests -ne 2 -or $after.shown) {
+            $problems.Add("A click on Turn on DualSense rumble should open the window once more and the button then go: opened $($after.requests) times in all, button still shown: $($after.shown).")
         }
         $sent = Invoke-PageScript $page $checkHidReports
         # CRC-32's check value, 0xCBF43926, in decimal: PowerShell reads that
@@ -471,16 +512,10 @@ return await new Promise(done => {
         if (-not $first -or $first.id -ne 0x31 -or $first.length -ne 77 -or -not $first.crcGood -or $first.magic -ne 0x10 -or $first.flags -ne 2 -or $first.improved -ne 4 -or $first.weak -ne 0 -or $first.strong -ne 0) {
             $problems.Add("The page's first report to the DualSense was not a Bluetooth report with the motors off, the improved rumble flag, and a good CRC: $($sent.reports | ConvertTo-Json -Compress -Depth 3).")
         }
-        Save-Screenshot "card-rumble-on.png"
 
-        # Cross on the DualSense's own reports starts the fight; the stick
-        # walks in, L2 jabs until a punch lands clean or the fighter is hit,
-        # and each rumble report is followed by one that stops it.
-        Invoke-PageScript $page "window.__fakeHid.input({ face: 0x20 }); return true;" | Out-Null
-        Wait-Page 0.15
-        Invoke-PageScript $page "window.__fakeHid.input({}); return true;" | Out-Null
-        Wait-Until "return !!window.wasm_exports;" "Cross on the directly driven DualSense did not start the fight"
-        Wait-Page 1.5
+        # The DualSense's own reports now play the fighter: the stick walks
+        # in, L2 jabs until a punch lands clean or the fighter is hit, and
+        # each rumble report is followed by one that stops it.
         Invoke-PageScript $page "window.__fakeHid.input({ lx: 255 }); return true;" | Out-Null
         Wait-Page 1.6
         Invoke-PageScript $page "window.__fakeHid.input({}); return true;" | Out-Null
@@ -497,12 +532,20 @@ return await new Promise(done => {
         }
         Wait-Page 1.0
         Save-Screenshot "fight-dualsense-direct.png"
-        $sent = @((Invoke-PageScript $page $checkHidReports).reports)
+        $sentAll = Invoke-PageScript $page $checkHidReports
+        $sent = @($sentAll.reports)
         $strong = @($sent | Where-Object { $_.weak -gt 0 -or $_.strong -gt 0 })
+        # The opponent fights on while the check looks, so a rumble begun in
+        # the last second may still be playing; any older must have been
+        # stopped by a later report with the motors off.
+        $unstopped = @($strong | Where-Object {
+                $began = $_.at
+                $began -lt $sentAll.now - 1000 -and -not ($sent | Where-Object { $_.at -gt $began -and $_.weak -eq 0 -and $_.strong -eq 0 })
+            })
         if ($strong.Count -eq 0) {
             $problems.Add("No punch landed or was taken in ten jabs, or it sent the DualSense no rumble: $($sent | ConvertTo-Json -Compress -Depth 3).")
-        } elseif (-not ($sent | Where-Object { $_.at -gt $strong[-1].at -and $_.weak -eq 0 -and $_.strong -eq 0 })) {
-            $problems.Add("The DualSense's last rumble was never stopped: $($sent | ConvertTo-Json -Compress -Depth 3).")
+        } elseif ($unstopped.Count -gt 0) {
+            $problems.Add("A rumble on the DualSense was never stopped: $($sent | ConvertTo-Json -Compress -Depth 3).")
         }
         if (@($sent | Where-Object { -not $_.crcGood }).Count -gt 0) {
             $problems.Add("A report to the DualSense had a bad CRC: $($sent | ConvertTo-Json -Compress -Depth 3).")
@@ -532,7 +575,7 @@ foreach ($line in $errors) {
 Write-Host ""
 Write-Host "Fake controllers on the Fight page at $Size, $fps fps:"
 if ($problems.Count -eq 0) {
-    Write-Host "  the start card named the DualSense, showed its buttons, and named a controller it cannot rumble; cross started the fight; the DualSense walked, jabbed (L2 and square), blocked, ducked and leaned back as the left fighter; the Xbox controller crossed (RT) as the right; a clean punch rumbled both (the one hit harder); J brought the keys back, CREATE switched fighters, OPTIONS paused; a DualSense the browser cannot rumble got Turn on rumble, then the page drove it over WebHID (Bluetooth reports with good CRCs, the improved rumble flag, rumble on a punch and stopped after it, its own reports starting the fight, walking, and jabbing); and the console stayed clean."
+    Write-Host "  the start card named the DualSense, showed its buttons, and named a controller it cannot rumble; cross started the fight; the DualSense walked, jabbed (L2 and square), blocked, ducked and leaned back as the left fighter; the Xbox controller crossed (RT) as the right; a clean punch rumbled both (the one hit harder); J brought the keys back, CREATE switched fighters, OPTIONS paused; a DualSense the browser cannot rumble opened the window for picking it on its first press, once a visit, then the start card and a button during the fight offered it, and once picked the page drove it over WebHID (Bluetooth reports with good CRCs, the improved rumble flag, rumble on a punch and stopped after it, its own reports walking and jabbing); and the console stayed clean."
 } else {
     $problems | ForEach-Object { Write-Host "  FAIL: $_" }
     exit 1
