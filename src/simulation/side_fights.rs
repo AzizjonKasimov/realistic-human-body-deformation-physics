@@ -360,10 +360,16 @@ mod bare_tests {
                 );
             }
         }
+        // `RP_BARE_MIN=0.05` prints phases that moved either that far, in
+        // pixels, rather than half a pixel.
+        let least: f64 = std::env::var("RP_BARE_MIN")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0.5);
         for (phase, bone_moved, flesh_moved, turned) in phases {
-            if hypot(bone_moved.x, bone_moved.y) > 0.5
-                || hypot(flesh_moved.x, flesh_moved.y) > 0.5
-                || turned.abs() > 0.02
+            if hypot(bone_moved.x, bone_moved.y) > least
+                || hypot(flesh_moved.x, flesh_moved.y) > least
+                || turned.abs() > 0.04 * least
             {
                 println!(
                     "    {phase:>20}: bone ({:+.1}, {:+.1}) px, turned {:+.3} rad; flesh ({:+.1}, {:+.1}) px",

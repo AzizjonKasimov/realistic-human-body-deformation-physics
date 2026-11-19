@@ -56,6 +56,14 @@ const PRESSED_FLESH: f64 = 0.5;
 /// The most of its depth as built a place along a bone is kept inside the
 /// skin, so that nothing at rest is pushed.
 const MOST_KEPT: f64 = 0.8;
+/// How firmly, in damping ratio, the skin stops a bone at its wall: the
+/// half of the bone the drawing shows inside the skin, held at the stiffest
+/// rate a substep allows (a quarter of it, as Box2D caps a soft
+/// constraint), critically damped. Held only as softly as the flesh, a
+/// knocked-out fighter's forearm lay with a centimetre of bone out of its
+/// skin for seconds: the ties to flesh the fall had shifted pulled it out as
+/// hard as the contact pushed it in.
+const WALL_DAMPING_RATIO: f64 = 1.0;
 
 /// A place along a bone and the stretch of skin round it nearest it this
 /// substep, which keep apart by at least `margin`.
@@ -70,8 +78,10 @@ pub(super) struct SkinHold {
     at: f64,
     /// Into the flesh from the skin there, as the substep began.
     normal: Vec2,
-    /// How far inside the skin the place is kept.
+    /// How far inside the skin the place is kept: softly, as pressed flesh
+    /// keeps it, to `margin`, and firmly, as the skin's wall, to `wall`.
     margin: f64,
+    wall: f64,
     /// The impulse it has given this substep.
     impulse: f64,
 }
@@ -79,12 +89,13 @@ pub(super) struct SkinHold {
 /// What the skin holds of one bone, as the body was built: the skin's
 /// outline round it, the stretches of that outline round it, and for each
 /// place along it, evenly spaced from end to end, how far inside the skin it
-/// is kept, or nothing where it lay outside.
+/// is kept, softly and at the wall (`SkinHold::margin`, `wall`), or nothing
+/// where it lay outside.
 #[derive(Clone, Debug, Default)]
 pub(super) struct BoneInSkin {
     outline: Option<usize>,
     edges: Vec<usize>,
-    margins: Vec<Option<f64>>,
+    margins: Vec<Option<(f64, f64)>>,
 }
 
 /// The nearest stretch of skin round a place: the stretch, where along it,
@@ -216,7 +227,8 @@ impl World {
                             |point| point.home,
                         )?;
                         (found.depth > 0.0).then(|| {
-                            (found.depth * PRESSED_FLESH).max((found.depth * MOST_KEPT).min(half))
+                            let wall = (found.depth * MOST_KEPT).min(half);
+                            ((found.depth * PRESSED_FLESH).max(wall), wall)
                         })
                     })
                     .collect();
@@ -254,8 +266,8 @@ impl World {
             let points = self.outlines[outline].points();
             let count = points.len();
             let samples = held.margins.len().saturating_sub(1).max(1);
-            for (sample, &margin) in held.margins.iter().enumerate() {
-                let Some(margin) = margin else {
+            for (sample, &margins) in held.margins.iter().enumerate() {
+                let Some((margin, wall)) = margins else {
                     continue;
                 };
                 let along = sample as f64 / samples as f64;
@@ -291,6 +303,7 @@ impl World {
                     at: found.at,
                     normal: found.normal,
                     margin,
+                    wall,
                     impulse: 0.0,
                 });
             }
@@ -389,13 +402,15 @@ impl World {
     /// Keeps each place a hold found as far inside the skin as its margin,
     /// as Box2D solves a contact point, one after another: the bone pushed
     /// in at the place, by its ends' shares, and the skin with the muscle
-    /// under it out.
+    /// under it out; softly down to its margin, and as firmly as a substep
+    /// allows past its wall.
     pub(super) fn solve_skin_holds(&mut self, h: f64) {
         if self.skin_holds.is_empty() {
             return;
         }
         let hertz = SKIN_HOLD_HERTZ.min(0.25 / h);
         let softness = Softness::new(2.0 * PI * hertz, SKIN_HOLD_DAMPING_RATIO, h);
+        let firmness = Softness::new(2.0 * PI * 0.25 / h, WALL_DAMPING_RATIO, h);
         let max_push = SKIN_HOLD_PUSH_SPEED * 1000.0 / self.mm_per_px();
         for index in 0..self.skin_holds.len() {
             let hold = self.skin_holds[index];
@@ -407,7 +422,12 @@ impl World {
                 self.points[second].position,
                 hold.at,
             );
-            let gap = dot(subtract(place, skin), hold.normal) - hold.margin;
+            let depth = dot(subtract(place, skin), hold.normal);
+            let (gap, softness) = if depth < hold.wall {
+                (depth - hold.wall, &firmness)
+            } else {
+                (depth - hold.margin, &softness)
+            };
             let bone_velocity = lerp(
                 scale(subtract(bone.a, bone.previous_a), 1.0 / h),
                 scale(subtract(bone.b, bone.previous_b), 1.0 / h),
