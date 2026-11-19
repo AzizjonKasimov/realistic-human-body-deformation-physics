@@ -60,6 +60,17 @@ impl OutlineLoop {
         &self.points
     }
 
+    /// Which way out of the sheet an edge's left-hand perpendicular points:
+    /// 1 or -1.
+    pub(super) fn outward(&self) -> f64 {
+        self.outward
+    }
+
+    /// The spring along edge `edge`, from its point to the next, if any.
+    pub(super) fn edge_spring(&self, edge: usize) -> Option<usize> {
+        self.edge_springs.get(edge).copied().flatten()
+    }
+
     /// The loop moved to follow `points` points and `springs` springs
     /// already in a world it joins (`World::add_body`).
     pub(super) fn move_indices(&mut self, points: usize, springs: usize) {
@@ -538,6 +549,11 @@ impl World {
             if !(bone.fractured || bone.splinter) || bone.open_break || bone.pinned {
                 continue;
             }
+            // A side-view fighter's skin holds every bone of it in
+            // (`skin_hold.rs`).
+            if self.materials.skin_holds_bones && self.skin_holds(&bone) {
+                continue;
+            }
             // Each end and the middle, and how much of what moves it each end
             // takes.
             for (share_a, share_b) in [(1.0, 0.0), (0.0, 1.0), (0.5, 0.5)] {
@@ -655,7 +671,7 @@ impl World {
     /// Whether point `point` is flesh round broken bone `piece`: kept in its
     /// place by a bone of the same limb, or for the head and trunk, of the
     /// same part.
-    fn skin_round(&self, point: usize, piece: &BoneSegment) -> bool {
+    pub(super) fn skin_round(&self, point: usize, piece: &BoneSegment) -> bool {
         let Some(hold) = self.point_holds.get(point) else {
             return false;
         };

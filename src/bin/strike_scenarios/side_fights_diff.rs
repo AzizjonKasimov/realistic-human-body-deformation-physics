@@ -27,6 +27,8 @@ struct Fighter {
     knocked_out: bool,
     fell: bool,
     head_off_cm: f64,
+    /// Steps bone showed through whole skin, away from the window's sides.
+    bone_shown: u32,
     torn_joints: String,
     slipped_joints: String,
 }
@@ -108,6 +110,7 @@ impl SideFights {
                 knocked_out: !field(&format!("{side}_knocked_out")).is_empty(),
                 fell: number(&format!("{side}_fell")) > 0,
                 head_off_cm: field(&format!("{side}_head_off_cm")).parse().unwrap_or(0.0),
+                bone_shown: number(&format!("{side}_bone_shown")),
                 torn_joints: field(&format!("{side}_torn_joints")),
                 slipped_joints: field(&format!("{side}_slipped_joints")),
             };
@@ -148,7 +151,7 @@ impl SideFights {
 
 /// What is counted of each fighter, how it is named, which way it gets
 /// worse, and whether it must hold.
-const MEASURES: [(&str, Worse, Holds); 7] = [
+const MEASURES: [(&str, Worse, Holds); 8] = [
     ("joints torn apart", Worse::Up, Holds::Must),
     ("joints put out of place", Worse::Up, Holds::Must),
     ("bones broken", Worse::Up, Holds::Must),
@@ -157,6 +160,11 @@ const MEASURES: [(&str, Worse, Holds); 7] = [
     ("knockouts", Worse::Neither, Holds::Drift),
     (
         "heads more than 25 cm off their poses",
+        Worse::Up,
+        Holds::Drift,
+    ),
+    (
+        "steps bone showed through whole skin",
         Worse::Up,
         Holds::Drift,
     ),
@@ -171,7 +179,8 @@ fn measure(fighter: &Fighter, index: usize) -> u32 {
         3 => u32::from(fighter.fell),
         4 => fighter.skin,
         5 => u32::from(fighter.knocked_out),
-        _ => u32::from(fighter.head_off_cm > HEAD_OFF_CM),
+        6 => u32::from(fighter.head_off_cm > HEAD_OFF_CM),
+        _ => fighter.bone_shown,
     }
 }
 

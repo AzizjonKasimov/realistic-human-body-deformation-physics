@@ -165,7 +165,7 @@ pub(crate) enum Only {
 }
 
 impl Only {
-    fn holds(self, body: u8, sheet: u8) -> bool {
+    pub(crate) fn holds(self, body: u8, sheet: u8) -> bool {
         match self {
             Only::All => true,
             Only::Sheet {
@@ -221,11 +221,17 @@ impl Only {
 /// punch is drawn last, its fist over what it reaches for, and otherwise
 /// the first.
 pub(crate) fn passes(world: &rp::World, rim: &SkinRim) -> Vec<Only> {
-    if rim.sheets.iter().all(|&(_, sheet)| sheet == 0) {
+    sheet_passes(world, &rim.sheets)
+}
+
+/// [`passes`] for a world whose sheets of flesh are `sheets`, each a body and
+/// a sheet of it, in any order.
+pub(crate) fn sheet_passes(world: &rp::World, sheets: &[(u8, u8)]) -> Vec<Only> {
+    if sheets.iter().all(|&(_, sheet)| sheet == 0) {
         return vec![Only::All];
     }
     let on_top = world.striking_body().unwrap_or(0) as u8;
-    let mut sheets = rim.sheets.clone();
+    let mut sheets = sheets.to_vec();
     sheets.sort_by(|a, b| {
         (a.0 == on_top)
             .cmp(&(b.0 == on_top))

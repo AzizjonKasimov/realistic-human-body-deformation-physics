@@ -94,8 +94,55 @@ pub struct SideFight {
     pub head_off: [f64; 2],
     /// The fastest an end of any bone moved over a step, in metres a second.
     pub fastest: f64,
+    /// The steps on which bone of it showed at least [`BONE_SHOWS_PX`] out
+    /// of the flesh drawn over it (`inspect::bare_bones`) through whole
+    /// skin, away from the window's sides, and the farthest out it showed
+    /// so, in pixels; the steps it showed only in a wound, beside skin torn
+    /// or cut ([`bone_in_a_wound`]), as an open injury shows it; and the
+    /// steps it showed near the sides, which only random fights reach: the
+    /// game's ring stops well short of them. An open break's pieces, which
+    /// come out through the skin they cut, are not counted.
+    pub bone_shown: [u32; 2],
+    pub bone_shown_px: [f64; 2],
+    pub bone_in_wounds: [u32; 2],
+    pub bone_shown_at_sides: [u32; 2],
     /// Every move made: the step, the fighter, and the move.
     pub moves: Vec<(usize, usize, Move)>,
+}
+
+/// How far out of the flesh drawn over it, in pixels (about a centimetre),
+/// bone counts as showing in a fight ([`SideFight::bone_shown`]).
+pub const BONE_SHOWS_PX: f64 = 3.0;
+
+/// How near the window's sides, in pixels, bone showing counts as at the
+/// sides ([`SideFight::bone_shown_at_sides`]).
+const SIDES_PX: f64 = 100.0;
+
+/// Whether bone `bone`, bare at `at`, shows in a wound: beside a fibre of
+/// its own flesh's skin torn or cut, or a triangle of that skin that has
+/// failed, within two point spacings.
+pub fn bone_in_a_wound(world: &World, bone: &BoneSegment, at: Vec2) -> bool {
+    let reach = 2.0 * world.materials.point_spacing;
+    let own = |point: usize| {
+        let point = &world.points[point];
+        point.body == bone.body && point.sheet == bone.sheet
+    };
+    let near = |a: usize, b: usize| {
+        distance_to_segment(at, world.points[a].position, world.points[b].position) < reach
+    };
+    world.springs.iter().any(|spring| {
+        spring.broken
+            && spring.layer == TissueLayer::Skin
+            && own(spring.a)
+            && near(spring.a, spring.b)
+    }) || world.triangles.iter().any(|triangle| {
+        triangle.layer == TissueLayer::Skin
+            && own(triangle.a)
+            && !world.triangle_alive(triangle)
+            && (near(triangle.a, triangle.b)
+                || near(triangle.b, triangle.c)
+                || near(triangle.c, triangle.a))
+    })
 }
 
 /// Plays random fight `seed` for `seconds` between two side-view fighters
@@ -128,6 +175,29 @@ pub fn play_side_fight(seed: u64, seconds: f64, materials: Materials) -> SideFig
             / dt
             * metres;
         fight.fastest = fight.fastest.max(fastest);
+        // Through whole skin, in a wound, and near the sides.
+        let mut shown = [[false; 3]; 2];
+        for bare in crate::inspect::bare_bones(&world) {
+            let bone = &world.bones[bare.bone];
+            let body = bone.body as usize;
+            if bare.out < BONE_SHOWS_PX || bone.open_break || body > 1 {
+                continue;
+            }
+            let width = crate::scenarios::SCENARIO_WIDTH;
+            if bare.farthest.x < SIDES_PX || bare.farthest.x > width - SIDES_PX {
+                shown[body][2] = true;
+            } else if bone_in_a_wound(&world, bone, bare.farthest) {
+                shown[body][1] = true;
+            } else {
+                shown[body][0] = true;
+                fight.bone_shown_px[body] = fight.bone_shown_px[body].max(bare.out);
+            }
+        }
+        for (body, [whole, wound, at_sides]) in shown.into_iter().enumerate() {
+            fight.bone_shown[body] += u32::from(whole);
+            fight.bone_in_wounds[body] += u32::from(wound && !whole);
+            fight.bone_shown_at_sides[body] += u32::from(at_sides && !whole && !wound);
+        }
         for body in 0..2 {
             let off = world.head_off_pose(body).unwrap_or(0.0);
             fight.head_off[body] = fight.head_off[body].max(off);
@@ -179,4 +249,349 @@ pub fn play_side_fight(seed: u64, seconds: f64, materials: Materials) -> SideFig
     }
     fight.muscle_torn = world.stats.broken_muscle;
     fight
+}
+
+#[cfg(test)]
+mod bare_tests {
+    use super::*;
+    use crate::inspect::{bare_bones, bone_name, BareBone};
+
+    /// One stretch of frames a bone showed through its flesh.
+    struct Episode {
+        from: usize,
+        to: usize,
+        out: f64,
+        bare: f64,
+        /// Where the bone lay farthest out.
+        at: Vec2,
+        /// It showed in a wound at some step (`bone_in_a_wound`).
+        wound: bool,
+        /// Shown on a step's own frame, not only between two.
+        on_step: bool,
+        doing: String,
+    }
+
+    fn doing_text(world: &World, body: usize) -> String {
+        let Some(doing) = world.fighter_doing(body) else {
+            return String::new();
+        };
+        let mut text = Vec::new();
+        if let Some(punch) = doing.punch {
+            text.push(format!(
+                "{:?}{} age {:.3}s reach {:.2}{}",
+                punch.kind,
+                if punch.to_body { " to body" } else { "" },
+                punch.age,
+                punch.reach,
+                if punch.landed { " landed" } else { "" }
+            ));
+        }
+        if doing.step.is_some() {
+            text.push("stepping".into());
+        }
+        if doing.lean > 0.1 {
+            text.push(format!("lean {:.1}", doing.lean));
+        }
+        if doing.duck > 0.1 {
+            text.push(format!("duck {:.1}", doing.duck));
+        }
+        if doing.block > 0.1 {
+            text.push(format!("block {:.1}", doing.block));
+        }
+        if doing.fallen {
+            text.push("down".into());
+        }
+        if doing.getting_up {
+            text.push("getting up".into());
+        }
+        text.join(", ")
+    }
+
+    /// The flesh tied to `bone`, nearest its far end first, at most six
+    /// points.
+    fn tied_flesh(world: &World, bone: usize) -> Vec<usize> {
+        let end = world.bones[bone].b;
+        let mut tied: Vec<(f64, usize)> = world
+            .bone_attachments()
+            .iter()
+            .filter(|tie| tie.bone == bone && !tie.broken)
+            .map(|tie| (distance(world.points()[tie.point].position, end), tie.point))
+            .collect();
+        tied.sort_by(|a, b| a.0.total_cmp(&b.0));
+        tied.dedup_by_key(|(_, point)| *point);
+        tied.into_iter().take(6).map(|(_, point)| point).collect()
+    }
+
+    /// What each phase did over the last step to `bone` and, on average, to
+    /// the flesh tied to it.
+    fn print_traced(world: &World, step: usize, bone: usize, flesh: &[usize]) {
+        let segment = world.bones[bone];
+        let held: Vec<Vec2> = flesh
+            .iter()
+            .map(|&point| world.points()[point].position)
+            .collect();
+        let middle = lerp(segment.a, segment.b, 0.5);
+        let flesh_middle = held.iter().fold(Vec2::default(), |sum, &at| add(sum, at));
+        let flesh_middle = scale(flesh_middle, 1.0 / held.len().max(1) as f64);
+        println!(
+            "  step {step}: bone {bone} middle ({:.1}, {:.1}), its flesh's middle ({:.1}, {:.1}), {}",
+            middle.x,
+            middle.y,
+            flesh_middle.x,
+            flesh_middle.y,
+            doing_text(world, segment.body as usize)
+        );
+        let mut phases: Vec<(&'static str, Vec2, Vec2, f64)> = Vec::new();
+        for stage in world.traced_stages() {
+            let slot = match phases.iter().position(|(phase, ..)| *phase == stage.phase) {
+                Some(slot) => slot,
+                None => {
+                    phases.push((stage.phase, Vec2::default(), Vec2::default(), 0.0));
+                    phases.len() - 1
+                }
+            };
+            if stage.target == 0 {
+                phases[slot].1 = add(phases[slot].1, stage.moved);
+                phases[slot].3 += stage.turned;
+            } else {
+                phases[slot].2 = add(
+                    phases[slot].2,
+                    scale(stage.moved, 1.0 / flesh.len().max(1) as f64),
+                );
+            }
+        }
+        for (phase, bone_moved, flesh_moved, turned) in phases {
+            if hypot(bone_moved.x, bone_moved.y) > 0.5
+                || hypot(flesh_moved.x, flesh_moved.y) > 0.5
+                || turned.abs() > 0.02
+            {
+                println!(
+                    "    {phase:>20}: bone ({:+.1}, {:+.1}) px, turned {:+.3} rad; flesh ({:+.1}, {:+.1}) px",
+                    bone_moved.x, bone_moved.y, turned, flesh_moved.x, flesh_moved.y
+                );
+            }
+        }
+    }
+
+    /// Prints where bone shows through the flesh in random side-view fights,
+    /// on each step's frame and halfway between steps as the game draws it
+    /// (`cargo test --release --lib print_bare_bones -- --ignored
+    /// --nocapture`; `RP_FIGHTS`, `RP_SEED`, `RP_SECONDS`, `RP_BARE_OUT` the
+    /// least distance out of the flesh to print, in pixels).
+    #[test]
+    #[ignore]
+    fn print_bare_bones() {
+        let fights: u64 = std::env::var("RP_FIGHTS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(6);
+        let only: Option<u64> = std::env::var("RP_SEED")
+            .ok()
+            .and_then(|value| value.parse().ok());
+        let seconds: f64 = std::env::var("RP_SECONDS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(60.0);
+        let least: f64 = std::env::var("RP_BARE_OUT")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1.5);
+        let trace_bone: Option<usize> = std::env::var("RP_BARE_BONE")
+            .ok()
+            .and_then(|value| value.parse().ok());
+        let trace_steps = std::env::var("RP_BARE_TRACE")
+            .ok()
+            .and_then(|value| {
+                let (from, to) = value.split_once('-')?;
+                Some(from.parse::<usize>().ok()?..=to.parse::<usize>().ok()?)
+            })
+            .unwrap_or(1..=0);
+        let rest = create_side_fighters(Materials::default());
+        for found in bare_bones(&rest) {
+            println!(
+                "at rest: {} bare {:.1} px, out {:.1} px",
+                bone_name(&rest, found.bone),
+                found.bare,
+                found.out
+            );
+        }
+        for seed in 1..=fights {
+            if only.is_some_and(|only| only != seed) {
+                continue;
+            }
+            // `RP_SET=name=value,...` changes settings as `--set` does, from
+            // the start or, with `RP_SET_AT=STEP`, from that step on.
+            let settings: Vec<(String, String)> = std::env::var("RP_SET")
+                .ok()
+                .map(|items| crate::parse_settings(&[items]).expect("RP_SET takes name=value"))
+                .unwrap_or_default();
+            let set_at: usize = std::env::var("RP_SET_AT")
+                .ok()
+                .and_then(|step| step.parse().ok())
+                .unwrap_or(0);
+            let mut materials = Materials::default();
+            if set_at == 0 {
+                crate::apply_settings(&mut materials, &settings).expect("RP_SET's settings");
+            }
+            let mut world = create_side_fighters(materials);
+            let dt = world.materials.fixed_dt;
+            let mut moves = RandomMoves::new(seed);
+            // `RP_MOVES=0:step=in,40:duck=on,60:jab` plays those moves on
+            // those steps instead of random ones, each written as a gesture
+            // writes it (`scenarios::fighter_move`).
+            let script: Option<Vec<(usize, usize, Move)>> =
+                std::env::var("RP_MOVES").ok().map(|script| {
+                    script
+                        .split(',')
+                        .filter_map(|part| {
+                            let (step, word) = part.split_once(':')?;
+                            match crate::scenarios::fighter_move(word)? {
+                                crate::scenarios::GestureStep::Act(body, made) => {
+                                    Some((step.parse().ok()?, body, made))
+                                }
+                                _ => None,
+                            }
+                        })
+                        .collect()
+                });
+            let mut earlier = MotionSnapshot::default();
+            let mut actual = MotionSnapshot::default();
+            let mut open: std::collections::BTreeMap<usize, Episode> = Default::default();
+            let mut episodes: Vec<(usize, Episode)> = Vec::new();
+            let mut breaks: Vec<(usize, usize, String)> = Vec::new();
+            let mut fractured = world.stats.fractured_bones;
+            let steps = (seconds / dt) as usize;
+            for step in 1..=steps {
+                if set_at > 0 && step == set_at {
+                    for (name, value) in &settings {
+                        world.set_setting(name, value).expect("RP_SET's settings");
+                    }
+                }
+                let mut input = InputState::default();
+                if let Some(script) = &script {
+                    for (slot, (_, body, made)) in
+                        script.iter().filter(|made| made.0 == step).enumerate()
+                    {
+                        input.moves[slot] = Some((*body, *made));
+                    }
+                } else {
+                    for (body, made) in moves.next_step().into_iter().enumerate() {
+                        if let Some(made) = made {
+                            input.moves[body] = Some((body, made));
+                        }
+                    }
+                }
+                world.capture_motion(&mut earlier);
+                // `RP_BARE_TRACE=FROM-TO` with `RP_BARE_BONE=N` follows bone N
+                // and the flesh tied to it through those steps, phase by
+                // phase.
+                let traced = trace_bone.filter(|_| trace_steps.contains(&step));
+                let flesh: Vec<usize> = traced.map_or(Vec::new(), |bone| tied_flesh(&world, bone));
+                if let Some(bone) = traced {
+                    let mut targets = vec![Traced::Bone(bone)];
+                    targets.extend(flesh.iter().map(|&point| Traced::Point(point)));
+                    world.trace(&targets);
+                }
+                world.step(dt, &input, crate::scenarios::SCENARIO_WIDTH);
+                if let Some(bone) = traced {
+                    print_traced(&world, step, bone, &flesh);
+                    world.trace(&[]);
+                }
+                if world.stats.fractured_bones > fractured {
+                    fractured = world.stats.fractured_bones;
+                    for (index, bone) in world.bones.iter().enumerate() {
+                        if (bone.fractured || bone.splinter)
+                            && !breaks.iter().any(|(_, known, _)| *known == index)
+                        {
+                            breaks.push((step, index, bone_name(&world, index)));
+                        }
+                    }
+                }
+                let on_step = bare_bones(&world);
+                world.blend_motion(&earlier, 0.5, &mut actual);
+                let between = bare_bones(&world);
+                world.restore_motion(&actual);
+                let mut seen: Vec<(BareBone, bool)> = Vec::new();
+                for found in on_step.iter().filter(|found| found.out >= least) {
+                    seen.push((*found, true));
+                }
+                for found in between.iter().filter(|found| found.out >= least) {
+                    if let Some(known) = seen.iter_mut().find(|(known, _)| known.bone == found.bone)
+                    {
+                        known.0.out = known.0.out.max(found.out);
+                    } else {
+                        seen.push((*found, false));
+                    }
+                }
+                for (found, shown_on_step) in &seen {
+                    let body = world.bones[found.bone].body as usize;
+                    let episode = open.entry(found.bone).or_insert_with(|| Episode {
+                        from: step,
+                        to: step,
+                        out: 0.0,
+                        bare: 0.0,
+                        at: found.farthest,
+                        wound: false,
+                        on_step: false,
+                        doing: doing_text(&world, body),
+                    });
+                    episode.to = step;
+                    episode.wound |=
+                        bone_in_a_wound(&world, &world.bones[found.bone], found.farthest);
+                    if found.out > episode.out {
+                        episode.at = found.farthest;
+                    }
+                    episode.out = episode.out.max(found.out);
+                    episode.bare = episode.bare.max(found.bare);
+                    episode.on_step |= *shown_on_step;
+                }
+                let closed: Vec<usize> = open
+                    .keys()
+                    .copied()
+                    .filter(|bone| !seen.iter().any(|(found, _)| found.bone == *bone))
+                    .collect();
+                for bone in closed {
+                    let episode = open.remove(&bone).expect("open");
+                    episodes.push((bone, episode));
+                }
+            }
+            for (bone, episode) in open {
+                episodes.push((bone, episode));
+            }
+            episodes.sort_by_key(|(_, episode)| episode.from);
+            println!(
+                "seed {seed}: {} episodes of bone showing {least} px or more out, bones broken {}, world digest {:016x} after {steps} steps",
+                episodes.len(),
+                world.stats.fractured_bones,
+                crate::inspect::digest(&world)
+            );
+            for (step, bone, name) in &breaks {
+                println!("  step {step}: broke, piece {bone} {name}");
+            }
+            for (bone, episode) in &episodes {
+                let segment = &world.bones[*bone];
+                println!(
+                    "  steps {}-{} ({} frames){}{}: fighter {} {} [{}{}], out {:.1} px at ({:.0}, {:.0}), bare {:.1} px; {}",
+                    episode.from,
+                    episode.to,
+                    episode.to - episode.from + 1,
+                    if episode.on_step { "" } else { " between steps only" },
+                    if episode.wound { " in a wound" } else { "" },
+                    segment.body,
+                    bone_name(&world, *bone),
+                    bone,
+                    if segment.fractured || segment.splinter {
+                        ", broken"
+                    } else {
+                        ""
+                    },
+                    episode.out,
+                    episode.at.x,
+                    episode.at.y,
+                    episode.bare,
+                    episode.doing
+                );
+            }
+        }
+    }
 }

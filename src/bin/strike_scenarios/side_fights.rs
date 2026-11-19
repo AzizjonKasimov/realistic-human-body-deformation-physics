@@ -18,7 +18,7 @@ pub(crate) const SIDE_FIGHT_SECONDS: f64 = 20.0;
 
 /// The columns of a side-view fights file, after the comment lines that say
 /// what the fights were played with.
-pub(crate) const SIDE_FIGHTS_HEADER: &str = "fight,seed,seconds,left_joints_torn,right_joints_torn,left_joints_slipped,right_joints_slipped,left_bones_broken,right_bones_broken,left_skin_torn,right_skin_torn,muscle_torn,left_knocked_out,right_knocked_out,left_fell,right_fell,left_head_off_cm,right_head_off_cm,fastest_m_s,left_torn_joints,right_torn_joints,left_slipped_joints,right_slipped_joints,left_downs,right_downs,left_got_up,right_got_up,left_longest_down_s,right_longest_down_s";
+pub(crate) const SIDE_FIGHTS_HEADER: &str = "fight,seed,seconds,left_joints_torn,right_joints_torn,left_joints_slipped,right_joints_slipped,left_bones_broken,right_bones_broken,left_skin_torn,right_skin_torn,muscle_torn,left_knocked_out,right_knocked_out,left_fell,right_fell,left_head_off_cm,right_head_off_cm,fastest_m_s,left_torn_joints,right_torn_joints,left_slipped_joints,right_slipped_joints,left_downs,right_downs,left_got_up,right_got_up,left_longest_down_s,right_longest_down_s,left_bone_shown,right_bone_shown,left_bone_shown_px,right_bone_shown_px,left_bone_in_wounds,right_bone_in_wounds,left_bone_shown_at_sides,right_bone_shown_at_sides";
 
 /// Plays side-view fights `seed` to `seed + count - 1`, each
 /// [`SIDE_FIGHT_SECONDS`] long, on all cores, writes them to
@@ -68,7 +68,7 @@ pub(crate) fn side_fights(count: usize, seed: u64, output_dir: &Path) {
         let out = |step: Option<usize>| step.map_or(String::new(), |step| step.to_string());
         writeln!(
             csv,
-            "{index},{},{SIDE_FIGHT_SECONDS},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.1},{:.1},{:.2},\"{}\",\"{}\",\"{}\",\"{}\",{},{},{},{},{:.2},{:.2}",
+            "{index},{},{SIDE_FIGHT_SECONDS},{},{},{},{},{},{},{},{},{},{},{},{},{},{:.1},{:.1},{:.2},\"{}\",\"{}\",\"{}\",\"{}\",{},{},{},{},{:.2},{:.2},{},{},{:.1},{:.1},{},{},{},{}",
             fight.seed,
             fight.torn_joints[0].len(),
             fight.torn_joints[1].len(),
@@ -96,6 +96,14 @@ pub(crate) fn side_fights(count: usize, seed: u64, output_dir: &Path) {
             fight.got_up[1],
             fight.longest_down[0],
             fight.longest_down[1],
+            fight.bone_shown[0],
+            fight.bone_shown[1],
+            fight.bone_shown_px[0],
+            fight.bone_shown_px[1],
+            fight.bone_in_wounds[0],
+            fight.bone_in_wounds[1],
+            fight.bone_shown_at_sides[0],
+            fight.bone_shown_at_sides[1],
         )
         .expect("write side fights CSV");
     }
@@ -128,6 +136,24 @@ pub(crate) fn side_fights(count: usize, seed: u64, output_dir: &Path) {
                     fight.downs[body], fight.got_up[body], fight.longest_down[body]
                 ));
             }
+            if fight.bone_shown[body] > 0 {
+                line.push_str(&format!(
+                    "; the {side} fighter's bone showed through whole skin on {} steps, {:.0} px out at most",
+                    fight.bone_shown[body], fight.bone_shown_px[body]
+                ));
+            }
+            if fight.bone_in_wounds[body] > 0 {
+                line.push_str(&format!(
+                    "; the {side} fighter's bone showed in a wound on {} steps",
+                    fight.bone_in_wounds[body]
+                ));
+            }
+            if fight.bone_shown_at_sides[body] > 0 {
+                line.push_str(&format!(
+                    "; the {side} fighter's bone showed near the window's side on {} steps",
+                    fight.bone_shown_at_sides[body]
+                ));
+            }
         }
         report.push_str(&line);
         report.push('\n');
@@ -135,7 +161,7 @@ pub(crate) fn side_fights(count: usize, seed: u64, output_dir: &Path) {
     let count_of =
         |test: &dyn Fn(&rp::SideFight) -> bool| fights.iter().filter(|f| test(f)).count();
     report.push_str(&format!(
-        "\nIn all: {} fights tore or put out a joint, {} broke a bone, {} tore skin or muscle, {} knocked a fighter out, {} had a fighter fall with no knockout; fighters went down {} times and got up {}; heads got {:.0} cm from their poses at the median.\n",
+        "\nIn all: {} fights tore or put out a joint, {} broke a bone, {} tore skin or muscle, {} knocked a fighter out, {} had a fighter fall with no knockout; fighters went down {} times and got up {}; heads got {:.0} cm from their poses at the median; bone showed {} px or more through whole skin in {} fights, on {} steps (and in wounds on {} more, and near the window's sides, which the game's ring keeps fighters from, on {} more).\n",
         count_of(&|f| f.torn_joints.iter().chain(&f.slipped_joints).any(|joints| !joints.is_empty())),
         count_of(&|f| f.bones_broken.iter().sum::<i32>() > 0),
         count_of(&|f| f.skin_torn.iter().sum::<i32>() + f.muscle_torn > 0),
@@ -149,6 +175,11 @@ pub(crate) fn side_fights(count: usize, seed: u64, output_dir: &Path) {
                 .flat_map(|fight| fight.head_off.map(|off| off * 100.0))
                 .collect()
         ),
+        rp::BONE_SHOWS_PX,
+        count_of(&|f| f.bone_shown.iter().sum::<u32>() > 0),
+        fights.iter().map(|f| f.bone_shown.iter().sum::<u32>()).sum::<u32>(),
+        fights.iter().map(|f| f.bone_in_wounds.iter().sum::<u32>()).sum::<u32>(),
+        fights.iter().map(|f| f.bone_shown_at_sides.iter().sum::<u32>()).sum::<u32>(),
     ));
     let report_path = output_dir.join("side_fights_report.txt");
     fs::write(&report_path, &report).expect("write side fights report");

@@ -6,6 +6,7 @@
 //! the app's viewer (`--inspect`) shows them over the body. A digest of the
 //! whole world tells two runs that should match apart.
 
+mod bare;
 mod blame;
 mod digest;
 mod names;
@@ -13,6 +14,7 @@ mod story;
 mod watchdogs;
 mod why;
 
+pub use bare::{bare_bones, BareBone};
 pub use blame::{blame, blame_by_step, Blame, BlameTarget, PhasePush};
 pub use digest::digest;
 pub use names::{

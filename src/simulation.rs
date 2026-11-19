@@ -26,6 +26,7 @@ mod rise;
 mod side_fights;
 mod sides;
 mod sight;
+mod skin_hold;
 mod soft;
 mod stance;
 mod tendons;
@@ -49,7 +50,7 @@ pub use motion::MotionSnapshot;
 pub use mover::{Move, Mover};
 pub use phases::{PhaseClock, PhaseTime, PhaseTimes, Traced, TracedStage};
 pub use punch::Punch;
-pub use side_fights::{play_side_fight, RandomMoves, SideFight};
+pub use side_fights::{bone_in_a_wound, play_side_fight, RandomMoves, SideFight, BONE_SHOWS_PX};
 pub use sight::{Doing, LandedPunch, PunchKind, Punching, Stepping, Struck};
 pub use stance::{Carry, FootHold, HipHold, JointDrive, Limb, PostureBinding};
 pub use tendons::{Muscle, Tendon, TendonEnd};
@@ -358,6 +359,10 @@ pub struct Materials {
     /// back on the feet standing on the floor (`balance.rs`), rather than it
     /// pushing the hips from nowhere.
     pub legs_carry: bool,
+    /// Whether every bone the normal view draws meets the skin round it from
+    /// inside (`skin_hold.rs`), rather than only a closed break's pieces,
+    /// near the skin, being held in (`hold_closed_pieces_in_the_skin`).
+    pub skin_holds_bones: bool,
     /// How firmly legs that carry a fighter's hips push them across toward
     /// where its pose puts them over its feet, and keep its pelvis tilted
     /// as the pose has it, in hertz on the body's weight and on its turning
@@ -673,6 +678,7 @@ impl Default for Materials {
             hip_hold_hertz: 6.0,
             carry_strength: 1.0,
             legs_carry: true,
+            skin_holds_bones: false,
             legs_across_hertz: 2.0,
             legs_tilt_hertz: 3.0,
             legs_up_hertz: 0.0,
@@ -1711,6 +1717,9 @@ pub struct Stats {
 pub struct ContactDebug {
     /// Times the skin held a closed break's piece from passing out through it.
     pub skin_held_pieces: i32,
+    /// Pushes the skin gave bones that reached it from inside, holding them
+    /// in (`skin_hold.rs`).
+    pub skin_held_bones: i32,
     pub active: bool,
     pub down: bool,
     pub striker_position: Vec2,
@@ -1830,6 +1839,7 @@ impl Default for ContactDebug {
     fn default() -> Self {
         Self {
             skin_held_pieces: 0,
+            skin_held_bones: 0,
             active: false,
             down: false,
             striker_position: Vec2::default(),
@@ -2099,6 +2109,15 @@ pub struct World {
     /// of those muscle points is tied to (`outline.rs`).
     flesh_under_skin: Vec<(usize, usize)>,
     flesh_ties: Vec<(usize, usize)>,
+    /// What the skin holds of each bone as the body was built, and the mesh
+    /// it was worked out for; the places along bones that meet the skin
+    /// round them this substep, and the muscle under the skin they press
+    /// (`skin_hold.rs`).
+    bones_in_skin: Vec<skin_hold::BoneInSkin>,
+    bones_in_skin_key: Option<(u64, usize, usize)>,
+    skin_holds: Vec<skin_hold::SkinHold>,
+    skin_columns: Vec<(usize, usize)>,
+    skin_column_ties: Vec<(usize, usize)>,
     /// How hard a bat or hammer knocked each point this step, before the
     /// broad face spreads it; a blow that lands on a scab knocks it open.
     blunt_knock: Vec<f64>,
@@ -2252,6 +2271,11 @@ impl World {
             outline_pairs: Vec::new(),
             flesh_under_skin: Vec::new(),
             flesh_ties: Vec::new(),
+            bones_in_skin: Vec::new(),
+            bones_in_skin_key: None,
+            skin_holds: Vec::new(),
+            skin_columns: Vec::new(),
+            skin_column_ties: Vec::new(),
             blunt_knock: Vec::new(),
             fist_contacts: Vec::new(),
             fist_blows: Vec::new(),
@@ -2437,6 +2461,14 @@ impl World {
 
     pub fn materials(&self) -> &Materials {
         &self.materials
+    }
+
+    /// Changes setting `name` of this world's [`Materials`] to `value`, as
+    /// `--set` does for a world being built, from the next step on: for the
+    /// tools, to play a change from partway into a run. A setting read only
+    /// as a body is built keeps what it built.
+    pub fn set_setting(&mut self, name: &str, value: &str) -> Result<(), String> {
+        self.materials.set(name, value)
     }
 
     pub fn points(&self) -> &[Point] {

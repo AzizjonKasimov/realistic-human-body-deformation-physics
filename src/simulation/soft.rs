@@ -259,6 +259,11 @@ impl World {
             // its hips from (`balance.rs`), before the hold on the hips warm
             // starts and pushes back on them.
             self.timed("stance", Self::measure_stances);
+            // Where bones may meet the skin round them from inside this
+            // substep (`skin_hold.rs`).
+            if self.materials.skin_holds_bones {
+                self.timed("bones in skin", |world| world.measure_skin_holds(h));
+            }
             if self.materials.warm_starting {
                 self.warm_start_soft(h);
             } else {
@@ -302,6 +307,9 @@ impl World {
                 self.timed("fragment-tissue", Self::solve_bone_fragment_tissue_contacts);
                 self.timed("fragment pairs", Self::solve_bone_fragment_repulsion);
                 self.timed("outline contact", Self::solve_outline_contacts);
+                if self.materials.skin_holds_bones {
+                    self.timed("skin holds bones", |world| world.solve_skin_holds(h));
+                }
                 self.timed("skin holds pieces", Self::hold_closed_pieces_in_the_skin);
                 self.timed("world bounds", |world| {
                     world.constrain_to_world(width, floor_y)

@@ -17,6 +17,8 @@
 //!                            120 steps of the body settling)
 //! --every N                  also save the screen every N steps, as OUT-STEP.png,
 //!                            to see how things move
+//! --from STEP                with --every, save only from that step on, to film
+//!                            a moment deep into a long play
 //! --no-ui                    leave out the HUD, control buttons, and pointer ring
 //! --no-tool                  leave out the tool, to see what lies under it
 //! --label TEXT              write TEXT in the bottom right corner
@@ -36,6 +38,9 @@
 //! --set NAME=VALUE           play with a setting of `Materials` changed, as
 //!                            `strike_scenarios --set` does, to see what a
 //!                            change looks like before making it the default
+//! --set-at STEP              change the --set settings only from that step
+//!                            on, so a film shows a change from the same
+//!                            moment of a long play as one without it
 //! --fighters                 play on two fighters standing side by side, as
 //!                            the fight scenarios stand them, rather than a
 //!                            lone body (gestures throw the second fighter's
@@ -71,6 +76,11 @@ pub struct CaptureRequest {
     play: Option<Scenario>,
     frames: Option<i32>,
     every: Option<i32>,
+    /// With `every`, the first step a frame is saved on.
+    from: i32,
+    /// The `--set` settings, changed from this step on rather than as the
+    /// world is built.
+    set_at: Option<(i32, Vec<(String, String)>)>,
     hide_ui: bool,
     hide_tool: bool,
     label: Option<String>,
@@ -112,12 +122,15 @@ pub fn request() -> Option<CaptureRequest> {
     }
     let mut args = env::args().skip(1);
     let mut settings = Vec::new();
+    let mut set_at = None;
     let mut request = CaptureRequest {
         path: PathBuf::new(),
         views: vec![ViewMode::Normal],
         play: None,
         frames: None,
         every: None,
+        from: 0,
+        set_at: None,
         hide_ui: false,
         hide_tool: false,
         label: None,
@@ -165,6 +178,7 @@ pub fn request() -> Option<CaptureRequest> {
             }
             "--frames" => request.frames = Some(steps(&value("--frames"))),
             "--every" => request.every = Some(steps(&value("--every")).max(1)),
+            "--from" => request.from = steps(&value("--from")),
             "--no-ui" => request.hide_ui = true,
             "--no-tool" => request.hide_tool = true,
             "--fighters" => request.fighters = true,
@@ -189,6 +203,7 @@ pub fn request() -> Option<CaptureRequest> {
             "--events" => request.events = Some(PathBuf::from(value("--events"))),
             "--sound" => request.sound = Some(PathBuf::from(value("--sound"))),
             "--set" => settings.push(value("--set")),
+            "--set-at" => set_at = Some(steps(&value("--set-at"))),
             "--variant" => {
                 let spec = value("--variant");
                 let numbers: Vec<f64> = spec
@@ -210,7 +225,12 @@ pub fn request() -> Option<CaptureRequest> {
         let parsed = rp::parse_settings(&settings).unwrap_or_else(|error| fail(&error));
         rp::apply_settings(&mut rp::Materials::default(), &parsed)
             .unwrap_or_else(|error| fail(&error));
-        rp::scenarios::use_settings(parsed);
+        match set_at {
+            Some(step) => request.set_at = Some((step, parsed)),
+            None => rp::scenarios::use_settings(parsed),
+        }
+    } else if set_at.is_some() {
+        fail("--set-at needs --set");
     }
     if let (Some((along, across, strength)), Some(play)) = (request.variant, request.play) {
         request.play = Some(play.shifted(along, across).with_bone_strength(strength));
@@ -288,6 +308,15 @@ pub async fn run(request: CaptureRequest) {
         .as_ref()
         .map(|bank| (Foley::new(), Mixdown::new(bank, dt)));
     for frame in 0..frames {
+        if let Some((step, settings)) = &request.set_at {
+            if frame == *step {
+                for (name, value) in settings {
+                    app.world
+                        .set_setting(name, value)
+                        .unwrap_or_else(|error| fail(&error));
+                }
+            }
+        }
         // The play is in the world, as the scenarios play it; only its
         // pointer ring is drawn through the view.
         let input = match &request.play {
@@ -313,7 +342,7 @@ pub async fn run(request: CaptureRequest) {
         }
         if request
             .every
-            .is_some_and(|every| step % every == 0 && step < frames)
+            .is_some_and(|every| step % every == 0 && step >= request.from && step < frames)
         {
             save_views(&mut app, &request, Some(step)).await;
         }
