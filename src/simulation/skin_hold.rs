@@ -188,7 +188,12 @@ impl World {
     /// lay as the body was built where that is less, so nothing at rest is
     /// pushed.
     fn refresh_bones_in_skin(&mut self) {
-        let key = (self.topology_version, self.bones.len(), self.points.len());
+        let key = (
+            self.topology_version,
+            self.bones.len(),
+            self.points.len(),
+            self.attachments.len(),
+        );
         if self.bones_in_skin_key == Some(key) {
             return;
         }
@@ -230,6 +235,16 @@ impl World {
             .collect();
         self.bones_in_skin = held;
         self.bones_in_skin_key = Some(key);
+        // The fat ties under each skin point, which the skin presses with
+        // (`measure_skin_columns`).
+        let mut ties: Vec<(usize, usize)> = self
+            .attachments
+            .iter()
+            .enumerate()
+            .map(|(tie, attachment)| (attachment.skin_point, tie))
+            .collect();
+        ties.sort_unstable();
+        self.fat_ties_by_skin = ties;
     }
 
     /// Finds, as this substep begins, each place along a bone that may reach
@@ -318,10 +333,18 @@ impl World {
         let mut touched: Vec<usize> = self.skin_holds.iter().flat_map(|hold| hold.skin).collect();
         touched.sort_unstable();
         touched.dedup();
-        for attachment in &self.attachments {
-            if !attachment.broken && touched.binary_search(&attachment.skin_point).is_ok() {
-                self.skin_columns
-                    .push((attachment.skin_point, attachment.muscle_point));
+        for skin in touched {
+            let from = self
+                .fat_ties_by_skin
+                .partition_point(|&(point, _)| point < skin);
+            for &(point, tie) in &self.fat_ties_by_skin[from..] {
+                if point != skin {
+                    break;
+                }
+                let attachment = &self.attachments[tie];
+                if !attachment.broken {
+                    self.skin_columns.push((skin, attachment.muscle_point));
+                }
             }
         }
         self.skin_columns.sort_unstable();
@@ -374,10 +397,20 @@ impl World {
     /// `change` over a substep `h` long: the muscle by its share of the
     /// skin points it is tied to.
     fn speed_up_column(&mut self, skin: usize, change: Vec2, h: f64) {
-        let column: Vec<(usize, usize)> = self.skin_column(skin).collect();
         let moved = scale(change, h);
         self.points[skin].position = add(self.points[skin].position, moved);
-        for (muscle, ties) in column {
+        let from = self
+            .skin_columns
+            .partition_point(|&(point, _)| point < skin);
+        for index in from..self.skin_columns.len() {
+            let (point, muscle) = self.skin_columns[index];
+            if point != skin {
+                break;
+            }
+            let ties = self
+                .skin_column_ties
+                .binary_search_by_key(&muscle, |&(muscle, _)| muscle)
+                .map_or(1, |found| self.skin_column_ties[found].1);
             if self.inverse_masses[muscle] > 0.0 {
                 self.points[muscle].position = add(
                     self.points[muscle].position,
@@ -483,16 +516,18 @@ impl World {
         };
         let mut nearest: Option<(f64, usize, f64)> = None;
         for &edge in edges {
-            if whole_only && !self.skin_edge_whole(outline, edge) {
-                continue;
-            }
             let (a, b) = (
                 place(&self.points[points[edge]]),
                 place(&self.points[points[(edge + 1) % count]]),
             );
             let t = segment_t(at, a, b);
             let gap = distance(at, lerp(a, b, t));
-            if gap > reach || nearest.is_some_and(|(closest, ..)| gap >= closest) {
+            // Whether it is whole skin is asked only of a stretch nearer
+            // than the nearest found yet, which few are.
+            if gap > reach
+                || nearest.is_some_and(|(closest, ..)| gap >= closest)
+                || (whole_only && !self.skin_edge_whole(outline, edge))
+            {
                 continue;
             }
             nearest = Some((gap, edge, t));

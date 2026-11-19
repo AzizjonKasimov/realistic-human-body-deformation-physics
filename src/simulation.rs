@@ -2115,7 +2115,9 @@ pub struct World {
     /// round them this substep, and the muscle under the skin they press
     /// (`skin_hold.rs`).
     bones_in_skin: Vec<skin_hold::BoneInSkin>,
-    bones_in_skin_key: Option<(u64, usize, usize)>,
+    bones_in_skin_key: Option<(u64, usize, usize, usize)>,
+    /// Each fat tie by the skin point it holds, in order (`skin_hold.rs`).
+    fat_ties_by_skin: Vec<(usize, usize)>,
     skin_holds: Vec<skin_hold::SkinHold>,
     skin_columns: Vec<(usize, usize)>,
     skin_column_ties: Vec<(usize, usize)>,
@@ -2274,6 +2276,7 @@ impl World {
             flesh_ties: Vec::new(),
             bones_in_skin: Vec::new(),
             bones_in_skin_key: None,
+            fat_ties_by_skin: Vec::new(),
             skin_holds: Vec::new(),
             skin_columns: Vec::new(),
             skin_column_ties: Vec::new(),
