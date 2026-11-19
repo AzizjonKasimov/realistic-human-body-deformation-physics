@@ -50,6 +50,8 @@ struct Fights {
     /// Whether the file names the joints that tore or slipped; one written
     /// before fights files did only counts them.
     names_joints: bool,
+    /// The watchdogs its build watched for ([`watched`]).
+    watched: BTreeSet<Watchdog>,
     fights: Vec<FightLine>,
 }
 
@@ -97,6 +99,49 @@ pub(crate) fn watchdog_named(name: &str) -> Option<Watchdog> {
         .find(|watchdog| format!("{watchdog:?}") == name || watchdog.slug() == name)
 }
 
+/// The comment line a fights or blows file lists the watchdogs its build
+/// watched for in. A file lists only those that tripped in each play, so
+/// without it a watchdog a build did not have reads as never tripped.
+pub(crate) fn watchdogs_comment() -> String {
+    let slugs: Vec<&str> = Watchdog::ALL
+        .iter()
+        .map(|watchdog| watchdog.slug())
+        .collect();
+    format!("# watchdogs: {}", slugs.join(","))
+}
+
+/// The watchdogs a file's `# watchdogs:` comment lists (`listed`), or, for a
+/// file written before files listed them, every watchdog but bone showing
+/// through whole skin, which came with the list. A name this build does not
+/// know, from a newer one, is left out.
+pub(crate) fn watched(listed: Option<&str>) -> BTreeSet<Watchdog> {
+    match listed {
+        Some(list) => list
+            .split(',')
+            .filter_map(|name| watchdog_named(name.trim()))
+            .collect(),
+        None => Watchdog::ALL
+            .iter()
+            .copied()
+            .filter(|&watchdog| watchdog != Watchdog::BoneShows)
+            .collect(),
+    }
+}
+
+/// The watchdogs only one side watched for, in words, for a report's line:
+/// "bone showing through whole skin (only B)".
+pub(crate) fn watched_by_one(a: &BTreeSet<Watchdog>, b: &BTreeSet<Watchdog>) -> Vec<String> {
+    a.symmetric_difference(b)
+        .map(|watchdog| {
+            format!(
+                "{} (only {})",
+                watchdog.describe(),
+                if a.contains(watchdog) { "A" } else { "B" }
+            )
+        })
+        .collect()
+}
+
 impl Fights {
     fn read(path: &Path) -> Result<Fights, String> {
         let file = fights_file(path);
@@ -113,9 +158,11 @@ impl Fights {
             seed: String::new(),
             mix: String::new(),
             names_joints: false,
+            watched: BTreeSet::new(),
             fights: Vec::new(),
         };
         let mut columns: Vec<String> = Vec::new();
+        let mut listed: Option<String> = None;
         for line in text.lines() {
             if let Some(comment) = line.strip_prefix('#') {
                 if let Some((key, value)) = comment.split_once(':') {
@@ -125,6 +172,7 @@ impl Fights {
                         "trying" => fights.trying = value,
                         "seed" => fights.seed = value,
                         "mix" => fights.mix = value,
+                        "watchdogs" => listed = Some(value),
                         _ => {}
                     }
                 }
@@ -189,6 +237,7 @@ impl Fights {
         if columns.is_empty() {
             return Err("no header line".to_string());
         }
+        fights.watched = watched(listed.as_deref());
         Ok(fights)
     }
 
@@ -363,10 +412,18 @@ fn fights_report(a: &Fights, a_label: &str, b: &Fights, b_label: &str) -> (Strin
         .iter()
         .chain(&b.fights)
         .flat_map(|fight| fight.tripped.iter().copied())
+        .filter(|kind| a.watched.contains(kind) && b.watched.contains(kind))
         .collect();
     report.push_str("\nWatchdogs, the fights each tripped in:\n");
     if kinds.is_empty() {
         report.push_str("  none tripped in either side's fights\n");
+    }
+    let one_sided = watched_by_one(&a.watched, &b.watched);
+    if !one_sided.is_empty() {
+        report.push_str(&format!(
+            "  watched by only one side's build, not compared: {}\n",
+            one_sided.join(", ")
+        ));
     }
     for kind in kinds {
         let change = Change::of(&a.fights, &b.fights, paired, &|fight| {

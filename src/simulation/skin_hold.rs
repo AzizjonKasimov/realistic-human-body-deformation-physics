@@ -27,10 +27,38 @@
 //! soft contacts"; Shinar, Schroeder and Fedkiw 2008, "Two-way coupling of
 //! rigid and deformable bodies"). Only where the skin is torn or cut, or
 //! the flesh at it torn away, or round an open break, can bone come out.
+//!
+//! The sandbox's front-view body is held so too, by more rules that a body
+//! struck by tools, its limbs one sheet of flesh, needs. Held as a fighter
+//! once was, half its flesh's depth kept, a tool crushing flesh onto a bone
+//! pinched the skin against that depth, and a firm bat swing split the
+//! skin in every run of the sweep; flesh a heavy blow dents for good was
+//! pushed back out for ever, and the body never came to rest; a punch on a
+//! front-view fighter's guard passed its push through the hold straight to
+//! the forearm's bone and folded the arm down for good; and the skin of an
+//! elbow's inner crease, round both the forearm's bone and the upper arm's,
+//! was pushed two ways by them and tore. So (1) skin a tool's or a fist's
+//! surface reaches, or other skin presses (another body's, or its own
+//! across a fold), lets go of the bone under it: the bone may be pressed
+//! onto it, as a hammer crushes flesh onto bone, and what presses reaches
+//! the bone by its own contacts with bones (`tools.rs`, `clash.rs`); (2) a
+//! limb's bone meets only the skin held mostly to it, not its whole limb's;
+//! (3) skin turned over in a crease is no wall; and (4) the wall holds
+//! softly, as two limbs meeting do: held as firmly as a substep allows,
+//! even only once a bone was past it, the elbow's crease tore under every
+//! punch on the guard. A closed break's pieces, which no skin is held to,
+//! keep their own hold (`hold_closed_pieces_in_the_skin`).
 
 use super::soft::{speed_up_bone, Softness};
 use super::*;
 
+/// How stiff a front-view body's skin's push on a bone that reaches it is,
+/// in hertz, and how damped: Box2D's contact softness, as two limbs meeting
+/// (`clash.rs`), capped at a quarter of the substep's rate as Box2D caps it.
+/// Held as firmly as a fighter's, the skin of the sandbox's elbow crease
+/// tore under every punch on the guard.
+const FRONT_HOLD_HERTZ: f64 = 30.0;
+const FRONT_HOLD_DAMPING_RATIO: f64 = 10.0;
 /// The fastest a bone found outside its skin is drawn back in, in metres a
 /// second: Box2D's `contactSpeed`, as the skin's own contacts push.
 const SKIN_HOLD_PUSH_SPEED: f64 = 3.0;
@@ -84,6 +112,15 @@ pub(super) struct BoneInSkin {
     margins: Vec<Option<f64>>,
 }
 
+/// Which stretches of skin a place may meet: any (as the body was built),
+/// whole skin, or whole skin not turned over in a crease.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Surface {
+    Any,
+    Whole,
+    Uncreased,
+}
+
 /// The nearest stretch of skin round a place: the stretch, where along it,
 /// the way into the flesh there, and how far inside the skin the place is
 /// (negative outside).
@@ -96,57 +133,65 @@ struct NearestSkin {
 }
 
 impl World {
-    /// Whether the skin holds `bone` in: any bone of a side-view fighter the
-    /// normal view draws, but the pieces of an open break, which come out
-    /// through the skin they cut. The sandbox's front-view bodies keep only
-    /// their closed breaks' pieces held in (`hold_closed_pieces_in_the_skin`):
-    /// held so, a bat or a hammer pressing a bone's flesh down onto it
-    /// pinched the skin between them, and a firm bat swing split the skin
-    /// in all of the sweep's 45 runs, where real swings rarely do; and their
-    /// flesh, which a heavy blow leaves dented for good, was pushed back
-    /// out for ever after, so the body never came to rest.
+    /// Whether the skin holds `bone` in: any bone the normal view draws, of
+    /// a side-view fighter or a front-view body, but the pieces of an open
+    /// break, which come out through the skin they cut.
     pub(super) fn skin_holds(&self, bone: &BoneSegment) -> bool {
-        self.materials.skin_holds_bones && self.skin_could_hold(bone)
+        let on = if self.side_fighter(bone.body as usize) {
+            self.materials.skin_holds_bones
+        } else {
+            self.materials.skin_holds_front
+        };
+        on && self.skin_could_hold(bone)
     }
 
-    /// Whether the skin would hold `bone` in with `skin_holds_bones` on: what
-    /// is worked out of it once per mesh (`refresh_bones_in_skin`) whatever
-    /// the setting, so that turning it on partway into a play holds it.
+    /// Whether the skin would hold `bone` in with its body's setting on
+    /// (`skin_holds_bones`, `skin_holds_front`): what is worked out of it
+    /// once per mesh (`refresh_bones_in_skin`) whatever the setting, so that
+    /// turning it on partway into a play holds it.
     fn skin_could_hold(&self, bone: &BoneSegment) -> bool {
-        self.side_fighter(bone.body as usize)
-            && bone.kind != BoneKind::Spine
+        bone.kind != BoneKind::Spine
             && !bone.open_break
             && bone.a.x.is_finite()
             && bone.b.x.is_finite()
     }
 
     /// Whether body `body` is a side-view fighter.
-    fn side_fighter(&self, body: usize) -> bool {
+    pub(super) fn side_fighter(&self, body: usize) -> bool {
         self.bodies
             .get(body)
             .is_some_and(|state| state.fighter.is_some())
     }
 
-    /// Whether skin point `point` is of the skin round `bone`: kept in its
-    /// place by a bone of the same limb, or, for the head and trunk, by any
-    /// bone of them. The same part alone, as a broken piece's skin is found
-    /// (`skin_round`), found no skin round a rib: the chest's skin keeps its
-    /// place on the spine.
-    fn skin_round_whole(&self, point: usize, bone: &BoneSegment) -> bool {
+    /// Whether skin point `point` is of the skin round bone `index`: kept in
+    /// its place by a bone of the same limb, or, for the head and trunk, by
+    /// any bone of them. The same part alone, as a broken piece's skin is
+    /// found (`skin_round`), found no skin round a rib: the chest's skin
+    /// keeps its place on the spine. A front-view body's limb bone meets
+    /// only skin held mostly to it: the limbs are one sheet of flesh, and
+    /// the skin of an elbow's inner crease, held to the forearm and the
+    /// upper arm both, was pushed two ways by their bones and tore, and at
+    /// rest the upper arm's bone lay against it.
+    fn skin_round_whole(&self, point: usize, index: usize) -> bool {
         let Some(hold) = self.point_holds.get(point) else {
             return false;
         };
+        let bone = &self.bones[index];
+        let own = !self.side_fighter(bone.body as usize) && bone.limb != Limb::None;
         let binding = hold.posture;
         binding
             .bones
             .iter()
             .zip(binding.weights)
-            .any(|(&index, weight)| {
+            .any(|(&other, weight)| {
                 weight > 0.0
-                    && self
-                        .bones
-                        .get(index)
-                        .is_some_and(|other| other.body == bone.body && other.limb == bone.limb)
+                    && if own {
+                        other == index && weight >= 0.5
+                    } else {
+                        self.bones
+                            .get(other)
+                            .is_some_and(|other| other.body == bone.body && other.limb == bone.limb)
+                    }
             })
     }
 
@@ -170,8 +215,8 @@ impl World {
             let count = points.len();
             let edges: Vec<usize> = (0..count)
                 .filter(|&edge| {
-                    self.skin_round_whole(points[edge], &bone)
-                        && self.skin_round_whole(points[(edge + 1) % count], &bone)
+                    self.skin_round_whole(points[edge], index)
+                        && self.skin_round_whole(points[(edge + 1) % count], index)
                 })
                 .collect();
             if !edges.is_empty() {
@@ -220,7 +265,7 @@ impl World {
                             &edges,
                             at,
                             f64::INFINITY,
-                            false,
+                            Surface::Any,
                             |point| point.home,
                         )?;
                         (found.depth > 0.0).then(|| (found.depth * MOST_KEPT).min(half))
@@ -258,6 +303,7 @@ impl World {
         self.refresh_bones_in_skin();
         let spacing = self.materials.point_spacing.max(1.0);
         let reach = SKIN_HOLD_REACH * spacing;
+        let pressed = self.pressed_skin();
         let mut holds = Vec::new();
         for (index, held) in self.bones_in_skin.iter().enumerate() {
             let Some(outline) = held.outline else {
@@ -267,6 +313,9 @@ impl World {
             if !self.skin_holds(&bone) {
                 continue;
             }
+            // A front-view body's skin lets go of a bone where something
+            // else presses it, and skin creased over is no wall there.
+            let yields = !self.side_fighter(bone.body as usize);
             let points = self.outlines[outline].points();
             let count = points.len();
             let samples = held.margins.len().saturating_sub(1).max(1);
@@ -276,14 +325,27 @@ impl World {
                 };
                 let along = sample as f64 / samples as f64;
                 let at = lerp(bone.previous_a, bone.previous_b, along);
-                let Some(found) =
-                    self.nearest_skin(outline, &held.edges, at, reach, true, |point| {
-                        point.previous
-                    })
-                else {
+                let Some(found) = self.nearest_skin(
+                    outline,
+                    &held.edges,
+                    at,
+                    reach,
+                    if yields {
+                        Surface::Uncreased
+                    } else {
+                        Surface::Whole
+                    },
+                    |point| point.previous,
+                ) else {
                     continue;
                 };
                 let skin = [points[found.edge], points[(found.edge + 1) % count]];
+                if yields
+                    && (pressed.binary_search(&skin[0]).is_ok()
+                        || pressed.binary_search(&skin[1]).is_ok())
+                {
+                    continue;
+                }
                 // How far the place and the skin could close within the
                 // substep, moving as they do.
                 let bone_velocity = lerp(
@@ -313,6 +375,48 @@ impl World {
         }
         self.skin_holds = holds;
         self.measure_skin_columns();
+    }
+
+    /// Each point of flesh something else presses as this substep begins,
+    /// which lets go of a front-view body's bone under it: where a tool's
+    /// or a fist's surface reaches it (`points_touched`, within half a point
+    /// spacing; all the tool may reach this step covered a thin limb whole,
+    /// and the bone went out of its far side), and skin touching other skin
+    /// (`mark_skin_touching`), sorted, each once. Nothing, if no
+    /// front-view body is held.
+    fn pressed_skin(&self) -> Vec<usize> {
+        let front = self.materials.skin_holds_front
+            && (0..self.bodies.len()).any(|body| !self.side_fighter(body));
+        if !front {
+            return Vec::new();
+        }
+        let mut pressed = self.points_touched(0.5 * self.materials.point_spacing);
+        self.mark_skin_touching(&mut pressed);
+        pressed.sort_unstable();
+        pressed.dedup();
+        pressed
+    }
+
+    /// Adds to `marks` each skin point touching other skin as this substep
+    /// begins: a point and the stretch of outline it meets
+    /// (`outline_pairs`), of another body or of its own across a gap,
+    /// within a point spacing.
+    fn mark_skin_touching(&self, marks: &mut Vec<usize>) {
+        let touch = self.materials.point_spacing;
+        for pair in &self.outline_pairs {
+            let (point, edge, outline) = (pair.point, pair.edge, pair.outline);
+            let points = self.outlines[outline].points();
+            let count = points.len();
+            let (a, b) = (points[edge], points[(edge + 1) % count]);
+            let gap = distance_to_segment(
+                self.points[point].previous,
+                self.points[a].previous,
+                self.points[b].previous,
+            );
+            if gap <= touch {
+                marks.extend([point, a, b]);
+            }
+        }
     }
 
     fn point_velocity(&self, point: usize, h: f64) -> Vec2 {
@@ -429,6 +533,11 @@ impl World {
             return;
         }
         let firmness = Softness::new(2.0 * PI * 0.25 / h, WALL_DAMPING_RATIO, h);
+        let softness = Softness::new(
+            2.0 * PI * FRONT_HOLD_HERTZ.min(0.25 / h),
+            FRONT_HOLD_DAMPING_RATIO,
+            h,
+        );
         let max_push = SKIN_HOLD_PUSH_SPEED * 1000.0 / self.mm_per_px();
         for index in 0..self.skin_holds.len() {
             let hold = self.skin_holds[index];
@@ -463,7 +572,12 @@ impl World {
                 continue;
             }
             let mass = 1.0 / (bone_give + skin_give);
-            let impulse = firmness.contact_impulse(mass, speed, gap, hold.impulse, max_push, h);
+            let held = if self.side_fighter(bone.body as usize) {
+                &firmness
+            } else {
+                &softness
+            };
+            let impulse = held.contact_impulse(mass, speed, gap, hold.impulse, max_push, h);
             let total = (hold.impulse + impulse).max(0.0);
             let applied = total - hold.impulse;
             self.skin_holds[index].impulse = total;
@@ -488,15 +602,16 @@ impl World {
     /// far inside the skin `at` lies by the outline's way in there, an
     /// edge's own across it and, where its nearest is a corner, the way in
     /// between the corner's two edges, so a place just outside a rounded
-    /// end reads as outside. With `whole_only`, a stretch of skin torn or
-    /// cut, or of flesh torn away, is no surface.
+    /// end reads as outside. On a `Surface::Whole` or `Uncreased`, a stretch
+    /// of skin torn or cut, or of flesh torn away, is no surface, and on an
+    /// `Uncreased` one neither is a stretch turned over in a crease.
     fn nearest_skin(
         &self,
         outline: usize,
         edges: &[usize],
         at: Vec2,
         reach: f64,
-        whole_only: bool,
+        surface: Surface,
         place: impl Fn(&Point) -> Vec2,
     ) -> Option<NearestSkin> {
         let loop_ = &self.outlines[outline];
@@ -521,14 +636,27 @@ impl World {
                 place(&self.points[points[(edge + 1) % count]]),
             );
             let t = segment_t(at, a, b);
-            let gap = distance(at, lerp(a, b, t));
+            // Squared, as only which is nearer matters: `hypot` on every
+            // stretch of skin for every place was most of the hold's cost.
+            let gap = distance_sq(at, lerp(a, b, t));
             // Whether it is whole skin is asked only of a stretch nearer
             // than the nearest found yet, which few are.
-            if gap > reach
+            if gap > reach * reach
                 || nearest.is_some_and(|(closest, ..)| gap >= closest)
-                || (whole_only && !self.skin_edge_whole(outline, edge))
+                || (surface != Surface::Any && !self.skin_edge_whole(outline, edge))
             {
                 continue;
+            }
+            // A stretch of skin turned over in a crease faces into the body,
+            // as the skin's own contacts skip it (`solve_outline_contacts`).
+            if surface == Surface::Uncreased {
+                let (home_a, home_b) = (
+                    self.points[points[edge]].home,
+                    self.points[points[(edge + 1) % count]].home,
+                );
+                if dot(subtract(b, a), subtract(home_b, home_a)) <= 0.0 {
+                    continue;
+                }
             }
             nearest = Some((gap, edge, t));
         }
@@ -600,13 +728,183 @@ mod tests {
         }
     }
 
-    /// Only side-view fighters' bones are held so: the sandbox's body keeps
-    /// only its closed breaks' pieces held in (`skin_holds`).
+    /// Both kinds of body have their bones held in their skin, and each
+    /// kind's setting turns it off, leaving only closed breaks' pieces held
+    /// in (`hold_closed_pieces_in_the_skin`), to set the two beside each
+    /// other.
     #[test]
-    fn only_side_view_fighters_bones_are_held_in_their_skin() {
+    fn every_body_s_bones_are_held_in_their_skin() {
         let fighters = create_side_fighters(Materials::default());
         assert!(fighters.bones.iter().any(|bone| fighters.skin_holds(bone)));
-        let sandbox = create_layered_body(1280.0, 720.0, Materials::default());
+        let sandbox = front_view();
+        assert!(sandbox.bones.iter().any(|bone| sandbox.skin_holds(bone)));
+        let mut off = Materials::default();
+        off.skin_holds_bones = false;
+        off.skin_holds_front = false;
+        let fighters = create_side_fighters(off);
+        assert!(fighters.bones.iter().all(|bone| !fighters.skin_holds(bone)));
+        let sandbox = create_layered_body(1280.0, 720.0, off);
         assert!(sandbox.bones.iter().all(|bone| !sandbox.skin_holds(bone)));
+    }
+
+    fn front_view() -> World {
+        create_layered_body(1280.0, 720.0, Materials::default())
+    }
+
+    /// The sandbox's body settling into its guard and hanging there is
+    /// never pushed by its skin's hold either.
+    #[test]
+    fn the_skin_leaves_the_sandbox_body_at_rest_alone() {
+        let mut world = front_view();
+        let dt = world.materials.fixed_dt;
+        for step in 0..300 {
+            world.step(dt, &InputState::default(), crate::scenarios::SCENARIO_WIDTH);
+            assert_eq!(
+                world.debug().skin_held_bones,
+                0,
+                "the skin pushed a bone of the body at rest on step {step}"
+            );
+        }
+    }
+
+    /// A front-view limb's bone meets only skin held to it: the skin of an
+    /// elbow's inner crease, held to the forearm and the upper arm both,
+    /// was pushed two ways by their bones and tore.
+    #[test]
+    fn a_front_view_limb_bone_meets_only_its_own_skin() {
+        let world = front_view();
+        let mut limb_bones = 0;
+        for index in 0..world.bones.len() {
+            let bone = world.bones[index];
+            if bone.limb == Limb::None || !world.skin_holds(&bone) {
+                continue;
+            }
+            limb_bones += 1;
+            let (outline, edges) = world.skin_round_bone(index);
+            let outline = outline.expect("a limb's bone has skin round it");
+            let points = world.outlines[outline].points();
+            for edge in edges {
+                for point in [points[edge], points[(edge + 1) % points.len()]] {
+                    let binding = world.point_holds[point].posture;
+                    assert!(
+                        binding
+                            .bones
+                            .iter()
+                            .zip(binding.weights)
+                            .any(|(&other, weight)| other == index && weight >= 0.5),
+                        "bone {index} meets skin point {point}, which is not held mostly to it"
+                    );
+                }
+            }
+        }
+        assert!(limb_bones >= 12, "only {limb_bones} limb bones held");
+    }
+
+    /// The check for bone through whole skin (`inspect::shown`) sees a
+    /// hand's bone moved out past its fist, and calls it a wound once the
+    /// skin there is torn.
+    #[test]
+    fn a_bone_out_through_whole_skin_shows_and_in_a_wound_does_not() {
+        use crate::inspect::{bare_bones, shown, Shown};
+        let mut world = create_layered_body(1280.0, 720.0, Materials::default());
+        let showing = |world: &World, kind: Shown| {
+            bare_bones(world)
+                .iter()
+                .filter(|bare| shown(world, bare) == Some(kind))
+                .map(|bare| bare.bone)
+                .collect::<Vec<usize>>()
+        };
+        assert!(
+            showing(&world, Shown::Whole).is_empty(),
+            "bone shows at rest"
+        );
+        let hand = world
+            .bones
+            .iter()
+            .position(|bone| bone.part == BonePart::Hand)
+            .expect("a hand");
+        let bone = world.bones[hand];
+        let out = scale(normalized(subtract(bone.b, bone.a), Vec2::default()), 25.0);
+        world.bones[hand].a = add(bone.a, out);
+        world.bones[hand].b = add(bone.b, out);
+        assert_eq!(showing(&world, Shown::Whole), vec![hand]);
+        let tip = world.bones[hand].b;
+        let reach = 3.0 * world.materials.point_spacing;
+        for spring in &mut world.springs {
+            let (a, b) = (
+                world.points[spring.a].position,
+                world.points[spring.b].position,
+            );
+            if spring.layer == TissueLayer::Skin && distance_to_segment(tip, a, b) < reach {
+                spring.broken = true;
+            }
+        }
+        assert!(showing(&world, Shown::Whole).is_empty());
+        assert_eq!(showing(&world, Shown::InWound), vec![hand]);
+    }
+}
+
+#[cfg(test)]
+mod print_tests {
+    use super::*;
+
+    /// Prints how deep inside its own skin each bone lies as built, the
+    /// least along it, against half the stroke it is drawn with, and how
+    /// many stretches of skin hold it (`cargo test --release --lib
+    /// print_bones_in_skin -- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn print_bones_in_skin() {
+        let materials = Materials::default();
+        for (name, world) in [
+            ("side fighters", create_side_fighters(materials)),
+            ("front view", create_layered_body(1280.0, 720.0, materials)),
+        ] {
+            println!("{name}:");
+            let spacing = world.materials.point_spacing;
+            for index in 0..world.bones.len() {
+                let bone = world.bones[index];
+                if !world.skin_holds(&bone) {
+                    continue;
+                }
+                let (outline, edges) = world.skin_round_bone(index);
+                let Some(outline) = outline else {
+                    println!("  {:>3} {:?}: no skin round it", index, bone.part);
+                    continue;
+                };
+                let samples = (distance(bone.home_a, bone.home_b) / (spacing * SKIN_HOLD_SPACING))
+                    .ceil()
+                    .max(1.0) as usize;
+                let depths: Vec<f64> = (0..=samples)
+                    .map(|sample| {
+                        let at = lerp(bone.home_a, bone.home_b, sample as f64 / samples as f64);
+                        world
+                            .nearest_skin(
+                                outline,
+                                &edges,
+                                at,
+                                f64::INFINITY,
+                                Surface::Any,
+                                |point| point.home,
+                            )
+                            .map_or(f64::NAN, |found| found.depth)
+                    })
+                    .collect();
+                let least = depths.iter().copied().fold(f64::INFINITY, f64::min);
+                let ends = (depths[0], depths[depths.len() - 1]);
+                println!(
+                    "  {:>3} {:>10} body {} sheet {:>2}: least {:6.1} px (ends {:5.1}, {:5.1}), drawn half {:4.1}, {} edges",
+                    index,
+                    bone.part.name(),
+                    bone.body,
+                    bone.sheet,
+                    least,
+                    ends.0,
+                    ends.1,
+                    World::drawn_half_width(&bone),
+                    edges.len()
+                );
+            }
+        }
     }
 }

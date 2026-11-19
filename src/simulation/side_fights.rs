@@ -7,6 +7,7 @@
 //! `--diff`).
 
 use super::*;
+use crate::inspect::Shown;
 
 /// The moves of a random side-view fight, drawn a step at a time from a
 /// seed (xorshift64).
@@ -114,10 +115,6 @@ pub struct SideFight {
 /// bone counts as showing in a fight ([`SideFight::bone_shown`]).
 pub const BONE_SHOWS_PX: f64 = 3.0;
 
-/// How near the window's sides, in pixels, bone showing counts as at the
-/// sides ([`SideFight::bone_shown_at_sides`]).
-const SIDES_PX: f64 = 100.0;
-
 /// Whether bone `bone`, bare at `at`, shows in a wound: beside a fibre of
 /// its own flesh's skin torn or cut, or a triangle of that skin that has
 /// failed, within two point spacings.
@@ -178,19 +175,18 @@ pub fn play_side_fight(seed: u64, seconds: f64, materials: Materials) -> SideFig
         // Through whole skin, in a wound, and near the sides.
         let mut shown = [[false; 3]; 2];
         for bare in crate::inspect::bare_bones(&world) {
-            let bone = &world.bones[bare.bone];
-            let body = bone.body as usize;
-            if bare.out < BONE_SHOWS_PX || bone.open_break || body > 1 {
+            let body = world.bones[bare.bone].body as usize;
+            if body > 1 {
                 continue;
             }
-            let width = crate::scenarios::SCENARIO_WIDTH;
-            if bare.farthest.x < SIDES_PX || bare.farthest.x > width - SIDES_PX {
-                shown[body][2] = true;
-            } else if bone_in_a_wound(&world, bone, bare.farthest) {
-                shown[body][1] = true;
-            } else {
-                shown[body][0] = true;
-                fight.bone_shown_px[body] = fight.bone_shown_px[body].max(bare.out);
+            match crate::inspect::shown(&world, &bare) {
+                Some(Shown::AtSides) => shown[body][2] = true,
+                Some(Shown::InWound) => shown[body][1] = true,
+                Some(Shown::Whole) => {
+                    shown[body][0] = true;
+                    fight.bone_shown_px[body] = fight.bone_shown_px[body].max(bare.out);
+                }
+                None => {}
             }
         }
         for (body, [whole, wound, at_sides]) in shown.into_iter().enumerate() {

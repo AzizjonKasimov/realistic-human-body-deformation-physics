@@ -49,9 +49,9 @@ pub(super) struct OutlineLoop {
 /// position `edge` to the next.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct OutlinePair {
-    outline: usize,
-    point: usize,
-    edge: usize,
+    pub(super) outline: usize,
+    pub(super) point: usize,
+    pub(super) edge: usize,
 }
 
 impl OutlineLoop {
@@ -550,8 +550,9 @@ impl World {
                 continue;
             }
             // A side-view fighter's skin holds every bone of it in
-            // (`skin_hold.rs`).
-            if self.skin_holds(&bone) {
+            // (`skin_hold.rs`); a front-view body's limb bones meet only the
+            // skin held to them, which none is to a piece.
+            if self.skin_holds(&bone) && self.side_fighter(bone.body as usize) {
                 continue;
             }
             // Each end and the middle, and how much of what moves it each end

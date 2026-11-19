@@ -33,6 +33,10 @@ A scenario both sides have, every 12 steps up to step 72, showing the body.
 One custom swing on both sides.
 
 .EXAMPLE
+.\tools\before_after.ps1 -Scenario bat_hard_shin -Variant -0.0100,0.0000,1.25 -Every 1 -Frames 24 -Steps 16,18,19,20,22
+One run of the sweep, as the sweep report names it, around its blow.
+
+.EXAMPLE
 .\tools\before_after.ps1 -Scenario bat_tap_on_the_guard -RefScenario bat_moderate_forearm -Every 15
 A new scenario against the nearest one the commit has.
 
@@ -53,6 +57,8 @@ param(
     [string]$RefGesture = "",
     [string]$Strike = "",
     [string]$Gesture = "",
+    # One run of the strike sweep, ALONG,ACROSS,STRENGTH (capture.ps1 -Variant), on both sides.
+    [string]$Variant = "",
     # Steps to play; 0 plays the whole strike, or lets the body settle.
     [int]$Frames = 0,
     # Save the screen every this many steps; 0 saves only the last.
@@ -102,6 +108,7 @@ function Invoke-Side([string]$Side, [string]$Exe, [string]$Play, [string]$Moves)
         if ($Strike) { $capture.Strike = $Strike }
         if ($Gesture) { $capture.Gesture = $Gesture }
     }
+    if ($Variant) { $capture.Variant = $Variant }
     if ($Frames -gt 0) { $capture.Frames = $Frames }
     if ($Every -gt 0) { $capture.Every = $Every }
     if ($NoUi) { $capture.NoUi = $true }

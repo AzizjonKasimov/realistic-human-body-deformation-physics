@@ -239,10 +239,11 @@ pub(crate) fn random_fights(count: usize, seed: u64, mix: Mix, output_dir: &Path
     let mut csv = BufWriter::new(File::create(&csv_path).expect("create fights CSV"));
     writeln!(
         csv,
-        "# settings: {}\n# trying: {}\n# seed: {seed}\n# mix: {}",
+        "# settings: {}\n# trying: {}\n# seed: {seed}\n# mix: {}\n{}",
         rp::scenarios::settings_used().join(" "),
         env::var("RP_TRY").unwrap_or_default(),
-        mix.name()
+        mix.name(),
+        fights_diff::watchdogs_comment()
     )
     .expect("write fights CSV");
     writeln!(

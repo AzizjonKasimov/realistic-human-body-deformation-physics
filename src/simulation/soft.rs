@@ -259,8 +259,8 @@ impl World {
             // its hips from (`balance.rs`), before the hold on the hips warm
             // starts and pushes back on them.
             self.timed("stance", Self::measure_stances);
-            // Where a side-view fighter's bones may meet the skin round
-            // them from inside this substep (`skin_hold.rs`).
+            // Where bones may meet the skin round them from inside this
+            // substep (`skin_hold.rs`).
             self.timed("bones in skin", |world| world.measure_skin_holds(h));
             if self.materials.warm_starting {
                 self.warm_start_soft(h);

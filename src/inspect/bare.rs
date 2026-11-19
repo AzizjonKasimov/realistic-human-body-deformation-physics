@@ -53,6 +53,48 @@ fn lerp(a: Vec2, b: Vec2, t: f64) -> Vec2 {
     add(a, scale(sub(b, a), t))
 }
 
+/// Where bare bone shows, as the checks count it ([`shown`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shown {
+    /// Through whole skin, which no blow opened.
+    Whole,
+    /// In a wound, beside skin torn or cut ([`bone_in_a_wound`]), as an
+    /// open injury shows it.
+    InWound,
+    /// Near the world's sides, whose walls clamp flesh and bone apart; only
+    /// random fights reach them, and the game's ring stops well short.
+    AtSides,
+}
+
+/// How near the world's sides, in pixels, bone showing counts as at the
+/// sides ([`Shown::AtSides`]).
+const SIDES_PX: f64 = 100.0;
+
+/// How bare bone `bare` shows, or `None` where it does not count: less
+/// than [`BONE_SHOWS_PX`] out of the flesh drawn over it, or an open
+/// break's piece, which comes out through the skin it cuts.
+pub fn shown(world: &World, bare: &BareBone) -> Option<Shown> {
+    let bone = world.bones().get(bare.bone)?;
+    if bare.out < BONE_SHOWS_PX || bone.open_break {
+        return None;
+    }
+    let width = crate::scenarios::SCENARIO_WIDTH;
+    Some(
+        if bare.farthest.x < SIDES_PX || bare.farthest.x > width - SIDES_PX {
+            Shown::AtSides
+        } else if bone_in_a_wound(world, bone, bare.farthest) {
+            Shown::InWound
+        } else {
+            Shown::Whole
+        },
+    )
+}
+
+/// Whether bare bone `bare` shows through whole skin ([`shown`]).
+pub fn shows_through_whole_skin(world: &World, bare: &BareBone) -> bool {
+    shown(world, bare) == Some(Shown::Whole)
+}
+
 /// The spacing of the places tested along a bone's axis, in pixels.
 const SAMPLE_SPACING: f64 = 1.0;
 /// The side of the grid's cells the flesh is filed in, in pixels.

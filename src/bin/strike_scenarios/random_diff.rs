@@ -15,7 +15,7 @@
 
 use super::*;
 use diff::{header_line, stars, write_findings, Change, Finding, Holds, Worse};
-use fights_diff::{csv_fields, watchdog_named};
+use fights_diff::{csv_fields, watchdog_named, watched, watched_by_one};
 use rp::inspect::Watchdog;
 use std::collections::BTreeSet;
 
@@ -51,6 +51,8 @@ struct Blow {
 struct Blows {
     /// What each file's blows were played with, for the report's heading.
     sources: Vec<String>,
+    /// The watchdogs every file's build watched for (`watched`).
+    watched: BTreeSet<Watchdog>,
     blows: Vec<Blow>,
 }
 
@@ -90,14 +92,16 @@ impl Blows {
     fn read(path: &Path) -> Result<Blows, String> {
         let mut blows = Blows {
             sources: Vec::new(),
+            watched: Watchdog::ALL.into_iter().collect(),
             blows: Vec::new(),
         };
         for file in blows_files(path) {
             let text = fs::read_to_string(&file)
                 .map_err(|error| format!("cannot read {}: {error}", file.display()))?;
-            let (source, read) =
+            let (source, watching, read) =
                 parse_blows(&text).map_err(|error| format!("{}: {error}", file.display()))?;
             blows.sources.push(source);
+            blows.watched.retain(|kind| watching.contains(kind));
             blows.blows.extend(read);
         }
         if blows.sources.is_empty() {
@@ -107,9 +111,11 @@ impl Blows {
     }
 }
 
-/// A blows file's blows, and what they were played with, in words.
-fn parse_blows(text: &str) -> Result<(String, Vec<Blow>), String> {
+/// A blows file's blows, what they were played with, in words, and the
+/// watchdogs its build watched for.
+fn parse_blows(text: &str) -> Result<(String, BTreeSet<Watchdog>, Vec<Blow>), String> {
     let (mut settings, mut trying, mut seed) = (String::new(), String::new(), String::new());
+    let mut listed: Option<String> = None;
     let mut columns: Vec<String> = Vec::new();
     let mut blows = Vec::new();
     for line in text.lines() {
@@ -120,6 +126,7 @@ fn parse_blows(text: &str) -> Result<(String, Vec<Blow>), String> {
                     "settings" => settings = value,
                     "trying" => trying = value,
                     "seed" => seed = value,
+                    "watchdogs" => listed = Some(value),
                     _ => {}
                 }
             }
@@ -184,7 +191,7 @@ fn parse_blows(text: &str) -> Result<(String, Vec<Blow>), String> {
     if !trying.is_empty() {
         parts.push(format!("trying {trying}"));
     }
-    Ok((parts.join(", "), blows))
+    Ok((parts.join(", "), watched(listed.as_deref()), blows))
 }
 
 /// What one line of the report counts in a blow, and how the good-enough
@@ -268,10 +275,16 @@ fn section(
 }
 
 /// The watchdogs that break the body (`breaks`: all of them, tripped or
-/// not, as the good-enough rule holds each), or the others that tripped.
-fn watchdog_lines<'a>(breaks: bool, tripped: &BTreeSet<Watchdog>) -> Vec<Counted<'a>> {
+/// not, as the good-enough rule holds each), or the others that tripped,
+/// of those both sides' builds watched for (`watched`).
+fn watchdog_lines<'a>(
+    breaks: bool,
+    tripped: &BTreeSet<Watchdog>,
+    watched: &BTreeSet<Watchdog>,
+) -> Vec<Counted<'a>> {
     Watchdog::ALL
         .iter()
+        .filter(|kind| watched.contains(kind))
         .filter(|kind| kind.breaks_the_body() == breaks && (breaks || tripped.contains(kind)))
         .map(|&kind| Counted {
             what: format!(
@@ -348,12 +361,13 @@ fn blows_report(a: &Blows, a_label: &str, b: &Blows, b_label: &str) -> (String, 
         .chain(y)
         .flat_map(|blow| blow.tripped.iter().copied())
         .collect();
+    let watched: BTreeSet<Watchdog> = a.watched.intersection(&b.watched).copied().collect();
     section(
         &mut report,
         &mut findings,
         sides,
         "Watchdogs for a body that breaks",
-        &watchdog_lines(true, &tripped),
+        &watchdog_lines(true, &tripped, &watched),
     );
     let rules: BTreeSet<String> = x
         .iter()
@@ -385,8 +399,15 @@ fn blows_report(a: &Blows, a_label: &str, b: &Blows, b_label: &str) -> (String, 
         &mut findings,
         sides,
         "Other watchdogs",
-        &watchdog_lines(false, &tripped),
+        &watchdog_lines(false, &tripped, &watched),
     );
+    let one_sided = watched_by_one(&a.watched, &b.watched);
+    if !one_sided.is_empty() {
+        report.push_str(&format!(
+            "  watched by only one side's build, not compared: {}\n",
+            one_sided.join(", ")
+        ));
+    }
     let injury_lines: Vec<Counted> = INJURIES
         .iter()
         .enumerate()
@@ -476,9 +497,10 @@ mod tests {
                 if index < bones_out { "WholeBoneOut@20" } else { "" }
             ));
         }
-        let (source, blows) = parse_blows(&text).unwrap();
+        let (source, watched, blows) = parse_blows(&text).unwrap();
         Blows {
             sources: vec![source],
+            watched,
             blows,
         }
     }
@@ -488,8 +510,12 @@ mod tests {
         let text = format!(
             "{OLDER}0,\"hammer:-0.300,0.400:0.100,0.400:power=2.6:frames=12:settle=40\",hammer,1,2,3,4,5.00,bone_pieces_out;flesh_speed,WholeBoneOut@20;JointApart@31\n"
         );
-        let (source, blows) = parse_blows(&text).unwrap();
+        let (source, watched, blows) = parse_blows(&text).unwrap();
         assert!(source.contains("written before"), "{source}");
+        // Written before files listed their watchdogs, so before bone
+        // showing through whole skin was watched for.
+        assert!(watched.contains(&Watchdog::WholeBoneOut));
+        assert!(!watched.contains(&Watchdog::BoneShows));
         assert_eq!(blows.len(), 1);
         assert_eq!(blows[0].tool, "hammer");
         assert_eq!(blows[0].injuries, [1, 2, 3, 4]);
