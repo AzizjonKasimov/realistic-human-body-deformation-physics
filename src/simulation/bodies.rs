@@ -363,6 +363,9 @@ impl World {
             joint.drive.swing = -joint.drive.swing;
             joint.drive.swing_speed = -joint.drive.swing_speed;
             joint.drive_impulse = -joint.drive_impulse;
+            // Mirrored, the muscles that turned the joint each way turn it
+            // the other way in the window's angles.
+            joint.drive.muscles.swap(0, 1);
         }
         for tendon in &mut world.tendons {
             tendon.from.sigma = -tendon.from.sigma;

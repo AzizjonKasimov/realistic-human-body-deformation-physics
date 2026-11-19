@@ -10,6 +10,7 @@ mod bruises;
 mod clash;
 mod cover;
 mod cuts;
+mod fatigue;
 mod fighter;
 mod grid;
 mod journal;
@@ -41,6 +42,7 @@ pub use body::{
 };
 pub use cover::Cover;
 pub use cuts::{OpenedCut, Piece, TriangleCut};
+pub use fatigue::{FatigueRates, MuscleGroup};
 pub use fighter::{
     create_side_fighter_in, create_side_fighters, create_side_fighters_at, side_fighter_frames_at,
     side_fighters_from, Rig, SIDE_FIGHTER_SPACING,
@@ -51,7 +53,7 @@ pub use mover::{Move, Mover};
 pub use phases::{PhaseClock, PhaseTime, PhaseTimes, Traced, TracedStage};
 pub use punch::Punch;
 pub use side_fights::{bone_in_a_wound, play_side_fight, RandomMoves, SideFight, BONE_SHOWS_PX};
-pub use sight::{Doing, LandedPunch, PunchKind, Punching, Stepping, Struck};
+pub use sight::{Doing, LandedPunch, PunchKind, Punching, Stamina, Stepping, Struck};
 pub use stance::{Carry, FootHold, HipHold, JointDrive, Limb, PostureBinding};
 pub use tendons::{Muscle, Tendon, TendonEnd};
 pub use tissue::SpringKind;
@@ -391,6 +393,10 @@ pub struct Materials {
     /// much longer for each whole limit past it (`rise.rs`).
     pub knockout_seconds: f64,
     pub knockout_more_seconds: f64,
+    /// How many times as fast as holding still the side-view fighters' arm
+    /// muscles tire shortening at their fastest, as they do throwing a punch
+    /// (`fatigue.rs`): 1 at the rates measured on muscles holding still.
+    pub muscle_fatigue: f64,
     /// The dermis's shear modulus at small strain, in pascals, and its
     /// thickness, in metres; it stiffens `skin_stiffening_ratio` times once
     /// stretched past `skin_stiffening_stretch` of its length (`tissue.rs`).
@@ -694,6 +700,7 @@ impl Default for Materials {
             knockout_spin: knockout::KNOCKOUT_SPIN,
             knockout_seconds: rise::KNOCKOUT_SECONDS,
             knockout_more_seconds: rise::KNOCKOUT_MORE_SECONDS,
+            muscle_fatigue: fatigue::FAST_FATIGUE,
             hip_hold_damping_ratio: 1.0,
             // Living skin's Young's modulus is about 0.5-0.6 MPa at small
             // strain (Lakhani et al. 2021), and tissue that keeps its volume

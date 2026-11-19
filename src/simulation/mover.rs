@@ -482,14 +482,22 @@ struct Strike {
     /// then, and how far out the fist had really got: the body comes back
     /// from where the punch had taken it, and the fist from where it is.
     turned: Option<(f64, f64, f64)>,
+    /// How fast it goes against a fresh arm's punch, from 1 down: the
+    /// square root of the strength the arm had left as it set off
+    /// (`fatigue.rs`). A punch is thrown as hard as the arm can; pulling
+    /// with a share of the strength, the arm covers the same way in the
+    /// time a share's square root longer, at that much less speed.
+    pace: f64,
 }
 
 impl Strike {
     fn seconds(&self) -> (f64, f64, f64) {
-        match self.hand {
+        let (out, stay, back) = match self.hand {
             Side::Lead => JAB_SECONDS,
             Side::Rear => CROSS_SECONDS,
-        }
+        };
+        // A tired arm goes out and comes back slower; its fist stays as long.
+        (out / self.pace, stay, back / self.pace)
     }
 
     /// How far into the punch the body is, from 0 in the stance to 1 with
@@ -1614,6 +1622,11 @@ impl World {
             !others.is_empty() && others.iter().all(|&other| self.fighter_fallen(other));
         let lead_free = throws(self, Side::Lead) && !others_down;
         let rear_free = throws(self, Side::Rear) && !others_down;
+        // How fast each arm punches for the strength it has left: the lead
+        // arm's, then the rear's (`Strike::pace`).
+        let paces = self
+            .fighter_stamina(body)
+            .map_or([1.0; 2], |stamina| stamina.arms.map(f64::sqrt));
         let Some(mover) = self.bodies[body]
             .mover
             .as_mut()
@@ -1642,6 +1655,7 @@ impl World {
                 body,
                 landed: None,
                 turned: None,
+                pace: paces[hand.index()],
             }
         };
         match made {

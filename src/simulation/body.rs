@@ -728,6 +728,8 @@ fn joint_drive(joint: Joint) -> JointDrive {
         swing: 0.0,
         swing_speed: 0.0,
         rise: 0.0,
+        // The sandbox's body never tires (`fatigue.rs`).
+        muscles: Default::default(),
     }
 }
 

@@ -1,9 +1,10 @@
 //! What can be seen of side-view fighters, for a game's computer opponent and
 //! its rules: what each fighter is doing (a punch on its way, a step, a lean,
-//! a duck, a block), as a person watching the screen would read it, and what
-//! each punch that landed this step struck, the head, the body, or an arm.
-//! None of it feeds the simulation: it is read after a step, and reading it
-//! changes nothing.
+//! a duck, a block), as a person watching the screen would read it, what
+//! each punch that landed this step struck, the head, the body, or an arm,
+//! and how much strength each fighter's arms have left as they tire
+//! (`fatigue.rs`). None of it feeds the simulation: it is read after a step,
+//! and reading it changes nothing.
 
 use super::tools::Spared;
 use super::*;
@@ -101,7 +102,50 @@ pub struct LandedPunch {
     pub speed: f64,
 }
 
+/// How much strength a side-view fighter's arms have left
+/// ([`World::fighter_stamina`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Stamina {
+    /// Each arm's, the viewer's left one first, from 1 fresh down toward 0:
+    /// the share of its muscles' fresh strength they can give now, each
+    /// joint's muscles counting by their strength (`fatigue.rs`).
+    pub arms: [f64; 2],
+}
+
+impl Stamina {
+    /// Both arms' together.
+    pub fn both(&self) -> f64 {
+        0.5 * (self.arms[0] + self.arms[1])
+    }
+}
+
 impl World {
+    /// How much strength side-view fighter `body`'s arms have left as their
+    /// muscles tire and recover; `None` for a body that is not a side-view
+    /// fighter.
+    pub fn fighter_stamina(&self, body: usize) -> Option<Stamina> {
+        self.bodies.get(body)?.mover.as_ref()?;
+        // Each arm's muscles' strength left, and fresh.
+        let mut sums = [(0.0, 0.0); 2];
+        for joint in &self.bone_joints {
+            let arm = match joint.drive.limb {
+                Limb::LeftArm => 0,
+                Limb::RightArm => 1,
+                _ => continue,
+            };
+            if self.joint_body(joint) != body {
+                continue;
+            }
+            for muscles in joint.drive.muscles.iter().filter(|muscles| muscles.tires()) {
+                sums[arm].0 += joint.drive.max_torque * muscles.capacity();
+                sums[arm].1 += joint.drive.max_torque;
+            }
+        }
+        Some(Stamina {
+            arms: sums.map(|(left, fresh)| if fresh > 0.0 { left / fresh } else { 1.0 }),
+        })
+    }
+
     /// What side-view fighter `body` is doing now, as someone watching it
     /// would see it; `None` for a body that is not a side-view fighter.
     pub fn fighter_doing(&self, body: usize) -> Option<Doing> {

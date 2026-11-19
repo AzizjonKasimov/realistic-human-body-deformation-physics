@@ -371,8 +371,9 @@ impl World {
         let turn = JointTurn::of(&joint, &self.bones);
         let angle = wrap_angle(turn.angle - joint.rest_angle - joint.drive.aim - joint.drive.swing);
         let speed = turn.speed(&self.bones, h);
-        let given = joint.drive_impulse.clamp(-limit, limit);
-        let total = (given + softness.impulse(mass, speed, angle, given)).clamp(-limit, limit);
+        let (least, most) = joint.drive.bounds(limit);
+        let given = joint.drive_impulse.clamp(least, most);
+        let total = (given + softness.impulse(mass, speed, angle, given)).clamp(least, most);
         self.bone_joints[swing.joint].drive_impulse = total;
         self.turn_swing(swing, links, &sides, total - given, h);
     }
@@ -385,8 +386,8 @@ impl World {
             };
             for swing in lean.swings.iter().filter(|swing| swing.active) {
                 let joint = self.bone_joints[swing.joint];
-                let limit = self.drive_limit(&joint) * h;
-                let given = joint.drive_impulse.clamp(-limit, limit);
+                let (least, most) = joint.drive.bounds(self.drive_limit(&joint) * h);
+                let given = joint.drive_impulse.clamp(least, most);
                 self.bone_joints[swing.joint].drive_impulse = given;
                 if let (true, Some(sides)) = (given != 0.0, swing.sides) {
                     self.turn_swing(swing, &lean.links, &sides, given, h);

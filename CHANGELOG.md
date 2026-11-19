@@ -2,6 +2,10 @@
 
 What each version of Realistic Physics changed, newest first. The game shows its version on the start screen and in its bottom-left corner, and every Short made from the game shows the version it was made with. Only the newest version is online.
 
+## v0.20 (2026-11-19)
+
+- On the Fight page, fighters tire as boxers do: punching flat out wears their arms down, and tired arms punch slower, land softer, and come back to the guard later, while resting between punches and between rounds brings their strength back. Holding the guard up hardly tires them.
+
 ## v0.19.2 (2026-11-19)
 
 - In the sandbox, bone shows through unbroken skin after a blow less often: the skin now holds the body's bones in, as it does the fighters' on the Fight page, while a bat or a sledgehammer can still crush the flesh onto a bone.

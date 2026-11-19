@@ -72,6 +72,7 @@ named_settings!(
     knockout_spin,
     knockout_seconds,
     knockout_more_seconds,
+    muscle_fatigue,
     skin_shear_modulus,
     skin_thickness,
     skin_stiffening_stretch,

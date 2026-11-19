@@ -24,6 +24,7 @@ use super::body::{
     add_layer_springs, add_layer_triangles, add_long_fiber_springs, attach_skin_to_muscle,
     bone_strength, build_sheet_mesh, reaches_through_flesh, DRIVE_DAMPING_TIME, MUSCLE_INSET_SCALE,
 };
+use super::fatigue;
 use super::soft::KG_PER_MASS;
 use super::*;
 use crate::profile::{self, Hinge, Joints, Part, Place, Side};
@@ -129,6 +130,28 @@ pub(super) const HIP_STRENGTH: f64 = 200.0;
 /// head a cross had struck within a step: it moved off at 1.2 m/s where the
 /// blow's momentum gives it about 3.5.
 const NECK_RISE_SECONDS: f64 = 0.08;
+
+/// The muscles across `hinge` that tire as the fighter works them
+/// (`fatigue.rs`), those turning it with positive torque in the window's
+/// angles first: the arms', which throw punches and hold the guard. Built
+/// facing right, a fighter turns a joint the figure's way forward
+/// (`hinge_range`'s positive way: raising the arm, bending the elbow) with
+/// negative torque in the window's angles, so the elbow's flexors come
+/// second; the second fighter, its mirror image, has them swapped
+/// (`World::mirrored`). The shoulder's two ways share the one set of rates
+/// measured, and so do the wrist's, held by the grip's muscles.
+fn tiring_muscles(hinge: Hinge) -> [MuscleGroup; 2] {
+    use fatigue::*;
+    match hinge {
+        Hinge::Shoulder(_) => [MuscleGroup::tiring(SHOULDER, SHOULDER_FASTEST); 2],
+        Hinge::Elbow(_) => [
+            MuscleGroup::tiring(ELBOW_EXTENSORS, ELBOW_FASTEST),
+            MuscleGroup::tiring(ELBOW_FLEXORS, ELBOW_FASTEST),
+        ],
+        Hinge::Wrist(_) => [MuscleGroup::tiring(GRIP, WRIST_FASTEST); 2],
+        _ => Default::default(),
+    }
+}
 
 /// How far from its aim a fighter's joint is when its muscles pull their
 /// hardest, in radians (`hinge_drive`; `Materials::punch_full_pull` is the
@@ -715,6 +738,7 @@ fn add_side_skeleton(
                 Hinge::Neck | Hinge::Head => NECK_RISE_SECONDS,
                 _ => 0.0,
             },
+            muscles: tiring_muscles(hinge),
         }
     };
     let join = |world: &mut World,
@@ -787,6 +811,7 @@ fn add_side_skeleton(
                     swing: 0.0,
                     swing_speed: 0.0,
                     rise: 0.0,
+                    muscles: Default::default(),
                 },
             );
         }

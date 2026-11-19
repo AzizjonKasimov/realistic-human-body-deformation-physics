@@ -318,6 +318,9 @@ impl World {
                     .all(|(point, &weighed)| point.inverse_mass().to_bits() == weighed.to_bits()),
                 "a point's weight changed during a substep"
             );
+            // The joints' muscles tire by what they pulled this substep, and
+            // recover (`fatigue.rs`).
+            self.timed("muscles tire", |world| world.tire_muscles(h));
             self.record_traced_clashes(substep, h);
         }
         self.join_substeps(substeps);

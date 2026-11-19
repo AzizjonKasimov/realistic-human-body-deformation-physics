@@ -74,6 +74,23 @@ pub struct JointDrive {
     /// that answered within a substep stopped a struck head as no neck can
     /// (`fighter.rs`).
     pub rise: f64,
+    /// The muscles turning the joint each way, which tire as they work and
+    /// give no more than they have left (`fatigue.rs`): the first turns it
+    /// with positive torque in the window's angles, the second with
+    /// negative. Muscles with no rates never tire.
+    pub muscles: [MuscleGroup; 2],
+}
+
+impl JointDrive {
+    /// The least and most a drive may give, from its whole strength each
+    /// way, `limit`: each way only as much as the muscles turning it that
+    /// way have left.
+    pub fn bounds(&self, limit: f64) -> (f64, f64) {
+        (
+            -limit * self.muscles[1].capacity(),
+            limit * self.muscles[0].capacity(),
+        )
+    }
 }
 
 /// How much of its braced damping a joint keeps in a limb hanging limp: a
@@ -1499,9 +1516,12 @@ impl World {
             let angle =
                 wrap_angle(turn.angle - joint.rest_angle - joint.drive.aim - joint.drive.swing);
             let speed = turn.speed(&self.bones, h) - joint.drive.swing_speed;
-            let given = joint.drive_impulse.clamp(-limit, limit);
+            // Each way no harder than the muscles turning it that way have
+            // left (`fatigue.rs`).
+            let (least, most) = joint.drive.bounds(limit);
+            let given = joint.drive_impulse.clamp(least, most);
             let mut total =
-                (given + softness.impulse(mass, speed, angle, given)).clamp(-limit, limit);
+                (given + softness.impulse(mass, speed, angle, given)).clamp(least, most);
             if joint.drive.rise > 0.0 {
                 // No faster than its muscles build force, over the passes
                 // of this substep.
@@ -1585,8 +1605,8 @@ impl World {
             }
             let joint = self.bone_joints[index];
             let strength = self.muscle_strength(self.joint_body(&joint));
-            let limit = self.drive_limit(&joint) * h * strength;
-            let given = joint.drive_impulse.clamp(-limit, limit);
+            let (least, most) = joint.drive.bounds(self.drive_limit(&joint) * h * strength);
+            let given = joint.drive_impulse.clamp(least, most);
             self.bone_joints[index].drive_impulse = given;
             if given != 0.0 {
                 match sides.get(index).and_then(Option::as_ref) {
