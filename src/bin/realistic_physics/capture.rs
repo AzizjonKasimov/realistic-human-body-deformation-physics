@@ -38,8 +38,9 @@
 //! --set NAME=VALUE           play with a setting of `Materials` changed, as
 //!                            `strike_scenarios --set` does, to see what a
 //!                            change looks like before making it the default
-//! --set-at STEP              change the --set settings only from that step
-//!                            on, so a film shows a change from the same
+//! --set-at STEP              change the --set settings given after it only
+//!                            from that step on (those before it from the
+//!                            start), so a film shows a change from the same
 //!                            moment of a long play as one without it
 //! --fighters                 play on two fighters standing side by side, as
 //!                            the fight scenarios stand them, rather than a
@@ -123,6 +124,8 @@ pub fn request() -> Option<CaptureRequest> {
     let mut args = env::args().skip(1);
     let mut settings = Vec::new();
     let mut set_at = None;
+    // The settings given after --set-at, changed from its step on.
+    let mut later = Vec::new();
     let mut request = CaptureRequest {
         path: PathBuf::new(),
         views: vec![ViewMode::Normal],
@@ -202,7 +205,14 @@ pub fn request() -> Option<CaptureRequest> {
             }
             "--events" => request.events = Some(PathBuf::from(value("--events"))),
             "--sound" => request.sound = Some(PathBuf::from(value("--sound"))),
-            "--set" => settings.push(value("--set")),
+            "--set" => {
+                let setting = value("--set");
+                if set_at.is_some() {
+                    later.push(setting);
+                } else {
+                    settings.push(setting);
+                }
+            }
             "--set-at" => set_at = Some(steps(&value("--set-at"))),
             "--variant" => {
                 let spec = value("--variant");
@@ -225,12 +235,17 @@ pub fn request() -> Option<CaptureRequest> {
         let parsed = rp::parse_settings(&settings).unwrap_or_else(|error| fail(&error));
         rp::apply_settings(&mut rp::Materials::default(), &parsed)
             .unwrap_or_else(|error| fail(&error));
-        match set_at {
-            Some(step) => request.set_at = Some((step, parsed)),
-            None => rp::scenarios::use_settings(parsed),
+        rp::scenarios::use_settings(parsed);
+    }
+    match set_at {
+        Some(step) if !later.is_empty() => {
+            let parsed = rp::parse_settings(&later).unwrap_or_else(|error| fail(&error));
+            rp::apply_settings(&mut rp::Materials::default(), &parsed)
+                .unwrap_or_else(|error| fail(&error));
+            request.set_at = Some((step, parsed));
         }
-    } else if set_at.is_some() {
-        fail("--set-at needs --set");
+        Some(_) => fail("--set-at needs a --set after it"),
+        None => {}
     }
     if let (Some((along, across, strength)), Some(play)) = (request.variant, request.play) {
         request.play = Some(play.shifted(along, across).with_bone_strength(strength));

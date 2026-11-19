@@ -359,6 +359,11 @@ pub struct Materials {
     /// back on the feet standing on the floor (`balance.rs`), rather than it
     /// pushing the hips from nowhere.
     pub legs_carry: bool,
+    /// Whether a side-view fighter's skin holds every bone of it in
+    /// (`skin_hold.rs`), as it does; false leaves only its closed breaks'
+    /// pieces held in, near the skin, as the sandbox's body has them
+    /// (`hold_closed_pieces_in_the_skin`), to set the two beside each other.
+    pub skin_holds_bones: bool,
     /// How firmly legs that carry a fighter's hips push them across toward
     /// where its pose puts them over its feet, and keep its pelvis tilted
     /// as the pose has it, in hertz on the body's weight and on its turning
@@ -674,6 +679,7 @@ impl Default for Materials {
             hip_hold_hertz: 6.0,
             carry_strength: 1.0,
             legs_carry: true,
+            skin_holds_bones: true,
             legs_across_hertz: 2.0,
             legs_tilt_hertz: 3.0,
             legs_up_hertz: 0.0,

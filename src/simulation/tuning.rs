@@ -63,6 +63,7 @@ named_settings!(
     hip_hold_damping_ratio,
     carry_strength,
     legs_carry,
+    skin_holds_bones,
     legs_across_hertz,
     legs_tilt_hertz,
     legs_up_hertz,
