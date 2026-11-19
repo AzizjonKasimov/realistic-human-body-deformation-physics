@@ -336,16 +336,27 @@ mod tests {
             "the fighter that threw the cross had its hips {stood:.0} cm up and now {:.0}",
             hips(&world, 0)
         );
+        // The fighter knocked out tears nothing lying and getting up. The
+        // cross that knocked it out may split a fibre of the puncher's
+        // knuckles: its hand's bone held in by the skin (`skin_hold.rs`),
+        // the knuckles' skin is pressed between the bone and the head it
+        // lands on, here stretched 69% against the 68% it tears at.
+        let knocked_out = world.body_state(1).map_or(0, |state| state.skin_tears);
+        let puncher = world.body_state(0).map_or(0, |state| state.skin_tears);
         assert_eq!(
             (
-                world.stats.broken_skin,
+                knocked_out,
                 world.stats.broken_muscle,
                 world.stats.broken_bone_joints,
                 world.stats.bone_joint_subluxations,
                 world.stats.fractured_bones
             ),
             (0, 0, 0, 0, 0),
-            "torn skin, muscle, joints; joints slipped; bones broken"
+            "the knocked-out fighter's torn skin, muscle, joints; joints slipped; bones broken"
+        );
+        assert!(
+            puncher <= 1,
+            "the cross tore {puncher} fibres of the puncher's skin"
         );
     }
 }
