@@ -14,7 +14,7 @@ mod story;
 mod watchdogs;
 mod why;
 
-pub use bare::{bare_bones, BareBone};
+pub use bare::{bare_bones, shown, shows_through_whole_skin, BareBone, Shown};
 pub use blame::{blame, blame_by_step, Blame, BlameTarget, PhasePush};
 pub use digest::digest;
 pub use names::{

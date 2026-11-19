@@ -435,6 +435,9 @@ struct Runs {
     values: HashMap<(String, String, String), HashMap<String, f64>>,
     /// Every number the sweep wrote, in any scenario.
     numbers: BTreeSet<String>,
+    /// Every watchdog the sweep wrote, in any scenario: each run writes
+    /// every watchdog its build has, tripped or not.
+    watchdogs: BTreeSet<String>,
 }
 
 impl Runs {
@@ -457,6 +460,7 @@ impl Runs {
             variants: BTreeMap::new(),
             values: HashMap::new(),
             numbers: BTreeSet::new(),
+            watchdogs: BTreeSet::new(),
         };
         for line in text.lines() {
             if let Some(settings) = line.strip_prefix("# settings:") {
@@ -484,6 +488,9 @@ impl Runs {
                 .insert(variant.clone());
             if kind == "number" {
                 runs.numbers.insert(name.to_string());
+            }
+            if kind == "watchdog" {
+                runs.watchdogs.insert(name.to_string());
             }
             runs.values
                 .entry((scenario.to_string(), kind.to_string(), name.to_string()))
@@ -521,6 +528,13 @@ impl Runs {
     /// in every scenario. A bone's load is written only when it was loaded.
     fn keeps(&self, name: &str) -> bool {
         name.starts_with("load_") || self.numbers.contains(name)
+    }
+
+    /// Whether the sweep's build watched for `watchdog` at all: a sweep
+    /// made before a watchdog was added never tripped it, and setting it
+    /// against nought would read as the newer build worse.
+    fn watches(&self, watchdog: Watchdog) -> bool {
+        self.watchdogs.contains(watchdog.slug())
     }
 
     fn value(&self, scenario: &str, name: &str, variant: &str) -> Option<f64> {
@@ -728,6 +742,9 @@ pub(crate) fn diff_sweeps(a: &Path, b: &Path, output: &Path) -> Result<(), Strin
             }
         }
         for watchdog in Watchdog::ALL {
+            if !left.watches(watchdog) || !right.watches(watchdog) {
+                continue;
+            }
             let (x, y) = (
                 left.hits(scenario, "watchdog", watchdog.slug()),
                 right.hits(scenario, "watchdog", watchdog.slug()),
@@ -820,7 +837,18 @@ pub(crate) fn diff_sweeps(a: &Path, b: &Path, output: &Path) -> Result<(), Strin
     report.push_str(&format!(
         "\nWatchdogs over all {runs_left} -> {runs_right} runs:\n"
     ));
+    // Watchdogs only one side's build had, such as one added after the
+    // other was made: not compared, and named after the totals.
+    let mut unwatched = Vec::new();
     for watchdog in Watchdog::ALL {
+        if !left.watches(watchdog) || !right.watches(watchdog) {
+            unwatched.push(format!(
+                "{} (only {})",
+                watchdog.describe(),
+                if left.watches(watchdog) { "A" } else { "B" }
+            ));
+            continue;
+        }
         let (x, y) = totals.get(watchdog.slug()).copied().unwrap_or((0, 0));
         findings.push(
             counted(
@@ -844,6 +872,12 @@ pub(crate) fn diff_sweeps(a: &Path, b: &Path, output: &Path) -> Result<(), Strin
             "  {} {}: {x} -> {y}\n",
             stars(p),
             watchdog.describe()
+        ));
+    }
+    if !unwatched.is_empty() {
+        report.push_str(&format!(
+            "  Watched by only one sweep's build, not compared: {}\n",
+            unwatched.join(", ")
         ));
     }
     if !one_sided.is_empty() {
@@ -942,6 +976,19 @@ mod tests {
         assert!(older.keeps("bruises"));
         assert!(!older.keeps("contacts"));
         assert!(older.keeps("load_skull"));
+    }
+
+    /// A watchdog a sweep's build never had, which its runs never wrote, is
+    /// not set against nought either.
+    #[test]
+    fn a_watchdog_one_sweep_never_watched_is_not_compared() {
+        let older = Runs::parse(
+            "scenario,along,across,strength,kind,name,value\n\
+            tap,0.0000,0.0000,1.00,watchdog,whole_bone_out,0\n",
+        )
+        .unwrap();
+        assert!(older.watches(Watchdog::WholeBoneOut));
+        assert!(!older.watches(Watchdog::BoneShows));
     }
 
     #[test]

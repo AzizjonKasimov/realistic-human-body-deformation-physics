@@ -2013,6 +2013,50 @@ impl World {
             .flat_map(|contact| contact.candidates.iter().copied())
     }
 
+    /// The points of flesh the tool's surface, or a landed fist's, reaches
+    /// over this substep, within `slack` of it, as they stood when it began:
+    /// what they press on now, not all they may reach this step
+    /// (`pressed_points`), which on a thin limb is the whole limb.
+    pub(super) fn points_touched(&self, slack: f64) -> Vec<usize> {
+        let progress = self.solver_progress;
+        let began = (progress - 1.0 / self.materials.substeps.max(1) as f64).max(0.0);
+        let contacts = self
+            .tool
+            .contact
+            .iter()
+            .map(|contact| (contact, self.tool.solver_shift))
+            .chain(
+                self.fist_contacts
+                    .iter()
+                    .map(|fist| (&fist.contact, fist.shift)),
+            );
+        let mut touched = Vec::new();
+        for (contact, shift) in contacts {
+            let at = |progress: f64| ToolContactShape {
+                axis_start: add(
+                    lerp(contact.start.axis_start, contact.shape.axis_start, progress),
+                    shift,
+                ),
+                axis_end: add(
+                    lerp(contact.start.axis_end, contact.shape.axis_end, progress),
+                    shift,
+                ),
+                ..contact.shape
+            };
+            let (before, after) = (at(began), at(progress));
+            let reach = contact.shape.radius + 1.0 + slack;
+            for &index in &contact.candidates {
+                let place = self.points[index].previous;
+                if sample_point_contact(place, &before).distance <= reach
+                    || sample_point_contact(place, &after).distance <= reach
+                {
+                    touched.push(index);
+                }
+            }
+        }
+        touched
+    }
+
     pub(super) fn pressed_points(&self) -> impl Iterator<Item = usize> + '_ {
         self.tool
             .contact

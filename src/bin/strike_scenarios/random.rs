@@ -491,9 +491,10 @@ pub(crate) fn random_blows(
     let mut csv = BufWriter::new(File::create(&csv_path).expect("create random CSV"));
     writeln!(
         csv,
-        "# settings: {}\n# trying: {}\n# seed: {seed}",
+        "# settings: {}\n# trying: {}\n# seed: {seed}\n{}",
         rp::scenarios::settings_used().join(" "),
         env::var("RP_TRY").unwrap_or_default(),
+        fights_diff::watchdogs_comment(),
     )
     .expect("write random CSV");
     writeln!(

@@ -5,10 +5,11 @@
 
 use std::collections::HashMap;
 
+use super::bare::{bare_bones, shows_through_whole_skin};
 use super::blame::BlameTarget;
 use super::names::{subject_name, subject_spec};
 use crate::scenarios::{inside_the_skin, BLOOD_VOLUME_ML, GUARD_DROP_PX};
-use crate::simulation::{BonePart, Limb, Subject, Vec2, World};
+use crate::simulation::{BonePart, Limb, Subject, Vec2, World, BONE_SHOWS_PX};
 
 /// What a watchdog checks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -28,6 +29,13 @@ pub enum Watchdog {
     ClosedPieceOut,
     /// A whole bone outside the skin.
     WholeBoneOut,
+    /// Bone showing through whole skin on any frame: part of a bone the
+    /// normal view draws, but an open break's piece, at least
+    /// `BONE_SHOWS_PX` out of the flesh drawn over it, away from any wound
+    /// and the world's sides (`inspect::shows_through_whole_skin`). The two
+    /// above judge only a bone's middle, so they miss a bone poking out of
+    /// its limb for a frame or two.
+    BoneShows,
     /// A whole joint whose second bone's end has moved more than a point
     /// spacing from where it was built on the first, pulled open or pushed
     /// aside, with no rule having loosened it.
@@ -50,12 +58,13 @@ pub enum Watchdog {
 
 impl Watchdog {
     /// Every watchdog, in the order reports list them.
-    pub const ALL: [Watchdog; 10] = [
+    pub const ALL: [Watchdog; 11] = [
         Watchdog::NotFinite,
         Watchdog::Flung,
         Watchdog::BoneLeftBody,
         Watchdog::ClosedPieceOut,
         Watchdog::WholeBoneOut,
+        Watchdog::BoneShows,
         Watchdog::JointApart,
         Watchdog::InsideOut,
         Watchdog::Restless,
@@ -71,6 +80,7 @@ impl Watchdog {
             Watchdog::BoneLeftBody => "bone_left_body",
             Watchdog::ClosedPieceOut => "closed_piece_out",
             Watchdog::WholeBoneOut => "whole_bone_out",
+            Watchdog::BoneShows => "bone_shows",
             Watchdog::JointApart => "joint_apart",
             Watchdog::InsideOut => "inside_out",
             Watchdog::Restless => "restless",
@@ -94,6 +104,7 @@ impl Watchdog {
             Watchdog::BoneLeftBody => "broken bone left the body",
             Watchdog::ClosedPieceOut => "a closed break's piece outside the skin",
             Watchdog::WholeBoneOut => "a whole bone outside the skin",
+            Watchdog::BoneShows => "bone showing through whole skin",
             Watchdog::JointApart => "a whole joint pulled apart",
             Watchdog::InsideOut => "flesh turned inside out",
             Watchdog::Restless => "still moving with nothing touching it",
@@ -136,6 +147,7 @@ impl Watchdog {
             }
             Watchdog::BoneLeftBody => format!("{value:.0} px from all flesh (limit {limit:.0})"),
             Watchdog::ClosedPieceOut | Watchdog::WholeBoneOut => "outside".to_string(),
+            Watchdog::BoneShows => format!("{value:.0} px out (limit {limit:.0})"),
             Watchdog::JointApart => {
                 format!("its bone's end {value:.0} px off its place (limit {limit:.0})")
             }
@@ -238,6 +250,8 @@ pub struct Watchdogs {
     last_points: Vec<Vec2>,
     last_bones: Vec<Vec2>,
     fastest_tool: f64,
+    /// The farthest any piece of broken bone got from all flesh so far.
+    farthest_piece: f64,
     /// Frames since the tool last touched the body.
     quiet: i32,
     trips: Vec<Trip>,
@@ -274,6 +288,13 @@ impl Watchdogs {
     /// What tripped so far, in the order each first tripped.
     pub fn trips(&self) -> &[Trip] {
         &self.trips
+    }
+
+    /// The farthest any piece of broken bone has got from all flesh so far,
+    /// in pixels, tripped or not: how near a run came to broken bone
+    /// leaving the body, which a change can move without crossing the limit.
+    pub fn farthest_piece(&self) -> f64 {
+        self.farthest_piece
     }
 
     fn remember(&mut self, world: &World) {
@@ -344,6 +365,7 @@ impl Watchdogs {
         }
         self.check_motion(frame, world);
         self.check_bones(frame, world);
+        self.check_bare(frame, world);
         self.check_joints(frame, world);
         self.check_flesh(frame, world);
         if self.quiet >= QUIET_FRAMES {
@@ -431,6 +453,9 @@ impl Watchdogs {
                     .filter(|point| !point.is_ghost())
                     .map(|point| span(point.position, middle))
                     .fold(f64::INFINITY, f64::min);
+                if nearest.is_finite() {
+                    self.farthest_piece = self.farthest_piece.max(nearest);
+                }
                 if nearest > reach {
                     self.trip(
                         Watchdog::BoneLeftBody,
@@ -454,6 +479,23 @@ impl Watchdogs {
                     middle,
                     1.0,
                     0.0,
+                );
+            }
+        }
+    }
+
+    /// No bone shows through whole skin, judged as the normal view draws
+    /// it (`bare_bones`), on this frame.
+    fn check_bare(&mut self, frame: i32, world: &World) {
+        for bare in bare_bones(world) {
+            if shows_through_whole_skin(world, &bare) {
+                self.trip(
+                    Watchdog::BoneShows,
+                    Subject::Bone(bare.bone),
+                    frame,
+                    bare.farthest,
+                    bare.out,
+                    BONE_SHOWS_PX,
                 );
             }
         }

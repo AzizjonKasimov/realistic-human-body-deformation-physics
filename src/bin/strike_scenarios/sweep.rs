@@ -32,6 +32,9 @@ pub(crate) struct SweepRun {
     /// tripped on and the first thing it flagged, as `--why` takes it and by
     /// name.
     pub(crate) flagged: Vec<(Watchdog, i32, String)>,
+    /// The farthest any piece of broken bone got from all flesh, in pixels
+    /// (`Watchdogs::farthest_piece`).
+    pub(crate) farthest_piece: f64,
 }
 
 impl SweepRun {
@@ -68,6 +71,7 @@ impl SweepRun {
             result,
             violations,
             flagged,
+            farthest_piece: watchdogs.farthest_piece(),
         }
     }
 
@@ -339,6 +343,10 @@ pub(crate) fn write_runs(
         for (name, value) in run_numbers(&run.result) {
             lines.push(format!("{key},number,{name},{value:.4}"));
         }
+        lines.push(format!(
+            "{key},number,piece_farthest_px,{:.4}",
+            run.farthest_piece
+        ));
     }
     for line in lines {
         writeln!(out, "{line}").expect("write sweep runs");
@@ -581,6 +589,7 @@ mod tests {
             result: ScenarioResult::default(),
             violations,
             flagged: Vec::new(),
+            farthest_piece: 0.0,
         };
         let weaker = run(0.8, vec!["bone_pieces_out=1".to_string()]);
         let tuned = run(1.0, Vec::new());
