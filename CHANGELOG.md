@@ -2,6 +2,11 @@
 
 What each version of Realistic Physics changed, newest first. The game shows its version on the start screen and in its bottom-left corner, and every Short made from the game shows the version it was made with. Only the newest version is online.
 
+## v0.19.1 (2026-11-19)
+
+- On the Fight page, a fighter's bones stay inside its skin: a punch that lands no longer shows the bone of the hand coming out through the knuckles for a moment, and a fighter who falls keeps the flesh on its legs instead of having it torn off its bones.
+- A hard fall can still tear a fallen fighter's skin, and bone can then show in the wound.
+
 ## v0.19 (2026-11-17)
 
 - On the Fight page, a knockdown no longer ends the fight: the fighter knocked down gets up on its own legs, off its back through a sit, its hands, and a crouch, or off its front through its hands and knees and a knee. Knocked out, it lies limp first, longer the harder the punch was.

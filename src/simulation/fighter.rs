@@ -2538,6 +2538,15 @@ mod tests {
                 );
             }
             fibres += stats.broken_skin + stats.broken_muscle;
+            // No bone shows through whole skin (`skin_hold.rs`): before the
+            // skin held a fighter's bones in, bone showed in fights 1, 3,
+            // and 4 as punches landed.
+            let fight = play_side_fight(seed, 20.0, materials());
+            assert_eq!(
+                fight.bone_shown,
+                [0, 0],
+                "in fight {seed}, bone showed through whole skin on that many steps, left and right"
+            );
         }
         assert!(
             fibres <= 3,

@@ -568,109 +568,30 @@ impl World {
 mod tests {
     use super::*;
 
-    /// Prints how deep inside its own skin each bone lies as built, the
-    /// least along it, against half the stroke it is drawn with
-    /// (`cargo test --release --lib print_bones_in_skin -- --ignored
-    /// --nocapture`).
+    /// The skin holds a fighter's bones in without pushing a fighter at
+    /// rest: standing in its stance, no bone comes near enough to its skin
+    /// to be pushed.
     #[test]
-    #[ignore]
-    fn print_bones_in_skin() {
-        for (name, world) in [
-            ("side fighters", create_side_fighters(Materials::default())),
-            (
-                "front view",
-                create_layered_body(1280.0, 720.0, Materials::default()),
-            ),
-        ] {
-            println!("{name}:");
-            let spacing = world.materials.point_spacing;
-            for index in 0..world.bones.len() {
-                let bone = world.bones[index];
-                if !world.skin_holds(&bone) {
-                    continue;
-                }
-                let (outline, edges) = world.skin_round_bone(index);
-                let Some(outline) = outline else {
-                    println!("  {:>3} {:?}: no skin round it", index, bone.part);
-                    continue;
-                };
-                let samples = (distance(bone.home_a, bone.home_b) / (spacing * SKIN_HOLD_SPACING))
-                    .ceil()
-                    .max(1.0) as usize;
-                let depths: Vec<f64> = (0..=samples)
-                    .map(|sample| {
-                        let at = lerp(bone.home_a, bone.home_b, sample as f64 / samples as f64);
-                        world
-                            .nearest_skin(outline, &edges, at, f64::INFINITY, false, |point| {
-                                point.home
-                            })
-                            .map_or(f64::NAN, |found| found.depth)
-                    })
-                    .collect();
-                let least = depths.iter().copied().fold(f64::INFINITY, f64::min);
-                let ends = (depths[0], depths[depths.len() - 1]);
-                println!(
-                    "  {:>3} {:>10} body {} sheet {:>2}: least {:6.1} px (ends {:5.1}, {:5.1}), drawn half {:4.1}, {} edges",
-                    index,
-                    bone.part.name(),
-                    bone.body,
-                    bone.sheet,
-                    least,
-                    ends.0,
-                    ends.1,
-                    World::drawn_half_width(&bone),
-                    edges.len()
-                );
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod rest_tests {
-    use super::*;
-
-    /// The skin holding bones changes nothing in a body at rest: the side
-    /// fighters standing come to rest where they do without it, and the
-    /// sandbox's body, which it does not hold, hangs in its guard as it
-    /// did.
-    #[test]
-    fn the_skin_holding_bones_leaves_a_body_at_rest_alone() {
-        let worlds: [(&str, fn(Materials) -> World); 2] = [
-            ("side fighters", create_side_fighters),
-            ("front view", |materials| {
-                create_layered_body(1280.0, 720.0, materials)
-            }),
-        ];
-        for (name, build) in worlds {
-            let settled = |holds: bool| {
-                let mut materials = Materials::default();
-                materials.skin_holds_bones = holds;
-                let mut world = build(materials);
-                let dt = world.materials.fixed_dt;
-                for _ in 0..300 {
-                    world.step(dt, &InputState::default(), 1280.0);
-                }
-                world
-            };
-            let (without, with) = (settled(false), settled(true));
-            let points = without
-                .points
-                .iter()
-                .zip(&with.points)
-                .map(|(a, b)| distance(a.position, b.position))
-                .fold(0.0, f64::max);
-            let bones = without
-                .bones
-                .iter()
-                .zip(&with.bones)
-                .map(|(a, b)| distance(a.a, b.a).max(distance(a.b, b.b)))
-                .fold(0.0, f64::max);
-            println!("{name}: points moved up to {points:.3} px, bones {bones:.3} px");
-            assert!(
-                points < 0.5 && bones < 0.5,
-                "{name}: the skin holding bones moved a body at rest, points {points:.2} px, bones {bones:.2} px"
+    fn the_skin_leaves_a_fighter_at_rest_alone() {
+        let mut world = create_side_fighters(Materials::default());
+        let dt = world.materials.fixed_dt;
+        for step in 0..300 {
+            world.step(dt, &InputState::default(), crate::scenarios::SCENARIO_WIDTH);
+            assert_eq!(
+                world.debug().skin_held_bones,
+                0,
+                "the skin pushed a bone of a fighter at rest on step {step}"
             );
         }
+    }
+
+    /// Only side-view fighters' bones are held so: the sandbox's body keeps
+    /// only its closed breaks' pieces held in (`skin_holds`).
+    #[test]
+    fn only_side_view_fighters_bones_are_held_in_their_skin() {
+        let fighters = create_side_fighters(Materials::default());
+        assert!(fighters.bones.iter().any(|bone| fighters.skin_holds(bone)));
+        let sandbox = create_layered_body(1280.0, 720.0, Materials::default());
+        assert!(sandbox.bones.iter().all(|bone| !sandbox.skin_holds(bone)));
     }
 }

@@ -359,10 +359,6 @@ pub struct Materials {
     /// back on the feet standing on the floor (`balance.rs`), rather than it
     /// pushing the hips from nowhere.
     pub legs_carry: bool,
-    /// Whether every bone the normal view draws meets the skin round it from
-    /// inside (`skin_hold.rs`), rather than only a closed break's pieces,
-    /// near the skin, being held in (`hold_closed_pieces_in_the_skin`).
-    pub skin_holds_bones: bool,
     /// How firmly legs that carry a fighter's hips push them across toward
     /// where its pose puts them over its feet, and keep its pelvis tilted
     /// as the pose has it, in hertz on the body's weight and on its turning
@@ -678,7 +674,6 @@ impl Default for Materials {
             hip_hold_hertz: 6.0,
             carry_strength: 1.0,
             legs_carry: true,
-            skin_holds_bones: false,
             legs_across_hertz: 2.0,
             legs_tilt_hertz: 3.0,
             legs_up_hertz: 0.0,

@@ -551,7 +551,7 @@ impl World {
             }
             // A side-view fighter's skin holds every bone of it in
             // (`skin_hold.rs`).
-            if self.materials.skin_holds_bones && self.skin_holds(&bone) {
+            if self.skin_holds(&bone) {
                 continue;
             }
             // Each end and the middle, and how much of what moves it each end
