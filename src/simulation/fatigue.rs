@@ -36,10 +36,10 @@
 //! slower from the sixth burst on (Haralabidis et al. 2020). Played so
 //! (`print_tiring` with `RP_BURST=5`), at the rates measured holding still
 //! the fighters' punches kept their speed, and at 30 times them a fighter's
-//! punches landed at 8.1 m/s in the first burst, 7.9 in the sixth, and 7.0
-//! in the eleventh, its arms down to 81% and 77% of their strength. Holding
-//! the guard up, still, tires the shoulders at the measured rates: 1% of
-//! their strength a minute.
+//! punches landed at 8.1 m/s in the first burst, 7.8 in the fifth, 7.5 in
+//! the sixth, and 6.9 in the eleventh, its arms down to 77% and 70% of
+//! their strength. Holding the guard up, still, tires the shoulders at the
+//! measured rates: 1% of their strength a minute.
 //!
 //! The rates are those fitted to measured endurance, joint by joint, for men,
 //! per second. The model's rest multiplier applies to a muscle at rest; a
@@ -48,7 +48,13 @@
 //! and one pulling a seventh or more as one at work, the multiplier fading
 //! out between: a working muscle's blood flow starts to be cut off somewhere
 //! between 5% and 15% of its strength (Rowell 1993, as Xia 2018 has recovery
-//! follow the blood's flow).
+//! follow the blood's flow). The multiplier was fitted to rests of seconds;
+//! a muscle's blood comes back over a few seconds once it stops working
+//! hard, so the multiplier grows in over `REFLOW_SECONDS` of rest. Given in
+//! full at once, it let the muscles of a fighter punching flat out recover
+//! in the fifth of a second between its punches nearly as they would resting,
+//! and the fighter tired no further than a quarter of its arms' strength
+//! however long it kept punching.
 //!
 //! Only the side-view fighters' arms tire for now: their shoulders, elbows,
 //! and wrists, which throw punches and hold the guard. The trunk, neck, and
@@ -134,6 +140,12 @@ const RELAXATION_RATE: f64 = 10.0;
 const RESTING_LOAD: f64 = 0.05;
 const WORKING_LOAD: f64 = 0.15;
 
+/// How long a muscle's blood takes to flow back in full once it stops
+/// working hard, in seconds: after a contraction blood flow rises within
+/// two seconds and peaks within about five heartbeats (rapid-onset
+/// vasodilation; Tschakovsky et al. 1996 and 2004, as reviews give them).
+const REFLOW_SECONDS: f64 = 3.0;
+
 /// The muscles that turn a joint one way, and how tired they are. Muscles
 /// with no rates never tire.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -144,6 +156,9 @@ pub struct MuscleGroup {
     /// The shares of its motor units now active and fatigued; the rest rest.
     active: f64,
     fatigued: f64,
+    /// How long it has worked under `WORKING_LOAD`, its blood flowing back,
+    /// in seconds.
+    rested: f64,
 }
 
 impl MuscleGroup {
@@ -155,6 +170,7 @@ impl MuscleGroup {
             fastest,
             active: 0.0,
             fatigued: 0.0,
+            rested: 0.0,
         }
     }
 
@@ -202,7 +218,16 @@ impl MuscleGroup {
         } else {
             RELAXATION_RATE * (load - self.active)
         };
-        let at_rest = ((WORKING_LOAD - load) / (WORKING_LOAD - RESTING_LOAD)).clamp(0.0, 1.0);
+        // Recovering as at rest the more lightly it pulls, once its blood
+        // has had time to flow back.
+        self.rested = if load < WORKING_LOAD {
+            self.rested + dt
+        } else {
+            0.0
+        };
+        let flowing = (self.rested / REFLOW_SECONDS).min(1.0);
+        let at_rest =
+            ((WORKING_LOAD - load) / (WORKING_LOAD - RESTING_LOAD)).clamp(0.0, 1.0) * flowing;
         let recovery = rates.recovery * (1.0 + (rates.rest - 1.0) * at_rest);
         let tiring = rates.fatigue * (1.0 + (fast - 1.0) * speed) * self.active;
         let recovering = recovery * self.fatigued;
