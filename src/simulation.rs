@@ -395,7 +395,8 @@ pub struct Materials {
     pub knockout_more_seconds: f64,
     /// How many times as fast as holding still the side-view fighters' arm
     /// muscles tire shortening at their fastest, as they do throwing a punch
-    /// (`fatigue.rs`): 1 at the rates measured on muscles holding still.
+    /// (`fatigue.rs`): 1 at the rates measured on muscles holding still, and
+    /// 0 never tiring at all.
     pub muscle_fatigue: f64,
     /// The dermis's shear modulus at small strain, in pascals, and its
     /// thickness, in metres; it stiffens `skin_stiffening_ratio` times once

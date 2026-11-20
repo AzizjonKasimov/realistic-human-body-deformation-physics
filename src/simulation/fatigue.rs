@@ -27,7 +27,7 @@
 //!
 //! The rates were fitted to muscles holding still. Shortening fast, a muscle
 //! turns its energy over several times faster than holding the same share
-//! of itself working (the Fenn effect: Fenn 1924; Barclay 1996), and tires
+//! of itself working (the Fenn effect, Fenn 1924), and tires
 //! faster: a muscle shortening at its fastest tires `FAST_FATIGUE` times as
 //! fast as one holding still (`Materials::muscle_fatigue`), and one
 //! shortening slower in proportion. That one number is set from boxing
@@ -218,6 +218,10 @@ impl World {
     pub(super) fn tire_muscles(&mut self, h: f64) {
         let newton_metres = self.newton_metres();
         let scale = self.materials.muscle_fatigue;
+        // `muscle_fatigue=0`: muscles that never tire, for comparisons.
+        if scale <= 0.0 {
+            return;
+        }
         for index in 0..self.bone_joints.len() {
             let joint = &self.bone_joints[index];
             if !joint.drive.muscles.iter().any(MuscleGroup::tires) {
@@ -460,14 +464,20 @@ mod tests {
         let flurry = flurry(Materials::default(), 0.62, 0.0, 0.0, 20.0, 15.0);
         let at = |second: usize| flurry.seconds[second - 1];
         let tired = at(20).arms[0];
-        assert!((0.6..0.92).contains(&tired), "after 20 s its arms have {tired:.3}");
+        assert!(
+            (0.6..0.92).contains(&tired),
+            "after 20 s its arms have {tired:.3}"
+        );
         let (first, last) = (at(1).out_seconds(), at(20).out_seconds());
         assert!(
             last > 1.04 * first,
             "its punches went out in {first:.3} s, then {last:.3} s"
         );
         let rested = at(35).arms[0];
-        assert!(rested > tired + 0.03, "rested 15 s, {tired:.3} came back to {rested:.3}");
+        assert!(
+            rested > tired + 0.03,
+            "rested 15 s, {tired:.3} came back to {rested:.3}"
+        );
         assert!(at(35).arms[1] > 0.95, "the other has {:.3}", at(35).arms[1]);
     }
 
