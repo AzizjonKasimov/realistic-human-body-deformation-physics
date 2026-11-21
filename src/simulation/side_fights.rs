@@ -99,7 +99,8 @@ pub struct SideFight {
     /// of the flesh drawn over it (`inspect::bare_bones`) through whole
     /// skin, away from the window's sides, and the farthest out it showed
     /// so, in pixels; the steps it showed only in a wound, beside skin torn
-    /// or cut ([`bone_in_a_wound`]), as an open injury shows it; and the
+    /// or cut ([`bone_in_a_wound`]), as an open injury shows it, a bone out
+    /// through a wound counted so for as long as it keeps showing; and the
     /// steps it showed near the sides, which only random fights reach: the
     /// game's ring stops well short of them. An open break's pieces, which
     /// come out through the skin they cut, are not counted.
@@ -155,6 +156,11 @@ pub fn play_side_fight(seed: u64, seconds: f64, materials: Materials) -> SideFig
     let steps = (seconds / dt) as usize;
     let metres = world.mm_per_px() * 0.001;
     let mut down_since: [Option<usize>; 2] = [None; 2];
+    // Each bone showing now, and whether it came out in a wound: a bone
+    // out through torn skin is a wound's for as long as it keeps showing,
+    // though the bare place farthest out moves off the tear as it swings
+    // (`bone_in_a_wound` judges a place).
+    let mut wounded: Vec<bool> = Vec::new();
     for step in 0..steps {
         let mut input = InputState::default();
         for (body, made) in moves.next_step().into_iter().enumerate() {
@@ -174,20 +180,33 @@ pub fn play_side_fight(seed: u64, seconds: f64, materials: Materials) -> SideFig
         fight.fastest = fight.fastest.max(fastest);
         // Through whole skin, in a wound, and near the sides.
         let mut shown = [[false; 3]; 2];
+        wounded.resize(world.bones.len(), false);
+        let mut showing = vec![false; world.bones.len()];
         for bare in crate::inspect::bare_bones(&world) {
             let body = world.bones[bare.bone].body as usize;
             if body > 1 {
                 continue;
             }
-            match crate::inspect::shown(&world, &bare) {
+            let kind = crate::inspect::shown(&world, &bare);
+            if kind.is_some() {
+                showing[bare.bone] = true;
+            }
+            if kind == Some(Shown::InWound) {
+                wounded[bare.bone] = true;
+            }
+            match kind {
                 Some(Shown::AtSides) => shown[body][2] = true,
                 Some(Shown::InWound) => shown[body][1] = true,
+                Some(Shown::Whole) if wounded[bare.bone] => shown[body][1] = true,
                 Some(Shown::Whole) => {
                     shown[body][0] = true;
                     fight.bone_shown_px[body] = fight.bone_shown_px[body].max(bare.out);
                 }
                 None => {}
             }
+        }
+        for (wound, shows) in wounded.iter_mut().zip(showing) {
+            *wound &= shows;
         }
         for (body, [whole, wound, at_sides]) in shown.into_iter().enumerate() {
             fight.bone_shown[body] += u32::from(whole);
@@ -408,6 +427,11 @@ mod bare_tests {
                 Some(from.parse::<usize>().ok()?..=to.parse::<usize>().ok()?)
             })
             .unwrap_or(1..=0);
+        // `RP_FIRST=N` starts at fight N, to split the fights between runs.
+        let first: u64 = std::env::var("RP_FIRST")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1);
         let rest = create_side_fighters(Materials::default());
         for found in bare_bones(&rest) {
             println!(
@@ -417,7 +441,7 @@ mod bare_tests {
                 found.out
             );
         }
-        for seed in 1..=fights {
+        for seed in first..=fights {
             if only.is_some_and(|only| only != seed) {
                 continue;
             }
