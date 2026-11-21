@@ -27,6 +27,16 @@
 //! soft contacts"; Shinar, Schroeder and Fedkiw 2008, "Two-way coupling of
 //! rigid and deformable bodies"). Only where the skin is torn or cut, or
 //! the flesh at it torn away, or round an open break, can bone come out.
+//! Skin folded over onto its own flesh, as a hand pushed back inside its
+//! forearm once the wrist tore folds it, has flesh beyond it too and is no
+//! wall: a place meets the nearest skin with nothing beyond it instead.
+//! Each tried and dropped for holding bones in worse: the push carried from
+//! one substep to the next, as Box2D warm starts a contact (bone through
+//! whole skin 756 frames against 40 over five random fights); skin pressed
+//! from outside, by the other fighter or the floor, taking none of the push
+//! (4,725 frames against 3 over the game's bouts); and places a step left
+//! outside the skin put back in after it, outside the solver, which flung
+//! bones across the ring.
 //!
 //! The sandbox's front-view body is held so too, by more rules that a body
 //! struck by tools, its limbs one sheet of flesh, needs. Held as a fighter
@@ -113,13 +123,20 @@ pub(super) struct BoneInSkin {
 }
 
 /// Which stretches of skin a place may meet: any (as the body was built),
-/// whole skin, or whole skin not turned over in a crease.
+/// whole skin, whole skin not turned over in a crease, or whole skin not
+/// folded over onto its own flesh (`World::skin_edge_on_surface`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Surface {
     Any,
     Whole,
     Uncreased,
+    Unfolded,
 }
+
+/// How far outside a stretch of skin, in pixels, the flesh is looked for
+/// beyond it, as skin folded over onto its own flesh has it
+/// (`World::skin_edge_on_surface`).
+const FOLD_TEST_PX: f64 = 0.5;
 
 /// The nearest stretch of skin round a place: the stretch, where along it,
 /// the way into the flesh there, and how far inside the skin the place is
@@ -325,7 +342,7 @@ impl World {
                 };
                 let along = sample as f64 / samples as f64;
                 let at = lerp(bone.previous_a, bone.previous_b, along);
-                let Some(found) = self.nearest_skin(
+                let Some(mut found) = self.nearest_skin(
                     outline,
                     &held.edges,
                     at,
@@ -339,27 +356,40 @@ impl World {
                 ) else {
                     continue;
                 };
+                let mut due = self.skin_hold_due(&bone, along, outline, &found, margin, h);
+                // A fighter's skin folded over onto its own flesh, as a hand
+                // slid back inside its forearm once the wrist tore folds it,
+                // has flesh on both sides and is no wall: the place meets the
+                // nearest stretch with nothing beyond it instead. Held to the
+                // folded skin, a forearm's bone was pushed two ways at once,
+                // and its end stood out of the top of the fist for the rest
+                // of the fight.
+                if due
+                    && !yields
+                    && !self
+                        .skin_edge_on_surface(outline, found.edge, &|point: &Point| point.previous)
+                {
+                    let Some(unfolded) = self.nearest_skin(
+                        outline,
+                        &held.edges,
+                        at,
+                        reach,
+                        Surface::Unfolded,
+                        |point| point.previous,
+                    ) else {
+                        continue;
+                    };
+                    found = unfolded;
+                    due = self.skin_hold_due(&bone, along, outline, &found, margin, h);
+                }
+                if !due {
+                    continue;
+                }
                 let skin = [points[found.edge], points[(found.edge + 1) % count]];
                 if yields
                     && (pressed.binary_search(&skin[0]).is_ok()
                         || pressed.binary_search(&skin[1]).is_ok())
                 {
-                    continue;
-                }
-                // How far the place and the skin could close within the
-                // substep, moving as they do.
-                let bone_velocity = lerp(
-                    scale(subtract(bone.a, bone.previous_a), 1.0 / h),
-                    scale(subtract(bone.b, bone.previous_b), 1.0 / h),
-                    along,
-                );
-                let skin_velocity = lerp(
-                    self.point_velocity(skin[0], h),
-                    self.point_velocity(skin[1], h),
-                    found.at,
-                );
-                let closing = (-dot(subtract(bone_velocity, skin_velocity), found.normal)).max(0.0);
-                if found.depth - margin > closing * h + spacing {
                     continue;
                 }
                 holds.push(SkinHold {
@@ -375,6 +405,89 @@ impl World {
         }
         self.skin_holds = holds;
         self.measure_skin_columns();
+    }
+
+    /// Whether the place `along` bone `bone` may reach the stretch of skin
+    /// `found` of outline `outline` within the substep `h`, kept `margin`
+    /// inside it, or lies past that already: how far they could close,
+    /// moving as they do, against how far apart they are, with a point
+    /// spacing to spare.
+    fn skin_hold_due(
+        &self,
+        bone: &BoneSegment,
+        along: f64,
+        outline: usize,
+        found: &NearestSkin,
+        margin: f64,
+        h: f64,
+    ) -> bool {
+        let points = self.outlines[outline].points();
+        let count = points.len();
+        let skin = [points[found.edge], points[(found.edge + 1) % count]];
+        let bone_velocity = lerp(
+            scale(subtract(bone.a, bone.previous_a), 1.0 / h),
+            scale(subtract(bone.b, bone.previous_b), 1.0 / h),
+            along,
+        );
+        let skin_velocity = lerp(
+            self.point_velocity(skin[0], h),
+            self.point_velocity(skin[1], h),
+            found.at,
+        );
+        let closing = (-dot(subtract(bone_velocity, skin_velocity), found.normal)).max(0.0);
+        found.depth - margin <= closing * h + self.materials.point_spacing.max(1.0)
+    }
+
+    /// How many times outline `outline` goes round `at`, judged where
+    /// `place` puts each point: none outside it, once inside, twice where
+    /// it has folded over itself (the nonzero winding rule).
+    fn winding(&self, outline: usize, at: Vec2, place: &impl Fn(&Point) -> Vec2) -> i32 {
+        let points = self.outlines[outline].points();
+        let count = points.len();
+        let mut winding = 0;
+        for index in 0..count {
+            let a = place(&self.points[points[index]]);
+            let b = place(&self.points[points[(index + 1) % count]]);
+            let side = (b.x - a.x) * (at.y - a.y) - (at.x - a.x) * (b.y - a.y);
+            if a.y <= at.y {
+                if b.y > at.y && side > 0.0 {
+                    winding += 1;
+                }
+            } else if b.y <= at.y && side < 0.0 {
+                winding -= 1;
+            }
+        }
+        winding
+    }
+
+    /// Whether edge `edge` of outline `outline` lies on the flesh's
+    /// surface, judged where `place` puts each point: just outside its
+    /// middle, the outline goes round nothing. Skin folded over onto its
+    /// own flesh has flesh beyond it too.
+    fn skin_edge_on_surface(
+        &self,
+        outline: usize,
+        edge: usize,
+        place: &impl Fn(&Point) -> Vec2,
+    ) -> bool {
+        let loop_ = &self.outlines[outline];
+        let points = loop_.points();
+        let count = points.len();
+        let (a, b) = (
+            place(&self.points[points[edge]]),
+            place(&self.points[points[(edge + 1) % count]]),
+        );
+        let along = subtract(b, a);
+        let length = hypot(along.x, along.y);
+        if length <= EPSILON {
+            return true;
+        }
+        let outward = Vec2 {
+            x: -along.y / length * loop_.outward(),
+            y: along.x / length * loop_.outward(),
+        };
+        let beyond = add(lerp(a, b, 0.5), scale(outward, FOLD_TEST_PX));
+        self.winding(outline, beyond, place) == 0
     }
 
     /// Each point of flesh something else presses as this substep begins,
@@ -602,9 +715,10 @@ impl World {
     /// far inside the skin `at` lies by the outline's way in there, an
     /// edge's own across it and, where its nearest is a corner, the way in
     /// between the corner's two edges, so a place just outside a rounded
-    /// end reads as outside. On a `Surface::Whole` or `Uncreased`, a stretch
-    /// of skin torn or cut, or of flesh torn away, is no surface, and on an
-    /// `Uncreased` one neither is a stretch turned over in a crease.
+    /// end reads as outside. On a `Surface::Whole`, `Uncreased` or
+    /// `Unfolded`, a stretch of skin torn or cut, or of flesh torn away, is no
+    /// surface; on an `Uncreased` one neither is a stretch turned over in a
+    /// crease, nor on an `Unfolded` one a stretch folded over onto the flesh.
     fn nearest_skin(
         &self,
         outline: usize,
@@ -645,6 +759,9 @@ impl World {
                 || nearest.is_some_and(|(closest, ..)| gap >= closest)
                 || (surface != Surface::Any && !self.skin_edge_whole(outline, edge))
             {
+                continue;
+            }
+            if surface == Surface::Unfolded && !self.skin_edge_on_surface(outline, edge, &place) {
                 continue;
             }
             // A stretch of skin turned over in a crease faces into the body,
@@ -767,6 +884,83 @@ mod tests {
         }
     }
 
+    /// Skin folded over onto its own flesh is no wall
+    /// (`skin_edge_on_surface`): a fighter's outline laid out as two turns
+    /// round one middle, the second inside the first, as a hand slid back
+    /// inside its forearm once the wrist tore folds it, has flesh beyond its
+    /// inner turn, and only its outer turn is the flesh's surface. As built,
+    /// every stretch of every outline is.
+    #[test]
+    fn skin_folded_over_its_own_flesh_is_no_wall() {
+        let world = create_side_fighters(Materials::default());
+        let as_built = |point: &Point| point.position;
+        for (outline, loop_) in world.outlines.iter().enumerate() {
+            for edge in 0..loop_.points().len() {
+                assert!(
+                    world.skin_edge_on_surface(outline, edge, &as_built),
+                    "edge {edge} of outline {outline} reads as folded as built"
+                );
+            }
+        }
+        let outline = world
+            .bones_in_skin
+            .iter()
+            .zip(&world.bones)
+            .find(|(_, bone)| bone.part == BonePart::Forearm)
+            .and_then(|(held, _)| held.outline)
+            .expect("skin round a forearm");
+        let points = world.outlines[outline].points().to_vec();
+        let count = points.len();
+        // The way the outline winds as built, which its outward side is
+        // set by: the two turns wind the same way.
+        let area: f64 = (0..count)
+            .map(|index| {
+                let (a, b) = (
+                    world.points[points[index]].position,
+                    world.points[points[(index + 1) % count]].position,
+                );
+                a.x * b.y - b.x * a.y
+            })
+            .sum();
+        let turn = area.signum();
+        let first = count / 2;
+        let middle = Vec2 { x: 600.0, y: 400.0 };
+        let laid_out: std::collections::HashMap<(u64, u64), Vec2> = points
+            .iter()
+            .enumerate()
+            .map(|(index, &point)| {
+                let (radius, share) = if index < first {
+                    (40.0, index as f64 / first as f64)
+                } else {
+                    (20.0, (index - first) as f64 / (count - first) as f64)
+                };
+                let angle = 2.0 * PI * share;
+                let home = world.points[point].home;
+                (
+                    (home.x.to_bits(), home.y.to_bits()),
+                    Vec2 {
+                        x: middle.x + radius * libm::cos(angle),
+                        y: middle.y + turn * radius * libm::sin(angle),
+                    },
+                )
+            })
+            .collect();
+        let folded = |point: &Point| laid_out[&(point.home.x.to_bits(), point.home.y.to_bits())];
+        for edge in 0..count - 1 {
+            if edge + 1 < first {
+                assert!(
+                    world.skin_edge_on_surface(outline, edge, &folded),
+                    "edge {edge} of the outer turn reads as folded"
+                );
+            } else if edge >= first {
+                assert!(
+                    !world.skin_edge_on_surface(outline, edge, &folded),
+                    "edge {edge} of the inner turn reads as the surface"
+                );
+            }
+        }
+    }
+
     /// A front-view limb's bone meets only skin held to it: the skin of an
     /// elbow's inner crease, held to the forearm and the upper arm both,
     /// was pushed two ways by their bones and tore.
@@ -846,7 +1040,313 @@ mod tests {
 
 #[cfg(test)]
 mod print_tests {
+    use super::super::soft::perpendicular;
     use super::*;
+
+    /// Replays random side-view fight `RP_SEED` as `print_bare_bones` plays
+    /// it to step `RP_STEP`, and prints how the skin holds bone `RP_BONE`
+    /// there: each place along it against the nearest whole skin and the
+    /// margin it is kept by, the holds the step's last substep found and
+    /// what they gave, where it shows bare, and how far its flesh lies off
+    /// its ties' places (`cargo test --release --lib print_hold_on_a_bone --
+    /// --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn print_hold_on_a_bone() {
+        let number = |name: &str, default: usize| {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(default)
+        };
+        let seed = number("RP_SEED", 31) as u64;
+        let last = number("RP_STEP", 854);
+        let index = number("RP_BONE", 10);
+        let first = number("RP_FROM", last);
+        let mut world = create_side_fighters(Materials::default());
+        let dt = world.materials.fixed_dt;
+        let mut moves = crate::simulation::side_fights::RandomMoves::new(seed);
+        for step in 1..=last {
+            let mut input = InputState::default();
+            for (body, made) in moves.next_step().into_iter().enumerate() {
+                if let Some(made) = made {
+                    input.moves[body] = Some((body, made));
+                }
+            }
+            world.step(dt, &input, crate::scenarios::SCENARIO_WIDTH);
+            if step < first {
+                continue;
+            }
+            let bone = world.bones[index];
+            let middle = lerp(bone.a, bone.b, 0.5);
+            println!(
+                "step {step}: bone {index} {:?}, a ({:.1}, {:.1}) b ({:.1}, {:.1}), middle ({:.1}, {:.1}), length {:.1} (rest {:.1}), drawn half {:.2}",
+                bone.part,
+                bone.a.x,
+                bone.a.y,
+                bone.b.x,
+                bone.b.y,
+                middle.x,
+                middle.y,
+                distance(bone.a, bone.b),
+                bone.rest_length,
+                World::drawn_half_width(&bone)
+            );
+            let held = world.bones_in_skin[index].clone();
+            let Some(outline) = held.outline else {
+                println!("  no skin round it");
+                continue;
+            };
+            let samples = held.margins.len().saturating_sub(1).max(1);
+            for (sample, margin) in held.margins.iter().enumerate() {
+                let along = sample as f64 / samples as f64;
+                let place = lerp(bone.a, bone.b, along);
+                let whole = world.nearest_skin(
+                    outline,
+                    &held.edges,
+                    place,
+                    f64::INFINITY,
+                    Surface::Whole,
+                    |point| point.position,
+                );
+                let any = world.nearest_skin(
+                    outline,
+                    &held.edges,
+                    place,
+                    f64::INFINITY,
+                    Surface::Any,
+                    |point| point.position,
+                );
+                let points = world.outlines[outline].points();
+                let count = points.len();
+                let text = |found: Option<NearestSkin>| {
+                    found.map_or("none".to_string(), |found| {
+                        format!(
+                            "edge {} (points {}-{}) at {:.2}, depth {:+.2}, in ({:+.2}, {:+.2})",
+                            found.edge,
+                            points[found.edge],
+                            points[(found.edge + 1) % count],
+                            found.at,
+                            found.depth,
+                            found.normal.x,
+                            found.normal.y
+                        )
+                    })
+                };
+                let past = match (margin, whole) {
+                    (Some(margin), Some(found)) if found.depth < *margin => {
+                        format!("  PAST BY {:.2}", margin - found.depth)
+                    }
+                    _ => String::new(),
+                };
+                println!(
+                    "  {:>4.2} ({:.1}, {:.1}) margin {}: whole {}; any {}{}",
+                    along,
+                    place.x,
+                    place.y,
+                    margin.map_or("none".to_string(), |margin| format!("{margin:.2}")),
+                    text(whole),
+                    if any.map(|found| found.edge) == whole.map(|found| found.edge) {
+                        "same".to_string()
+                    } else {
+                        text(any)
+                    },
+                    past
+                );
+            }
+            for hold in world.skin_holds.iter().filter(|hold| hold.bone == index) {
+                println!(
+                    "  hold at {:.2}: skin {:?} at {:.2}, margin {:.2}, in ({:+.2}, {:+.2}), impulse {:.4}",
+                    hold.along,
+                    hold.skin,
+                    hold.at,
+                    hold.margin,
+                    hold.normal.x,
+                    hold.normal.y,
+                    hold.impulse
+                );
+            }
+            for bare in crate::inspect::bare_bones(&world)
+                .iter()
+                .filter(|bare| bare.bone == index)
+            {
+                println!(
+                    "  bare {:.1} px, out {:.2} px at ({:.1}, {:.1}), shown {:?}",
+                    bare.bare,
+                    bare.out,
+                    bare.farthest.x,
+                    bare.farthest.y,
+                    crate::inspect::shown(&world, bare)
+                );
+            }
+            // How far each tie's flesh lies off its place on the bone, along
+            // the bone and across it.
+            let length = bone.rest_length.max(EPSILON);
+            let axis = normalized(subtract(bone.b, bone.a), Vec2 { x: 1.0, y: 0.0 });
+            let across_axis = perpendicular(axis);
+            let mut ties = 0;
+            let mut off = Vec2::default();
+            let mut worst: (f64, usize, Vec2) = (0.0, 0, Vec2::default());
+            for tie in world
+                .bone_attachments
+                .iter()
+                .filter(|tie| tie.bone == index)
+            {
+                if tie.broken {
+                    continue;
+                }
+                let tau = tie.t + tie.along / length;
+                let sigma = tie.across / length;
+                let target = add(
+                    lerp(bone.a, bone.b, tau),
+                    scale(perpendicular(subtract(bone.b, bone.a)), sigma),
+                );
+                let error = subtract(world.points[tie.point].position, target);
+                let local = Vec2 {
+                    x: dot(error, axis),
+                    y: dot(error, across_axis),
+                };
+                ties += 1;
+                off = add(off, local);
+                let size = hypot(error.x, error.y);
+                if size > worst.0 {
+                    worst = (size, tie.point, local);
+                }
+            }
+            let broken = world
+                .bone_attachments
+                .iter()
+                .filter(|tie| tie.bone == index && tie.broken)
+                .count();
+            println!(
+                "  ties {ties} whole, {broken} broken: flesh off its places by ({:+.2} along, {:+.2} across) on average, most {:.2} (point {}, {:+.2}, {:+.2})",
+                off.x / ties.max(1) as f64,
+                off.y / ties.max(1) as f64,
+                worst.0,
+                worst.1,
+                worst.2.x,
+                worst.2.y
+            );
+            for joint in world
+                .bone_joints
+                .iter()
+                .filter(|joint| joint.a == index || joint.b == index)
+            {
+                let (first, second) = (world.bones[joint.a], world.bones[joint.b]);
+                let at_first = lerp(first.a, first.b, joint.t_a);
+                let at_second = lerp(second.a, second.b, joint.t_b);
+                println!(
+                    "  joint {} {:?} ({:.2}) - {} {:?} ({:.2}): {:.1} px apart (rest {:.1}){}{}{}",
+                    joint.a,
+                    first.part,
+                    joint.t_a,
+                    joint.b,
+                    second.part,
+                    joint.t_b,
+                    distance(at_first, at_second),
+                    joint.rest,
+                    if joint.broken { ", broken" } else { "" },
+                    if joint.subluxated { ", slipped" } else { "" },
+                    if joint.fracture_link {
+                        ", a break's link"
+                    } else {
+                        ""
+                    }
+                );
+            }
+            // `RP_DUMP=FILE` writes, on the last step, the outlines, bones,
+            // ties and skin contacts near the bone, to draw them.
+            let Ok(path) = std::env::var("RP_DUMP") else {
+                continue;
+            };
+            if step != last {
+                continue;
+            }
+            let near = |at: Vec2| distance_to_segment(at, bone.a, bone.b) < 60.0;
+            let mut lines = Vec::new();
+            lines.push(format!(
+                "traced,{index},{},{},{},{}",
+                bone.a.x, bone.a.y, bone.b.x, bone.b.y
+            ));
+            for (number, loop_) in world.outlines.iter().enumerate() {
+                let points = loop_.points();
+                if !points
+                    .iter()
+                    .any(|&point| near(world.points[point].position))
+                {
+                    continue;
+                }
+                let count = points.len();
+                for (edge, &point) in points.iter().enumerate() {
+                    let at = world.points[point].position;
+                    let own = number == outline;
+                    lines.push(format!(
+                        "outline,{number},{edge},{point},{},{},{},{},{},{},{}",
+                        at.x,
+                        at.y,
+                        u8::from(own),
+                        u8::from(world.skin_edge_whole(number, edge)),
+                        u8::from(own && held.edges.contains(&edge)),
+                        world.points[point].body,
+                        world.points[point].sheet
+                    ));
+                    let _ = count;
+                }
+            }
+            for (other, segment) in world.bones.iter().enumerate() {
+                if near(segment.a) || near(segment.b) {
+                    lines.push(format!(
+                        "bone,{other},{},{},{},{},{},{}",
+                        segment.a.x,
+                        segment.a.y,
+                        segment.b.x,
+                        segment.b.y,
+                        segment.body,
+                        segment.sheet
+                    ));
+                }
+            }
+            for tie in world
+                .bone_attachments
+                .iter()
+                .filter(|tie| tie.bone == index)
+            {
+                let tau = tie.t + tie.along / length;
+                let sigma = tie.across / length;
+                let target = add(
+                    lerp(bone.a, bone.b, tau),
+                    scale(perpendicular(subtract(bone.b, bone.a)), sigma),
+                );
+                let at = world.points[tie.point].position;
+                lines.push(format!(
+                    "tie,{},{},{},{},{},{},{:?}",
+                    tie.point,
+                    at.x,
+                    at.y,
+                    target.x,
+                    target.y,
+                    u8::from(tie.broken),
+                    world.points[tie.point].layer
+                ));
+            }
+            for pair in &world.outline_pairs {
+                let points = world.outlines[pair.outline].points();
+                let count = points.len();
+                let (a, b) = (points[pair.edge], points[(pair.edge + 1) % count]);
+                let at = world.points[pair.point].position;
+                if near(at) {
+                    let gap =
+                        distance_to_segment(at, world.points[a].position, world.points[b].position);
+                    lines.push(format!(
+                        "pair,{},{},{},{},{},{:.2}",
+                        pair.point, pair.outline, pair.edge, a, b, gap
+                    ));
+                }
+            }
+            std::fs::write(&path, lines.join("\n")).expect("RP_DUMP's file");
+            println!("  wrote {path}");
+        }
+    }
 
     /// Prints how deep inside its own skin each bone lies as built, the
     /// least along it, against half the stroke it is drawn with, and how

@@ -2,6 +2,10 @@
 
 What each version of Realistic Physics changed, newest first. The game shows its version on the start screen and in its bottom-left corner, and every Short made from the game shows the version it was made with. Only the newest version is online.
 
+## v0.20.1 (2026-11-21)
+
+- On the Fight page, a wrist torn in a fall no longer leaves the end of the forearm's bone showing through unbroken skin at the fist for the rest of the fight.
+
 ## v0.20 (2026-11-19)
 
 - On the Fight page, fighters tire as boxers do: punching flat out wears their arms down, and tired arms punch slower, land softer, and come back to the guard later, while resting between punches and between rounds brings their strength back. Holding the guard up hardly tires them.
