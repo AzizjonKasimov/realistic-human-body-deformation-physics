@@ -40,6 +40,7 @@ pub use bodies::{create_fighters, create_fighters_at, fighters_from, BodyState};
 pub use body::{
     body_frame, body_frame_between, create_layered_body, create_layered_body_in, BodyFrame,
 };
+pub use clash::FLESH_WAYS;
 pub use cover::Cover;
 pub use cuts::{OpenedCut, Piece, TriangleCut};
 pub use fatigue::{FatigueRates, MuscleGroup};
@@ -372,6 +373,11 @@ pub struct Materials {
     /// breaks' pieces held in (`hold_closed_pieces_in_the_skin`), to set
     /// the two beside each other.
     pub skin_holds_front: bool,
+    /// Whether the floor lifts a side-view fighter's bone that sank below
+    /// it back onto it with the flesh held to it (`constrain_to_world`), as
+    /// every other push moves a fighter's bone; false lifts the bone alone,
+    /// to set the two beside each other.
+    pub floor_lifts_flesh: bool,
     /// How firmly legs that carry a fighter's hips push them across toward
     /// where its pose puts them over its feet, and keep its pelvis tilted
     /// as the pose has it, in hertz on the body's weight and on its turning
@@ -694,6 +700,7 @@ impl Default for Materials {
             legs_carry: true,
             skin_holds_bones: true,
             skin_holds_front: true,
+            floor_lifts_flesh: true,
             legs_across_hertz: 2.0,
             legs_tilt_hertz: 3.0,
             legs_up_hertz: 0.0,
@@ -1322,6 +1329,12 @@ pub struct BoneSegment {
     /// (`clash.rs`). None round a broken piece, or a bone no skin keeps its
     /// place on.
     pub flesh: f64,
+    /// For a side-view fighter's skull, which lies nearer the back of the
+    /// head than the face, how far the head's skin lies from it each way
+    /// round it, in pixels, as built (`clash.rs`, `FLESH_WAYS`); nothing
+    /// for any other bone, nor a way none of the skin lies, where `flesh`
+    /// holds.
+    pub flesh_round: [f64; FLESH_WAYS],
     /// Which of its body's sheets of flesh it lies in (`Point::sheet`); its
     /// pieces keep it.
     pub sheet: u8,
@@ -1370,6 +1383,7 @@ impl Default for BoneSegment {
             limb: Limb::None,
             body: 0,
             flesh: 0.0,
+            flesh_round: [0.0; FLESH_WAYS],
             sheet: 0,
             sole: 0.0,
         }
@@ -7142,8 +7156,14 @@ impl World {
         self.acting(acted);
     }
 
+    /// Keeps every point and bone above the floor and inside the world's
+    /// sides, a side-view fighter's sunken bones lifted with their flesh
+    /// first (`lift_sunk_bones_with_flesh`).
     fn constrain_to_world(&mut self, width: f64, floor_y: f64) {
         let margin = 8.0;
+        if self.materials.floor_lifts_flesh {
+            self.lift_sunk_bones_with_flesh(floor_y);
+        }
         for point in &mut self.points {
             if point.pinned {
                 continue;
@@ -7193,6 +7213,43 @@ impl World {
                 bone.b.y = bone.b.y.min(floor_y);
             }
             self.bones[index] = bone;
+        }
+    }
+
+    /// Lifts each side-view fighter's bone that sank below the floor back
+    /// onto it with the flesh held to it (`floor_lifts_flesh`): each point
+    /// by its share of the bone (`side_flesh`), as far as the bone's place
+    /// beside it sank, as the joints and the clash move a fighter's bone
+    /// with its flesh (`sides.rs`). Lifted alone, as the floor lifted every
+    /// bone, a fighter that fell onto a folded leg, its knee and ankle
+    /// forced past their ranges, had its shin turned into the floor each
+    /// substep by the joints' held push and lifted back out of its flesh by
+    /// the floor: within a fifth of a second all 43 of the shin's muscle
+    /// ties tore, the ankle with them, and the bare bone lay on the floor,
+    /// showing at the ankle. Each tried and dropped: a foot standing on the
+    /// floor left to its own hold on its sole (`solve_foot_holds`), the
+    /// ankle of that fall still tore, and a fighter shoved onto its back
+    /// took 7.2 s to get up against 5.1; only the flesh above the bone
+    /// lifted, the floor holding what lies under it, a shin was dragged out
+    /// of its flesh as before.
+    fn lift_sunk_bones_with_flesh(&mut self, floor_y: f64) {
+        for index in 0..self.bones.len() {
+            let bone = self.bones[index];
+            if bone.pinned || free_bone_fragment(bone) || !self.side_fighter(bone.body as usize) {
+                continue;
+            }
+            let sinks = [(bone.a.y - floor_y).max(0.0), (bone.b.y - floor_y).max(0.0)];
+            if sinks == [0.0, 0.0] {
+                continue;
+            }
+            for &(point, share) in self.side_flesh.get(index).map_or(&[][..], Vec::as_slice) {
+                let at = self.points[point].position;
+                let t = segment_t(at, bone.a, bone.b);
+                let lift = sinks[0] * (1.0 - t) + sinks[1] * t;
+                self.points[point].position.y -= lift * share;
+            }
+            self.bones[index].a.y -= sinks[0];
+            self.bones[index].b.y -= sinks[1];
         }
     }
 
@@ -8490,6 +8547,68 @@ mod tests {
         fn move_tool_for_test(&mut self, dt: f64, input: &InputState) {
             self.move_tool(input, dt);
         }
+    }
+
+    /// The floor lifts a side-view fighter's bone that sank below it with
+    /// the flesh held to it (`lift_sunk_bones_with_flesh`): a shin pushed
+    /// into the floor with its flesh, as a knee forced past its range turns
+    /// it in, comes back up with its flesh where it was on it, its muscle
+    /// ties no further off their places; lifted alone (`floor_lifts_flesh`
+    /// false), its end came out of its flesh as far as it had sunk.
+    #[test]
+    fn the_floor_lifts_a_fighter_s_sunken_bone_with_its_flesh() {
+        let sink = 10.0;
+        let mut slips = Vec::new();
+        for lifts in [true, false] {
+            let mut materials = Materials::default();
+            materials.floor_lifts_flesh = lifts;
+            let mut world = fighter::create_side_fighters(materials);
+            world.measure_bone_pieces();
+            let shin = world.bodies[0].fighter.as_ref().expect("a fighter").shins[1];
+            // Pushed down until its lower end lies `sink` below the floor,
+            // its flesh with it by its share.
+            let bone = world.bones[shin];
+            let floor = world.floor_y();
+            let down = floor + sink - bone.a.y.max(bone.b.y);
+            let turned = |at: Vec2| Vec2 {
+                x: at.x,
+                y: at.y + down,
+            };
+            // How far the ties of the flesh held wholly to it are off their
+            // places on it, on average; flesh shared with the foot or the
+            // thigh follows them too.
+            let flesh = world.side_flesh[shin].clone();
+            let own: Vec<usize> = flesh
+                .iter()
+                .filter(|&&(_, share)| share >= 1.0)
+                .map(|&(point, _)| point)
+                .collect();
+            let slip = |world: &World| {
+                let slips: Vec<f64> = world
+                    .bone_attachments
+                    .iter()
+                    .filter(|tie| tie.bone == shin && !tie.broken && own.contains(&tie.point))
+                    .map(|tie| world.bone_tie_slip(tie))
+                    .collect();
+                slips.iter().sum::<f64>() / slips.len().max(1) as f64
+            };
+            for &(point, share) in &flesh {
+                let at = world.points[point].position;
+                world.points[point].position = lerp(at, turned(at), share);
+            }
+            world.bones[shin].a = turned(bone.a);
+            world.bones[shin].b = turned(bone.b);
+            let before = slip(&world);
+            world.constrain_to_world(crate::scenarios::SCENARIO_WIDTH, floor);
+            assert!(world.bones[shin].a.y.max(world.bones[shin].b.y) <= floor);
+            slips.push(slip(&world) - before);
+        }
+        assert!(
+            slips[0] < 0.2 * sink && slips[1] > 2.0 * slips[0],
+            "the shin's ties slipped {:.2} px further on average lifted with its flesh, {:.2} lifted alone",
+            slips[0],
+            slips[1]
+        );
     }
 
     fn average_fragment_speed(bone: BoneSegment) -> f64 {

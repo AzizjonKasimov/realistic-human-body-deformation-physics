@@ -2,6 +2,11 @@
 
 What each version of Realistic Physics changed, newest first. The game shows its version on the start screen and in its bottom-left corner, and every Short made from the game shows the version it was made with. Only the newest version is online.
 
+## v0.20.2 (2026-11-22)
+
+- On the Fight page, punches landing on the jaw no longer tear the flesh of the punching hand off its bone, which after many punches let the hand's bone show through the knuckles.
+- On the Fight page, bone shows far less often after a fighter falls: the floor now lifts a fighter's limbs with their flesh instead of dragging the bones out of it, which tore the flesh off a shin and left the bone showing at the ankle.
+
 ## v0.20.1 (2026-11-21)
 
 - On the Fight page, a wrist torn in a fall no longer leaves the end of the forearm's bone showing through unbroken skin at the fist for the rest of the fight.

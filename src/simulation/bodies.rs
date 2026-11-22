@@ -338,6 +338,7 @@ impl World {
                 *at = place(*at);
             }
             bone.break_normal = motion(bone.break_normal);
+            bone.flesh_round = super::clash::mirrored_flesh(bone.flesh_round);
             bone.broken_start_normal = motion(bone.broken_start_normal);
             bone.broken_end_normal = motion(bone.broken_end_normal);
             bone.angular_velocity = -bone.angular_velocity;

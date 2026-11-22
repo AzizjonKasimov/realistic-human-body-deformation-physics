@@ -30,6 +30,13 @@
 //! Skin folded over onto its own flesh, as a hand pushed back inside its
 //! forearm once the wrist tore folds it, has flesh beyond it too and is no
 //! wall: a place meets the nearest skin with nothing beyond it instead.
+//! Two pushes from outside the hold, which it cannot outrun, are kept from
+//! dragging bone and flesh apart where they begin: the skull meets a landed
+//! fist at the face's flesh, not the back of the head's (`clash.rs`,
+//! `flesh_toward`), so the punching hand's bone no longer drives on through
+//! its own knuckles and tears their flesh off it; and the floor lifts a
+//! fighter's sunken bone with its flesh (`lift_sunk_bones_with_flesh`), so a
+//! fall onto a folded leg no longer drags the shin out of its flesh.
 //! Each tried and dropped for holding bones in worse: the push carried from
 //! one substep to the next, as Box2D warm starts a contact (bone through
 //! whole skin 756 frames against 40 over five random fights); skin pressed

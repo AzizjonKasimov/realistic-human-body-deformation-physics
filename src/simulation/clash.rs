@@ -7,7 +7,10 @@
 //! bone showed.
 //!
 //! So each bone of a limb, and the skull, is a capsule as thick as the flesh
-//! round it, and where two bodies' capsules overlap they are pushed apart as
+//! round it (a skull's, which lies nearer the back of the head than the
+//! face, as thick each way round it as the head's flesh lies that way:
+//! `flesh_toward`), and where two bodies' capsules overlap they are pushed
+//! apart as
 //! Box2D v3 pushes two bodies' shapes apart (Erin Catto, MIT, `contact_solver.c`:
 //! a soft contact at 30 Hz, damped tenfold, pushing out no faster than 3 m/s,
 //! speculative before they touch), on the bone and the flesh held to it as one
@@ -54,6 +57,57 @@ const CLASH_PUSH_SPEED: f64 = 3.0;
 /// gave way to it short of the head, and at 800 N punches thrown again and
 /// again pressed on into the guard until a wrist tore.
 const CLASH_BLOCK_FORCE: f64 = 600.0;
+
+/// How many ways round a bone its flesh is measured (`BoneSegment::flesh_round`):
+/// every eighth of a turn, from beyond its `b` end, counterclockwise.
+/// Measured as one thickness all round, a skull, which lies nearer the back
+/// of the head than the face, met a fist at the flesh of the back of the
+/// head: after a cross landed on the jaw the hand's bone drove about 11 px
+/// (3.5 cm) on through its own knuckles' flesh before the skull's flesh
+/// stopped it, and the hand's flesh tore off its bone a few punches a
+/// minute.
+pub const FLESH_WAYS: usize = 8;
+
+/// The way round bone `along` (from its `a` end to its `b`) that `off`
+/// points, in [`FLESH_WAYS`]ths of a turn from beyond its `b` end,
+/// counterclockwise.
+fn way_round(along: Vec2, off: Vec2) -> f64 {
+    let turn = libm::atan2(cross(along, off), dot(along, off));
+    turn / (2.0 * PI) * FLESH_WAYS as f64
+}
+
+/// How far `bone`'s flesh reaches from it the way `way` points, as built:
+/// its flesh measured each way round it (`flesh_round`), between the two
+/// nearest ways in proportion, its flesh all round (`flesh`) where none of
+/// its skin lies a way.
+pub(super) fn flesh_toward(bone: &BoneSegment, way: Vec2) -> f64 {
+    let along = subtract(bone.b, bone.a);
+    if bone.flesh_round == [0.0; FLESH_WAYS]
+        || dot(along, along) <= EPSILON
+        || dot(way, way) <= EPSILON
+    {
+        return bone.flesh;
+    }
+    let turn = way_round(along, way);
+    let below = libm::floor(turn);
+    let share = turn - below;
+    let at = |way: f64| {
+        let index = (way as i64).rem_euclid(FLESH_WAYS as i64) as usize;
+        let flesh = bone.flesh_round[index];
+        if flesh > 0.0 {
+            flesh
+        } else {
+            bone.flesh
+        }
+    };
+    at(below) * (1.0 - share) + at(below + 1.0) * share
+}
+
+/// `flesh_round` as a mirror image of the body has it: each way turned the
+/// other way round.
+pub(super) fn mirrored_flesh(round: [f64; FLESH_WAYS]) -> [f64; FLESH_WAYS] {
+    std::array::from_fn(|way| round[(FLESH_WAYS - way) % FLESH_WAYS])
+}
 
 /// A bone of one body and a bone of another whose flesh overlaps, or may
 /// overlap within this substep, and how they press on each other.
@@ -108,7 +162,45 @@ impl World {
     /// from the bone to the points of the skin's outline that keep their
     /// place mostly on it, as built.
     pub(super) fn measure_bone_flesh(&mut self) {
-        let mut reaches: Vec<Vec<f64>> = vec![Vec::new(); self.bones.len()];
+        for (bone, mut reach) in self.held_skin_reaches().into_iter().enumerate() {
+            reach.sort_by(|p, q| p.0.total_cmp(&q.0));
+            self.bones[bone].flesh = reach.get(reach.len() / 2).map_or(0.0, |&(gap, _)| gap);
+        }
+    }
+
+    /// Measures, once, how thick a side-view fighter's skull's flesh is each
+    /// way round it (`flesh_round`): the middle distance from it to the
+    /// points of the skin's outline that keep their place mostly on it and
+    /// lie that way from the nearest place on it, as built. Its skull lies
+    /// nearer the back of the head than the face (13 px of flesh over the
+    /// crown, 19-24 behind, 33-39 toward the face and the jaw). A limb's bone lies
+    /// in the middle of its flesh, about as deep all round (a fighter's
+    /// forearm 13-15 px every way, its hand 12-15, its shin 16-20), and keeps
+    /// one thickness: measured each way round an arm too, a cross into a low
+    /// block met the blocking hand a pixel and a half later, harder than a
+    /// punching arm stands, and turned back short of the arms.
+    pub(super) fn measure_skull_flesh(&mut self) {
+        for (bone, reach) in self.held_skin_reaches().into_iter().enumerate() {
+            if self.bones[bone].part != BonePart::Skull {
+                continue;
+            }
+            self.bones[bone].flesh_round = std::array::from_fn(|way| {
+                let mut gaps: Vec<f64> = reach
+                    .iter()
+                    .filter(|&&(_, at)| at == way)
+                    .map(|&(gap, _)| gap)
+                    .collect();
+                gaps.sort_by(f64::total_cmp);
+                gaps.get(gaps.len() / 2).copied().unwrap_or(0.0)
+            });
+        }
+    }
+
+    /// For each bone, how far from it, as built, lies each point of the
+    /// skin's outline that keeps its place mostly on it, and which way round
+    /// it from the nearest place on it ([`FLESH_WAYS`]).
+    fn held_skin_reaches(&self) -> Vec<Vec<(f64, usize)>> {
+        let mut reaches: Vec<Vec<(f64, usize)>> = vec![Vec::new(); self.bones.len()];
         for outline in &self.outlines {
             for &index in outline.points() {
                 let point = self.points[index];
@@ -122,19 +214,25 @@ impl World {
                         continue;
                     }
                     if let Some(segment) = self.bones.get(bone) {
-                        reaches[bone].push(distance_to_segment(
-                            point.home,
+                        let along = subtract(segment.home_b, segment.home_a);
+                        let nearest = lerp(
                             segment.home_a,
                             segment.home_b,
+                            segment_t(point.home, segment.home_a, segment.home_b),
+                        );
+                        let off = subtract(point.home, nearest);
+                        let way = (libm::round(way_round(along, off)) as i64)
+                            .rem_euclid(FLESH_WAYS as i64)
+                            as usize;
+                        reaches[bone].push((
+                            distance_to_segment(point.home, segment.home_a, segment.home_b),
+                            way,
                         ));
                     }
                 }
             }
         }
-        for (bone, mut reach) in self.bones.iter_mut().zip(reaches) {
-            reach.sort_by(f64::total_cmp);
-            bone.flesh = reach.get(reach.len() / 2).copied().unwrap_or(0.0);
-        }
+        reaches
     }
 
     /// Whether bone `index` meets other bodies' limbs: a whole bone of an
@@ -203,7 +301,20 @@ impl World {
                 let (t_a, t_b, p_a, p_b) =
                     closest_between(a.previous_a, a.previous_b, b.previous_a, b.previous_b);
                 let apart = distance(p_a, p_b);
-                let reach = a.flesh + b.flesh;
+                // Nearly crossed, the normal is the way the second body
+                // stands from the first.
+                let normal = if apart > EPSILON {
+                    scale(subtract(p_b, p_a), 1.0 / apart)
+                } else {
+                    let toward = self.midline_of(b.body as usize).unwrap_or(0.0)
+                        - self.midline_of(a.body as usize).unwrap_or(0.0);
+                    Vec2 {
+                        x: if toward >= 0.0 { 1.0 } else { -1.0 },
+                        y: 0.0,
+                    }
+                };
+                // The flesh each carries the way the other lies.
+                let reach = flesh_toward(&a, normal) + flesh_toward(&b, scale(normal, -1.0));
                 // How far the two could close within the substep.
                 let velocity = |bone: &BoneSegment, t: f64| {
                     lerp(
@@ -217,18 +328,6 @@ impl World {
                 if apart > reach + margin {
                     continue;
                 }
-                // Nearly crossed, the normal is the way the second body
-                // stands from the first.
-                let normal = if apart > EPSILON {
-                    scale(subtract(p_b, p_a), 1.0 / apart)
-                } else {
-                    let toward = self.midline_of(b.body as usize).unwrap_or(0.0)
-                        - self.midline_of(a.body as usize).unwrap_or(0.0);
-                    Vec2 {
-                        x: if toward >= 0.0 { 1.0 } else { -1.0 },
-                        y: 0.0,
-                    }
-                };
                 let (Some(side_a), Some(side_b)) = (
                     self.clash_side(first, t_a, p_a),
                     self.clash_side(second, t_b, p_b),
@@ -252,9 +351,10 @@ impl World {
     }
 
     /// A line for each pair of limbs pressing on each other as a substep
-    /// `h` long ends: the two bones, how many pieces each moved as one, and
-    /// how hard they pressed, in newtons. For the tools that look for what
-    /// flung a bone (`World::traced_clashes`).
+    /// `h` long ends: the two bones, how many pieces each moved as one, how
+    /// hard they pressed, in newtons, and how far apart their axes stand
+    /// against the flesh both carry. For the tools that look for what flung
+    /// a bone (`World::traced_clashes`).
     pub(super) fn clash_lines(&self, h: f64) -> Vec<String> {
         let newtons = self.newtons();
         self.clashes
@@ -272,11 +372,19 @@ impl World {
                         if side.braced.len() > 1 { "s" } else { "" },
                     )
                 };
+                let [first, second] = &clash.sides;
+                let (a, b) = (self.bones[first.bone], self.bones[second.bone]);
+                let apart = dot(
+                    subtract(lerp(b.a, b.b, second.along), lerp(a.a, a.b, first.along)),
+                    clash.normal,
+                );
                 format!(
-                    "{} on {}: {:.0} N",
+                    "{} on {}: {:.0} N, {:.1} px apart against {:.1}",
                     name(&clash.sides[0]),
                     name(&clash.sides[1]),
-                    clash.impulse / h / newtons
+                    clash.impulse / h / newtons,
+                    apart,
+                    clash.reach
                 )
             })
             .collect()
@@ -570,6 +678,99 @@ mod tests {
                 "{apart} steps apart, the crossing punches hurt an arm"
             );
         }
+    }
+
+    /// A skull lies nearer the back of the head than the face, and meets
+    /// another body's limb at the flesh lying that way (`flesh_toward`): a
+    /// fist landing on the face or the jaw at that flesh, a third deeper than
+    /// all round, and one at the back of the head at less, both fighters
+    /// alike, the second built as the first's mirror image. A limb's bone,
+    /// in the middle of its flesh, meets one at its flesh all round.
+    #[test]
+    fn a_skull_meets_a_fist_at_its_face() {
+        let world = create_side_fighters(Materials::default());
+        let mut skulls = Vec::new();
+        for bone in &world.bones {
+            if bone.part != BonePart::Skull {
+                for way in [(1.0, 0.0), (0.0, 1.0), (-0.6, 0.8)] {
+                    let way = Vec2 { x: way.0, y: way.1 };
+                    assert_eq!(flesh_toward(bone, way), bone.flesh);
+                }
+                continue;
+            }
+            // The other fighter stands the way this one faces.
+            let facing = if world.bodies[bone.body as usize].mirrored {
+                -1.0
+            } else {
+                1.0
+            };
+            let toward = |x: f64, y: f64| {
+                let length = hypot(x, y);
+                flesh_toward(
+                    bone,
+                    Vec2 {
+                        x: x * facing / length,
+                        y: y / length,
+                    },
+                )
+            };
+            let (face, jaw, back) = (toward(1.0, 0.0), toward(1.0, 0.5), toward(-1.0, 0.0));
+            assert!(
+                face > 1.3 * bone.flesh && jaw > 1.3 * bone.flesh && back < bone.flesh,
+                "body {}: the face {face:.1} px, the jaw {jaw:.1}, the back of the head {back:.1}, all round {:.1}",
+                bone.body,
+                bone.flesh
+            );
+            skulls.push([face, jaw, back]);
+        }
+        assert_eq!(skulls.len(), 2);
+        for (first, second) in skulls[0].iter().zip(&skulls[1]) {
+            assert!(
+                (first - second).abs() < 1.0e-9,
+                "the mirror image's skull {skulls:?}"
+            );
+        }
+    }
+
+    /// Crosses thrown flat out at the other fighter's jaw leave the
+    /// punching hand's flesh on its bone, its muscle ties well short of
+    /// tearing: met at the flesh of the back of the head, the hand's bone
+    /// drove on through its knuckles' flesh after each landing, the ties
+    /// slipped 27 mm of the 40 they tear at, and a few tore every minute of
+    /// a bout, until the hand's bone showed through the knuckles.
+    #[test]
+    fn crosses_on_the_jaw_leave_the_hand_s_flesh_on_its_bone() {
+        // Near enough for a cross to land (`print_fighter_punches`).
+        let mut world = create_side_fighters_at(Materials::default(), 0.62);
+        let dt = world.materials.fixed_dt;
+        let hand = world.bodies[0].fighter.as_ref().expect("a fighter").hands[1];
+        let tears_at = world.materials.bone_tie_tear_mm;
+        let (mut landed, mut slipped) = (0, 0.0_f64);
+        for step in 0..600 {
+            let mut input = InputState::default();
+            if step % 20 == 5 {
+                input.moves[0] = Some((0, Move::Cross));
+            }
+            world.step(dt, &input, SCENARIO_WIDTH);
+            landed += world
+                .landed_punches()
+                .iter()
+                .filter(|punch| punch.by == 0 && punch.struck == Struck::Head)
+                .count();
+            for tie in world.bone_attachments.iter().filter(|tie| tie.bone == hand) {
+                slipped = slipped.max(world.bone_tie_slip(tie) * world.mm_per_px());
+            }
+        }
+        let torn = world
+            .bone_attachments
+            .iter()
+            .filter(|tie| tie.bone == hand && tie.broken)
+            .count();
+        assert!(landed >= 10, "{landed} crosses landed on the head");
+        assert!(
+            torn == 0 && slipped < 0.6 * tears_at,
+            "{landed} crosses on the jaw slipped the hand's ties {slipped:.0} mm and tore {torn}"
+        );
     }
 
     /// The two fighters punching on the same step stay each other's mirror

@@ -65,6 +65,7 @@ named_settings!(
     legs_carry,
     skin_holds_bones,
     skin_holds_front,
+    floor_lifts_flesh,
     legs_across_hertz,
     legs_tilt_hertz,
     legs_up_hertz,

@@ -462,6 +462,7 @@ fn unsettled_side_fighter_in(frame: BodyFrame, materials: Materials) -> World {
             .unwrap_or_default()
     });
     world.measure_bone_flesh();
+    world.measure_skull_flesh();
     world.bodies[0].fighter = Some(rig.clone());
 
     // It stands on the floor at its soles, its hips held up and its feet
