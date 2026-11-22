@@ -9,6 +9,7 @@
 mod bare;
 mod blame;
 mod digest;
+mod follow;
 mod names;
 mod story;
 mod watchdogs;
@@ -17,6 +18,7 @@ mod why;
 pub use bare::{bare_bones, shown, shows_through_whole_skin, BareBone, Shown};
 pub use blame::{blame, blame_by_step, Blame, BlameTarget, PhasePush};
 pub use digest::digest;
+pub use follow::{follow_bone, followed_phases, tied_flesh};
 pub use names::{
     actor_name, bone_name, joint_name, measure_text, nearest_bone, place_name, place_name_on,
     subject_name, subject_part, subject_spec, tool_name,

@@ -322,75 +322,26 @@ mod bare_tests {
         text.join(", ")
     }
 
-    /// The flesh tied to `bone`, nearest its far end first, at most six
-    /// points.
-    fn tied_flesh(world: &World, bone: usize) -> Vec<usize> {
-        let end = world.bones[bone].b;
-        let mut tied: Vec<(f64, usize)> = world
-            .bone_attachments()
-            .iter()
-            .filter(|tie| tie.bone == bone && !tie.broken)
-            .map(|tie| (distance(world.points()[tie.point].position, end), tie.point))
-            .collect();
-        tied.sort_by(|a, b| a.0.total_cmp(&b.0));
-        tied.dedup_by_key(|(_, point)| *point);
-        tied.into_iter().take(6).map(|(_, point)| point).collect()
-    }
-
     /// What each phase did over the last step to `bone` and, on average, to
-    /// the flesh tied to it.
+    /// the flesh tied to it (`inspect::followed_phases`): `RP_BARE_MIN=0.05`
+    /// prints phases that moved either that far, in pixels, rather than half
+    /// a pixel, and `RP_BARE_RUNS=1` each run of a phase on its own line.
     fn print_traced(world: &World, step: usize, bone: usize, flesh: &[usize]) {
-        let segment = world.bones[bone];
-        let held: Vec<Vec2> = flesh
-            .iter()
-            .map(|&point| world.points()[point].position)
-            .collect();
-        let middle = lerp(segment.a, segment.b, 0.5);
-        let flesh_middle = held.iter().fold(Vec2::default(), |sum, &at| add(sum, at));
-        let flesh_middle = scale(flesh_middle, 1.0 / held.len().max(1) as f64);
-        println!(
-            "  step {step}: bone {bone} middle ({:.1}, {:.1}), its flesh's middle ({:.1}, {:.1}), {}",
-            middle.x,
-            middle.y,
-            flesh_middle.x,
-            flesh_middle.y,
-            doing_text(world, segment.body as usize)
-        );
-        let mut phases: Vec<(&'static str, Vec2, Vec2, f64)> = Vec::new();
-        for stage in world.traced_stages() {
-            let slot = match phases.iter().position(|(phase, ..)| *phase == stage.phase) {
-                Some(slot) => slot,
-                None => {
-                    phases.push((stage.phase, Vec2::default(), Vec2::default(), 0.0));
-                    phases.len() - 1
-                }
-            };
-            if stage.target == 0 {
-                phases[slot].1 = add(phases[slot].1, stage.moved);
-                phases[slot].3 += stage.turned;
-            } else {
-                phases[slot].2 = add(
-                    phases[slot].2,
-                    scale(stage.moved, 1.0 / flesh.len().max(1) as f64),
-                );
-            }
-        }
-        // `RP_BARE_MIN=0.05` prints phases that moved either that far, in
-        // pixels, rather than half a pixel.
         let least: f64 = std::env::var("RP_BARE_MIN")
             .ok()
             .and_then(|value| value.parse().ok())
             .unwrap_or(0.5);
-        for (phase, bone_moved, flesh_moved, turned) in phases {
-            if hypot(bone_moved.x, bone_moved.y) > least
-                || hypot(flesh_moved.x, flesh_moved.y) > least
-                || turned.abs() > 0.04 * least
-            {
-                println!(
-                    "    {phase:>20}: bone ({:+.1}, {:+.1}) px, turned {:+.3} rad; flesh ({:+.1}, {:+.1}) px",
-                    bone_moved.x, bone_moved.y, turned, flesh_moved.x, flesh_moved.y
-                );
-            }
+        let each_run = std::env::var("RP_BARE_RUNS").is_ok();
+        let lines = crate::inspect::followed_phases(world, bone, flesh, least, each_run);
+        let Some((first, phases)) = lines.split_first() else {
+            return;
+        };
+        println!(
+            "  step {step}: {first}, {}",
+            doing_text(world, world.bones[bone].body as usize)
+        );
+        for line in phases {
+            println!("    {line}");
         }
     }
 
@@ -512,12 +463,9 @@ mod bare_tests {
                 // and the flesh tied to it through those steps, phase by
                 // phase.
                 let traced = trace_bone.filter(|_| trace_steps.contains(&step));
-                let flesh: Vec<usize> = traced.map_or(Vec::new(), |bone| tied_flesh(&world, bone));
-                if let Some(bone) = traced {
-                    let mut targets = vec![Traced::Bone(bone)];
-                    targets.extend(flesh.iter().map(|&point| Traced::Point(point)));
-                    world.trace(&targets);
-                }
+                let flesh: Vec<usize> = traced.map_or(Vec::new(), |bone| {
+                    crate::inspect::follow_bone(&mut world, bone)
+                });
                 world.step(dt, &input, crate::scenarios::SCENARIO_WIDTH);
                 if let Some(bone) = traced {
                     print_traced(&world, step, bone, &flesh);
