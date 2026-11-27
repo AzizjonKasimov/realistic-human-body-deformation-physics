@@ -2,6 +2,12 @@
 
 What each version of Realistic Physics changed, newest first. The game shows its version on the start screen and in its bottom-left corner, and every Short made from the game shows the version it was made with. Only the newest version is online.
 
+## v0.20.3 (2026-11-27)
+
+- On the Fight page, punches sound like punches: each one as hard as the fist was fast, a sharp smack on the head, a deeper thump on the body, and a muffled pat on a guarding arm. Before, every punch played the same soft hammer thud.
+- On the Fight page, a punch whooshes as it sets off, and a fighter who falls thuds as its body reaches the floor.
+- In the sandbox, the bare fist lands with the same punch sound.
+
 ## v0.20.2 (2026-11-22)
 
 - On the Fight page, punches landing on the jaw no longer tear the flesh of the punching hand off its bone, which after many punches let the hand's bone show through the knuckles.

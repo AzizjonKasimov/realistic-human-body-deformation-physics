@@ -160,6 +160,31 @@ impl World {
         &self.landed_punches
     }
 
+    /// How far down the window side-view fighter `body`'s lowest part
+    /// reaches, its shins and feet left out, since they stand on the floor:
+    /// the lowest end of its trunk, head, thighs, and arms, in pixels, each
+    /// bone's radius below it. The sound hears a falling fighter's body
+    /// reach the floor by it (`sound.rs`); `None` for a body that is not a
+    /// side-view fighter.
+    pub fn fighter_low_point(&self, body: usize) -> Option<f64> {
+        let rig = self.bodies.get(body)?.fighter.as_ref()?;
+        [
+            rig.pelvis,
+            rig.lumbar,
+            rig.thoracic,
+            rig.cervical,
+            rig.skull,
+        ]
+        .into_iter()
+        .chain(rig.thighs)
+        .chain(rig.upper_arms)
+        .chain(rig.forearms)
+        .chain(rig.hands)
+        .filter_map(|bone| self.bones.get(bone))
+        .map(|bone| bone.a.y.max(bone.b.y) + bone.radius)
+        .reduce(f64::max)
+    }
+
     /// What the knuckles of fighter `puncher`'s fist, their face's middle at
     /// `at`, met first: the body nearest them other than its own and the
     /// part of it, by the flesh nearest the knuckles and the bone that

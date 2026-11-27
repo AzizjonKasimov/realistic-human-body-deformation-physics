@@ -102,6 +102,202 @@ fn a_knife_cut_wells_blood_without_spatter() {
     );
 }
 
+/// How hard a fist landing at `speed` m/s should sound: from a punch that only
+/// just reaches (3 m/s) to an elite straight punch (9.5).
+fn punch_strength(speed: f64) -> f32 {
+    ((speed - 3.0) / 6.5).clamp(0.0, 1.0) as f32
+}
+
+/// Two side-view fighters `spacing` body heights apart, played for `steps`
+/// steps with `script`'s moves (step, the body moving, the move), each step
+/// heard; also each step's landed punches, and whether the right fighter was
+/// down.
+fn hear_fight(
+    materials: rp::Materials,
+    spacing: f64,
+    steps: usize,
+    script: &[(usize, usize, rp::Move)],
+) -> (Vec<Heard>, Vec<Vec<rp::LandedPunch>>, Vec<bool>) {
+    let mut world = rp::create_side_fighters_at(materials, spacing);
+    let dt = world.materials().fixed_dt;
+    let mut foley = Foley::new();
+    let (mut heard, mut landed, mut down) = (Vec::new(), Vec::new(), Vec::new());
+    for step in 0..steps {
+        let mut input = rp::InputState::default();
+        for (slot, &(_, body, made)) in script.iter().filter(|(at, ..)| *at == step).enumerate() {
+            input.moves[slot] = Some((body, made));
+        }
+        world.step(dt, &input, SCENARIO_WIDTH);
+        heard.push(foley.hear(&world));
+        landed.push(world.landed_punches().to_vec());
+        down.push(world.fighter_fallen(1));
+    }
+    (heard, landed, down)
+}
+
+fn punch_cues(step: &Heard) -> Vec<Cue> {
+    step.cues
+        .iter()
+        .copied()
+        .filter(|cue| {
+            matches!(
+                cue.kind,
+                CueKind::PunchHead | CueKind::PunchBody | CueKind::PunchArm
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_fighters_punch_sounds_as_hard_as_it_lands_on_what_it_struck() {
+    // The left fighter steps in and throws a cross and a jab at the right
+    // one, which stands in its guard.
+    let script = [
+        (10, 0, rp::Move::StepIn),
+        (67, 0, rp::Move::Cross),
+        (130, 0, rp::Move::Jab),
+    ];
+    let (heard, landed, _) = hear_fight(
+        rp::Materials::default(),
+        rp::SIDE_FIGHTER_SPACING,
+        220,
+        &script,
+    );
+    let mut punches = 0;
+    for (step, punches_landed) in landed.iter().enumerate() {
+        let mut expected: Vec<(CueKind, f32)> = punches_landed
+            .iter()
+            .map(|punch| {
+                let kind = match punch.struck {
+                    rp::Struck::Head => CueKind::PunchHead,
+                    rp::Struck::Arm => CueKind::PunchArm,
+                    rp::Struck::Body | rp::Struck::Leg => CueKind::PunchBody,
+                };
+                (kind, punch_strength(punch.speed))
+            })
+            .collect();
+        let mut got: Vec<(CueKind, f32)> = punch_cues(&heard[step])
+            .iter()
+            .map(|cue| (cue.kind, cue.strength))
+            .collect();
+        expected.sort_by(|a, b| a.1.total_cmp(&b.1));
+        got.sort_by(|a, b| a.1.total_cmp(&b.1));
+        assert_eq!(
+            got, expected,
+            "step {step}: the punches landed and the punches heard differ"
+        );
+        punches += got.len();
+    }
+    assert!(punches > 0, "no punch landed: {landed:?}");
+    assert!(
+        heard
+            .iter()
+            .all(|step| step.cues.iter().all(|cue| cue.kind != CueKind::Thud)),
+        "a fight has no tool, so nothing should thud as one"
+    );
+    let whooshes = heard
+        .iter()
+        .flat_map(|step| step.cues.iter())
+        .filter(|cue| cue.kind == CueKind::Whoosh)
+        .count();
+    assert_eq!(
+        whooshes, 2,
+        "each of the two punches should whoosh as it sets off, once"
+    );
+}
+
+#[test]
+fn a_fallen_fighter_thuds_once_when_its_body_reaches_the_floor() {
+    // Knocked out by a cross (the knockout limit lowered under what a cross
+    // landed well gives, as the engine's own tests lower it) and shoved over
+    // backward: either way the body takes a moment to fall, and thuds as it
+    // lands, not as it goes down.
+    let knockout = rp::Materials {
+        knockout_turn: 10.0,
+        ..rp::Materials::default()
+    };
+    for (how, materials, spacing, script) in [
+        ("knocked out", knockout, 0.60, [(20, 0, rp::Move::Cross)]),
+        (
+            "shoved over",
+            rp::Materials::default(),
+            1.40,
+            [(20, 1, rp::Move::Shoved(220))],
+        ),
+    ] {
+        let (heard, _, down) = hear_fight(materials, spacing, 300, &script);
+        let falls: Vec<usize> = (0..heard.len())
+            .filter(|&step| heard[step].cues.iter().any(|cue| cue.kind == CueKind::Fall))
+            .collect();
+        let went_down = down.iter().position(|&down| down);
+        assert!(went_down.is_some(), "{how}: the fighter never went down");
+        assert_eq!(
+            falls.len(),
+            1,
+            "{how}: falls heard on steps {falls:?}, gone down on {went_down:?}"
+        );
+        assert!(
+            falls[0] > 20 + 9,
+            "{how}: the body thudded on step {}, as it went down rather than as it landed",
+            falls[0]
+        );
+    }
+}
+
+#[test]
+fn fighters_moving_without_falling_make_no_fall_sound() {
+    // Steps, ducks, a lean back, and a block, held and let go, by both.
+    let script = [
+        (10, 0, rp::Move::StepIn),
+        (50, 1, rp::Move::Duck(true)),
+        (90, 1, rp::Move::Duck(false)),
+        (100, 0, rp::Move::LeanBack(true)),
+        (140, 0, rp::Move::LeanBack(false)),
+        (150, 1, rp::Move::Block(true)),
+        (190, 1, rp::Move::Block(false)),
+        (200, 0, rp::Move::Duck(true)),
+        (240, 0, rp::Move::Duck(false)),
+        (250, 0, rp::Move::StepOut),
+    ];
+    let (heard, _, down) = hear_fight(
+        rp::Materials::default(),
+        rp::SIDE_FIGHTER_SPACING,
+        330,
+        &script,
+    );
+    assert!(!down.iter().any(|&down| down), "a fighter fell");
+    let sounds: Vec<(usize, CueKind)> = heard
+        .iter()
+        .enumerate()
+        .flat_map(|(step, heard)| heard.cues.iter().map(move |cue| (step, cue.kind)))
+        .collect();
+    assert!(
+        sounds.is_empty(),
+        "moves with no punch and no fall sounded: {sounds:?}"
+    );
+}
+
+#[test]
+fn the_sandboxs_bare_fist_lands_as_a_punch() {
+    for (name, kind) in [
+        ("punch_to_the_head", CueKind::PunchHead),
+        ("punch_to_the_ribs", CueKind::PunchBody),
+    ] {
+        let heard = hear_scenario(name);
+        assert!(
+            cues(&heard, CueKind::Thud).is_empty(),
+            "{name}: a bare fist thudded as a hammer"
+        );
+        let strongest = strongest(&heard, kind);
+        // The scenarios' punch lands at about 8 m/s.
+        assert!(
+            strongest > 0.5 && strongest < 0.95,
+            "{name}: should land as a hard {} punch, got {strongest:.2}",
+            kind.name()
+        );
+    }
+}
+
 #[test]
 fn a_new_body_is_heard_silently() {
     // A reset swaps a hurt body for a fresh one; its counts start again.

@@ -1,10 +1,13 @@
 //! The game's sound, made from what the simulation does, with no recordings.
 //!
 //! [`Foley`] listens to the world after each step and hears what happened: a
-//! thud as loud as the blow was fast when a bat or hammer lands, a crack for
-//! each break, a wet tear for flesh torn by a blow, a spatter when blood a cut
-//! artery spurts lands, air rushing past a swung tool, and a slice while the
-//! knife cuts.
+//! thud as loud as the blow was fast when a bat or hammer lands, a punch as
+//! hard as the fist was fast when a bare fist lands (the sandbox's fist, or
+//! a side-view fighter's, by what it struck: a head, a body, or a guarding
+//! arm), a whoosh as a fighter's punch sets off, a thud of its body when a
+//! falling fighter reaches the floor, a crack for each break, a wet tear
+//! for flesh torn by a blow, a spatter when blood a cut artery spurts lands,
+//! air rushing past a swung tool, and a slice while the knife cuts.
 //! [`SoundBank`] synthesizes those sounds once (`synth.rs`) and [`Voices`]
 //! says which clip plays for each and how loud. [`Player`] plays them through
 //! macroquad, for the sandbox and the game built on the engine alike;
@@ -13,7 +16,11 @@
 //!
 //! Rebuilt from the foley that makes the sound of the project's videos
 //! (`shared-tools/video-tools/tools/foley.py`, which reads the same counts from the capture
-//! mode's `--events` log), so the game sounds like them.
+//! mode's `--events` log), so the game sounds like them. The punches, the
+//! whoosh, and the fall came later, for the Fight page (2026-11-27): before
+//! them a fighter's punch played the softest hammer thud at one level
+//! whatever its speed, since the thud followed the tool, which a fight has
+//! none of.
 
 mod mixdown;
 mod player;
@@ -22,7 +29,7 @@ mod synth;
 pub use mixdown::Mixdown;
 pub use player::Player;
 
-use crate::{ToolMode, World};
+use crate::{PunchKind, Struck, ToolMode, World};
 
 /// Samples per second of every clip: the rate quad-snd mixes at natively, so
 /// nothing is resampled there.
@@ -57,10 +64,37 @@ const SPATTER_WINDOW: f64 = 0.12;
 const SPATTER_MIN_DROPS: i32 = 12;
 /// ...at full strength with this many.
 const SPATTER_FULL_DROPS: f32 = 80.0;
-/// Shortest gap between two cues of a kind (thud, crack, tear, spatter), so a
-/// crush that breaks bone after bone, or flesh tearing step after step, does
-/// not stack a wall of sound. A cue much stronger than the last still sounds.
-const COOLDOWN: [f64; 4] = [0.08, 0.06, 0.08, 0.0];
+/// A punch sounds as softly as a punch can at this fist speed (m/s), one
+/// that only just reaches...
+const PUNCH_FROM: f64 = 3.0;
+/// ...and at full strength this much faster, an elite boxer's straight
+/// punch (9.1 m/s for Olympic boxers: Walilko, Viano and Bir 2005).
+const PUNCH_SPAN: f64 = 6.5;
+/// How tall a body is, in metres, for its speeds in pixels a second: a
+/// 1.75 m adult drawn [`crate::world_frame`]'s height.
+const BODY_METRES: f64 = 1.75;
+/// The top of a body down to this share of its height is its head and neck,
+/// for where the sandbox's bare fist landed.
+const HEAD_SHARE: f64 = 0.17;
+/// A fighter's body reaching the floor thuds when its lowest part was falling
+/// faster than this (m/s), quicker than a duck or a kneel ever lowers it...
+const FALL_FROM: f64 = 1.6;
+/// ...at full strength this much faster...
+const FALL_SPAN: f64 = 2.4;
+/// ...and stops falling within this share of its height above the floor; it
+/// thuds again only once that part has risen this far above it.
+const FLOOR_NEAR: f64 = 0.15;
+const FLOOR_RISEN: f64 = 0.25;
+
+/// Shortest gap between two cues of a kind (in [`CueKind::ALL`]'s order), so
+/// a crush that breaks bone after bone, or flesh tearing step after step,
+/// does not stack a wall of sound. A cue much stronger than the last still
+/// sounds. Punches and whooshes each come from a fist of their own, so two
+/// together both sound.
+const COOLDOWN: [f64; CUE_KINDS] = [0.08, 0.06, 0.08, 0.0, 0.0, 0.0, 0.0, 0.0, 0.25];
+
+/// How many kinds of one-off sound there are.
+const CUE_KINDS: usize = 9;
 
 /// A one-off sound.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -73,14 +107,28 @@ pub enum CueKind {
     Tear,
     /// Spurted blood landing.
     Spatter,
+    /// A bare fist landing on a head (or neck), on a body (or leg), or on a
+    /// guarding arm.
+    PunchHead,
+    PunchBody,
+    PunchArm,
+    /// A fighter's fist setting off on a punch.
+    Whoosh,
+    /// A fighter's body reaching the floor as it falls.
+    Fall,
 }
 
 impl CueKind {
-    pub const ALL: [CueKind; 4] = [
+    pub const ALL: [CueKind; CUE_KINDS] = [
         CueKind::Thud,
         CueKind::Crack,
         CueKind::Tear,
         CueKind::Spatter,
+        CueKind::PunchHead,
+        CueKind::PunchBody,
+        CueKind::PunchArm,
+        CueKind::Whoosh,
+        CueKind::Fall,
     ];
 
     fn index(self) -> usize {
@@ -93,8 +141,42 @@ impl CueKind {
             CueKind::Crack => "crack",
             CueKind::Tear => "tear",
             CueKind::Spatter => "spatter",
+            CueKind::PunchHead => "punch-head",
+            CueKind::PunchBody => "punch-body",
+            CueKind::PunchArm => "punch-arm",
+            CueKind::Whoosh => "whoosh",
+            CueKind::Fall => "fall",
         }
     }
+
+    /// The punch sound for a fist landing on what it `struck`.
+    fn punch(struck: Struck) -> CueKind {
+        match struck {
+            Struck::Head => CueKind::PunchHead,
+            Struck::Body | Struck::Leg => CueKind::PunchBody,
+            Struck::Arm => CueKind::PunchArm,
+        }
+    }
+
+    /// What a punch cue's fist struck, or `None` for another kind.
+    fn struck(self) -> Option<Struck> {
+        match self {
+            CueKind::PunchHead => Some(Struck::Head),
+            CueKind::PunchBody => Some(Struck::Body),
+            CueKind::PunchArm => Some(Struck::Arm),
+            _ => None,
+        }
+    }
+}
+
+/// How hard a fist landing at `metres_a_second` sounds, from 0 to 1.
+fn punch_strength(metres_a_second: f64) -> f32 {
+    ((metres_a_second - PUNCH_FROM) / PUNCH_SPAN).clamp(0.0, 1.0) as f32
+}
+
+/// Metres a pixel of the simulated world stands for.
+fn metres_per_pixel() -> f64 {
+    BODY_METRES / crate::world_frame().height
 }
 
 /// A one-off sound and how strong it is, from 0 to 1.
@@ -154,15 +236,30 @@ impl Tally {
     }
 }
 
+/// What the foley remembers of a side-view fighter from one step to the next.
+#[derive(Clone, Copy, Debug, Default)]
+struct Fighter {
+    /// How long the punch it was throwing had been going, if it was punching.
+    punch_age: Option<f64>,
+    /// Its lowest part ([`World::fighter_low_point`]), in pixels down the
+    /// window, and how fast that part was going down, in pixels a second.
+    low: Option<f64>,
+    falling: f64,
+    /// Its body has reached the floor and not risen off it since.
+    floored: bool,
+}
+
 /// Listens to the world after each step and says what it sounded like.
 #[derive(Clone, Debug)]
 pub struct Foley {
     last: Option<Tally>,
     /// Seconds since each kind of cue last sounded, and how strong it was.
-    since: [f64; 4],
-    last_strength: [f32; 4],
+    since: [f64; CUE_KINDS],
+    last_strength: [f32; CUE_KINDS],
     /// Spurted blood drops gathered for the next spatter, and for how long.
     blood: Option<(i32, f64)>,
+    /// Each side-view fighter, by its body.
+    fighters: Vec<Fighter>,
 }
 
 impl Default for Foley {
@@ -175,9 +272,10 @@ impl Foley {
     pub fn new() -> Foley {
         Foley {
             last: None,
-            since: [f64::INFINITY; 4],
-            last_strength: [0.0; 4],
+            since: [f64::INFINITY; CUE_KINDS],
+            last_strength: [0.0; CUE_KINDS],
             blood: None,
+            fighters: Vec::new(),
         }
     }
 
@@ -190,6 +288,8 @@ impl Foley {
             Some(last) if !now.restarted_from(&last) => last,
             _ => {
                 self.blood = None;
+                self.fighters.clear();
+                self.listen_to_fighters(world, &mut Heard::default());
                 return Heard::default();
             }
         };
@@ -207,11 +307,24 @@ impl Foley {
                 .powf(1.3) as f32;
         }
 
+        // Side-view fighters' fists are heard as their punches, not as a
+        // tool (one is parked far off in a fight, its speed nil).
+        let fighting = self.listen_to_fighters(world, &mut heard);
         // On the step a tool lands the solver has already slowed it, so the
-        // blow is as fast as the faster of the two steps.
-        if now.touching && !last.touching && !sharp {
-            let strength = ((now.speed.max(last.speed) - THUD_FROM) / THUD_SPAN).clamp(0.03, 1.0);
-            self.cue(&mut heard, CueKind::Thud, strength as f32);
+        // blow is as fast as the faster of the two steps. The sandbox's bare
+        // fist lands as a punch, on the head or the body as it struck.
+        if now.touching && !last.touching && !sharp && !fighting {
+            let speed = now.speed.max(last.speed);
+            if debug.tool == ToolMode::Fist {
+                let frame = crate::world_frame();
+                let head = debug.striker_position.y < frame.origin.y + HEAD_SHARE * frame.height;
+                let struck = if head { Struck::Head } else { Struck::Body };
+                let strength = punch_strength(speed * metres_per_pixel());
+                self.cue(&mut heard, CueKind::punch(struck), strength);
+            } else {
+                let strength = ((speed - THUD_FROM) / THUD_SPAN).clamp(0.03, 1.0);
+                self.cue(&mut heard, CueKind::Thud, strength as f32);
+            }
         }
         let fractures = now.fractures - last.fractures;
         if fractures > 0 {
@@ -246,6 +359,69 @@ impl Foley {
             }
         }
         heard
+    }
+
+    /// Hears the side-view fighters, if the world has any, and says whether
+    /// it does: each punch that landed this step, as hard as its fist was
+    /// fast and as what it struck sounds; each punch that set off, as a
+    /// whoosh; and each fighter whose body reached the floor as it fell,
+    /// as hard as it was falling.
+    fn listen_to_fighters(&mut self, world: &World, heard: &mut Heard) -> bool {
+        let bodies = world.body_count();
+        if !(0..bodies).any(|body| world.fighter_doing(body).is_some()) {
+            return false;
+        }
+        let dt = world.materials().fixed_dt;
+        let metres = metres_per_pixel();
+        let height = crate::world_frame().height;
+        let floor = world.floor_y();
+        self.fighters.resize(bodies, Fighter::default());
+        let mut cues: Vec<(CueKind, f32)> = world
+            .landed_punches()
+            .iter()
+            .map(|punch| (CueKind::punch(punch.struck), punch_strength(punch.speed)))
+            .collect();
+        for (body, ear) in self.fighters.iter_mut().enumerate() {
+            let Some(doing) = world.fighter_doing(body) else {
+                continue;
+            };
+            // A punch younger than the one heard last step is a new one.
+            if let Some(punch) = doing.punch {
+                if ear.punch_age.map_or(true, |age| punch.age < age) {
+                    let strength = match punch.kind {
+                        PunchKind::Jab => 0.7,
+                        PunchKind::Cross => 1.0,
+                    };
+                    cues.push((CueKind::Whoosh, strength));
+                }
+            }
+            ear.punch_age = doing.punch.map(|punch| punch.age);
+            // Its lowest part, falling fast near the floor, stopped short:
+            // it reached the floor.
+            let Some(low) = world.fighter_low_point(body) else {
+                continue;
+            };
+            let falling = ear.low.map_or(0.0, |last| (low - last) / dt);
+            let near = low > floor - FLOOR_NEAR * height;
+            if near
+                && !ear.floored
+                && ear.falling * metres > FALL_FROM
+                && falling < 0.3 * ear.falling
+            {
+                let strength = ((ear.falling * metres - FALL_FROM) / FALL_SPAN).clamp(0.15, 1.0);
+                cues.push((CueKind::Fall, strength as f32));
+                ear.floored = true;
+            }
+            if low < floor - FLOOR_RISEN * height {
+                ear.floored = false;
+            }
+            ear.low = Some(low);
+            ear.falling = falling;
+        }
+        for (kind, strength) in cues {
+            self.cue(heard, kind, strength);
+        }
+        true
     }
 
     fn cue(&mut self, heard: &mut Heard, kind: CueKind, strength: f32) {
@@ -286,10 +462,24 @@ const TEAR_TIERS: [f32; 2] = [0.3, 0.85];
 const TEAR_PITCHES: [f64; 2] = [1.0, 0.9];
 const SPATTER_TIERS: [f32; 2] = [0.3, 0.9];
 const SPATTER_PITCHES: [f64; 2] = [1.0, 1.08];
+/// Punches are synthesized for each thing they strike (head, body, arm) at
+/// these strengths, a harder one brighter and heavier; its takes differ in
+/// pitch and a little in loudness, so a flurry never repeats one sound.
+const PUNCH_STRUCK: [Struck; 3] = [Struck::Head, Struck::Body, Struck::Arm];
+const PUNCH_TIERS: [f32; 3] = [0.2, 0.55, 0.9];
+const PUNCH_PITCHES: [f64; 3] = [1.0, 0.95, 1.05];
+const PUNCH_TAKE_LEVELS: [f32; 3] = [1.0, 0.9, 0.95];
+const WHOOSH_PITCHES: [f64; 3] = [1.0, 0.93, 1.07];
+const FALL_TIERS: [f32; 2] = [0.4, 0.9];
+const FALL_PITCHES: [f64; 2] = [1.0, 0.94];
 /// Air at full rush, and the knife at full slice, before the master volume.
 const RUSH_VOLUME: f32 = 0.35;
 const SLICE_VOLUME: f32 = 0.45;
 const CLICK_VOLUME: f32 = 0.2;
+/// The loudest punch, and the loudest whoosh, before the master volume: a
+/// full punch is about as loud as a full hammer blow's thud.
+const PUNCH_VOLUME: f32 = 0.85;
+const WHOOSH_VOLUME: f32 = 0.3;
 
 /// Which clip of the bank plays for what, and how loud.
 #[derive(Clone, Debug)]
@@ -298,6 +488,9 @@ pub struct Voices {
     cracks: [usize; CRACK_PITCHES.len()],
     tears: [[usize; TEAR_PITCHES.len()]; TEAR_TIERS.len()],
     spatters: [[usize; SPATTER_PITCHES.len()]; SPATTER_TIERS.len()],
+    punches: [[[usize; PUNCH_PITCHES.len()]; PUNCH_TIERS.len()]; PUNCH_STRUCK.len()],
+    whooshes: [usize; WHOOSH_PITCHES.len()],
+    falls: [[usize; FALL_PITCHES.len()]; FALL_TIERS.len()],
     click: usize,
     beds: [usize; BED_COUNT],
 }
@@ -320,6 +513,27 @@ impl Voices {
             CueKind::Spatter => (
                 self.spatters[nearest(&SPATTER_TIERS, s)][take % SPATTER_PITCHES.len()],
                 0.08 + 0.22 * s,
+            ),
+            CueKind::PunchHead | CueKind::PunchBody | CueKind::PunchArm => {
+                let struck = cue.kind.struck().unwrap_or(Struck::Head);
+                let place = PUNCH_STRUCK.iter().position(|&x| x == struck).unwrap_or(0);
+                // A punch on a guarding arm is muffled.
+                let guarded = if struck == Struck::Arm { 0.55 } else { 1.0 };
+                (
+                    self.punches[place][nearest(&PUNCH_TIERS, s)][take % PUNCH_PITCHES.len()],
+                    (0.25 + 0.75 * s.powf(1.2))
+                        * guarded
+                        * PUNCH_TAKE_LEVELS[take % PUNCH_TAKE_LEVELS.len()]
+                        * PUNCH_VOLUME,
+                )
+            }
+            CueKind::Whoosh => (
+                self.whooshes[take % WHOOSH_PITCHES.len()],
+                (0.4 + 0.6 * s) * WHOOSH_VOLUME,
+            ),
+            CueKind::Fall => (
+                self.falls[nearest(&FALL_TIERS, s)][take % FALL_PITCHES.len()],
+                0.35 + 0.55 * s,
             ),
         };
         Voice {
@@ -367,7 +581,7 @@ fn nearest(tiers: &[f32], x: f32) -> usize {
 /// Which take of each kind of sound plays next.
 #[derive(Clone, Debug, Default)]
 pub struct Takes {
-    next: [usize; 4],
+    next: [usize; CUE_KINDS],
 }
 
 impl Takes {
@@ -388,8 +602,8 @@ pub struct SoundBank {
 }
 
 impl SoundBank {
-    /// Synthesizes the bank, the same every time: about 20 seconds of audio,
-    /// a few hundredths of a second's work in a release build.
+    /// Synthesizes the bank, the same every time: about 34 seconds of audio
+    /// in 66 clips, a few hundredths of a second's work in a release build.
     pub fn render() -> SoundBank {
         let mut synth = synth::Synth::new(0x5EED_50D5);
         let mut clips = Vec::new();
@@ -446,6 +660,30 @@ impl SoundBank {
             ),
             add("slice".to_string(), synth.slice(), true),
         ];
+        // The fight's sounds come last, so the sandbox's clips, made from the
+        // same run of noise, sound exactly as before them.
+        let punches = PUNCH_STRUCK.map(|struck| {
+            PUNCH_TIERS.map(|strength| {
+                PUNCH_PITCHES.map(|pitch| {
+                    add(
+                        format!("punch-{struck:?}-{strength}-{pitch}").to_lowercase(),
+                        synth.punch(strength as f64, struck, pitch),
+                        false,
+                    )
+                })
+            })
+        });
+        let whooshes =
+            WHOOSH_PITCHES.map(|pitch| add(format!("whoosh-{pitch}"), synth.whoosh(pitch), false));
+        let falls = FALL_TIERS.map(|strength| {
+            FALL_PITCHES.map(|pitch| {
+                add(
+                    format!("fall-{strength}-{pitch}"),
+                    synth.body_fall(strength as f64, pitch),
+                    false,
+                )
+            })
+        });
         SoundBank {
             clips,
             voices: Voices {
@@ -453,6 +691,9 @@ impl SoundBank {
                 cracks,
                 tears,
                 spatters,
+                punches,
+                whooshes,
+                falls,
                 click,
                 beds,
             },

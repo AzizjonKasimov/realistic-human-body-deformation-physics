@@ -9,6 +9,7 @@
 use std::f64::consts::{FRAC_1_SQRT_2, FRAC_PI_2, TAU};
 
 use super::SAMPLE_RATE;
+use crate::Struck;
 
 const RATE: f64 = SAMPLE_RATE as f64;
 /// One-shot clips fade out over their last this long, so a tail that is
@@ -63,6 +64,125 @@ impl Synth {
         }
         out.truncate(n);
         out
+    }
+
+    /// A bare fist landing, short and dry as a real punch is (its force peaks
+    /// within about 14 ms of contact: Atha, Yeadon, Sandover and Parsons
+    /// 1985), with a game's weight on top, the user's pick of three by ear
+    /// (2026-11-27): the smack of skin, brighter for a faster punch; the
+    /// knock of the flesh and bone under it; a damped thump of the part
+    /// struck, highest for a guarding arm and lowest for the body; a low
+    /// sub-thump for weight; a snap on the head; and a little saturation.
+    /// Layered as fight foley is, each layer in its own band. `strength`
+    /// runs from a punch that only just reaches (0) to an elite straight
+    /// punch (1).
+    pub fn punch(&mut self, strength: f64, struck: Struck, pitch: f64) -> Vec<f32> {
+        let s = strength;
+        let n = samples(0.4);
+        let smack = decay_from(
+            band(
+                self.noise(n),
+                (900.0 + 700.0 * s) * pitch,
+                (4200.0 + 2800.0 * s) * pitch,
+            ),
+            0.0006,
+            0.006 + 0.003 * s,
+        );
+        let knock = decay_from(
+            band(self.noise(n), 220.0 * pitch, 1100.0 * pitch),
+            0.001,
+            0.022,
+        );
+        // Smack, knock, and thump, the thump's pitch and how long it lasts.
+        let (smack_w, knock_w, thump_w, thump_freq, thump_time) = match struck {
+            Struck::Head => (1.0, 0.8, 0.6, 130.0, 0.035),
+            Struck::Body | Struck::Leg => (0.45, 0.6, 1.0, 95.0, 0.05),
+            Struck::Arm => (0.35, 0.7, 0.4, 150.0, 0.03),
+        };
+        let part = thump(n, thump_freq * pitch, thump_time, 0.6, 0.012);
+        let natural = norm(
+            sum(&[
+                (smack_w, norm(smack, 1.0)),
+                (knock_w, norm(knock, 1.0)),
+                (thump_w, norm(part, 1.0)),
+            ]),
+            1.0,
+        );
+        let sub = thump(n, 62.0 * pitch, 0.07 + 0.03 * s, 0.9, 0.02);
+        let sub_w = 0.8 * (0.5 + 0.5 * s) * if struck == Struck::Arm { 0.4 } else { 1.0 };
+        let mut parts = vec![(1.0, natural), (sub_w, norm(sub, 1.0))];
+        if struck == Struck::Head {
+            let snap = decay_from(high(self.noise(n), 2600.0), 0.0003, 0.003);
+            parts.push((0.55 * s, norm(snap, 1.0)));
+        }
+        let mix = sum(&parts);
+        let top = mix.iter().fold(0.0f64, |top, sample| top.max(sample.abs()));
+        let drive = 1.8f64;
+        let shaped = mix
+            .into_iter()
+            .map(|sample| (drive * sample / top).tanh() / drive.tanh())
+            .collect();
+        one_shot(fade_out(shaped, 0.03))
+    }
+
+    /// Air past a fist on its way out: a low band of noise giving way to a
+    /// higher one, so the air rises in pitch as the fist speeds up, louder
+    /// until the fist would land, then dying away fast for a punch that
+    /// misses.
+    pub fn whoosh(&mut self, pitch: f64) -> Vec<f32> {
+        let rise_time = 0.12 / pitch;
+        let n = samples(rise_time + 0.06);
+        let low_band = norm(band(self.noise(n), 400.0 * pitch, 1300.0 * pitch), 1.0);
+        let high_band = norm(band(self.noise(n), 1300.0 * pitch, 3600.0 * pitch), 1.0);
+        let mix = (0..n)
+            .map(|i| {
+                let t = time(i);
+                let rise = (t / rise_time).min(1.0);
+                let level = if t < rise_time {
+                    rise * rise
+                } else {
+                    (-(t - rise_time) / 0.012).exp()
+                };
+                (low_band[i] * (1.0 - rise) + high_band[i] * rise) * level
+            })
+            .collect();
+        one_shot(mix)
+    }
+
+    /// A fighter's body reaching the floor: the deep thump of its weight,
+    /// the broad slap of its flesh on the floor, and its limbs knocking down
+    /// a moment after.
+    pub fn body_fall(&mut self, strength: f64, pitch: f64) -> Vec<f32> {
+        let n = samples(0.7 / pitch);
+        let weight = thump(
+            n,
+            (58.0 + 12.0 * strength) * pitch,
+            0.1 + 0.06 * strength,
+            0.7,
+            0.03,
+        );
+        let slap = decay_from(
+            band(self.noise(n), 300.0 * pitch, 2500.0 * pitch),
+            0.001,
+            0.025 / pitch,
+        );
+        let mut limbs = vec![0.0; n];
+        for (lag, gain) in [(0.07, 0.5), (0.14, 0.35), (0.21, 0.25)] {
+            let at = samples(lag * self.uniform(0.85, 1.15) / pitch);
+            let knock = decay_from(
+                band(self.noise(n - at), 180.0 * pitch, 900.0 * pitch),
+                0.001,
+                0.02,
+            );
+            for (sample, value) in limbs[at..].iter_mut().zip(norm(knock, gain)) {
+                *sample += value;
+            }
+        }
+        one_shot(sum(&[
+            (1.0, norm(weight, 1.0)),
+            (0.6, norm(slap, 1.0)),
+            (0.5, limbs),
+        ]))
     }
 
     /// A blow on flesh: a low thump whose pitch drops as it rings, the slap
@@ -254,6 +374,41 @@ fn band(x: Vec<f64>, low_edge: f64, high_edge: f64) -> Vec<f64> {
 fn decay(mut x: Vec<f64>, seconds: f64) -> Vec<f64> {
     for (i, sample) in x.iter_mut().enumerate() {
         *sample *= (-time(i) / seconds).exp();
+    }
+    x
+}
+
+/// `x` coming in over `attack` seconds, then fading away with time constant
+/// `seconds`, as a struck thing sounds.
+fn decay_from(mut x: Vec<f64>, attack: f64, seconds: f64) -> Vec<f64> {
+    for (i, sample) in x.iter_mut().enumerate() {
+        let t = time(i);
+        *sample *= (t / attack).min(1.0) * (-(t - attack).max(0.0) / seconds).exp();
+    }
+    x
+}
+
+/// A damped thump `n` samples long: a tone at `freq` that starts `drop`
+/// higher and falls to it over `drop_seconds`, fading away with time
+/// constant `seconds` after a 1.5 ms attack.
+fn thump(n: usize, freq: f64, seconds: f64, drop: f64, drop_seconds: f64) -> Vec<f64> {
+    let mut phase = 0.0;
+    let tone = (0..n)
+        .map(|i| {
+            phase += TAU * freq * (1.0 + drop * (-time(i) / drop_seconds).exp()) / RATE;
+            phase.sin()
+        })
+        .collect();
+    decay_from(tone, 0.0015, seconds)
+}
+
+/// `x` fading to silence over its last `seconds`, so a tail still sounding
+/// does not end in a click.
+fn fade_out(mut x: Vec<f64>, seconds: f64) -> Vec<f64> {
+    let fade = samples(seconds).min(x.len());
+    let n = x.len();
+    for (k, sample) in x[n - fade..].iter_mut().enumerate() {
+        *sample *= 1.0 - (k + 1) as f64 / fade as f64;
     }
     x
 }
