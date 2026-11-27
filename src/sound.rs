@@ -603,7 +603,7 @@ pub struct SoundBank {
 
 impl SoundBank {
     /// Synthesizes the bank, the same every time: about 34 seconds of audio
-    /// in 66 clips, a few hundredths of a second's work in a release build.
+    /// in 60 clips, a few hundredths of a second's work in a release build.
     pub fn render() -> SoundBank {
         let mut synth = synth::Synth::new(0x5EED_50D5);
         let mut clips = Vec::new();
